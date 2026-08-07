@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { docFormatForUrl, docFormatForContentType, DOC_EXTENSIONS } from "../src/doc.js";
+import { looksLikePdfUrl } from "../src/fetch.js";
 import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "../src/pdf/exec.js";
 
 // The npx rungs run a PINNED range, not `latest`. Floating would let a breaking
@@ -51,12 +52,10 @@ describe("docFormatForUrl", () => {
 
   // The two ladders must partition the space: a URL routed to both would fetch
   // twice and report whichever branch happened to run first.
-  //
-  // Restore this the moment fetch.ts lands in the engine — it asserts a property
-  // that spans BOTH ladders, and `looksLikePdfUrl` is still on the ultrasearch
-  // side of the extraction. Left as a todo rather than deleted so the runner
-  // keeps reporting the gap instead of letting it disappear silently.
-  it.todo("never claims a URL is both a PDF and an office document (needs looksLikePdfUrl from fetch.ts)");
+  it("never claims a URL is both a PDF and an office document", () => {
+    const urls = ["https://x.test/paper.pdf", "https://arxiv.org/pdf/2502.19732", "https://x.test/report.docx", "https://x.test/data.csv", "https://x.test/"];
+    for (const u of urls) expect(looksLikePdfUrl(u) && !!docFormatForUrl(u)).toBe(false);
+  });
 
   // The security property: a format reaching argv must come from the table, so
   // nothing a URL carries can ever become a converter argument.

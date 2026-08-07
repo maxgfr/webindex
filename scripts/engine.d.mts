@@ -9,6 +9,16 @@ interface Brand {
     cli: string;
     /** Root for on-disk caches. Defaults to `<tmpdir>/<name>` when unset. */
     cacheDir?: string;
+    /**
+     * Where a rate-limited API maintainer can find out who is calling.
+     *
+     * Goes into the polite User-Agent that arXiv, Crossref, OpenAlex and friends
+     * are sent. That header is a courtesy with teeth — it is how those services
+     * attribute traffic and choose to throttle a well-behaved client gently
+     * rather than block it — so it has to name the SKILL doing the calling, not
+     * the shared engine underneath.
+     */
+    contactUrl?: string;
 }
 /**
  * Declare the consuming skill's identity. Call once, as early as possible in
@@ -224,4 +234,284 @@ interface RunResult {
  */
 declare function runWithInput(cmd: string, args: string[], input: Buffer, timeoutMs: number): Promise<RunResult>;
 
-export { ANYDOC_SPEC, type Brand, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, assessExtractedText, assessPdfText, brand, configure, docFormatForContentType, docFormatForUrl, enabledDocExtractors, enabledExtractors, env, envFlag, envInt, envName, extractDocument, extractPdf, ocrBudgetLeft, ocrPdf, ocrTools, pdfToText, resetBrand, resetDocLadderCache, resetOcrBudget, resetPdfLadderCache, runWithInput };
+/**
+ * A realistic desktop-browser User-Agent. Several keyless web endpoints (DDG,
+ * Mojeek) serve 403 or empty to obvious bot UAs, so scrapers default to this.
+ * Override with `<PREFIX>_UA`.
+ */
+declare function browserUa(): string;
+/**
+ * The polite, identifying User-Agent for well-behaved JSON/XML APIs (arXiv,
+ * Crossref, OpenAlex, Europe PMC). Naming ourselves is what lets them
+ * attribute and throttle us courteously instead of blocking outright — so it
+ * names the consuming SKILL, not the shared engine underneath.
+ */
+declare function contactUa(): string;
+/**
+ * Polite pause between successive result-page fetches to the same web engine
+ * (multi-page pagination). Keyless engines block aggressive scraping, so pages
+ * are fetched sequentially with a small gap. Tunable; 0 disables.
+ */
+declare function pageDelayMs(): number;
+/**
+ * Polite pause between a rate-limited scholarly API's per-variant calls
+ * (Crossref/OpenAlex/arXiv/Europe PMC), which the registry serialises rather
+ * than firing concurrently to avoid tripping their anonymous quotas. Tunable;
+ * 0 disables (tests set it to 0 to stay fast).
+ */
+declare function politeDelayMs(): number;
+interface HttpResult {
+    ok: boolean;
+    status: number;
+    body: string;
+    contentType: string;
+    url: string;
+    bytes?: Buffer;
+    error?: string;
+}
+declare function sleep(ms: number): Promise<void>;
+declare function httpGet(url: string, opts?: {
+    timeoutMs?: number;
+    accept?: string;
+    acceptLanguage?: string;
+    maxBytes?: number;
+    userAgent?: string;
+    binary?: boolean;
+}): Promise<HttpResult>;
+declare function httpJson(method: string, url: string, body?: unknown, opts?: {
+    timeoutMs?: number;
+    accept?: string;
+    acceptLanguage?: string;
+    userAgent?: string;
+    headers?: Record<string, string>;
+}): Promise<{
+    ok: boolean;
+    status: number;
+    data: any;
+    error?: string;
+}>;
+declare function decodeEntities(s: string): string;
+declare function cleanInline(s: string): string;
+declare function htmlToText(html: string): string;
+declare function htmlTitle(html: string): string | undefined;
+declare function htmlCanonicalUrl(html: string): string | undefined;
+declare function extractMainHtml(html: string): string;
+declare const PDF_URL_RE: RegExp;
+/**
+ * Is this URL a PDF, judged before the fetch?
+ *
+ * It decides two things that both matter: whether to request BYTES (an
+ * extension-less PDF fetched as text costs a second round-trip once the
+ * content-type gives it away), and whether the documented extractor ladder
+ * runs in its documented order. `fetchAndExtract` hands a non-PDF to Firecrawl
+ * FIRST, so a misjudged PDF silently skips `pdf-inspector` — the ladder's
+ * preferred rung — whenever a Firecrawl container happens to be up.
+ */
+declare function looksLikePdfUrl(url: string): boolean;
+type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext" | "anydoc" | "ocr";
+interface ExtractResult {
+    text: string;
+    title?: string;
+    note?: string;
+    finalUrl: string;
+    status: number;
+    extractor?: ExtractorId;
+    canonical?: string;
+}
+declare function fetchAndExtract(url: string, opts?: {
+    acceptLanguage?: string;
+    firecrawl?: string;
+}): Promise<ExtractResult>;
+declare const DEAD_LINK_STATUS: Set<number>;
+declare function rescueViaWayback(url: string, opts?: {
+    acceptLanguage?: string;
+    firecrawl?: string;
+}): Promise<{
+    text: string;
+    title?: string;
+    snapshotUrl: string;
+    timestamp: string;
+} | undefined>;
+declare function looksLikeJunkExtraction(text: string): string | undefined;
+declare function nearestHeading(lines: string[], anchor: number): string | undefined;
+declare function focusedSnippet(text: string, question: string, opts?: {
+    maxChars?: number;
+    maxSentences?: number;
+}): string;
+declare function bestExcerpt(text: string, question: string, maxChars?: number): string;
+declare function capExtract(text: string, depth: "summary" | "standard" | "deep"): string;
+
+declare const FIRECRAWL_DEFAULT_BASE = "http://localhost:3002";
+interface FirecrawlOptions {
+    /** `--firecrawl <url>`; "off" disables Firecrawl entirely. */
+    firecrawl?: string;
+}
+/**
+ * Resolve the configured Firecrawl base: an explicit `--firecrawl` wins, else
+ * `<PREFIX>_FIRECRAWL`, else the localhost default. The literal value `off`
+ * (either source) disables Firecrawl entirely and returns null.
+ */
+declare function firecrawlBase(opts?: FirecrawlOptions): string | null;
+/** True when the base came from the user (flag or env) rather than the default. */
+declare function firecrawlIsExplicit(opts?: FirecrawlOptions): boolean;
+/**
+ * Test seam: forget which bases were probed.
+ *
+ * The memoisation is per-process and deliberately sticky — the whole cost of an
+ * absent Firecrawl is meant to be one refused connection. That is right in
+ * production and wrong across test cases, where one case's "down" verdict would
+ * silently decide the next case's behaviour. Mirrors resetOcrBudget,
+ * resetPdfLadderCache and resetDocLadderCache.
+ */
+declare function resetFirecrawlProbeCache(): void;
+/**
+ * Decide whether the thing that answered `GET {base}/` is actually Firecrawl.
+ *
+ * "Something is listening" is NOT the same question, and conflating them is a
+ * real trap: 3002 is a common dev port, so a Next.js/Vite app squatting it
+ * answers 200 and every page extraction then POSTs to an app that 404s — each
+ * one paying a wasted round-trip before falling back, while `doctor` cheerfully
+ * reports "firecrawl answering". A false positive here is worse than a false
+ * negative, because it is invisible.
+ *
+ * The rule: an HTML page with no Firecrawl marker is somebody else's app.
+ * Anything else (its JSON root, an empty body, a proxy's 404) is accepted, so
+ * the reverse-proxy case the original probe protected still works. Exported for
+ * unit tests — this is a decision, not a detail.
+ */
+declare function looksLikeFirecrawl(contentType: string | null, body: string): boolean;
+/**
+ * Is a Firecrawl instance answering at `base`? `GET {base}/` with a hard 2s
+ * ceiling. The response must also look like Firecrawl (see above) unless the
+ * caller named the instance itself — pointing `--firecrawl` somewhere is a
+ * statement about what lives there, and it may legitimately sit behind a proxy
+ * that masks the root. Connection refused / timeout ⇒ down. Memoised for the
+ * process, so the whole cost of an absent Firecrawl is one refused connection.
+ * Never throws.
+ *
+ * Deliberately bypasses `httpGet`: that layer retries once with a backoff,
+ * which would turn a 2s ceiling into ~4.6s on a blackholed host. A probe wants
+ * a single shot.
+ */
+declare function probeFirecrawl(base: string, explicit?: boolean): Promise<boolean>;
+/** The API prefix in use for `base`: `/v2` until a 404 proves it is `/v1`. */
+declare function apiPrefix(base: string): string;
+/** A page as Firecrawl returned it: main-content markdown plus provenance. */
+interface FirecrawlScrape {
+    markdown: string;
+    title?: string;
+    sourceURL?: string;
+    statusCode?: number;
+}
+/**
+ * PURE mapper for a `/scrape` response body → the fields the extractor needs,
+ * or null when there is nothing usable: `{success:false}`, a missing/non-object
+ * `data`, or empty markdown. Exported so the response contract is unit-tested
+ * against a fixture instead of the network.
+ */
+declare function mapScrapeResponse(json: any): FirecrawlScrape | null;
+/** One `web` hit from a `/search` response. */
+interface FirecrawlHit {
+    url: string;
+    title: string;
+    description: string;
+    markdown?: string;
+}
+/**
+ * PURE mapper for a `/search` response body → the `web` hits. Tolerates the
+ * shape drifting to a bare array or to `data.results`, and drops any entry
+ * without a usable URL. Never throws.
+ */
+declare function mapSearchResponse(json: any): FirecrawlHit[];
+/** What a scrape attempt tells the caller: the page, or WHY it fell through. */
+interface ScrapeAttempt {
+    data?: FirecrawlScrape;
+    /**
+     * A user-visible reason the caller should surface as a note. Only set when
+     * Firecrawl was actually REACHED and still produced nothing — an unreachable
+     * or disabled instance is silent (see the note-policy comment in fetch.ts).
+     */
+    why?: string;
+}
+/**
+ * Scrape one URL through Firecrawl, returning the cleaned markdown or the
+ * reason it could not. A single `/scrape` call — never `/batch/scrape`, which is
+ * an async job + polling protocol not worth the complexity for one page.
+ * Returns `{}` (silently) when Firecrawl is disabled or unreachable.
+ */
+declare function scrapeViaFirecrawl(url: string, opts?: FirecrawlOptions): Promise<ScrapeAttempt>;
+/**
+ * Query Firecrawl's keyless `/search` (Fire-Engine → SearXNG → DuckDuckGo
+ * internally). Returns the `web` hits, or a reason.
+ */
+declare function searchViaFirecrawl(query: string, limit: number, opts?: FirecrawlOptions): Promise<{
+    hits?: FirecrawlHit[];
+    why?: string;
+}>;
+
+declare function escapeRegExp(s: string): string;
+declare function keywords(question: string): string[];
+declare function rankedKeywords(question: string): string[];
+declare function deaccent(s: string): string;
+declare function foldTerm(raw: string): string;
+declare function subtokens(raw: string): string[];
+interface KeywordVariant {
+    text: string;
+    kind: "original" | "folded" | "subtoken";
+}
+interface ExpandedKeyword {
+    canonical: string;
+    original: string;
+    variants: KeywordVariant[];
+}
+declare function expandTokens(tokens: string[], max?: number): ExpandedKeyword[];
+declare function accentPattern(text: string): string;
+interface KeywordMatcher {
+    expanded: ExpandedKeyword[];
+    canonicals: string[];
+    matchLine(line: string): Set<string>;
+}
+declare function buildMatcher(question: string, max?: number): KeywordMatcher;
+
+declare function canonicalizeUrl(raw: string): string;
+declare function normalizeDoi(doi: string): string;
+declare function domainOf(raw: string): string;
+/** The `domain` a local file is filed under. Not a host, and deliberately not one. */
+declare const LOCAL_FILE_DOMAIN = "local file";
+declare function fnv1a64(s: string): bigint;
+
+type Extract = Awaited<ReturnType<typeof fetchAndExtract>>;
+declare function cacheDir(): string;
+declare function cachePath(url: string, acceptLanguage?: string, extractor?: CacheNamespace): string;
+declare const PDF_CACHE_NS: "pdf";
+declare const DOC_CACHE_NS: "doc";
+type CacheNamespace = ExtractorId | typeof PDF_CACHE_NS | typeof DOC_CACHE_NS;
+declare function cachedFetchAndExtract(url: string, opts?: {
+    acceptLanguage?: string;
+    firecrawl?: string;
+}, enabled?: boolean, now?: number): Promise<Extract & {
+    cached?: boolean;
+}>;
+
+interface Artifact {
+    /** Path the artifact WOULD have been written to. */
+    path: string;
+    content: string;
+}
+declare function setNoWrite(on: boolean): void;
+declare function isNoWrite(): boolean;
+/** mkdirSync -p, or nothing at all under no-write. */
+declare function ensureDir(dir: string): void;
+/**
+ * Write a file, or collect it under no-write. Returns the path either way — so
+ * callers keep their existing shape — which means a caller that PRINTS the
+ * returned path must check `isNoWrite()` first, or it advertises a file that
+ * does not exist. The CLI does exactly that.
+ */
+declare function writeArtifact(path: string, content: string): string;
+/** Drain the collected artifacts. Empty when writes actually went to disk. */
+declare function takeArtifacts(): Artifact[];
+/** Test seam: clear both the switch and anything collected under it. */
+declare function resetNoWrite(): void;
+
+export { ANYDOC_SPEC, type Artifact, type Brand, DEAD_LINK_STATUS, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, type ExpandedKeyword, type ExtractResult, type ExtractorId, FIRECRAWL_DEFAULT_BASE, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type HttpResult, type KeywordMatcher, type KeywordVariant, LOCAL_FILE_DOMAIN, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type ScrapeAttempt, accentPattern, apiPrefix, assessExtractedText, assessPdfText, bestExcerpt, brand, browserUa, buildMatcher, cacheDir, cachePath, cachedFetchAndExtract, canonicalizeUrl, capExtract, cleanInline, configure, contactUa, deaccent, decodeEntities, docFormatForContentType, docFormatForUrl, domainOf, enabledDocExtractors, enabledExtractors, ensureDir, env, envFlag, envInt, envName, escapeRegExp, expandTokens, extractDocument, extractMainHtml, extractPdf, fetchAndExtract, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isNoWrite, keywords, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, mapScrapeResponse, mapSearchResponse, nearestHeading, normalizeDoi, ocrBudgetLeft, ocrPdf, ocrTools, pageDelayMs, pdfToText, politeDelayMs, probeFirecrawl, rankedKeywords, rescueViaWayback, resetBrand, resetDocLadderCache, resetFirecrawlProbeCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, runWithInput, scrapeViaFirecrawl, searchViaFirecrawl, setNoWrite, sleep, subtokens, takeArtifacts, writeArtifact };

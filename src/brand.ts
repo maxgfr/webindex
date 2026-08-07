@@ -39,6 +39,16 @@ export interface Brand {
   cli: string;
   /** Root for on-disk caches. Defaults to `<tmpdir>/<name>` when unset. */
   cacheDir?: string;
+  /**
+   * Where a rate-limited API maintainer can find out who is calling.
+   *
+   * Goes into the polite User-Agent that arXiv, Crossref, OpenAlex and friends
+   * are sent. That header is a courtesy with teeth — it is how those services
+   * attribute traffic and choose to throttle a well-behaved client gently
+   * rather than block it — so it has to name the SKILL doing the calling, not
+   * the shared engine underneath.
+   */
+  contactUrl?: string;
 }
 
 // Used when a consumer forgets to call configure(), and by the test suite.
@@ -49,6 +59,7 @@ const DEFAULT_BRAND: Brand = {
   name: "webindex",
   envPrefix: "WEBINDEX",
   cli: "webindex",
+  contactUrl: "https://github.com/maxgfr/webindex",
 };
 
 let current: Brand = { ...DEFAULT_BRAND };

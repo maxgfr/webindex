@@ -38,3 +38,44 @@ export * from "./doc.js";
 // Running an external converter on stdin. Exported because the ladders' rungs
 // are pinned npx specs that consumers surface in their `doctor` output.
 export { ANYDOC_SPEC, PDF_INSPECTOR_SPEC, runWithInput } from "./pdf/exec.js";
+
+// ── Retrieval: HTTP and extraction ──────────────────────────────────────────
+// httpGet/httpJson are the retrying, byte-capped, never-throwing HTTP floor;
+// fetchAndExtract is the whole decision tree from a URL to citable text
+// (Firecrawl → PDF ladder → office ladder → built-in HTML extractor), with
+// rescueViaWayback behind it for dead links.
+export * from "./fetch.js";
+
+// The Firecrawl CLIENT — probe, scrape, search. The discovery *backend* built
+// on top of it stays with the consumer until the discovery layer moves.
+export {
+  apiPrefix,
+  FIRECRAWL_DEFAULT_BASE,
+  firecrawlBase,
+  firecrawlIsExplicit,
+  looksLikeFirecrawl,
+  mapScrapeResponse,
+  mapSearchResponse,
+  probeFirecrawl,
+  resetFirecrawlProbeCache,
+  scrapeViaFirecrawl,
+  searchViaFirecrawl,
+  type FirecrawlHit,
+  type FirecrawlOptions,
+  type FirecrawlScrape,
+  type ScrapeAttempt,
+} from "./firecrawl.js";
+
+// ── Text: keywords and matching ─────────────────────────────────────────────
+export * from "./text.js";
+
+// ── URL identity ────────────────────────────────────────────────────────────
+export * from "./url.js";
+
+// ── The on-disk fetch cache ─────────────────────────────────────────────────
+export * from "./cache.js";
+
+// ── The write gate ──────────────────────────────────────────────────────────
+// One switch every write passes through, so read-only operation is a property
+// of this module rather than a promise each command has to keep individually.
+export { type Artifact, ensureDir, isNoWrite, resetNoWrite, setNoWrite, takeArtifacts, writeArtifact } from "./no-write.js";

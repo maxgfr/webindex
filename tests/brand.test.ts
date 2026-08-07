@@ -70,36 +70,36 @@ describe("env", () => {
 
 describe("envFlag", () => {
   it("is off when unset", () => {
-    expect(envFlag("NO_NPX")).toBe(false);
+    expect(envFlag("SYNTHETIC_FLAG")).toBe(false);
   });
 
   it("is on for any ordinary truthy spelling", () => {
     for (const v of ["1", "true", "yes", "on", "anything"]) {
-      process.env[`${P}_NO_NPX`] = v;
-      expect(envFlag("NO_NPX"), v).toBe(true);
+      process.env[`${P}_SYNTHETIC_FLAG`] = v;
+      expect(envFlag("SYNTHETIC_FLAG"), v).toBe(true);
     }
   });
 
   it("is off for explicit negatives, case-insensitively", () => {
-    // The presence-only test this replaces read `NO_NPX=0` as ON, which is the
+    // The presence-only test this replaces read `SYNTHETIC_FLAG=0` as ON, which is the
     // opposite of what anyone writing it means.
     for (const v of ["0", "false", "FALSE", "no", "Off"]) {
-      process.env[`${P}_NO_NPX`] = v;
-      expect(envFlag("NO_NPX"), v).toBe(false);
+      process.env[`${P}_SYNTHETIC_FLAG`] = v;
+      expect(envFlag("SYNTHETIC_FLAG"), v).toBe(false);
     }
   });
 });
 
 describe("envInt", () => {
   it("returns the default when unset", () => {
-    expect(envInt("OCR_MAX", 5)).toBe(5);
+    expect(envInt("SYNTHETIC_BUDGET", 5)).toBe(5);
   });
 
   it("parses and truncates", () => {
-    process.env[`${P}_OCR_MAX`] = "12";
-    expect(envInt("OCR_MAX", 5)).toBe(12);
-    process.env[`${P}_OCR_MAX`] = "12.9";
-    expect(envInt("OCR_MAX", 5)).toBe(12);
+    process.env[`${P}_SYNTHETIC_BUDGET`] = "12";
+    expect(envInt("SYNTHETIC_BUDGET", 5)).toBe(12);
+    process.env[`${P}_SYNTHETIC_BUDGET`] = "12.9";
+    expect(envInt("SYNTHETIC_BUDGET", 5)).toBe(12);
   });
 
   it("clamps into range", () => {
@@ -110,16 +110,16 @@ describe("envInt", () => {
   });
 
   it("keeps zero when zero is in range", () => {
-    // One of the three drifted copies rejected 0, which silently ignored
-    // `PAGE_DELAY_MS=0` — the one value a user sets it to on purpose.
-    process.env[`${P}_PAGE_DELAY_MS`] = "0";
-    expect(envInt("PAGE_DELAY_MS", 350, 0, 5000)).toBe(0);
+    // One of the three drifted copies rejected 0, which silently ignored a
+    // `SYNTHETIC_DELAY_MS=0` — the one value a user sets it to on purpose.
+    process.env[`${P}_SYNTHETIC_DELAY_MS`] = "0";
+    expect(envInt("SYNTHETIC_DELAY_MS", 350, 0, 5000)).toBe(0);
   });
 
   it("falls back on garbage rather than throwing", () => {
     for (const v of ["abc", "NaN", "Infinity", "  "]) {
-      process.env[`${P}_OCR_MAX`] = v;
-      expect(envInt("OCR_MAX", 5), v).toBe(5);
+      process.env[`${P}_SYNTHETIC_BUDGET`] = v;
+      expect(envInt("SYNTHETIC_BUDGET", 5), v).toBe(5);
     }
   });
 });
