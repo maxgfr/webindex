@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMatcher, keywords, rankedKeywords } from "../src/text.js";
+import { buildMatcher, isStopword, keywords, rankedKeywords } from "../src/text.js";
 import { canonicalizeUrl, domainOf, fnv1a64, LOCAL_FILE_DOMAIN, normalizeDoi } from "../src/url.js";
 
 // Ported from the blocks of each skill's util.test.ts whose subjects moved into
@@ -129,5 +129,19 @@ describe("buildMatcher", () => {
   it("counts each keyword once, however many variants hit", () => {
     const m = buildMatcher("retry");
     expect(m.matchLine("retry retry retries").size).toBe(1);
+  });
+});
+
+describe("isStopword", () => {
+  it("names the scaffolding both scorers must drop", () => {
+    // A consumer's own tokeniser calls this so its vocabulary matches
+    // buildMatcher's. Two lists that drift make a source rank on a term the
+    // excerpt never highlights, which looks like a bug in neither.
+    for (const w of ["the", "is", "for", "la", "est", "une"]) expect(isStopword(w), w).toBe(true);
+    for (const w of ["retry", "maxRetries", "télémétrie", "5000"]) expect(isStopword(w), w).toBe(false);
+  });
+
+  it("is case-insensitive", () => {
+    expect(isStopword("THE")).toBe(true);
   });
 });

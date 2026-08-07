@@ -595,6 +595,9 @@ var STOPWORDS = /* @__PURE__ */ new Set([
   "si",
   "ne"
 ]);
+function isStopword(term) {
+  return STOPWORDS.has(term.toLowerCase());
+}
 function keywords(question) {
   const seen = /* @__PURE__ */ new Set();
   const out = [];
@@ -2093,6 +2096,7 @@ export {
   isNoWrite,
   isOriginAllowed,
   isProtocolVersion,
+  isStopword,
   keywords,
   listResources,
   looksLikeFirecrawl,
