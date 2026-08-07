@@ -1,6 +1,6 @@
 {
   "name": "webindex",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "The web-retrieval engine behind the ultrasearch, ultradoc and construct skills — fetch a URL into clean text (HTML, PDF, office docs), discover candidates across keyless backends, and rank them. Zero-dependency ESM, vendored not installed. The web-side companion to codeindex.",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
