@@ -81,12 +81,4 @@ jobs:
           '
 
       - name: The bundle declares no runtime dependencies
-        run: |
-          # A vendored file cannot resolve bare specifiers — the consumer's
-          # bundler would fail, or worse, silently pull a dependency the skill
-          # never declared. Every import in the bundle must be a node: builtin.
-          if grep -nE '^\s*(import|export)[^;]*\bfrom\s+"[^."]' scripts/engine.mjs | grep -v '"node:'; then
-            echo "::error::the bundle imports a non-builtin module — it is no longer vendorable"
-            exit 1
-          fi
-          echo "no external imports."
+        run: node scripts/check-vendorable.mjs

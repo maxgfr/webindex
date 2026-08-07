@@ -23,3 +23,18 @@ export { ENGINE_VERSION } from "./version.js";
 // Consumers call configure() once at CLI and MCP startup. Read the lazy rule in
 // brand.ts before adding any module-scope tunable anywhere in this package.
 export { type Brand, brand, configure, env, envFlag, envInt, envName, resetBrand } from "./brand.js";
+
+// ── Retrieval: PDF ──────────────────────────────────────────────────────────
+// The ladder tries the strongest available extractor first: native reader →
+// pdf-inspector → anydoc → Firecrawl → pdftotext → OCR.
+export * from "./pdf.js";
+
+// ── Retrieval: office documents ─────────────────────────────────────────────
+// `docFormatForUrl` / `docFormatForContentType` decide whether a response is an
+// office document; `extractDocument` converts it, or refuses rather than let
+// the caller cite bytes nothing could read.
+export * from "./doc.js";
+
+// Running an external converter on stdin. Exported because the ladders' rungs
+// are pinned npx specs that consumers surface in their `doctor` output.
+export { ANYDOC_SPEC, PDF_INSPECTOR_SPEC, runWithInput } from "./pdf/exec.js";
