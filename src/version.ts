@@ -14,4 +14,4 @@
 //   2. `pnpm run check:build` proves the committed bundle is reproducible.
 //
 // So: do not template it, do not compute it, and keep minify off in tsup.
-export const ENGINE_VERSION = "0.0.0";
+export const ENGINE_VERSION = "1.0.0";
