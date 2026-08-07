@@ -79,3 +79,38 @@ export * from "./cache.js";
 // One switch every write passes through, so read-only operation is a property
 // of this module rather than a promise each command has to keep individually.
 export { type Artifact, ensureDir, isNoWrite, resetNoWrite, setNoWrite, takeArtifacts, writeArtifact } from "./no-write.js";
+
+// ── MCP transport ───────────────────────────────────────────────────────────
+// The whole protocol: version negotiation, notification vs request,
+// cancellation, schema validation, response capping, the error taxonomy, and
+// both transports. The consumer supplies an McpAdapter naming ITS tools — the
+// one thing the engine cannot know — and keeps its tools/handlers/prompts.
+export * from "./mcp/protocol.js";
+export {
+  createServer,
+  ERR_INTERNAL,
+  ERR_INVALID_PARAMS,
+  ERR_INVALID_REQUEST,
+  ERR_METHOD_NOT_FOUND,
+  PromptError,
+  ToolError,
+  type JsonRpcMessage,
+  type McpAdapter,
+  type McpServer,
+  type PromptDecl,
+  type PromptResult,
+  type ServerOptions,
+  type ToolDecl,
+  type ToolOutcome,
+} from "./mcp/server.js";
+export { runStdioServer, type StdioOptions } from "./mcp/stdio.js";
+export { startHttpServer, type HttpOptions, type RunningHttpServer } from "./mcp/http.js";
+export {
+  listResources,
+  readResource,
+  resolveSkillRoot,
+  ResourceError,
+  skillName,
+  type ResourceContents,
+  type ResourceDecl,
+} from "./mcp/resources.js";

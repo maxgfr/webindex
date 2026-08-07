@@ -200,12 +200,12 @@ function binaryName(name) {
   return process.platform === "win32" && name === "npx" ? "npx.cmd" : name;
 }
 function runWithInput(cmd, args, input, timeoutMs) {
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     let child;
     try {
       child = spawn(binaryName(cmd), args, { stdio: ["pipe", "pipe", "pipe"] });
     } catch (e) {
-      resolve({ ok: false, stdout: "", error: e.message });
+      resolve2({ ok: false, stdout: "", error: e.message });
       return;
     }
     const chunks = [];
@@ -215,7 +215,7 @@ function runWithInput(cmd, args, input, timeoutMs) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(r);
+      resolve2(r);
     };
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
@@ -1469,17 +1469,581 @@ async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date
   if (res.text?.trim()) writeCache(url, res, now, lang, ns === PDF_CACHE_NS || ns === DOC_CACHE_NS ? ns : res.extractor ?? "native");
   return res;
 }
+
+// src/mcp/protocol.ts
+var PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
+var LATEST_PROTOCOL = PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1];
+var ASSUMED_HTTP_PROTOCOL = "2025-03-26";
+var ANNOTATIONS_SINCE = "2025-03-26";
+var RICH_TOOLS_SINCE = "2025-06-18";
+var DEFAULT_MAX_RESPONSE_BYTES = 1e6;
+function isProtocolVersion(v) {
+  return typeof v === "string" && PROTOCOL_VERSIONS.includes(v);
+}
+function negotiateProtocol(requested) {
+  return isProtocolVersion(requested) ? requested : LATEST_PROTOCOL;
+}
+function validateArgs(schema, args) {
+  for (const key of schema.required) {
+    const v = args[key];
+    if (v === void 0 || v === null || v === "") return `\`${key}\` is required`;
+  }
+  for (const [key, value] of Object.entries(args)) {
+    if (value === void 0 || value === null) continue;
+    const spec = schema.properties[key];
+    if (!spec?.type) continue;
+    const actual = Array.isArray(value) ? "array" : typeof value;
+    if (spec.type === "number") {
+      if (actual === "number") continue;
+      if (actual === "string" && value.trim() !== "" && Number.isFinite(Number(value))) continue;
+      return `\`${key}\` must be a number, got ${actual === "string" ? JSON.stringify(value) : actual}`;
+    }
+    if (spec.type === "array") {
+      if (actual !== "array") return `\`${key}\` must be an array, got ${actual}`;
+      const arr = value;
+      if (spec.items?.type === "string" && !arr.every((x) => typeof x === "string")) {
+        return `\`${key}\` must be an array of strings`;
+      }
+      if (spec.enum) {
+        const bad = arr.find((x) => typeof x === "string" && !spec.enum.includes(x));
+        if (bad !== void 0) return `\`${key}\` contains "${String(bad)}" \u2014 allowed: ${spec.enum.join(", ")}`;
+      }
+      continue;
+    }
+    if (actual !== spec.type) return `\`${key}\` must be a ${spec.type}, got ${actual}`;
+    if (spec.enum && typeof value === "string" && !spec.enum.includes(value)) {
+      return `\`${key}\` must be one of: ${spec.enum.join(", ")}`;
+    }
+  }
+  return void 0;
+}
+function capResponse(text, tool, maxBytes, artifact, advice = {}) {
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes <= maxBytes) return text;
+  return JSON.stringify(
+    {
+      truncated: true,
+      tool,
+      bytes,
+      maxBytes,
+      reason: "This response exceeds the configured limit and was withheld rather than sent as an unusable partial payload.",
+      narrower: advice[tool] ?? "narrow the request and call again",
+      ...artifact ? { artifact, artifactNote: "The full result is on disk here \u2014 read it directly if you need all of it." } : {}
+    },
+    null,
+    2
+  ) + "\n";
+}
+function structuredContentFor(text, capped, hasSchema) {
+  if (capped || !hasSchema) return void 0;
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return void 0;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
+  return parsed;
+}
+var LOOPBACK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+function isOriginAllowed(origin, allowed = []) {
+  if (origin === void 0) return true;
+  const o = origin.trim();
+  if (o === "" || o === "null") return true;
+  if (LOOPBACK_ORIGIN.test(o)) return true;
+  return allowed.some((a) => a === "*" || a.toLowerCase() === o.toLowerCase());
+}
+
+// src/mcp/resources.ts
+import { existsSync as existsSync3, readdirSync, readFileSync as readFileSync3, realpathSync, statSync } from "fs";
+import { basename, dirname, join as join3, resolve, sep } from "path";
+import { fileURLToPath } from "url";
+var skillName = () => brand().name;
+var URI_SCHEME = "skill://";
+function resolveSkillRoot(moduleDir) {
+  const here = moduleDir ?? dirname(fileURLToPath(import.meta.url));
+  const name = brand().name;
+  const candidates = [resolve(here, ".."), resolve(here, "..", "skills", name), resolve(here, "..", "..", "skills", name)];
+  return candidates.find((dir) => existsSync3(join3(dir, "SKILL.md")));
+}
+function listResources(moduleDir) {
+  const root = resolveSkillRoot(moduleDir);
+  if (!root) return [];
+  const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
+  const refDir = join3(root, "references");
+  if (!existsSync3(refDir)) return out;
+  for (const file of readdirSync(refDir).sort()) {
+    if (!file.endsWith(".md")) continue;
+    out.push(describe(root, join3("references", file), `${skillName()} reference: ${basename(file, ".md")}`));
+  }
+  return out;
+}
+function readResource(uri, moduleDir) {
+  if (!uri.startsWith(URI_SCHEME)) {
+    throw new ResourceError(`unknown resource scheme in "${uri}" (expected ${URI_SCHEME}\u2026)`);
+  }
+  const root = resolveSkillRoot(moduleDir);
+  if (!root) throw new ResourceError("no skill payload found next to this build \u2014 nothing to read");
+  const rel = uri.slice(URI_SCHEME.length);
+  if (!rel) throw new ResourceError("empty resource path");
+  const target = resolve(root, rel);
+  const rootReal = realpathSync(root);
+  let targetReal;
+  try {
+    targetReal = realpathSync(target);
+  } catch {
+    throw new ResourceError(`no such resource: ${uri}`);
+  }
+  if (targetReal !== rootReal && !targetReal.startsWith(rootReal + sep)) {
+    throw new ResourceError(`resource path escapes the skill root: ${uri}`);
+  }
+  if (!statSync(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
+  return { uri, mimeType: "text/markdown", text: readFileSync3(targetReal, "utf8") };
+}
+var ResourceError = class extends Error {
+};
+function describe(root, rel, fallbackTitle) {
+  const decl = {
+    uri: `${URI_SCHEME}${rel.split(sep).join("/")}`,
+    name: rel.split(sep).join("/"),
+    title: fallbackTitle,
+    mimeType: "text/markdown"
+  };
+  const summary = firstProse(join3(root, rel));
+  if (summary) decl.description = summary;
+  return decl;
+}
+function firstProse(file) {
+  let text;
+  try {
+    text = readFileSync3(file, "utf8");
+  } catch {
+    return void 0;
+  }
+  const body = text.startsWith("---\n") ? text.slice(text.indexOf("\n---", 3) + 4) : text;
+  for (const block of body.split(/\n\s*\n/)) {
+    const line = block.trim();
+    if (!line || line.startsWith("#") || line.startsWith(">") || line.startsWith("|") || line.startsWith("```")) continue;
+    const flat = line.replace(/\s+/g, " ").replace(/[*`]/g, "");
+    return flat.length > 300 ? `${flat.slice(0, 297)}\u2026` : flat;
+  }
+  return void 0;
+}
+
+// src/mcp/server.ts
+var ToolError = class extends Error {
+};
+var PromptError = class extends Error {
+};
+var ERR_INVALID_REQUEST = -32600;
+var ERR_METHOD_NOT_FOUND = -32601;
+var ERR_INVALID_PARAMS = -32602;
+var ERR_INTERNAL = -32603;
+function createServer(adapter, opts = {}) {
+  const serverInfo = { name: opts.serverName ?? brand().name, version: adapter.version };
+  const maxBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  let protocol = LATEST_PROTOCOL;
+  const cancelled = /* @__PURE__ */ new Set();
+  const CANCELLED_MAX = 1024;
+  const listTools = () => adapter.listTools(protocol);
+  const prompts = () => adapter.prompts ?? [];
+  async function handle(msg, send) {
+    if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
+      send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: expected a JSON-RPC object" } });
+      return;
+    }
+    if (msg.id === void 0 || msg.id === null) {
+      if (msg.method === "notifications/cancelled") {
+        const target = msg.params?.requestId;
+        if (typeof target === "string" || typeof target === "number") {
+          if (cancelled.size >= CANCELLED_MAX) cancelled.delete(cancelled.values().next().value);
+          cancelled.add(String(target));
+        }
+      }
+      return;
+    }
+    const id = msg.id;
+    const reply = (out) => {
+      if (cancelled.delete(String(id))) return;
+      send({ jsonrpc: "2.0", id, ...out });
+    };
+    try {
+      switch (msg.method) {
+        case "initialize": {
+          protocol = negotiateProtocol(msg.params?.protocolVersion);
+          reply({
+            result: {
+              protocolVersion: protocol,
+              // Three primitives, because a skill is three things: the engine
+              // (tools), the method (prompts) and the documentation the method
+              // refers to (resources). A client given only the first has to
+              // invent the other two.
+              capabilities: {
+                tools: { listChanged: false },
+                resources: { subscribe: false, listChanged: false },
+                prompts: { listChanged: false }
+              },
+              serverInfo
+            }
+          });
+          return;
+        }
+        case "ping":
+          reply({ result: {} });
+          return;
+        case "tools/list":
+          reply({ result: { tools: listTools() } });
+          return;
+        case "tools/call":
+          await handleToolCall(msg, reply);
+          return;
+        case "resources/list":
+          reply({ result: { resources: listResources(opts.skillDir) } });
+          return;
+        case "resources/read": {
+          const uri = typeof msg.params?.uri === "string" ? msg.params.uri : "";
+          if (!uri) {
+            reply({ error: { code: ERR_INVALID_PARAMS, message: "`uri` is required" } });
+            return;
+          }
+          try {
+            reply({ result: { contents: [readResource(uri, opts.skillDir)] } });
+          } catch (e) {
+            if (e instanceof ResourceError) reply({ error: { code: ERR_INVALID_PARAMS, message: e.message } });
+            else reply({ error: { code: ERR_INTERNAL, message: errMessage(e) } });
+          }
+          return;
+        }
+        case "prompts/list":
+          reply({ result: { prompts: prompts() } });
+          return;
+        case "prompts/get": {
+          const name = typeof msg.params?.name === "string" ? msg.params.name : "";
+          const args = msg.params?.arguments ?? {};
+          try {
+            if (!adapter.getPrompt) throw new PromptError(`unknown prompt: ${name || "(none given)"}`);
+            reply({ result: adapter.getPrompt(name, args) });
+          } catch (e) {
+            if (e instanceof PromptError) reply({ error: { code: ERR_INVALID_PARAMS, message: e.message } });
+            else reply({ error: { code: ERR_INTERNAL, message: errMessage(e) } });
+          }
+          return;
+        }
+        default:
+          reply({ error: { code: ERR_METHOD_NOT_FOUND, message: `method not found: ${String(msg.method)}` } });
+          return;
+      }
+    } catch (e) {
+      reply({ error: { code: ERR_INTERNAL, message: errMessage(e) } });
+    }
+  }
+  async function handleToolCall(msg, reply) {
+    const params = msg.params ?? {};
+    const name = typeof params.name === "string" ? params.name : "";
+    const args = params.arguments ?? {};
+    const decl = listTools().find((t) => t.name === name);
+    if (!decl) {
+      reply({ error: { code: ERR_INVALID_PARAMS, message: `unknown tool: ${name || "(none given)"}` } });
+      return;
+    }
+    const invalid = validateArgs(decl.inputSchema, args);
+    if (invalid) {
+      reply({ error: { code: ERR_INVALID_PARAMS, message: invalid } });
+      return;
+    }
+    try {
+      const { text: raw, artifact } = await adapter.callTool(name, args);
+      const text = capResponse(raw, name, maxBytes, artifact, adapter.capAdvice);
+      const capped = text !== raw;
+      const structured = protocol >= RICH_TOOLS_SINCE ? structuredContentFor(text, capped, decl.outputSchema !== void 0) : void 0;
+      reply({ result: { content: [{ type: "text", text }], ...structured ? { structuredContent: structured } : {} } });
+    } catch (e) {
+      if (e instanceof ToolError) {
+        reply({ result: { content: [{ type: "text", text: e.message }], isError: true } });
+        return;
+      }
+      reply({ error: { code: ERR_INTERNAL, message: errMessage(e) } });
+    }
+  }
+  return {
+    handle,
+    protocolVersion: () => protocol,
+    setProtocolVersion: (v) => {
+      protocol = v;
+    },
+    tools: listTools
+  };
+}
+function errMessage(e) {
+  return e instanceof Error ? e.message : String(e);
+}
+
+// src/mcp/stdio.ts
+import { createInterface } from "readline";
+var MAX_IN_FLIGHT = 4;
+async function runStdioServer(adapter, opts = {}) {
+  const input = opts.input ?? process.stdin;
+  const output = opts.output ?? process.stdout;
+  const emit = output.write.bind(output);
+  let restore;
+  if (!opts.captureStdout && output === process.stdout) {
+    const original = process.stdout.write;
+    process.stdout.write = ((chunk, ...rest) => process.stderr.write(chunk, ...rest));
+    restore = () => {
+      process.stdout.write = original;
+    };
+  }
+  const server = createServer(adapter, opts);
+  const send = (msg) => {
+    emit(JSON.stringify(msg) + "\n");
+  };
+  const inFlight = /* @__PURE__ */ new Set();
+  const track = (p) => {
+    inFlight.add(p);
+    void p.finally(() => inFlight.delete(p));
+    return p;
+  };
+  const drainToLimit = async () => {
+    while (inFlight.size >= MAX_IN_FLIGHT) await Promise.race(inFlight);
+  };
+  const rl = createInterface({ input, terminal: false });
+  try {
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
+        continue;
+      }
+      await drainToLimit();
+      if (Array.isArray(parsed)) {
+        track(
+          (async () => {
+            const out = [];
+            await Promise.all(parsed.map((m) => server.handle(m, (r) => void out.push(r))));
+            if (out.length) emit(JSON.stringify(out) + "\n");
+          })().catch(reportInternal(send))
+        );
+        continue;
+      }
+      if (parsed === null || typeof parsed !== "object") {
+        send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: expected a JSON-RPC object" } });
+        continue;
+      }
+      track(server.handle(parsed, send).catch(reportInternal(send)));
+    }
+    await Promise.all(inFlight);
+  } finally {
+    rl.close();
+    restore?.();
+  }
+}
+function reportInternal(send) {
+  return (e) => {
+    send({ jsonrpc: "2.0", id: null, error: { code: -32603, message: e instanceof Error ? e.message : String(e) } });
+  };
+}
+
+// src/mcp/http.ts
+import { createServer as createHttpServer } from "http";
+var MCP_PATH = "/mcp";
+var MAX_BODY_BYTES = 4 * 1024 * 1024;
+var CORS_HEADERS = "content-type, accept, mcp-protocol-version, mcp-session-id, authorization, last-event-id";
+var LOOPBACK_BIND = /* @__PURE__ */ new Set(["127.0.0.1", "::1", "localhost"]);
+function startHttpServer(adapter, opts = {}) {
+  const bind = opts.bind ?? "127.0.0.1";
+  if (!LOOPBACK_BIND.has(bind) && !opts.allowRemote) {
+    return Promise.reject(
+      new Error(
+        `refusing to bind ${bind}: ${brand().name}'s MCP server fetches arbitrary URLs and reads local files. Pass --allow-remote if that is really what you want.`
+      )
+    );
+  }
+  const server = createHttpServer((req, res) => {
+    void route(req, res, adapter, opts).catch((e) => {
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      sendJson(res, 500, { jsonrpc: "2.0", id: null, error: { code: -32603, message: e instanceof Error ? e.message : String(e) } });
+    });
+  });
+  server.requestTimeout = 0;
+  server.headersTimeout = 6e4;
+  server.keepAliveTimeout = 12e4;
+  return new Promise((resolve2, reject) => {
+    server.once("error", reject);
+    server.listen(opts.port ?? 0, bind, () => {
+      server.removeListener("error", reject);
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : opts.port ?? 0;
+      const host = bind.includes(":") ? `[${bind}]` : bind;
+      resolve2({
+        server,
+        port,
+        url: `http://${host}:${port}${MCP_PATH}`,
+        close: () => new Promise((done) => {
+          server.closeAllConnections?.();
+          server.close(() => done());
+        })
+      });
+    });
+  });
+}
+async function route(req, res, adapter, opts) {
+  const path = (req.url ?? "").split("?")[0];
+  const origin = header(req, "origin");
+  if (!isOriginAllowed(origin, opts.allowOrigin)) {
+    sendJson(res, 403, { error: "origin not allowed", origin });
+    return;
+  }
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      ...corsHeaders(origin),
+      "access-control-allow-methods": "POST, GET, DELETE, OPTIONS",
+      "access-control-allow-headers": CORS_HEADERS,
+      "access-control-max-age": "86400"
+    });
+    res.end();
+    return;
+  }
+  if (path !== MCP_PATH) {
+    sendJson(res, 404, { error: `not found: ${path} (the MCP endpoint is ${MCP_PATH})` }, origin);
+    return;
+  }
+  if (req.method === "GET" || req.method === "DELETE") {
+    res.writeHead(405, { allow: "POST, OPTIONS", ...corsHeaders(origin) });
+    res.end(JSON.stringify({ error: `${req.method} is not supported: this server is stateless and offers no server-initiated stream` }));
+    return;
+  }
+  if (req.method !== "POST") {
+    res.writeHead(405, { allow: "POST, OPTIONS", ...corsHeaders(origin) });
+    res.end(JSON.stringify({ error: `${req.method} is not supported` }));
+    return;
+  }
+  const contentType = (header(req, "content-type") ?? "").split(";")[0].trim().toLowerCase();
+  if (contentType && contentType !== "application/json") {
+    sendJson(res, 415, { error: `unsupported content-type "${contentType}" \u2014 send application/json` }, origin);
+    return;
+  }
+  const accept = (header(req, "accept") ?? "").toLowerCase();
+  if (accept && !/application\/json|text\/event-stream|\*\/\*/.test(accept)) {
+    sendJson(res, 406, { error: "this endpoint replies with application/json" }, origin);
+    return;
+  }
+  const declared = header(req, "mcp-protocol-version");
+  if (declared !== void 0 && !isProtocolVersion(declared)) {
+    sendJson(res, 400, { error: `unsupported MCP-Protocol-Version: ${declared}` }, origin);
+    return;
+  }
+  const protocol = declared ?? ASSUMED_HTTP_PROTOCOL;
+  let raw;
+  try {
+    raw = await readBody(req);
+  } catch (e) {
+    if (e.message === "too large") {
+      sendJson(res, 413, { error: `request body exceeds ${MAX_BODY_BYTES} bytes` }, origin);
+      return;
+    }
+    sendJson(res, 400, { error: `could not read request body: ${e.message}` }, origin);
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    sendJson(res, 200, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }, origin);
+    return;
+  }
+  const mcp = createServer(adapter, opts);
+  mcp.setProtocolVersion(protocol);
+  const out = [];
+  const collect = (m) => void out.push(m);
+  const messages = Array.isArray(parsed) ? parsed : [parsed];
+  for (const m of messages) await mcp.handle(m, collect);
+  if (out.length === 0) {
+    res.writeHead(202, corsHeaders(origin));
+    res.end();
+    return;
+  }
+  sendJson(res, 200, Array.isArray(parsed) ? out : out[0], origin);
+}
+function header(req, name) {
+  const v = req.headers[name];
+  return Array.isArray(v) ? v[0] : v;
+}
+function corsHeaders(origin) {
+  return origin ? { "access-control-allow-origin": origin, vary: "origin" } : {};
+}
+function sendJson(res, status, body, origin, extra = {}) {
+  const text = JSON.stringify(body);
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "content-length": String(Buffer.byteLength(text, "utf8")),
+    ...corsHeaders(origin),
+    ...extra
+  });
+  res.end(text);
+}
+var DRAIN_LIMIT = MAX_BODY_BYTES * 8;
+function readBody(req) {
+  return new Promise((resolve2, reject) => {
+    const chunks = [];
+    let size = 0;
+    let over = false;
+    const declared = Number(req.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) over = true;
+    req.on("data", (c) => {
+      size += c.length;
+      if (over) {
+        if (size > DRAIN_LIMIT) {
+          req.destroy();
+          reject(new Error("too large"));
+        }
+        return;
+      }
+      if (size > MAX_BODY_BYTES) {
+        over = true;
+        chunks.length = 0;
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => {
+      if (over) reject(new Error("too large"));
+      else resolve2(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", reject);
+    req.on("aborted", () => reject(new Error("client aborted the request")));
+  });
+}
 export {
+  ANNOTATIONS_SINCE,
   ANYDOC_SPEC,
+  ASSUMED_HTTP_PROTOCOL,
   DEAD_LINK_STATUS,
+  DEFAULT_MAX_RESPONSE_BYTES,
   DOC_EXTENSIONS,
   DOC_EXTRACTORS,
   ENGINE_VERSION,
+  ERR_INTERNAL,
+  ERR_INVALID_PARAMS,
+  ERR_INVALID_REQUEST,
+  ERR_METHOD_NOT_FOUND,
   FIRECRAWL_DEFAULT_BASE,
+  LATEST_PROTOCOL,
   LOCAL_FILE_DOMAIN,
   PDF_EXTRACTORS,
   PDF_INSPECTOR_SPEC,
   PDF_URL_RE,
+  PROTOCOL_VERSIONS,
+  PromptError,
+  RICH_TOOLS_SINCE,
+  ResourceError,
+  ToolError,
   accentPattern,
   apiPrefix,
   assessExtractedText,
@@ -1493,9 +2057,11 @@ export {
   cachedFetchAndExtract,
   canonicalizeUrl,
   capExtract,
+  capResponse,
   cleanInline,
   configure,
   contactUa,
+  createServer,
   deaccent,
   decodeEntities,
   docFormatForContentType,
@@ -1525,13 +2091,17 @@ export {
   httpGet,
   httpJson,
   isNoWrite,
+  isOriginAllowed,
+  isProtocolVersion,
   keywords,
+  listResources,
   looksLikeFirecrawl,
   looksLikeJunkExtraction,
   looksLikePdfUrl,
   mapScrapeResponse,
   mapSearchResponse,
   nearestHeading,
+  negotiateProtocol,
   normalizeDoi,
   ocrBudgetLeft,
   ocrPdf,
@@ -1541,6 +2111,7 @@ export {
   politeDelayMs,
   probeFirecrawl,
   rankedKeywords,
+  readResource,
   rescueViaWayback,
   resetBrand,
   resetDocLadderCache,
@@ -1548,12 +2119,18 @@ export {
   resetNoWrite,
   resetOcrBudget,
   resetPdfLadderCache,
+  resolveSkillRoot,
+  runStdioServer,
   runWithInput,
   scrapeViaFirecrawl,
   searchViaFirecrawl,
   setNoWrite,
+  skillName,
   sleep,
+  startHttpServer,
+  structuredContentFor,
   subtokens,
   takeArtifacts,
+  validateArgs,
   writeArtifact
 };
