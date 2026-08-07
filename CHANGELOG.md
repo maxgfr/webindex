@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.3.0](https://github.com/maxgfr/webindex/compare/v1.2.0...v1.3.0) (2026-08-07)
+
+
+### Features
+
+* **text:** export isStopword, the vocabulary two scorers must share ([1ce065e](https://github.com/maxgfr/webindex/commit/1ce065e8539147e3a0fcbd544134ed570a599baa))
+
 # [1.2.0](https://github.com/maxgfr/webindex/compare/v1.1.0...v1.2.0) (2026-08-07)
 
 
