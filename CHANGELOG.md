@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.1.0](https://github.com/maxgfr/webindex/compare/v1.0.0...v1.1.0) (2026-08-07)
+
+
+### Features
+
+* **fetch:** move the HTTP, extraction, Firecrawl and cache layer in ([2be403c](https://github.com/maxgfr/webindex/commit/2be403cf332d0e79380834cda3507ad9e530f15b))
+
 # 1.0.0 (2026-08-07)
 
 

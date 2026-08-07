@@ -1,4 +1,4 @@
-declare const ENGINE_VERSION = "1.0.0";
+declare const ENGINE_VERSION = "1.1.0";
 
 interface Brand {
     /** Human-readable engine consumer, used in notes and diagnostics. */
