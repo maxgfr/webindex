@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 is the dev-toolchain floor (vitest 4 needs >=20.19); 24 is current.
+        # The published bundle's Node 18 floor is covered by runtime-node-floor.
+        node-version: [20, 24]
+    name: build-test (node ${{ matrix.node-version }})
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Build is reproducible (committed bundle up to date)
+        run: pnpm run check:build # tsup && postbuild && git diff scripts/engine.mjs scripts/engine.d.mts
+
+      - name: Test
+        run: pnpm test
+
+      # Coverage ratchet — one Node version is enough (the suite is deterministic).
+      - name: Coverage thresholds
+        if: matrix.node-version == 24
+        run: pnpm run test:coverage
+
+  # The whole point of this package is to be VENDORED: consumers copy
+  # scripts/engine.mjs into their tree and their own tsup inlines it, so the
+  # bundle is never resolved through a package manager and never installed.
+  # This job proves the two properties that makes it depend on —
+  #   1. it is genuinely dependency-free and parses/runs standalone,
+  #   2. it holds the engines.node ">=18" promise,
+  # neither of which build-test can show, since the dev toolchain needs >=20.19.
+  # A Node 20+ API sneaking into src/ would build green on 24 and break real
+  # users on 18; this catches that.
+  runtime-node-floor:
+    runs-on: ubuntu-latest
+    name: runtime (Node 18 floor, zero-dep bundle)
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 18
+
+      - name: The committed bundle imports and runs on Node 18, with no install
+        run: |
+          cd "$RUNNER_TEMP"
+          cp "$GITHUB_WORKSPACE/scripts/engine.mjs" .
+          node --input-type=module -e '
+            import { ENGINE_VERSION, configure, env, envInt, envFlag, brand } from "./engine.mjs";
+            if (!/^\d+\.\d+\.\d+/.test(ENGINE_VERSION)) throw new Error("bad ENGINE_VERSION: " + ENGINE_VERSION);
+            configure({ name: "floor", envPrefix: "FLOOR", cli: "floor" });
+            if (brand().cli !== "floor") throw new Error("configure() did not take");
+            process.env.FLOOR_UA = "probe";
+            if (env("UA") !== "probe") throw new Error("env() did not read through the prefix");
+            if (envInt("MISSING", 7) !== 7) throw new Error("envInt() default broken");
+            if (envFlag("MISSING") !== false) throw new Error("envFlag() default broken");
+            console.log("node 18 floor OK — webindex " + ENGINE_VERSION);
+          '
+
+      - name: The bundle declares no runtime dependencies
+        run: |
+          # A vendored file cannot resolve bare specifiers — the consumer's
+          # bundler would fail, or worse, silently pull a dependency the skill
+          # never declared. Every import in the bundle must be a node: builtin.
+          if grep -nE '^\s*(import|export)[^;]*\bfrom\s+"[^."]' scripts/engine.mjs | grep -v '"node:'; then
+            echo "::error::the bundle imports a non-builtin module — it is no longer vendorable"
+            exit 1
+          fi
+          echo "no external imports."

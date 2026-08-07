@@ -1,0 +1,67 @@
+{
+  "name": "webindex",
+  "version": "0.0.0",
+  "description": "The web-retrieval engine behind the ultrasearch, ultradoc and construct skills — fetch a URL into clean text (HTML, PDF, office docs), discover candidates across keyless backends, and rank them. Zero-dependency ESM, vendored not installed. The web-side companion to codeindex.",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "main": "scripts/engine.mjs",
+  "types": "scripts/engine.d.mts",
+  "exports": {
+    ".": {
+      "types": "./scripts/engine.d.mts",
+      "default": "./scripts/engine.mjs"
+    }
+  },
+  "files": [
+    "scripts",
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup && node scripts/postbuild.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome ci .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "check:build": "tsup && node scripts/postbuild.mjs && git diff --exit-code -- scripts/engine.mjs scripts/engine.d.mts",
+    "release": "semantic-release"
+  },
+  "keywords": [
+    "web-search",
+    "retrieval",
+    "scraping",
+    "pdf-extraction",
+    "bm25",
+    "rrf",
+    "zero-dependency",
+    "engine"
+  ],
+  "license": "MIT",
+  "author": "maxgfr",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maxgfr/webindex"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.16",
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/exec": "^6.0.3",
+    "@semantic-release/git": "^10.0.1",
+    "@types/node": "^20.14.0",
+    "@vitest/coverage-v8": "^4.1.10",
+    "semantic-release": "^24.2.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.5.0",
+    "vitest": "^4.1.10"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
