@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.5.0](https://github.com/maxgfr/webindex/compare/v1.4.0...v1.5.0) (2026-08-08)
+
+
+### Features
+
+* **text:** add matcherFromTokens, the empty-query fallback ([0c104e1](https://github.com/maxgfr/webindex/commit/0c104e1271e0dca7113070414270bb0a769b0de2))
+
 # [1.4.0](https://github.com/maxgfr/webindex/compare/v1.3.0...v1.4.0) (2026-08-08)
 
 
