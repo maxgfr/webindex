@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.10.0](https://github.com/maxgfr/webindex/compare/v1.9.0...v1.10.0) (2026-08-08)
+
+
+### Features
+
+* **search:** ask the local stack, not just start it ([7457a94](https://github.com/maxgfr/webindex/commit/7457a943d4cedf8716b544e94765131559adf312))
+
 # [1.9.0](https://github.com/maxgfr/webindex/compare/v1.8.0...v1.9.0) (2026-08-08)
 
 
