@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.9.0](https://github.com/maxgfr/webindex/compare/v1.8.0...v1.9.0) (2026-08-08)
+
+
+### Features
+
+* **stack:** own the container stack, and document what the tool can do ([d61adec](https://github.com/maxgfr/webindex/commit/d61adec9f31ce9d5bece6e70084a1cf13b6c3079))
+
 # [1.8.0](https://github.com/maxgfr/webindex/compare/v1.7.2...v1.8.0) (2026-08-08)
 
 
