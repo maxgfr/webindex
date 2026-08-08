@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMatcher, isStopword, keywords, rankedKeywords } from "../src/text.js";
+import { buildMatcher, isStopword, keywords, matcherFromTokens, rankedKeywords } from "../src/text.js";
 import { configure, resetBrand } from "../src/brand.js";
 import { canonicalizeUrl, domainOf, fnv1a64, LOCAL_FILE_DOMAIN, normalizeDoi } from "../src/url.js";
 
@@ -171,5 +171,23 @@ describe("extraStopwords", () => {
     resetBrand();
     expect(isStopword("test")).toBe(false);
     expect(keywords("the test harness")).toContain("test");
+  });
+});
+
+describe("matcherFromTokens", () => {
+  it("still matches when keyword extraction would leave nothing", () => {
+    // "what is it for" is all stopwords: buildMatcher yields an empty matcher,
+    // which highlights nothing. The raw tokens are a worse query than a good
+    // one and a far better one than none.
+    expect(buildMatcher("what is it for").matchLine("what is it for").size).toBe(0);
+    expect(matcherFromTokens("what is it for".split(/\s+/)).matchLine("what is it for").size).toBeGreaterThan(0);
+  });
+
+  it("keeps the accent folding, so attribution agrees with buildMatcher", () => {
+    expect(matcherFromTokens(["télémétrie"]).matchLine("the telemetrie pipeline").size).toBe(1);
+  });
+
+  it("ignores empty tokens", () => {
+    expect(matcherFromTokens(["", "retry", ""]).matchLine("a retry loop").size).toBe(1);
   });
 });

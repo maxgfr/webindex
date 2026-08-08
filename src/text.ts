@@ -367,3 +367,16 @@ function makeMatcher(expanded: ExpandedKeyword[]): KeywordMatcher {
 export function buildMatcher(question: string, max = 8): KeywordMatcher {
   return makeMatcher(expandTokens(keywords(question), max));
 }
+
+/**
+ * A matcher over raw tokens, skipping keyword extraction.
+ *
+ * The fallback for a question with no distinctive keywords left after stopword
+ * removal — "what is it for?" reduces to nothing, and a matcher that matches
+ * nothing highlights nothing. Searching the words as given is worse than a good
+ * query and much better than an empty one. Still accent-folded and
+ * subtoken-expanded, so attribution stays consistent with buildMatcher.
+ */
+export function matcherFromTokens(tokens: string[], max = 8): KeywordMatcher {
+  return makeMatcher(expandTokens(tokens.filter(Boolean), max));
+}

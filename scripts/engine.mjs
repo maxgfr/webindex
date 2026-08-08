@@ -741,6 +741,9 @@ function makeMatcher(expanded) {
 function buildMatcher(question, max = 8) {
   return makeMatcher(expandTokens(keywords(question), max));
 }
+function matcherFromTokens(tokens, max = 8) {
+  return makeMatcher(expandTokens(tokens.filter(Boolean), max));
+}
 
 // src/firecrawl.ts
 var FIRECRAWL_DEFAULT_BASE = "http://localhost:3002";
@@ -2107,6 +2110,7 @@ export {
   looksLikePdfUrl,
   mapScrapeResponse,
   mapSearchResponse,
+  matcherFromTokens,
   nearestHeading,
   negotiateProtocol,
   normalizeDoi,
