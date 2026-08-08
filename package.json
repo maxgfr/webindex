@@ -13,7 +13,9 @@
     }
   },
   "files": [
-    "scripts",
+    "scripts/engine.mjs",
+    "scripts/engine.d.mts",
+    "scripts/webindex.mjs",
     "src"
   ],
   "engines": {
@@ -28,7 +30,7 @@
     "lint": "biome ci .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
-    "check:build": "tsup && node scripts/postbuild.mjs && node scripts/check-vendorable.mjs && node scripts/consumer-smoke.mjs && git diff --exit-code -- scripts/engine.mjs scripts/engine.d.mts",
+    "check:build": "tsup && node scripts/postbuild.mjs && node scripts/check-vendorable.mjs && node scripts/consumer-smoke.mjs && git diff --exit-code -- scripts/engine.mjs scripts/engine.d.mts scripts/webindex.mjs",
     "verify:vendorable": "node scripts/check-vendorable.mjs",
     "release": "semantic-release",
     "verify:standalone": "node scripts/consumer-smoke.mjs"
@@ -65,5 +67,8 @@
     "onlyBuiltDependencies": [
       "esbuild"
     ]
+  },
+  "bin": {
+    "webindex": "scripts/webindex.mjs"
   }
 }

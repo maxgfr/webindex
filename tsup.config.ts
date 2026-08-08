@@ -13,10 +13,16 @@ import { defineConfig } from "tsup";
 //
 // The committed bundle is verified reproducible in CI via `pnpm run check:build`.
 export default defineConfig({
-  entry: { engine: "src/index.ts" },
+  // TWO entries, and the separation is load-bearing. `engine` is what the three
+  // skills vendor and inline; `webindex` is the command. A CLI reachable from
+  // src/index.ts would be inlined into three skills that cannot invoke it, and
+  // its module-scope configure() would race theirs.
+  entry: { engine: "src/index.ts", webindex: "src/cli.ts" },
   outDir: "scripts",
   format: ["esm"],
   outExtension: () => ({ js: ".mjs", dts: ".d.mts" }),
+  // Only the library ships declarations; nobody imports the CLI as a module.
+  banner: { js: "" },
   target: "node18",
   platform: "node",
   bundle: true,

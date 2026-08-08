@@ -1,3 +1,5 @@
+import { S as ServerOptions, M as McpAdapter } from './server-D34vtOaQ.js';
+export { A as ANNOTATIONS_SINCE, a as ASSUMED_HTTP_PROTOCOL, C as CapAdvice, D as DEFAULT_MAX_RESPONSE_BYTES, E as ERR_INTERNAL, b as ERR_INVALID_PARAMS, c as ERR_INVALID_REQUEST, d as ERR_METHOD_NOT_FOUND, J as JsonRpcMessage, e as JsonSchema, f as JsonSchemaProp, L as LATEST_PROTOCOL, g as McpServer, P as PROTOCOL_VERSIONS, h as PromptDecl, i as PromptError, j as PromptResult, k as ProtocolVersion, R as RICH_TOOLS_SINCE, T as ToolDecl, l as ToolError, m as ToolOutcome, n as capResponse, o as createServer, p as isOriginAllowed, q as isProtocolVersion, r as negotiateProtocol, s as structuredContentFor, v as validateArgs } from './server-D34vtOaQ.js';
 import { Readable, Writable } from 'node:stream';
 import { Server } from 'node:http';
 
@@ -567,137 +569,6 @@ declare function takeArtifacts(): Artifact[];
 /** Test seam: clear both the switch and anything collected under it. */
 declare function resetNoWrite(): void;
 
-declare const PROTOCOL_VERSIONS: readonly ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
-type ProtocolVersion = (typeof PROTOCOL_VERSIONS)[number];
-declare const LATEST_PROTOCOL: ProtocolVersion;
-declare const ASSUMED_HTTP_PROTOCOL: ProtocolVersion;
-declare const ANNOTATIONS_SINCE = "2025-03-26";
-declare const RICH_TOOLS_SINCE = "2025-06-18";
-declare const DEFAULT_MAX_RESPONSE_BYTES = 1000000;
-declare function isProtocolVersion(v: unknown): v is ProtocolVersion;
-declare function negotiateProtocol(requested: unknown): ProtocolVersion;
-interface JsonSchemaProp {
-    type?: "string" | "number" | "boolean" | "array" | "object";
-    items?: {
-        type?: string;
-    };
-    enum?: readonly string[];
-    description?: string;
-}
-interface JsonSchema {
-    type: "object";
-    properties: Record<string, JsonSchemaProp>;
-    required: string[];
-}
-declare function validateArgs(schema: JsonSchema, args: Record<string, unknown>): string | undefined;
-/**
- * How to ask for less, per tool name.
- *
- * A cap that only says "too big" makes the model retry the same call; one that
- * names the narrowing argument gets a smaller second call. Which argument that
- * is depends entirely on the tool, so the map is supplied by the consuming
- * skill through McpAdapter.capAdvice — the engine knows a response is oversized,
- * only the skill knows how to make it smaller.
- */
-type CapAdvice = Record<string, string>;
-declare function capResponse(text: string, tool: string, maxBytes: number, artifact?: string, advice?: CapAdvice): string;
-declare function structuredContentFor(text: string, capped: boolean, hasSchema: boolean): Record<string, unknown> | undefined;
-declare function isOriginAllowed(origin: string | undefined, allowed?: string[]): boolean;
-
-interface JsonRpcMessage {
-    jsonrpc?: string;
-    id?: string | number | null;
-    method?: string;
-    params?: Record<string, unknown>;
-    [k: string]: unknown;
-}
-interface ToolDecl {
-    name: string;
-    description: string;
-    inputSchema: JsonSchema;
-    title?: string;
-    outputSchema?: JsonSchema;
-    annotations?: Record<string, boolean>;
-}
-interface PromptDecl {
-    name: string;
-    title?: string;
-    description?: string;
-    arguments?: {
-        name: string;
-        description?: string;
-        required?: boolean;
-    }[];
-}
-interface PromptResult {
-    description?: string;
-    messages: {
-        role: string;
-        content: {
-            type: string;
-            text: string;
-        };
-    }[];
-}
-/** What a tool handler gives back: text for the model, plus an optional artifact path. */
-interface ToolOutcome {
-    text: string;
-    artifact?: string;
-}
-/**
- * Thrown for anything the caller can fix by calling again differently. The
- * server turns it into an `isError` tool result, never a JSON-RPC error: the
- * tool ran, the request was wrong or the world didn't cooperate.
- *
- * Lives here rather than in each skill so the distinction is decided in ONE
- * place. Conflating a tool failure with a protocol error hides a client bug
- * inside a model-readable result the model then tries to reason around.
- */
-declare class ToolError extends Error {
-}
-/** Thrown for an unknown prompt or a missing required argument. A client bug. */
-declare class PromptError extends Error {
-}
-/**
- * The skill half of the server. Everything the engine cannot know.
- *
- * `listTools` takes the negotiated protocol version because tool declarations
- * are version-gated: annotations and output schemas only exist from certain
- * revisions onward, and advertising them to an older client is a spec
- * violation.
- */
-interface McpAdapter {
-    /** Version reported in `serverInfo`. The skill's, not the engine's. */
-    version: string;
-    listTools(protocol: ProtocolVersion): ToolDecl[];
-    callTool(name: string, args: Record<string, unknown>): Promise<ToolOutcome>;
-    /**
-     * Per-tool advice for narrowing an oversized request. The engine detects the
-     * overflow; only the skill knows which argument makes the result smaller.
-     */
-    capAdvice?: CapAdvice;
-    /** Omit to advertise no prompts; the capability is declared either way. */
-    prompts?: PromptDecl[];
-    getPrompt?(name: string, args: Record<string, unknown>): PromptResult;
-}
-interface ServerOptions {
-    maxResponseBytes?: number;
-    /** Defaults to the brand name. */
-    serverName?: string;
-    skillDir?: string;
-}
-declare const ERR_INVALID_REQUEST = -32600;
-declare const ERR_METHOD_NOT_FOUND = -32601;
-declare const ERR_INVALID_PARAMS = -32602;
-declare const ERR_INTERNAL = -32603;
-interface McpServer {
-    handle(msg: JsonRpcMessage, send: (out: JsonRpcMessage) => void): Promise<void>;
-    protocolVersion(): ProtocolVersion;
-    setProtocolVersion(v: ProtocolVersion): void;
-    tools(): ToolDecl[];
-}
-declare function createServer(adapter: McpAdapter, opts?: ServerOptions): McpServer;
-
 interface StdioOptions extends ServerOptions {
     input?: Readable;
     output?: Writable;
@@ -742,4 +613,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, type Brand, type CapAdvice, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, type ExpandedKeyword, type ExtractResult, type ExtractorId, FIRECRAWL_DEFAULT_BASE, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type HttpOptions, type HttpResult, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type ResourceContents, type ResourceDecl, ResourceError, type RunningHttpServer, type ScrapeAttempt, type ServerOptions, type StdioOptions, type ToolDecl, ToolError, type ToolOutcome, accentPattern, apiPrefix, assessExtractedText, assessPdfText, bestExcerpt, brand, browserUa, buildMatcher, cacheDir, cachePath, cachedFetchAndExtract, canonicalizeUrl, capExtract, capResponse, cleanInline, configure, contactUa, createServer, deaccent, decodeEntities, docFormatForContentType, docFormatForUrl, domainOf, enabledDocExtractors, enabledExtractors, ensureDir, env, envFlag, envInt, envName, escapeRegExp, expandTokens, extractDocument, extractMainHtml, extractPdf, fetchAndExtract, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, keywords, listResources, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, mapScrapeResponse, mapSearchResponse, matcherFromTokens, nearestHeading, negotiateProtocol, normalizeDoi, ocrBudgetLeft, ocrPdf, ocrTools, pageDelayMs, pdfToText, politeDelayMs, probeFirecrawl, rankedKeywords, readResource, rescueViaWayback, resetBrand, resetDocLadderCache, resetFirecrawlProbeCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, resolveSkillRoot, runStdioServer, runWithInput, scrapeViaFirecrawl, searchViaFirecrawl, setNoWrite, skillName, sleep, startHttpServer, structuredContentFor, subtokens, takeArtifacts, validateArgs, writeArtifact };
+export { ANYDOC_SPEC, type Artifact, type Brand, DEAD_LINK_STATUS, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, type ExpandedKeyword, type ExtractResult, type ExtractorId, FIRECRAWL_DEFAULT_BASE, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type HttpOptions, type HttpResult, type KeywordMatcher, type KeywordVariant, LOCAL_FILE_DOMAIN, McpAdapter, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type ResourceContents, type ResourceDecl, ResourceError, type RunningHttpServer, type ScrapeAttempt, ServerOptions, type StdioOptions, accentPattern, apiPrefix, assessExtractedText, assessPdfText, bestExcerpt, brand, browserUa, buildMatcher, cacheDir, cachePath, cachedFetchAndExtract, canonicalizeUrl, capExtract, cleanInline, configure, contactUa, deaccent, decodeEntities, docFormatForContentType, docFormatForUrl, domainOf, enabledDocExtractors, enabledExtractors, ensureDir, env, envFlag, envInt, envName, escapeRegExp, expandTokens, extractDocument, extractMainHtml, extractPdf, fetchAndExtract, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isNoWrite, isStopword, keywords, listResources, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, mapScrapeResponse, mapSearchResponse, matcherFromTokens, nearestHeading, normalizeDoi, ocrBudgetLeft, ocrPdf, ocrTools, pageDelayMs, pdfToText, politeDelayMs, probeFirecrawl, rankedKeywords, readResource, rescueViaWayback, resetBrand, resetDocLadderCache, resetFirecrawlProbeCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, resolveSkillRoot, runStdioServer, runWithInput, scrapeViaFirecrawl, searchViaFirecrawl, setNoWrite, skillName, sleep, startHttpServer, subtokens, takeArtifacts, writeArtifact };

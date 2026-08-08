@@ -37,3 +37,13 @@ if (!existsSync(from)) {
 if (existsSync(to)) rmSync(to);
 renameSync(from, to);
 console.log("postbuild: scripts/engine.d.ts -> scripts/engine.d.mts");
+
+// tsup emits declarations per entry, but nobody imports the CLI as a module —
+// it is a program. Shipping scripts/webindex.d.ts would advertise an API that
+// is not one, and it would have to be kept reproducible by check:build for no
+// reason.
+const cliDts = join(scriptsDir, "webindex.d.ts");
+if (existsSync(cliDts)) {
+  rmSync(cliDts);
+  console.log("postbuild: dropped scripts/webindex.d.ts (the CLI is a program, not an API)");
+}

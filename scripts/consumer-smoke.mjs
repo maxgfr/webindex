@@ -124,8 +124,24 @@ try {
   writeFileSync(join(dir, "probe.mjs"), probe);
   const out = execFileSync(process.execPath, ["probe.mjs"], { cwd: dir, encoding: "utf8", timeout: 60_000 });
   process.stdout.write(out);
+
+  // The CLI is a separate artifact, and its two server-startup paths are the
+  // part the in-process suite cannot reach — they need a real subprocess. Drive
+  // the built binary over stdio, which is exactly how an agent host runs it.
+  const cli = join(root, "scripts", "webindex.mjs");
+  const rpc = (id, method, params) => JSON.stringify({ jsonrpc: "2.0", id, method, params });
+  const reply = execFileSync(process.execPath, [cli, "mcp"], {
+    input: [rpc(1, "initialize", { protocolVersion: "2025-06-18" }), rpc(2, "tools/list", {})].join("\n") + "\n",
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  const frames = reply.trim().split("\n").map((l) => JSON.parse(l));
+  if (frames[0].result?.serverInfo?.name !== "webindex") throw new Error("the CLI's MCP server did not identify itself");
+  const names = frames[1].result.tools.map((t) => t.name).join(", ");
+  if (!names.includes("webindex_fetch")) throw new Error("the CLI's MCP server advertised no fetch tool");
+  console.log(`consumer-smoke: the CLI serves MCP over stdio — ${names}.`);
 } catch (e) {
-  process.stderr.write(String(e.stdout ?? "") + String(e.stderr ?? ""));
+  process.stderr.write(String(e.stdout ?? "") + String(e.stderr ?? "") + String(e.message ?? "") + "\n");
   console.error("consumer-smoke: FAILED — the engine does not stand alone.");
   process.exit(1);
 } finally {
