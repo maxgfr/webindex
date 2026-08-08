@@ -1392,6 +1392,174 @@ function fnv1a64(s) {
   return h;
 }
 
+// src/citable.ts
+var API_HOSTS = /* @__PURE__ */ new Set(["eutils.ncbi.nlm.nih.gov", "api.crossref.org", "api.openalex.org", "api.semanticscholar.org", "export.arxiv.org"]);
+var API_PATHS = [/^\/europepmc\/webservices\//i, /^\/search\/publ\/api/i, /^\/api\//i, /\.(fcgi|cgi)$/i];
+var API_FORMATS = /[?&](format|retmode|rettype|output)=(json|xml|text|atom|csv|bibtex)\b/i;
+function isApiEndpoint(url) {
+  try {
+    const u = new URL(url);
+    if (API_HOSTS.has(u.hostname.toLowerCase().replace(/^www\./, ""))) return true;
+    if (API_PATHS.some((re) => re.test(u.pathname))) return true;
+    return API_FORMATS.test(u.search);
+  } catch {
+    return false;
+  }
+}
+var ID_PARAMS = ["id", "ids", "uid", "uids", "pmid", "doi", "identifier"];
+function addressedIdCount(url) {
+  try {
+    const params = new URL(url).searchParams;
+    for (const name of ID_PARAMS) {
+      const raw = params.get(name);
+      if (!raw) continue;
+      const ids = raw.split(/[,\s+]+/).map((s) => s.trim()).filter(Boolean);
+      if (ids.length) return ids.length;
+    }
+  } catch {
+  }
+  return 0;
+}
+function isCitableUrl(url) {
+  try {
+    const u = new URL(url);
+    return (u.protocol === "https:" || u.protocol === "http:") && !isApiEndpoint(url);
+  } catch {
+    return false;
+  }
+}
+var DOI_RE = /\b(10\.\d{4,9}\/[^\s"'<>()[\],;]+)/;
+var ARXIV_RE = /\barxiv[:\s/]+((?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?\/\d{7})(?:v\d+)?)/i;
+var PMID_RE = /\bPMID:?\s*(\d{4,9})\b/i;
+var ARXIV_ID_PATH_RE = /\/(\d{4}\.\d{4,5}(?:v\d+)?)(?:$|[/?#])/;
+function urlDeclaresIdentity(url) {
+  return DOI_RE.test(url) || ARXIV_ID_PATH_RE.test(url);
+}
+function deriveCitableUrl(text, canonical) {
+  if (canonical && isCitableUrl(canonical)) return canonical;
+  const head = text.slice(0, 4e3);
+  const doi = head.match(DOI_RE)?.[1];
+  if (doi) return `https://doi.org/${doi.replace(/[.,;:)\]]+$/, "")}`;
+  const arxiv = head.match(ARXIV_RE)?.[1];
+  if (arxiv) return `https://arxiv.org/abs/${arxiv}`;
+  const pmid = head.match(PMID_RE)?.[1];
+  if (pmid) return `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`;
+  return void 0;
+}
+
+// src/providers.ts
+var PUBMED_LANDING = /^https?:\/\/(?:www\.)?pubmed\.ncbi\.nlm\.nih\.gov\/(\d{4,9})\/?$/i;
+var PMC_LANDING = /^https?:\/\/(?:www\.)?pmc\.ncbi\.nlm\.nih\.gov\/articles\/(PMC\d+)\/?$/i;
+var EUTILS = /^https?:\/\/eutils\.ncbi\.nlm\.nih\.gov\/entrez\/eutils\/([a-z]+)\.fcgi/i;
+var ARXIV_PDF = /^https?:\/\/(?:www\.|export\.)?arxiv\.org\/pdf\/([^?#]+?)(?:\.pdf)?\/?$/i;
+function eutilsIds(raw) {
+  return (raw ?? "").split(/[,\s+]+/).map((s) => s.trim()).filter(Boolean);
+}
+function pubmedAbstractUrl(pmid) {
+  return `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=${pmid}&rettype=abstract&retmode=text`;
+}
+function resolveProvider(url) {
+  const raw = url.trim();
+  const pubmed = raw.match(PUBMED_LANDING);
+  if (pubmed) {
+    const pmid = pubmed[1];
+    return { citeUrl: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`, textUrl: pubmedAbstractUrl(pmid) };
+  }
+  const pmc = raw.match(PMC_LANDING);
+  if (pmc) return { citeUrl: `https://pmc.ncbi.nlm.nih.gov/articles/${pmc[1].toUpperCase()}/` };
+  const eutils = raw.match(EUTILS);
+  if (eutils) return resolveEutils(raw, eutils[1].toLowerCase());
+  const arxiv = raw.match(ARXIV_PDF);
+  if (arxiv) return { citeUrl: `https://arxiv.org/abs/${arxiv[1]}`, textUrl: raw, preferText: true };
+  return { citeUrl: raw };
+}
+function resolveEutils(raw, op) {
+  let params;
+  try {
+    params = new URL(raw).searchParams;
+  } catch {
+    return { citeUrl: raw };
+  }
+  if (op === "esearch" || op === "egquery" || op === "espell") {
+    return { citeUrl: raw, reject: `${raw} is an E-utilities ${op} query, not a document \u2014 fetch the record it points at instead.` };
+  }
+  const db = (params.get("db") ?? "").toLowerCase();
+  const ids = eutilsIds(params.get("id"));
+  const id = ids[0];
+  if (!id) return { citeUrl: raw };
+  if (db === "pubmed" && /^\d+$/.test(id)) {
+    return { citeUrl: `https://pubmed.ncbi.nlm.nih.gov/${id}/`, textUrl: pubmedAbstractUrl(id) };
+  }
+  if (db === "pmc") {
+    const pmcid = /^pmc/i.test(id) ? id.toUpperCase() : `PMC${id}`;
+    return { citeUrl: `https://pmc.ncbi.nlm.nih.gov/articles/${pmcid}/` };
+  }
+  return { citeUrl: raw };
+}
+
+// src/locale.ts
+var LANG_COUNTRY = {
+  en: "us",
+  pt: "br",
+  ja: "jp",
+  zh: "cn",
+  ko: "kr",
+  sv: "se",
+  da: "dk",
+  cs: "cz",
+  el: "gr",
+  uk: "ua",
+  // Ukrainian language → Ukraine
+  ar: "xa",
+  // DuckDuckGo's "Arabia" region
+  he: "il",
+  hi: "in"
+};
+var REGION_ALIASES = {
+  gb: "uk",
+  en: "us"
+};
+function baseLang(lang) {
+  return (lang || "en").split("-")[0].toLowerCase();
+}
+function resolveRegion(lang, region) {
+  if (region?.trim()) return region.trim().toLowerCase();
+  const parts = (lang || "en").split("-");
+  if (parts.length > 1 && parts[1]) return parts[1].toLowerCase();
+  const l = baseLang(lang);
+  return LANG_COUNTRY[l] ?? l;
+}
+function ddgRegion(lang, region) {
+  const l = baseLang(lang);
+  let r = resolveRegion(lang, region);
+  r = REGION_ALIASES[r] ?? r;
+  return `${r}-${l}`;
+}
+function acceptLanguageHeader(lang, region) {
+  const l = baseLang(lang);
+  const R = resolveRegion(lang, region).toUpperCase();
+  if (l === "en") return `${l}-${R},${l};q=0.9`;
+  return `${l}-${R},${l};q=0.9,en;q=0.5`;
+}
+
+// src/run-lock.ts
+var chains = /* @__PURE__ */ new Map();
+function withRunLock(slug, fn) {
+  const prev = chains.get(slug) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  const tail = next.then(noop, noop);
+  chains.set(slug, tail);
+  tail.then(() => {
+    if (chains.get(slug) === tail) chains.delete(slug);
+  }, noop);
+  return next;
+}
+function noop() {
+}
+function resetRunLocks() {
+  chains.clear();
+}
+
 // src/cache.ts
 import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync3 } from "fs";
 import { join as join2 } from "path";
@@ -2057,9 +2225,12 @@ export {
   ResourceError,
   ToolError,
   accentPattern,
+  acceptLanguageHeader,
+  addressedIdCount,
   apiPrefix,
   assessExtractedText,
   assessPdfText,
+  baseLang,
   bestExcerpt,
   brand,
   browserUa,
@@ -2074,8 +2245,10 @@ export {
   configure,
   contactUa,
   createServer,
+  ddgRegion,
   deaccent,
   decodeEntities,
+  deriveCitableUrl,
   docFormatForContentType,
   docFormatForUrl,
   domainOf,
@@ -2102,6 +2275,8 @@ export {
   htmlToText,
   httpGet,
   httpJson,
+  isApiEndpoint,
+  isCitableUrl,
   isNoWrite,
   isOriginAllowed,
   isProtocolVersion,
@@ -2124,6 +2299,7 @@ export {
   pdfToText,
   politeDelayMs,
   probeFirecrawl,
+  pubmedAbstractUrl,
   rankedKeywords,
   readResource,
   rescueViaWayback,
@@ -2133,6 +2309,9 @@ export {
   resetNoWrite,
   resetOcrBudget,
   resetPdfLadderCache,
+  resetRunLocks,
+  resolveProvider,
+  resolveRegion,
   resolveSkillRoot,
   runStdioServer,
   runWithInput,
@@ -2145,6 +2324,8 @@ export {
   structuredContentFor,
   subtokens,
   takeArtifacts,
+  urlDeclaresIdentity,
   validateArgs,
+  withRunLock,
   writeArtifact
 };

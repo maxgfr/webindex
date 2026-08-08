@@ -70,6 +70,22 @@ export * from "./text.js";
 // ── URL identity ────────────────────────────────────────────────────────────
 export * from "./url.js";
 
+// ── Is this URL worth citing, and where does its text live? ─────────────────
+// Whether a URL addresses a specific document or is a bare API endpoint, and
+// how to turn a landing page into the readable version of the same work.
+export * from "./citable.js";
+export * from "./providers.js";
+
+// ── Locale ──────────────────────────────────────────────────────────────────
+// Turning a language tag into the Accept-Language header and the region codes
+// the keyless engines expect.
+export * from "./locale.js";
+
+// ── Serialising work per key ────────────────────────────────────────────────
+// A per-key promise chain, so two concurrent calls touching the same directory
+// or repository queue instead of racing.
+export * from "./run-lock.js";
+
 // ── The on-disk fetch cache ─────────────────────────────────────────────────
 export * from "./cache.js";
 

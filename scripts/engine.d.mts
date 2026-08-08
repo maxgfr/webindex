@@ -533,6 +533,58 @@ declare function domainOf(raw: string): string;
 declare const LOCAL_FILE_DOMAIN = "local file";
 declare function fnv1a64(s: string): bigint;
 
+declare function isApiEndpoint(url: string): boolean;
+/**
+ * How many documents a URL addresses, when it says so in its query string.
+ * 0 means "it doesn't say" — the normal case for an ordinary page.
+ */
+declare function addressedIdCount(url: string): number;
+/** A url fit to appear in a report: parseable, http(s), and not an API endpoint. */
+declare function isCitableUrl(url: string): boolean;
+/**
+ * Does the URL ITSELF carry a persistent identifier?
+ *
+ * `deriveCitableUrl` reads identifiers out of a document's text, which misses
+ * the commonest case in scholarly work: the address IS the identifier
+ * (`arxiv.org/pdf/2408.05636`, `doi.org/10.1145/…`). A PDF makes that worse —
+ * extraction drops hyperlinks, so the text can carry none at all. Measured: two
+ * arXiv papers were flagged "thin attribution" purely because nothing looked at
+ * their own URL.
+ *
+ * Identifier SYNTAX only (DOI, arXiv id). No hostnames.
+ */
+declare function urlDeclaresIdentity(url: string): boolean;
+/**
+ * Derive a citable URL from what a fetch returned, for the case where the URL we
+ * fetched is not itself citable. Reads the document's own identifiers, in
+ * descending order of authority:
+ *
+ *   1. the canonical link the page declares (`<link rel=canonical>` / `og:url`),
+ *   2. a DOI — the identifier publishers agree on,
+ *   3. an arXiv id, 4. a PMID.
+ *
+ * Returns undefined when the payload names no document, which is the honest
+ * answer: the caller then refuses or asks the agent for the page.
+ */
+declare function deriveCitableUrl(text: string, canonical?: string): string | undefined;
+
+interface ResolvedProvider {
+    citeUrl: string;
+    textUrl?: string;
+    reject?: string;
+    preferText?: true;
+}
+declare function pubmedAbstractUrl(pmid: string): string;
+declare function resolveProvider(url: string): ResolvedProvider;
+
+declare function baseLang(lang: string | undefined): string;
+declare function resolveRegion(lang: string | undefined, region?: string): string;
+declare function ddgRegion(lang: string | undefined, region?: string): string;
+declare function acceptLanguageHeader(lang: string | undefined, region?: string): string;
+
+declare function withRunLock<T>(slug: string, fn: () => Promise<T>): Promise<T>;
+declare function resetRunLocks(): void;
+
 type Extract = Awaited<ReturnType<typeof fetchAndExtract>>;
 declare function cacheDir(): string;
 declare function cachePath(url: string, acceptLanguage?: string, extractor?: CacheNamespace): string;
@@ -742,4 +794,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, type Brand, type CapAdvice, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, type ExpandedKeyword, type ExtractResult, type ExtractorId, FIRECRAWL_DEFAULT_BASE, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type HttpOptions, type HttpResult, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type ResourceContents, type ResourceDecl, ResourceError, type RunningHttpServer, type ScrapeAttempt, type ServerOptions, type StdioOptions, type ToolDecl, ToolError, type ToolOutcome, accentPattern, apiPrefix, assessExtractedText, assessPdfText, bestExcerpt, brand, browserUa, buildMatcher, cacheDir, cachePath, cachedFetchAndExtract, canonicalizeUrl, capExtract, capResponse, cleanInline, configure, contactUa, createServer, deaccent, decodeEntities, docFormatForContentType, docFormatForUrl, domainOf, enabledDocExtractors, enabledExtractors, ensureDir, env, envFlag, envInt, envName, escapeRegExp, expandTokens, extractDocument, extractMainHtml, extractPdf, fetchAndExtract, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, keywords, listResources, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, mapScrapeResponse, mapSearchResponse, matcherFromTokens, nearestHeading, negotiateProtocol, normalizeDoi, ocrBudgetLeft, ocrPdf, ocrTools, pageDelayMs, pdfToText, politeDelayMs, probeFirecrawl, rankedKeywords, readResource, rescueViaWayback, resetBrand, resetDocLadderCache, resetFirecrawlProbeCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, resolveSkillRoot, runStdioServer, runWithInput, scrapeViaFirecrawl, searchViaFirecrawl, setNoWrite, skillName, sleep, startHttpServer, structuredContentFor, subtokens, takeArtifacts, validateArgs, writeArtifact };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, type Brand, type CapAdvice, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, type ExpandedKeyword, type ExtractResult, type ExtractorId, FIRECRAWL_DEFAULT_BASE, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type HttpOptions, type HttpResult, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type RunningHttpServer, type ScrapeAttempt, type ServerOptions, type StdioOptions, type ToolDecl, ToolError, type ToolOutcome, accentPattern, acceptLanguageHeader, addressedIdCount, apiPrefix, assessExtractedText, assessPdfText, baseLang, bestExcerpt, brand, browserUa, buildMatcher, cacheDir, cachePath, cachedFetchAndExtract, canonicalizeUrl, capExtract, capResponse, cleanInline, configure, contactUa, createServer, ddgRegion, deaccent, decodeEntities, deriveCitableUrl, docFormatForContentType, docFormatForUrl, domainOf, enabledDocExtractors, enabledExtractors, ensureDir, env, envFlag, envInt, envName, escapeRegExp, expandTokens, extractDocument, extractMainHtml, extractPdf, fetchAndExtract, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isApiEndpoint, isCitableUrl, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, keywords, listResources, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, mapScrapeResponse, mapSearchResponse, matcherFromTokens, nearestHeading, negotiateProtocol, normalizeDoi, ocrBudgetLeft, ocrPdf, ocrTools, pageDelayMs, pdfToText, politeDelayMs, probeFirecrawl, pubmedAbstractUrl, rankedKeywords, readResource, rescueViaWayback, resetBrand, resetDocLadderCache, resetFirecrawlProbeCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, resetRunLocks, resolveProvider, resolveRegion, resolveSkillRoot, runStdioServer, runWithInput, scrapeViaFirecrawl, searchViaFirecrawl, setNoWrite, skillName, sleep, startHttpServer, structuredContentFor, subtokens, takeArtifacts, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact };
