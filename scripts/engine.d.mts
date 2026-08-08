@@ -3,7 +3,7 @@ export { A as ANNOTATIONS_SINCE, a as ASSUMED_HTTP_PROTOCOL, C as CapAdvice, D a
 import { Readable, Writable } from 'node:stream';
 import { Server } from 'node:http';
 
-declare const ENGINE_VERSION = "1.6.0";
+declare const ENGINE_VERSION = "1.7.0";
 
 interface Brand {
     /** Human-readable engine consumer, used in notes and diagnostics. */

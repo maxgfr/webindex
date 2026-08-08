@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.7.0](https://github.com/maxgfr/webindex/compare/v1.6.0...v1.7.0) (2026-08-08)
+
+
+### Features
+
+* **cli:** ship a webindex command and an MCP server ([1c3433d](https://github.com/maxgfr/webindex/commit/1c3433de4d16f789130d9d8a3cbfe11febcb27bf))
+
 # [1.6.0](https://github.com/maxgfr/webindex/compare/v1.5.0...v1.6.0) (2026-08-08)
 
 
