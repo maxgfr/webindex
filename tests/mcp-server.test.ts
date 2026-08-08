@@ -21,7 +21,7 @@ const rpc = (method: string, params?: Record<string, unknown>, id: string | numb
 describe("initialize", () => {
   it("reports the skill's name and version, not the engine's", async () => {
     // A client shows the user which server it is talking to. "webindex" would
-    // be a lie: they installed ultradoc.
+    // be a lie: they installed the consumer, not the engine.
     const r = await call(rpc("initialize", { protocolVersion: LATEST_PROTOCOL }));
     expect(r!.result).toMatchObject({ serverInfo: { name: "webindex-tests", version: "9.9.9" } });
   });

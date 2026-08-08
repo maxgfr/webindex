@@ -23,7 +23,7 @@ describe("runWithInput", () => {
   // The ladder turns this into "rung unavailable" and remembers it, which is how
   // a machine without npm or poppler still gets an answer.
   it("reports a missing binary as `not installed`", async () => {
-    const r = await runWithInput("ultrasearch-no-such-binary-xyz", [], Buffer.alloc(0), 30_000);
+    const r = await runWithInput("webindex-no-such-binary-xyz", [], Buffer.alloc(0), 30_000);
     expect(r.ok).toBe(false);
     expect(r.error).toBe("not installed");
   });

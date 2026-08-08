@@ -27,12 +27,10 @@ import { listResources, readResource, ResourceError } from "./resources.js";
 // schema, response capping, the error taxonomy, and the exact line between a
 // JSON-RPC error and an `isError` tool result.
 //
-// What the engine cannot know is WHICH tools exist. ultrasearch exposes
-// ultrasearch_gather, ultradoc exposes ultradoc_ask, construct exposes
-// construct_research — different names, different schemas, different handlers.
-// So the skill passes an McpAdapter and keeps its tools/handlers/prompts
-// modules; this file keeps the 200 lines of protocol all three used to carry a
-// copy of.
+// What the engine cannot know is WHICH tools exist. Every consumer exposes its
+// own — different names, different schemas, different handlers. So the consumer
+// passes an McpAdapter and keeps its tools, handlers and prompts; this file
+// keeps the protocol.
 
 export interface JsonRpcMessage {
   jsonrpc?: string;

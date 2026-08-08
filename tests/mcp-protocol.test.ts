@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 
 // Narrowing advice is supplied by the consuming skill through McpAdapter now —
 // the engine detects the overflow, only the skill knows which argument shrinks
-// the result. This is the map ultrasearch passes, used here as a realistic one.
-const ADVICE = { ultrasearch_gather: 'lower `max_sources` or `per_source`, or drop to `depth: "summary"`' };
+// the result. A realistic map, of the shape a consumer supplies.
+const ADVICE = { acme_gather: 'lower `max_sources` or `per_source`, or drop to `depth: "summary"`' };
 import {
   PROTOCOL_VERSIONS,
   LATEST_PROTOCOL,
@@ -86,27 +86,27 @@ describe("validateArgs", () => {
 describe("capResponse", () => {
   it("returns the payload untouched when it fits", () => {
     const text = '{"ok":true}';
-    expect(capResponse(text, "ultrasearch_gather", 1000, undefined, ADVICE)).toBe(text);
+    expect(capResponse(text, "acme_gather", 1000, undefined, ADVICE)).toBe(text);
   });
 
   it("withholds an oversized payload and says how to ask for less", () => {
     const big = JSON.stringify({ pad: "x".repeat(5000) });
-    const out = capResponse(big, "ultrasearch_gather", 100, undefined, ADVICE);
+    const out = capResponse(big, "acme_gather", 100, undefined, ADVICE);
     expect(out).not.toContain("xxxx");
     const parsed = JSON.parse(out);
     expect(parsed.truncated).toBe(true);
-    expect(parsed.tool).toBe("ultrasearch_gather");
+    expect(parsed.tool).toBe("acme_gather");
     expect(parsed.bytes).toBeGreaterThan(parsed.maxBytes);
     expect(parsed.narrower).toMatch(/max_sources/);
   });
 
   it("points at the on-disk artifact when there is one", () => {
-    const out = capResponse("x".repeat(500), "ultrasearch_gather", 10, "/tmp/run/EVIDENCE.md", ADVICE);
+    const out = capResponse("x".repeat(500), "acme_gather", 10, "/tmp/run/EVIDENCE.md", ADVICE);
     expect(JSON.parse(out).artifact).toBe("/tmp/run/EVIDENCE.md");
   });
 
   it("still gives a generic hint for a tool with no tailored one", () => {
-    expect(JSON.parse(capResponse("x".repeat(500), "ultrasearch_modes", 10)).narrower).toBe("narrow the request and call again");
+    expect(JSON.parse(capResponse("x".repeat(500), "acme_modes", 10)).narrower).toBe("narrow the request and call again");
   });
 });
 

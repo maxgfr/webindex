@@ -149,9 +149,9 @@ describe("isStopword", () => {
 
 describe("extraStopwords", () => {
   it("lets a consumer drop words the shared list keeps", () => {
-    // ultradoc reads source repositories, where "test" and "request" appear in
-    // almost every file — keeping them as keywords scores every document alike.
-    // A market-research tool would say the opposite, so the engine cannot decide.
+    // A tool reading source repositories sees "test" and "request" in almost
+    // every file — keeping them as keywords scores every document alike. A
+    // market-research tool would say the opposite, so the engine cannot decide.
     expect(isStopword("test")).toBe(false);
     configure({ name: "docs-tool", envPrefix: "DOCS", cli: "docs", extraStopwords: ["request", "test"] });
     expect(isStopword("test")).toBe(true);

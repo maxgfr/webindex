@@ -11,9 +11,9 @@
 //
 // Note the bundler drops the `node:` prefix (esbuild normalises `node:fs` to
 // `fs` for a node platform target). That is the established shape — the
-// codeindex bundle the skills already vendor, and ultrasearch's own shipped
-// engine, both look like this and run fine. So the check is "is this a
-// builtin?", resolved against Node's own list, NOT "does it carry the prefix".
+// codeindex bundle looks exactly like this and runs fine. So the check is "is
+// this a builtin?", resolved against Node's own list, NOT "does it carry the
+// prefix".
 import { readFileSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { dirname, join } from "node:path";

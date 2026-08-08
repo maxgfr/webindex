@@ -17,8 +17,8 @@ import { fileURLToPath } from "node:url";
 // client.
 
 /**
- * Display name used in resource titles. Comes from the brand, so ultradoc's
- * resources say "ultradoc: the skill" and construct's say "construct: …".
+ * Display name used in resource titles. Comes from the brand, so a consumer
+ * called "reader" serves "reader: the skill".
  */
 export const skillName = (): string => brand().name;
 

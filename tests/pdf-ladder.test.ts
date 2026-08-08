@@ -128,7 +128,7 @@ describe("extractPdf", () => {
   // real invocations (npx -y --prefer-offline …, pdftotext -layout - -) that the
   // suite otherwise never reaches, since setup.ts pins the ladder to `native`.
   it("falls through when neither external extractor can be launched", async () => {
-    vi.stubEnv("PATH", "/nonexistent-ultrasearch-test");
+    vi.stubEnv("PATH", "/nonexistent-webindex-test");
     const r = await extractPdf(TEXTUAL, { engines: ["pdf-inspector", "pdftotext"] });
     expect(r.via).toBeUndefined();
     expect(r.text).toBe("");

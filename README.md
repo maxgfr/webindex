@@ -1,29 +1,20 @@
 # webindex
 
-The web-retrieval engine behind [ultrasearch](https://github.com/maxgfr/ultrasearch),
-[ultradoc](https://github.com/maxgfr/ultradoc) and [construct](https://github.com/maxgfr/construct).
+Turn a URL into clean, citable text — HTML, PDFs through a six-rung ladder ending in OCR,
+and office documents — and serve that to an agent over MCP.
 
-Zero runtime dependencies. One ESM bundle plus one declaration file. **Vendored, not
-installed.**
+Zero runtime dependencies. One ESM bundle plus one declaration file, plus a CLI. The
+web-side companion to [codeindex](https://github.com/maxgfr/codeindex): codeindex indexes
+the code you have locally, webindex fetches what is out there.
 
-It is the web-side companion to [codeindex](https://github.com/maxgfr/codeindex):
-codeindex indexes the code you have locally, webindex fetches and ranks what is out there.
+```bash
+brew install maxgfr/tap/webindex
 
-## Why it exists
-
-Three skills grew the same machinery independently. Before this package, they shared
-**1 485 lines that were byte-identical** apart from an environment-variable prefix — the
-PDF and office-document extraction ladders, and the MCP transport — plus divergent forks
-of the same fetcher, the same Firecrawl client, the same cache and the same ranking
-helpers. Three consecutive releases of all three repos were the same commit, hand-copied:
-
+webindex fetch https://example.com     # URL -> clean text
+webindex extract report.pdf            # a file already on disk
+webindex mcp                           # serve fetch/extract over MCP
+webindex doctor                        # which rungs and helpers are available
 ```
-feat(pdf): read scanned PDFs with copyable-pdf, the ladder's OCR rung
-fix(pdf,doc): pin the npx extractor rungs instead of floating on latest
-feat(doc): read office documents instead of quoting their bytes
-```
-
-Now that fix is one commit here, and the three skills pick it up on their own.
 
 ## What is in scope
 
@@ -31,27 +22,28 @@ A library of **primitives**, not a pipeline.
 
 | Layer | What it owns |
 |---|---|
-| Retrieval | HTTP with retry and byte caps, HTML→text, Firecrawl, the PDF ladder (native → `pdf-inspector`/`anydoc` → Firecrawl → OCR), the office-document ladder, the page cache |
-| Text + ranking | keyword extraction and matching, RRF fusion, BM25, simhash near-duplicate collapse, diversification, URL canonicalisation, excerpting |
-| Discovery | the backend registry and its keyless engines (SearXNG, DuckDuckGo, Mojeek, Marginalia, Wikipedia, Hacker News, StackExchange, GitHub, arXiv/Crossref/OpenAlex/PubMed…), the harness-WebSearch lane, and the git-host providers |
-| MCP transport | protocol, stdio, HTTP, resources |
+| Retrieval | HTTP with retry and byte caps, HTML→text, main-content extraction, Firecrawl, the PDF ladder (native → `pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → OCR), the office-document ladder, Wayback rescue, the fetch cache |
+| Text | keyword extraction, accent- and plural-folded matching, camelCase splitting, excerpting, URL canonicalisation and identity |
+| MCP | the whole protocol — negotiation, cancellation, schema validation, response capping, the error taxonomy — plus the stdio and HTTP transports |
+
+Ranking (BM25, RRF fusion, near-duplicate collapse, diversification) and discovery (the
+keyless search backends) are **not here yet**. They are the next layers to land; until they
+do, this is a retrieval engine, not a search engine.
 
 ## What is deliberately out of scope
 
-Each consumer keeps its own evidence model, dossier layout and citation gate. construct
-and ultradoc number sources `E#` and write `evidence.json`; ultrasearch numbers them `S#`
-and writes `sources/S#.md`. Their `check` commands re-validate against different things —
-a pinned clone, an SRD, a report. Those differences are real, so unifying them would
-change three skills' behaviour rather than share their plumbing.
+Evidence models, document layouts and citation gates. Those are product decisions: how a
+tool numbers its sources, where it writes them and what it considers grounded is the tool's
+business, and baking one choice in here would dictate behaviour rather than share plumbing.
 
 ## The vendoring contract
 
-Consumers do **not** `npm install webindex`. They copy the two published files into
-`src/vendor/`, pinned by tag and SHA-256, and their own `tsup` inlines them — so each
-skill still ships as a single file that runs under `node` with no install:
+A consumer does **not** `npm install webindex`. It copies the two published files into
+`src/vendor/`, pinned by tag and SHA-256, and lets its own bundler inline them — so it
+still ships as a single file that runs under `node` with no install:
 
 ```bash
-node scripts/sync-engine.mjs --ref v1.2.0   # fetch + pin
+node scripts/sync-engine.mjs --ref v1.7.2   # fetch + pin
 node scripts/sync-engine.mjs --check        # offline drift/tamper gate, runs in CI
 ```
 
@@ -74,20 +66,20 @@ The engine has no identity of its own at runtime. Each consumer declares one, on
 ```ts
 import { configure } from "./vendor/webindex-engine.mjs";
 
-configure({ name: "ultradoc", envPrefix: "ULTRADOC", cli: "ultradoc" });
+configure({ name: "reader", envPrefix: "READER", cli: "reader" });
 ```
 
-Everything the user already exports keeps working unchanged — `ULTRADOC_SEARXNG`,
-`CONSTRUCT_FIRECRAWL`, `ULTRASEARCH_PDF_ENGINE` — because the engine reads
-`env("SEARXNG")` and resolves the prefix at call time. Notes that name a command take it
-from `brand().cli`, so ultradoc's output says `ultradoc web --url`, not `webindex`.
+Everything the user already exports keeps working unchanged — `READER_SEARXNG`,
+`READER_FIRECRAWL`, `READER_PDF_ENGINE` — because the engine reads `env("SEARXNG")` and
+resolves the prefix at call time. Notes that name a command take it from `brand().cli`, so
+the output says `reader fetch --url`, not `webindex`.
 
 **The lazy rule.** A vendored bundle is imported by the consumer's entry module, so this
 package's top-level code runs *before* the consumer's first statement — before
 `configure()` can possibly have been called. A module-scope
 `const UA = env("UA") ?? "…"` would therefore capture the default brand forever and
 silently ignore the real prefix. Keep every tunable behind a function. `src/brand.ts`
-documents this at length; it is the one invariant that makes sharing possible at all.
+documents this at length; it is the one invariant that makes vendoring possible at all.
 
 ## Development
 
@@ -95,12 +87,14 @@ documents this at length; it is the one invariant that makes sharing possible at
 pnpm install
 pnpm run typecheck && pnpm run lint
 pnpm test
-pnpm run build        # tsup + rename the declaration output to .d.mts
-pnpm run check:build  # asserts the committed bundle is reproducible
+pnpm run build              # tsup + rename the declaration output to .d.mts
+pnpm run check:build        # the committed artifacts are reproducible
+pnpm run verify:vendorable  # nothing but Node builtins, declarations self-contained
+pnpm run verify:standalone  # a third-party consumer, built elsewhere on disk, works
 ```
 
-Releases are Conventional-Commit-driven via semantic-release. The built bundle is
-committed on every release, because consumers fetch it from the repository tree at the
+Releases are Conventional-Commit-driven via semantic-release. The built artifacts are
+committed on every release, because consumers fetch them from the repository tree at the
 pinned tag.
 
 ## License

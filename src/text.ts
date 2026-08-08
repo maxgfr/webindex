@@ -173,11 +173,11 @@ const STOPWORDS = new Set([
  * Is this term question scaffolding rather than content?
  *
  * Exported because a consumer's own scorer must agree with buildMatcher on what
- * a term IS. ultrasearch's BM25 tokeniser drops the same words and applies the
- * same folding, so a document ranks against the same vocabulary the excerpt
- * matcher highlights. Two lists that drift apart make the two disagree, and the
- * symptom — a source that scores well but shows an excerpt with no highlight —
- * looks like a bug in neither.
+ * a term IS. A caller's own ranking tokeniser should drop the same words and
+ * apply the same folding, so a document ranks against the same vocabulary the
+ * excerpt matcher highlights. Two lists that drift apart make the two disagree,
+ * and the symptom — a source that scores well but shows an excerpt with no
+ * highlight — looks like a bug in neither.
  */
 export function isStopword(term: string): boolean {
   const t = term.toLowerCase();

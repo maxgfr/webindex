@@ -8,14 +8,14 @@ describe("configure", () => {
   it("rejects a prefix that is not UPPER_SNAKE", () => {
     // A lowercase or hyphenated prefix would silently read nothing at all,
     // which is far worse than refusing at startup.
-    expect(() => configure({ name: "x", envPrefix: "ultradoc", cli: "x" })).toThrow(/UPPER_SNAKE/);
+    expect(() => configure({ name: "x", envPrefix: "reader", cli: "x" })).toThrow(/UPPER_SNAKE/);
     expect(() => configure({ name: "x", envPrefix: "ULTRA-DOC", cli: "x" })).toThrow(/UPPER_SNAKE/);
     expect(() => configure({ name: "x", envPrefix: "", cli: "x" })).toThrow(/UPPER_SNAKE/);
     expect(() => configure({ name: "x", envPrefix: "1ABC", cli: "x" })).toThrow(/UPPER_SNAKE/);
   });
 
   it("accepts digits and underscores after the first letter", () => {
-    expect(() => configure({ name: "x", envPrefix: "ULTRA_DOC2", cli: "x" })).not.toThrow();
+    expect(() => configure({ name: "x", envPrefix: "READER_V2", cli: "x" })).not.toThrow();
   });
 
   it("requires both name and cli", () => {
@@ -24,10 +24,10 @@ describe("configure", () => {
   });
 
   it("exposes the configured identity", () => {
-    configure({ name: "ultradoc", envPrefix: "ULTRADOC", cli: "ultradoc" });
-    expect(brand().name).toBe("ultradoc");
-    expect(brand().cli).toBe("ultradoc");
-    expect(envName("SEARXNG")).toBe("ULTRADOC_SEARXNG");
+    configure({ name: "reader", envPrefix: "READER", cli: "reader" });
+    expect(brand().name).toBe("reader");
+    expect(brand().cli).toBe("reader");
+    expect(envName("SEARXNG")).toBe("READER_SEARXNG");
   });
 
   it("falls back to webindex's own identity when never configured", () => {

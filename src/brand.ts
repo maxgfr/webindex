@@ -1,16 +1,15 @@
 // The brand injection point.
 //
-// webindex is vendored into skills that each own a different public identity:
-// ultrasearch reads ULTRASEARCH_SEARXNG, construct reads CONSTRUCT_SEARXNG,
-// ultradoc reads ULTRADOC_SEARXNG — and each prints notes that name its own
-// CLI ("pass --web-results to `ultradoc ask`"). None of that may be hardcoded
-// here, and none of it may break for the user: the variables they already
-// export must keep working byte-for-byte.
+// webindex is vendored into tools that each own a different public identity:
+// one reads ACME_SEARXNG, another READER_SEARXNG — and each prints notes that
+// name its own command ("pass --web-results to `reader ask`"). None of that may
+// be hardcoded here, and none of it may break for the user: the variables they
+// already export must keep working byte-for-byte.
 //
 // So the engine never writes `process.env.SOMETHING_SEARXNG`. It writes
 // `env("SEARXNG")`, and the consumer declares the prefix once at startup:
 //
-//   configure({ name: "ultradoc", envPrefix: "ULTRADOC", cli: "ultradoc" });
+//   configure({ name: "reader", envPrefix: "READER", cli: "reader" });
 //
 // ── The lazy rule ───────────────────────────────────────────────────────────
 // Every read here happens at CALL time, never at module-load time. This is not

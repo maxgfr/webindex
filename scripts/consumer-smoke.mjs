@@ -3,14 +3,13 @@
 //
 // Everything else in CI runs webindex from inside webindex: its own tests, its
 // own tsconfig, its own node_modules. None of that answers the question this
-// package actually has to answer — can a project that is NOT one of the three
-// skills, and has no relationship to this repo, vendor two files and get a
-// working engine?
+// package actually has to answer — can a project with no relationship to this
+// repo vendor two files and get a working engine?
 //
 // So this script builds a throwaway consumer somewhere else on disk, copies in
 // nothing but scripts/engine.mjs, declares a brand no skill uses, and exercises
 // the real surface. No package.json, no install, no tsconfig, no node_modules.
-// If it passes, the engine survives without ultrasearch, ultradoc and construct.
+// If it passes, the engine stands on its own.
 //
 // It is deliberately offline: global fetch is stubbed, the PDF ladder is pinned
 // to its built-in rung, and the office ladder is disabled. A smoke test that
@@ -24,8 +23,8 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dir = mkdtempSync(join(tmpdir(), "webindex-consumer-"));
 
-// A brand belonging to no real skill. If anything in the engine still assumes
-// ultrasearch/ultradoc/construct, this is what surfaces it.
+// A brand belonging to no real consumer. If anything in the engine still
+// assumes a particular one, this is what surfaces it.
 const PREFIX = "ACME";
 
 const probe = `
@@ -116,7 +115,7 @@ ok(typeof runStdioServer === "function", "the stdio transport must be reachable"
 const res = await say({ jsonrpc: "2.0", id: 5, method: "resources/list" });
 ok(Array.isArray(res.result.resources), "resources/list must answer even with no payload on disk");
 
-console.log("consumer-smoke: webindex " + ENGINE_VERSION + " works standalone, under a brand no skill uses.");
+console.log("consumer-smoke: webindex " + ENGINE_VERSION + " works standalone, under an unknown brand.");
 `;
 
 try {

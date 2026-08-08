@@ -88,12 +88,12 @@ describe("ocrPdf", () => {
   });
 
   it("leaves no temp directory behind, on success or failure", async () => {
-    const before = readdirSync(tmpdir()).filter((f) => f.startsWith("ultrasearch-ocr-")).length;
+    const before = readdirSync(tmpdir()).filter((f) => f.startsWith("webindex-tests-ocr-")).length;
     toolsPresent();
     await ocrPdf(PDF);
     runMock.mockResolvedValue({ ok: false, stdout: "", error: "boom" });
     await ocrPdf(PDF);
-    const after = readdirSync(tmpdir()).filter((f) => f.startsWith("ultrasearch-ocr-")).length;
+    const after = readdirSync(tmpdir()).filter((f) => f.startsWith("webindex-tests-ocr-")).length;
     expect(after).toBe(before);
   });
 

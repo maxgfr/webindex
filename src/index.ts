@@ -4,17 +4,15 @@
 // artifact is a single bundle plus a single declaration file, so this module is
 // the whole API: anything not named below simply does not exist downstream.
 //
-// The shape is deliberately a library of PRIMITIVES, not a pipeline. Each skill
-// keeps its own evidence model (construct and ultradoc number sources `E#`,
-// ultrasearch numbers them `S#`), its own dossier layout, and its own citation
-// gate — those genuinely differ, and folding them in here would change three
-// skills' behaviour rather than share their plumbing. webindex owns the part
-// that is provably the same everywhere: turning a URL into clean text,
-// discovering candidates, and ranking them.
+// The shape is deliberately a library of PRIMITIVES, not a pipeline. A consumer
+// keeps its own evidence model, its own document layout and its own citation
+// gate — those are product decisions, and folding them in here would dictate
+// behaviour rather than share plumbing. webindex owns the part that is the same
+// everywhere: turning a URL into clean text, discovering candidates, and
+// ranking them.
 //
-// Layers land in order (see the migration plan): retrieval, then text+ranking,
-// then discovery. Each layer ships as its own release and each consumer re-pins
-// before the next one starts.
+// Layers land in order: retrieval, then text and ranking, then discovery. Each
+// ships as its own release.
 
 // ── Engine identity ─────────────────────────────────────────────────────────
 export { ENGINE_VERSION } from "./version.js";
