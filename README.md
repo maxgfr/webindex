@@ -21,6 +21,7 @@ brew install maxgfr/tap/webindex
 | `webindex extract <file>` | The same extraction on a file already on disk — PDF, office document, HTML or plain text. `--json` as above. |
 | `webindex mcp` | Serve the two tools below to an agent. `--transport stdio` (default) or `http` with `--port`, `--bind`, `--allow-remote`. |
 | `webindex searxng up\|down\|status` | Drive the keyless SearXNG container. |
+| `webindex semantic up\|down\|status` | Drive Qdrant and Ollama, and pull the embedding model once they answer. |
 | `webindex firecrawl up\|down\|status` | Drive Firecrawl, which cleans a page with a real headless browser. It delegates its own search to SearXNG, so this starts both. |
 | `webindex stack up\|down\|status\|path` | Everything at once. `path` prints where the compose file was written. |
 | `webindex doctor` | Which optional helpers answer — SearXNG, Firecrawl, the extraction rungs, OCR — on this machine. |
@@ -39,6 +40,11 @@ vendored bundle alike.
 The stack uses one fixed project name and one set of container names, so several
 tools on the same machine share a single set of containers instead of fighting
 over the same host ports.
+
+`up` pulls the images first, on a budget of its own (`WEBINDEX_DOCKER_PULL_TIMEOUT_MS`,
+20 minutes by default) — the Ollama image alone is over 1.6 GB, and letting `up`'s
+shorter deadline cover the download turns a slow network into a failed start. It then
+waits for every healthcheck, so a green `up` means the endpoints actually answer.
 
 ```bash
 webindex firecrawl up      # searxng + firecrawl, detached, waits for health

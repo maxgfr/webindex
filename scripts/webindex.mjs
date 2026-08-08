@@ -962,7 +962,7 @@ async function fetchAndExtract(url, opts = {}) {
 }
 
 // src/stack.ts
-import { spawn as spawn2 } from "child_process";
+import { spawnSync } from "child_process";
 import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
 import { tmpdir as tmpdir2 } from "os";
 import { dirname, join as join2 } from "path";
@@ -1240,36 +1240,102 @@ function writeIfChanged(path, content) {
   } catch {
   }
 }
-var SERVICE_PROFILES = {
-  searxng: ["search"],
-  firecrawl: ["search", "extract"],
-  semantic: ["semantic"],
-  all: ["all", "extract"]
+var DEFAULT_PULL_TIMEOUT_MS = 12e5;
+var UP_TIMEOUT_MS = 3e5;
+var DOWN_TIMEOUT_MS = 12e4;
+var PS_TIMEOUT_MS = 3e4;
+var MODEL_PULL_TIMEOUT_MS = 6e5;
+function pullTimeoutMs() {
+  return envInt("DOCKER_PULL_TIMEOUT_MS", DEFAULT_PULL_TIMEOUT_MS);
+}
+function embedModel() {
+  return env("EMBED_MODEL") ?? "nomic-embed-text";
+}
+function defaultRun(cmd, args, opts) {
+  const res = spawnSync(cmd, args, {
+    encoding: "utf8",
+    timeout: opts.timeoutMs,
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: opts.capture ? "pipe" : "inherit"
+  });
+  const missing = !!res.error && res.error.code === "ENOENT";
+  return {
+    ok: !res.error && res.status === 0,
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? (res.error ? String(res.error.message) : ""),
+    missing
+  };
+}
+function defaultHas(cmd) {
+  const probe = defaultRun(process.platform === "win32" ? "where" : "which", [cmd], { timeoutMs: 1e4, capture: true });
+  return probe.ok && probe.stdout.trim().length > 0;
+}
+var STACKS = {
+  searxng: {
+    profiles: ["search"],
+    summary: "SearXNG is up (:8888) \u2014 keyless discovery, JSON API enabled."
+  },
+  firecrawl: {
+    profiles: ["search", "extract"],
+    summary: "Firecrawl is up (:3002 \xB7 playwright \xB7 redis \xB7 rabbitmq \xB7 postgres), with SearXNG behind it.",
+    postUp: () => [
+      "  keyless: USE_DB_AUTHENTICATION=false \u2014 no API key is sent or needed.",
+      "  effect:  pages are now cleaned by a real browser; --firecrawl off opts out."
+    ]
+  },
+  semantic: {
+    profiles: ["semantic"],
+    summary: "Qdrant (:6333) and Ollama (:11434) are up.",
+    postUp: (file, run) => {
+      const model = embedModel();
+      const pull = run("docker", ["compose", "-f", file, "exec", "-T", "ollama", "ollama", "pull", model], { timeoutMs: MODEL_PULL_TIMEOUT_MS, capture: true });
+      return [pull.ok ? `  model:   ${model} ready` : `  model:   pull it yourself: docker compose -f ${file} exec ollama ollama pull ${model}`];
+    }
+  },
+  all: {
+    profiles: ["all", "extract"],
+    summary: "The whole stack is up (Qdrant \xB7 Ollama \xB7 SearXNG \xB7 Firecrawl).",
+    postUp: (file, run) => STACKS.semantic.postUp(file, run)
+  }
 };
-var STACK_SERVICES = Object.keys(SERVICE_PROFILES);
-function composeControl(service, action) {
-  const profiles = SERVICE_PROFILES[service];
-  if (!profiles) {
-    process.stderr.write(`${brand().cli}: unknown service "${service}" \u2014 expected one of ${STACK_SERVICES.join(", ")}
-`);
-    return Promise.resolve(1);
+var STACK_SERVICES = Object.keys(STACKS);
+var SERVICE_PROFILES = Object.fromEntries(Object.entries(STACKS).map(([k, v]) => [k, v.profiles]));
+function stackControl(service, action, deps = {}) {
+  const run = deps.run ?? defaultRun;
+  const has = deps.has ?? defaultHas;
+  const tag = `${brand().cli} ${service}`;
+  const spec = STACKS[service];
+  if (!spec) return { message: `${brand().cli}: unknown service "${service}" \u2014 expected one of ${STACK_SERVICES.join(", ")}`, code: 1 };
+  if (action !== "up" && action !== "down" && action !== "status") {
+    return { message: `${tag}: unknown action "${action}" (use: up | down | status)`, code: 1 };
+  }
+  if (!has("docker")) {
+    return { message: `${tag}: docker not found on PATH. The stack is optional \u2014 everything it provides degrades to a note.`, code: 1 };
   }
   const file = ensureComposeMaterialized();
-  const flags = profiles.flatMap((p) => ["--profile", p]);
-  const verb = action === "status" ? ["ps"] : action === "up" ? ["up", "-d", "--wait"] : ["down"];
-  const args = ["compose", "-f", file, ...flags, ...verb];
-  return new Promise((resolve2) => {
-    const child = spawn2("docker", args, { stdio: "inherit" });
-    child.on("error", (e) => {
-      process.stderr.write(
-        e.code === "ENOENT" ? `${brand().cli}: docker not found on PATH. The stack is optional \u2014 every rung it provides degrades to a note.
-` : `${brand().cli}: ${e.message}
-`
-      );
-      resolve2(1);
-    });
-    child.on("close", (code) => resolve2(code ?? 1));
-  });
+  const profiles = spec.profiles.flatMap((p) => ["--profile", p]);
+  if (action === "down") {
+    const r = run("docker", ["compose", "-f", file, ...profiles, "down"], { timeoutMs: DOWN_TIMEOUT_MS, capture: true });
+    return { message: r.ok ? `${tag}: stopped.` : `${tag}: down failed.
+${r.stderr}`, code: r.ok ? 0 : 1 };
+  }
+  if (action === "status") {
+    const r = run("docker", ["compose", "-f", file, ...profiles, "ps"], { timeoutMs: PS_TIMEOUT_MS, capture: true });
+    return { message: r.ok ? r.stdout.trim() || `${tag}: no services running.` : `${tag}: status failed.
+${r.stderr}`, code: 0 };
+  }
+  const pulled = run("docker", ["compose", "-f", file, ...profiles, "pull"], { timeoutMs: pullTimeoutMs() });
+  if (!pulled.ok) {
+    return {
+      message: `${tag}: pulling the images failed (they are large \u2014 raise ${envName("DOCKER_PULL_TIMEOUT_MS")}, currently ${pullTimeoutMs()}ms).` + (pulled.stderr ? `
+${pulled.stderr}` : ""),
+      code: 1
+    };
+  }
+  const up = run("docker", ["compose", "-f", file, ...profiles, "up", "-d", "--wait"], { timeoutMs: UP_TIMEOUT_MS });
+  if (!up.ok) return { message: `${tag}: up failed.${up.stderr ? `
+${up.stderr}` : ""}`, code: 1 };
+  return { message: [`${tag}: ${spec.summary}`, ...spec.postUp?.(file, run) ?? []].join("\n"), code: 0 };
 }
 
 // src/locale.ts
@@ -2247,11 +2313,11 @@ async function main(argv = process.argv.slice(2)) {
       process.stdout.write(ensureComposeMaterialized() + "\n");
       return;
     }
-    if (action !== "up" && action !== "down" && action !== "status") {
-      fail(`usage: webindex ${cmd} up|down|status${cmd === "stack" ? "|path" : ""}`);
-    }
-    const code = await composeControl(cmd === "stack" ? "all" : cmd, action);
-    if (code !== 0) process.exit(code);
+    const valid = cmd === "stack" ? ["up", "down", "status", "path"] : ["up", "down", "status"];
+    if (!valid.includes(action)) fail(`usage: webindex ${cmd} ${valid.join("|")}`);
+    const r = stackControl(cmd === "stack" ? "all" : cmd, action);
+    (r.code === 0 ? process.stdout : process.stderr).write(r.message + "\n");
+    if (r.code !== 0) process.exit(r.code);
     return;
   }
   if (cmd === "doctor") {

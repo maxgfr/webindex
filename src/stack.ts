@@ -1,8 +1,8 @@
-import { spawn } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { brand } from "./brand.js";
+import { brand, env, envInt, envName } from "./brand.js";
 
 // The optional local Docker stack, embedded so `webindex semantic up|down|status`
 // and `webindex firecrawl up|down|status` work from ANY install location (npx
@@ -301,21 +301,126 @@ function writeIfChanged(path: string, content: string): void {
 }
 
 // ── Driving the stack ───────────────────────────────────────────────────────
-//
-// Which compose profiles each service needs. Firecrawl delegates its keyless
-// `/search` to SearXNG, so bringing it up alone would give you an extractor
-// that cannot discover anything.
-export const SERVICE_PROFILES: Record<string, string[]> = {
-  searxng: ["search"],
-  firecrawl: ["search", "extract"],
-  semantic: ["semantic"],
-  all: ["all", "extract"],
-};
+
+/** What one `docker` invocation produced. Mirrors the shape a caller can act on. */
+export interface StackRun {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  /** The binary was not on PATH — a different problem from a non-zero exit. */
+  missing?: boolean;
+}
+
+/**
+ * The two host effects `stackControl` needs, injectable so its orchestration is
+ * unit-testable without a Docker daemon. Both default to the real thing.
+ */
+export interface StackDeps {
+  run?: (cmd: string, args: string[], opts: { timeoutMs: number; capture?: boolean }) => StackRun;
+  has?: (cmd: string) => boolean;
+}
+
+export interface StackResult {
+  /** Ready to print. Multi-line for `up`, which reports what to do next. */
+  message: string;
+  code: number;
+}
 
 export type StackAction = "up" | "down" | "status";
 
+// Budgets. Only the image pull is configurable: it is the one that legitimately
+// takes tens of minutes on a cold machine, and the one whose failure is most
+// often just "the network was slow", not "this is broken".
+const DEFAULT_PULL_TIMEOUT_MS = 1_200_000; // 20 min — the Ollama image alone is >1.6 GB
+const UP_TIMEOUT_MS = 300_000;
+const DOWN_TIMEOUT_MS = 120_000;
+const PS_TIMEOUT_MS = 30_000;
+const MODEL_PULL_TIMEOUT_MS = 600_000;
+
+function pullTimeoutMs(): number {
+  return envInt("DOCKER_PULL_TIMEOUT_MS", DEFAULT_PULL_TIMEOUT_MS);
+}
+
+/** The embedding model the `ollama` service is expected to serve. */
+export function embedModel(): string {
+  return env("EMBED_MODEL") ?? "nomic-embed-text";
+}
+
+function defaultRun(cmd: string, args: string[], opts: { timeoutMs: number; capture?: boolean }): StackRun {
+  // `capture: false` inherits the terminal, which is the point for `pull` and
+  // `up`: those are the slow ones, and a 20-minute silence is indistinguishable
+  // from a hang. Their output is progress, not data — nothing reads it back.
+  const res = spawnSync(cmd, args, {
+    encoding: "utf8",
+    timeout: opts.timeoutMs,
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: opts.capture ? "pipe" : "inherit",
+  });
+  const missing = !!res.error && (res.error as NodeJS.ErrnoException).code === "ENOENT";
+  return {
+    ok: !res.error && res.status === 0,
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? (res.error ? String(res.error.message) : ""),
+    missing,
+  };
+}
+
+function defaultHas(cmd: string): boolean {
+  const probe = defaultRun(process.platform === "win32" ? "where" : "which", [cmd], { timeoutMs: 10_000, capture: true });
+  return probe.ok && probe.stdout.trim().length > 0;
+}
+
+/**
+ * One controllable subset of the compose file: which profiles it starts, what a
+ * successful `up` reports, and any work that only makes sense once the
+ * containers answer.
+ */
+interface StackSpec {
+  profiles: string[];
+  summary: string;
+  /** Extra steps after a green `up`. Returns the lines appended to the report. */
+  postUp?: (file: string, run: NonNullable<StackDeps["run"]>) => string[];
+}
+
+// Firecrawl delegates its keyless `/search` to SearXNG, so bringing it up alone
+// would give an extractor that cannot discover anything — hence `search` too.
+const STACKS: Record<string, StackSpec> = {
+  searxng: {
+    profiles: ["search"],
+    summary: "SearXNG is up (:8888) — keyless discovery, JSON API enabled.",
+  },
+  firecrawl: {
+    profiles: ["search", "extract"],
+    summary: "Firecrawl is up (:3002 · playwright · redis · rabbitmq · postgres), with SearXNG behind it.",
+    postUp: () => [
+      "  keyless: USE_DB_AUTHENTICATION=false — no API key is sent or needed.",
+      "  effect:  pages are now cleaned by a real browser; --firecrawl off opts out.",
+    ],
+  },
+  semantic: {
+    profiles: ["semantic"],
+    summary: "Qdrant (:6333) and Ollama (:11434) are up.",
+    postUp: (file, run) => {
+      // Idempotent, and embeddings do not work until it has run once. A failure
+      // here is not a failed `up` — the containers are fine, one model is not
+      // there yet — so it degrades to the command to run by hand.
+      const model = embedModel();
+      const pull = run("docker", ["compose", "-f", file, "exec", "-T", "ollama", "ollama", "pull", model], { timeoutMs: MODEL_PULL_TIMEOUT_MS, capture: true });
+      return [pull.ok ? `  model:   ${model} ready` : `  model:   pull it yourself: docker compose -f ${file} exec ollama ollama pull ${model}`];
+    },
+  },
+  all: {
+    profiles: ["all", "extract"],
+    summary: "The whole stack is up (Qdrant · Ollama · SearXNG · Firecrawl).",
+    postUp: (file, run) => STACKS.semantic!.postUp!(file, run),
+  },
+};
+
 /** The services this stack knows how to drive. */
-export const STACK_SERVICES = Object.keys(SERVICE_PROFILES);
+export const STACK_SERVICES = Object.keys(STACKS);
+
+/** Which compose profiles each service needs. */
+export const SERVICE_PROFILES: Record<string, string[]> = Object.fromEntries(Object.entries(STACKS).map(([k, v]) => [k, v.profiles]));
 
 /**
  * Run `docker compose` for a service, against the embedded stack.
@@ -323,34 +428,59 @@ export const STACK_SERVICES = Object.keys(SERVICE_PROFILES);
  * Materialises the compose file first, so this works from any install — a
  * global npm install, a Homebrew cellar, a vendored bundle — and not only from
  * a checkout with docker-compose.yml beside the source. That last assumption is
- * what made the equivalent command fail for anyone who installed the tool
+ * what made the equivalent command fail for everyone who installed the tool
  * rather than cloned it.
  *
- * Resolves with the exit code; never throws. A missing `docker` is reported as
- * a message rather than a stack trace, because not having Docker is a normal
- * state for this tool — everything it gates is optional.
+ * Never throws. Every failure comes back as a message and a non-zero code,
+ * because not having Docker is a normal state for this tool: everything the
+ * stack provides is optional and degrades to a note.
  */
-export function composeControl(service: string, action: StackAction): Promise<number> {
-  const profiles = SERVICE_PROFILES[service];
-  if (!profiles) {
-    process.stderr.write(`${brand().cli}: unknown service "${service}" — expected one of ${STACK_SERVICES.join(", ")}\n`);
-    return Promise.resolve(1);
-  }
-  const file = ensureComposeMaterialized();
-  const flags = profiles.flatMap((p) => ["--profile", p]);
-  const verb = action === "status" ? ["ps"] : action === "up" ? ["up", "-d", "--wait"] : ["down"];
-  const args = ["compose", "-f", file, ...flags, ...verb];
+export function stackControl(service: string, action: string, deps: StackDeps = {}): StackResult {
+  const run = deps.run ?? defaultRun;
+  const has = deps.has ?? defaultHas;
+  const tag = `${brand().cli} ${service}`;
 
-  return new Promise((resolve) => {
-    const child = spawn("docker", args, { stdio: "inherit" });
-    child.on("error", (e: NodeJS.ErrnoException) => {
-      process.stderr.write(
-        e.code === "ENOENT"
-          ? `${brand().cli}: docker not found on PATH. The stack is optional — every rung it provides degrades to a note.\n`
-          : `${brand().cli}: ${e.message}\n`,
-      );
-      resolve(1);
-    });
-    child.on("close", (code) => resolve(code ?? 1));
-  });
+  const spec = STACKS[service];
+  if (!spec) return { message: `${brand().cli}: unknown service "${service}" — expected one of ${STACK_SERVICES.join(", ")}`, code: 1 };
+  if (action !== "up" && action !== "down" && action !== "status") {
+    return { message: `${tag}: unknown action "${action}" (use: up | down | status)`, code: 1 };
+  }
+  if (!has("docker")) {
+    return { message: `${tag}: docker not found on PATH. The stack is optional — everything it provides degrades to a note.`, code: 1 };
+  }
+
+  const file = ensureComposeMaterialized();
+  const profiles = spec.profiles.flatMap((p) => ["--profile", p]);
+
+  if (action === "down") {
+    const r = run("docker", ["compose", "-f", file, ...profiles, "down"], { timeoutMs: DOWN_TIMEOUT_MS, capture: true });
+    return { message: r.ok ? `${tag}: stopped.` : `${tag}: down failed.\n${r.stderr}`, code: r.ok ? 0 : 1 };
+  }
+
+  if (action === "status") {
+    const r = run("docker", ["compose", "-f", file, ...profiles, "ps"], { timeoutMs: PS_TIMEOUT_MS, capture: true });
+    // Not an error: "nothing is running" is a legitimate answer to a question.
+    return { message: r.ok ? r.stdout.trim() || `${tag}: no services running.` : `${tag}: status failed.\n${r.stderr}`, code: 0 };
+  }
+
+  // Pull FIRST, on a budget that assumes a cold machine. `up` carries its own
+  // shorter deadline, and letting it do the downloading means a first run dies
+  // partway through a multi-gigabyte pull and reports it as a failed start.
+  const pulled = run("docker", ["compose", "-f", file, ...profiles, "pull"], { timeoutMs: pullTimeoutMs() });
+  if (!pulled.ok) {
+    return {
+      message:
+        `${tag}: pulling the images failed (they are large — raise ${envName("DOCKER_PULL_TIMEOUT_MS")}, currently ${pullTimeoutMs()}ms).` +
+        (pulled.stderr ? `\n${pulled.stderr}` : ""),
+      code: 1,
+    };
+  }
+
+  // `--wait` blocks until every healthcheck passes, so a green `up` means the
+  // endpoints actually answer — without it the very next probe can fail against
+  // a container that is merely "started".
+  const up = run("docker", ["compose", "-f", file, ...profiles, "up", "-d", "--wait"], { timeoutMs: UP_TIMEOUT_MS });
+  if (!up.ok) return { message: `${tag}: up failed.${up.stderr ? `\n${up.stderr}` : ""}`, code: 1 };
+
+  return { message: [`${tag}: ${spec.summary}`, ...(spec.postUp?.(file, run) ?? [])].join("\n"), code: 0 };
 }

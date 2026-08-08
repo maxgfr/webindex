@@ -654,24 +654,51 @@ declare const COMPOSE_YAML = "# Optional, fully-local, no-API-key stack for a se
 declare const SEARXNG_SETTINGS_YAML = "# Minimal SearXNG config for keyless, self-hosted web discovery. The important\n# bit is enabling the JSON output format so the CLI can query it\n# programmatically (`/search?format=json`) \u2014 most PUBLIC instances disable it,\n# which is why a local one ships here.\n#\n# The service names and ports below are deliberately stable, so several tools on\n# one machine share a single container rather than each starting their own.\nuse_default_settings: true\n\nserver:\n  # Override with a real random secret if you expose this beyond localhost.\n  secret_key: \"searxng-local-dev-change-me\"\n  # The limiter/bot-detection middleware answers 403 to format=json requests.\n  limiter: false\n  image_proxy: false\n\nsearch:\n  safe_search: 0\n  autocomplete: \"\"\n  formats:\n    - html\n    - json\n";
 declare const FIRECRAWL_ENV = "# Tunables for the self-hosted Firecrawl stack (docker compose --profile extract).\n# Wiring (hostnames, ports, SEARXNG_ENDPOINT) lives in docker-compose.yml and\n# overrides anything set here.\n\n# THIS is what makes the API keyless. Turning it on would require a Supabase\n# project; there is no reason to for a localhost stack.\nUSE_DB_AUTHENTICATION=false\n\n# Firecrawl's Rust PDF extractor, which is OFF by default upstream. Without it\n# Firecrawl falls back to pdf-parse (JS) for PDFs. Still keyless: this is the\n# local Rust path, not the MinerU / Fire PDF routes, which need API credentials.\n# Reached as a rung of the PDF ladder when the built-in reader finds no text.\nPDF_RUST_EXTRACT_ENABLE=true\n\n# Postgres credentials for the bundled nuq-postgres container. It is not\n# published on a host port, so these never leave the compose network.\nPOSTGRES_USER=postgres\nPOSTGRES_PASSWORD=postgres\nPOSTGRES_DB=postgres\nPOSTGRES_PORT=5432\n\n# Admin queue dashboard at http://localhost:3002/admin/CHANGEME/queues\nBULL_AUTH_KEY=CHANGEME\n\n# Concurrency, trimmed for a laptop. Upstream defaults are 8/5/5/10 and assume\n# a 4-CPU / 8-GB box; these keep the stack near ~4 GB total.\nNUM_WORKERS_PER_QUEUE=2\nMAX_CONCURRENT_JOBS=3\nBROWSER_POOL_SIZE=2\nCRAWL_CONCURRENT_REQUESTS=4\n\n# Back off before the host runs out of headroom.\nMAX_CPU=0.8\nMAX_RAM=0.8\n\nLOGGING_LEVEL=info\n";
 declare function ensureComposeMaterialized(): string;
-declare const SERVICE_PROFILES: Record<string, string[]>;
+/** What one `docker` invocation produced. Mirrors the shape a caller can act on. */
+interface StackRun {
+    ok: boolean;
+    stdout: string;
+    stderr: string;
+    /** The binary was not on PATH — a different problem from a non-zero exit. */
+    missing?: boolean;
+}
+/**
+ * The two host effects `stackControl` needs, injectable so its orchestration is
+ * unit-testable without a Docker daemon. Both default to the real thing.
+ */
+interface StackDeps {
+    run?: (cmd: string, args: string[], opts: {
+        timeoutMs: number;
+        capture?: boolean;
+    }) => StackRun;
+    has?: (cmd: string) => boolean;
+}
+interface StackResult {
+    /** Ready to print. Multi-line for `up`, which reports what to do next. */
+    message: string;
+    code: number;
+}
 type StackAction = "up" | "down" | "status";
+/** The embedding model the `ollama` service is expected to serve. */
+declare function embedModel(): string;
 /** The services this stack knows how to drive. */
 declare const STACK_SERVICES: string[];
+/** Which compose profiles each service needs. */
+declare const SERVICE_PROFILES: Record<string, string[]>;
 /**
  * Run `docker compose` for a service, against the embedded stack.
  *
  * Materialises the compose file first, so this works from any install — a
  * global npm install, a Homebrew cellar, a vendored bundle — and not only from
  * a checkout with docker-compose.yml beside the source. That last assumption is
- * what made the equivalent command fail for anyone who installed the tool
+ * what made the equivalent command fail for everyone who installed the tool
  * rather than cloned it.
  *
- * Resolves with the exit code; never throws. A missing `docker` is reported as
- * a message rather than a stack trace, because not having Docker is a normal
- * state for this tool — everything it gates is optional.
+ * Never throws. Every failure comes back as a message and a non-zero code,
+ * because not having Docker is a normal state for this tool: everything the
+ * stack provides is optional and degrades to a note.
  */
-declare function composeControl(service: string, action: StackAction): Promise<number>;
+declare function stackControl(service: string, action: string, deps?: StackDeps): StackResult;
 
 declare function withRunLock<T>(slug: string, fn: () => Promise<T>): Promise<T>;
 declare function resetRunLocks(): void;
@@ -886,4 +913,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, type Brand, COMPOSE_YAML, type CapAdvice, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, type ExpandedKeyword, type ExtractResult, type ExtractorId, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type HttpOptions, type HttpResult, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type StackAction, type StdioOptions, type ToolDecl, ToolError, type ToolOutcome, accentPattern, acceptLanguageHeader, addressedIdCount, apiPrefix, assessExtractedText, assessPdfText, baseLang, bestExcerpt, brand, browserUa, buildMatcher, cacheDir, cachePath, cachedFetchAndExtract, canonicalizeUrl, capExtract, capResponse, cleanInline, composeControl, configure, contactUa, createServer, ddgRegion, deaccent, decodeEntities, deriveCitableUrl, docFormatForContentType, docFormatForUrl, domainOf, enabledDocExtractors, enabledExtractors, ensureComposeMaterialized, ensureDir, env, envFlag, envInt, envName, escapeRegExp, expandTokens, extractDocument, extractMainHtml, extractPdf, fetchAndExtract, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isApiEndpoint, isCitableUrl, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, keywords, listResources, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, mapScrapeResponse, mapSearchResponse, matcherFromTokens, nearestHeading, negotiateProtocol, normalizeDoi, ocrBudgetLeft, ocrPdf, ocrTools, pageDelayMs, pdfToText, politeDelayMs, probeFirecrawl, probeSearxng, pubmedAbstractUrl, rankedKeywords, readResource, rescueViaWayback, resetBrand, resetDocLadderCache, resetFirecrawlProbeCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, resetRunLocks, resetSearxngProbeCache, resolveProvider, resolveRegion, resolveSkillRoot, runStdioServer, runWithInput, scrapeViaFirecrawl, search, searchViaFirecrawl, searchViaSearxng, searxngBase, searxngIsExplicit, setNoWrite, skillName, sleep, startHttpServer, structuredContentFor, subtokens, takeArtifacts, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, type Brand, COMPOSE_YAML, type CapAdvice, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, type ExpandedKeyword, type ExtractResult, type ExtractorId, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type HttpOptions, type HttpResult, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, type ToolDecl, ToolError, type ToolOutcome, accentPattern, acceptLanguageHeader, addressedIdCount, apiPrefix, assessExtractedText, assessPdfText, baseLang, bestExcerpt, brand, browserUa, buildMatcher, cacheDir, cachePath, cachedFetchAndExtract, canonicalizeUrl, capExtract, capResponse, cleanInline, configure, contactUa, createServer, ddgRegion, deaccent, decodeEntities, deriveCitableUrl, docFormatForContentType, docFormatForUrl, domainOf, embedModel, enabledDocExtractors, enabledExtractors, ensureComposeMaterialized, ensureDir, env, envFlag, envInt, envName, escapeRegExp, expandTokens, extractDocument, extractMainHtml, extractPdf, fetchAndExtract, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isApiEndpoint, isCitableUrl, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, keywords, listResources, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, mapScrapeResponse, mapSearchResponse, matcherFromTokens, nearestHeading, negotiateProtocol, normalizeDoi, ocrBudgetLeft, ocrPdf, ocrTools, pageDelayMs, pdfToText, politeDelayMs, probeFirecrawl, probeSearxng, pubmedAbstractUrl, rankedKeywords, readResource, rescueViaWayback, resetBrand, resetDocLadderCache, resetFirecrawlProbeCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, resetRunLocks, resetSearxngProbeCache, resolveProvider, resolveRegion, resolveSkillRoot, runStdioServer, runWithInput, scrapeViaFirecrawl, search, searchViaFirecrawl, searchViaSearxng, searxngBase, searxngIsExplicit, setNoWrite, skillName, sleep, stackControl, startHttpServer, structuredContentFor, subtokens, takeArtifacts, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact };

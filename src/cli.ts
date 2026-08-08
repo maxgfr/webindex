@@ -20,7 +20,7 @@ import { docFormatForContentType, docFormatForUrl, extractDocument, enabledDocEx
 import { enabledExtractors, extractPdf, ocrTools } from "./pdf.js";
 import { fetchAndExtract, htmlToText, looksLikePdfUrl } from "./fetch.js";
 import { firecrawlBase, probeFirecrawl } from "./firecrawl.js";
-import { composeControl, ensureComposeMaterialized, STACK_SERVICES, type StackAction } from "./stack.js";
+import { ensureComposeMaterialized, stackControl } from "./stack.js";
 import { probeSearxng, search, searxngBase } from "./search.js";
 import { ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
@@ -305,11 +305,16 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       process.stdout.write(ensureComposeMaterialized() + "\n");
       return;
     }
-    if (action !== "up" && action !== "down" && action !== "status") {
-      fail(`usage: webindex ${cmd} up|down|status${cmd === "stack" ? "|path" : ""}`);
-    }
-    const code = await composeControl(cmd === "stack" ? "all" : cmd, action as StackAction);
-    if (code !== 0) process.exit(code);
+    // The engine guards this too, for library callers. Doing it here as well is
+    // what lets the message name `path`, which only `stack` accepts.
+    const valid = cmd === "stack" ? ["up", "down", "status", "path"] : ["up", "down", "status"];
+    if (!valid.includes(action)) fail(`usage: webindex ${cmd} ${valid.join("|")}`);
+
+    const r = stackControl(cmd === "stack" ? "all" : cmd, action);
+    // stdout for the report, so `webindex stack status` is pipeable; the engine
+    // already streamed docker's own progress to the terminal.
+    (r.code === 0 ? process.stdout : process.stderr).write(r.message + "\n");
+    if (r.code !== 0) process.exit(r.code);
     return;
   }
 
