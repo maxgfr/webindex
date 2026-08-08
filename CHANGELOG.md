@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.7.1](https://github.com/maxgfr/webindex/compare/v1.7.0...v1.7.1) (2026-08-08)
+
+
+### Bug Fixes
+
+* **release:** ship the CLI that was built, not the one from last time ([c715897](https://github.com/maxgfr/webindex/commit/c71589723ca363ad3acc4cf73e3ddb14ac3382e5))
+
 # [1.7.0](https://github.com/maxgfr/webindex/compare/v1.6.0...v1.7.0) (2026-08-08)
 
 
