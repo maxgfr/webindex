@@ -81,6 +81,11 @@ export * from "./providers.js";
 // the keyless engines expect.
 export * from "./locale.js";
 
+// ── Discovery ───────────────────────────────────────────────────────────────
+// Turning a question into candidate URLs, using the local keyless stack. A
+// primitive, not a pipeline: no backend fan-out, no fusion, no ranking.
+export * from "./search.js";
+
 // ── The optional local container stack ──────────────────────────────────────
 // SearXNG, Firecrawl and the semantic pair, embedded so they can be driven from
 // any install rather than only from a checkout. Everything here is optional:

@@ -73,11 +73,63 @@ describe("help and version", () => {
     expect(stdout().trim()).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  it("does not promise a search command it cannot deliver", async () => {
-    // The discovery layer has not landed. Advertising `search` would be a lie,
-    // and this asserts the help text stays honest as the engine grows.
+  it("documents every command it actually dispatches", async () => {
+    // This started life as the opposite assertion — `search` was advertised
+    // nowhere because the engine could not do it. Now it can, so the gate
+    // flips: help and dispatch must not drift apart in either direction.
     await run(["--help"]);
-    expect(stdout()).not.toMatch(/^\s+webindex search/m);
+    const help = stdout();
+    for (const cmd of ["search", "fetch", "extract", "mcp", "searxng", "firecrawl", "stack", "doctor", "version"]) {
+      expect(help, cmd).toMatch(new RegExp(`^\\s+webindex ${cmd}\\b`, "m"));
+    }
+  });
+});
+
+describe("search", () => {
+  const up = (body: unknown) => {
+    const spy = vi.fn(async (input: any) => {
+      const url = String(input);
+      const payload = url.includes("/search") ? JSON.stringify(body) : "ok";
+      return new Response(payload, { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", spy);
+    return spy;
+  };
+
+  it("prints one hit per block, and keeps the notes off stdout", async () => {
+    // `webindex search q | head` has to be a usable URL list, so the reason a
+    // result set is short goes to stderr rather than into the middle of it.
+    up({ results: [{ url: "https://a.test/1", title: "First", content: "About one" }], unresponsive_engines: [["google", "429"]] });
+    expect(await run(["search", "rate", "limiting", "--searxng", "http://sxcli.test"])).toBe(0);
+    expect(stdout()).toContain("First\n  https://a.test/1");
+    expect(stdout()).not.toContain("throttled");
+    expect(stderr()).toContain("throttled");
+  });
+
+  it("treats the words before a flag as one query, not several", async () => {
+    const spy = up({ results: [] });
+    await run(["search", "rate", "limiting", "--limit", "3", "--searxng", "http://sxcli2.test"]);
+    const asked = spy.mock.calls.map((c) => String(c[0])).find((u) => u.includes("q="))!;
+    expect(asked).toContain("q=rate%20limiting");
+    expect(asked).not.toContain("q=rate%20limiting%203");
+  });
+
+  it("emits machine-readable hits with --json", async () => {
+    up({ results: [{ url: "https://a.test/1", title: "First", content: "c" }] });
+    await run(["search", "q", "--json", "--searxng", "http://sxcli3.test"]);
+    const parsed = JSON.parse(stdout());
+    expect(parsed.hits[0]).toMatchObject({ url: "https://a.test/1", via: "searxng" });
+  });
+
+  it("exits non-zero when it found nothing, so a script can tell", async () => {
+    up({ results: [] });
+    expect(await run(["search", "q", "--searxng", "http://sxcli4.test"])).toBe(1);
+    expect(stderr()).toContain("stack up");
+  });
+
+  it("asks for a query rather than searching for nothing", async () => {
+    expect(await run(["search"])).toBe(1);
+    expect(stderr()).toContain("usage: webindex search");
   });
 });
 
@@ -168,10 +220,22 @@ describe("unknown input", () => {
 describe("the MCP tools", () => {
   const adapter = webindexAdapter();
 
-  it("declares both tools with a required argument each", () => {
+  it("declares the three tools, each with a required argument", () => {
     const tools = adapter.listTools(LATEST_PROTOCOL);
-    expect(tools.map((t) => t.name)).toEqual(["webindex_fetch", "webindex_extract"]);
+    expect(tools.map((t) => t.name)).toEqual(["webindex_search", "webindex_fetch", "webindex_extract"]);
     for (const t of tools) expect(t.inputSchema.required.length).toBeGreaterThan(0);
+  });
+
+  it("says which backend was missing rather than reporting an empty web", async () => {
+    // A search tool that returns "no results" when nothing is running teaches
+    // the model the answer does not exist. It has to fail loudly instead.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      }),
+    );
+    await expect(adapter.callTool("webindex_search", { query: "rate limiting" })).rejects.toThrow(/stack up/);
   });
 
   it("fetches a URL and says which rung produced the text", async () => {

@@ -33,7 +33,7 @@ import {
   canonicalizeUrl, domainOf, fnv1a64, keywords, buildMatcher, isStopword,
   docFormatForUrl, looksLikePdfUrl, htmlToText, extractMainHtml,
   extractPdf, pdfToText, enabledExtractors,
-  httpGet, fetchAndExtract,
+  httpGet, fetchAndExtract, search,
   isNoWrite, setNoWrite, writeArtifact, takeArtifacts,
   createServer, runStdioServer, ToolError,
 } from "./engine.mjs";
@@ -80,6 +80,24 @@ const r = await httpGet("https://acme.test/page");
 ok(r.ok && r.body.includes("rate limiting"), "httpGet");
 const ex = await fetchAndExtract("https://acme.test/page");
 ok(ex.text.includes("rate limiting"), "fetchAndExtract did not reach clean text");
+
+// ── Discovery: the engine can ask the local stack, not just drive it ────────
+globalThis.fetch = async (input) => new Response(
+  String(input).includes("/search")
+    ? JSON.stringify({ results: [{ url: "https://acme.test/1", title: "One", content: "about one" }] })
+    : "ok",
+  { status: 200, headers: { "content-type": "application/json" } });
+const found = await search("rate limiting", { searxng: "http://sx.test" });
+ok(found.hits.length === 1 && found.hits[0].via === "searxng", "search() did not reach SearXNG");
+ok(found.hits[0].url === "https://acme.test/1", "search() lost the hit's URL");
+
+// With nothing listening, it must say WHICH backend is missing and name the
+// CONSUMER's command — proof the brand reaches this module too, not just the
+// old ones.
+globalThis.fetch = async () => { throw new Error("ECONNREFUSED"); };
+const none = await search("rate limiting");
+ok(none.hits.length === 0, "search() invented hits with nothing running");
+ok(none.notes.join(" ").includes("acme searxng up"), "the note must name the consumer's CLI, got: " + none.notes.join(" | "));
 
 // ── The write gate ──────────────────────────────────────────────────────────
 setNoWrite(true);

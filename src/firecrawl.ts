@@ -1,4 +1,4 @@
-import { env, envName } from "./brand.js";
+import { brand, env, envName } from "./brand.js";
 import { cleanInline, httpJson } from "./fetch.js";
 
 // Self-hosted Firecrawl client — a content-CLEANING layer in front of the
@@ -12,7 +12,7 @@ import { cleanInline, httpJson } from "./fetch.js";
 // (it cascades Fire-Engine → SearXNG → DuckDuckGo internally).
 //
 // Bring the stack up with:
-//   docker compose --profile search --profile extract up -d --wait
+//   <cli> firecrawl up      (the engine ships the compose file; see stack.ts)
 //
 // Everything here degrades to a NOTE, never a throw: when Firecrawl is absent
 // the caller keeps using the built-in extractor exactly as before.
@@ -279,7 +279,7 @@ export async function searchViaFirecrawl(query: string, limit: number, opts: Fir
   const base = firecrawlBase(opts);
   if (!base) return { why: `Firecrawl disabled (--firecrawl off / ${envName("FIRECRAWL")}=off). Skipping.` };
   if (!(await probeFirecrawl(base, firecrawlIsExplicit(opts)))) {
-    return { why: `Firecrawl not reachable at ${base} (bring it up with \`docker compose --profile search --profile extract up -d --wait\`). Skipping.` };
+    return { why: `Firecrawl not reachable at ${base} (bring it up with \`${brand().cli} firecrawl up\`). Skipping.` };
   }
   const r = await postJson(base, "/search", { query, limit, sources: ["web"] }, SEARCH_TIMEOUT_MS);
   if (!r.ok) {

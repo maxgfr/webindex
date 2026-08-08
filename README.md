@@ -1,7 +1,8 @@
 # webindex
 
-Turn a URL into clean, citable text — HTML, PDFs through a six-rung ladder ending in OCR,
-and office documents — and serve that to an agent over MCP.
+Find pages with a local, keyless search stack, turn them into clean, citable text — HTML,
+PDFs through a six-rung ladder ending in OCR, and office documents — and serve that to an
+agent over MCP.
 
 Zero runtime dependencies. One ESM bundle plus one declaration file, plus a CLI. The
 web-side companion to [codeindex](https://github.com/maxgfr/codeindex): codeindex indexes
@@ -15,13 +16,14 @@ brew install maxgfr/tap/webindex
 
 | Command | What it does |
 |---|---|
+| `webindex search <query>` | Ask the local stack for candidate URLs — SearXNG first, Firecrawl as the fallback. Prints title, URL and snippet; `--json` returns them structured with the notes. `--limit <n>`, `--pages <n>` walk further, `--lang fr-FR` sets the result language. Exits non-zero when it found nothing, and says on stderr which backend was missing. |
 | `webindex fetch <url>` | Fetch a URL and print its readable text. Routes PDFs and office documents to their ladders, falls back through Firecrawl and the Wayback Machine when a page resists. `--json` adds the title, status, extractor and any note. `--lang fr-FR` sets Accept-Language, `--firecrawl <base>\|off` overrides the extractor. |
 | `webindex extract <file>` | The same extraction on a file already on disk — PDF, office document, HTML or plain text. `--json` as above. |
 | `webindex mcp` | Serve the two tools below to an agent. `--transport stdio` (default) or `http` with `--port`, `--bind`, `--allow-remote`. |
 | `webindex searxng up\|down\|status` | Drive the keyless SearXNG container. |
 | `webindex firecrawl up\|down\|status` | Drive Firecrawl, which cleans a page with a real headless browser. It delegates its own search to SearXNG, so this starts both. |
 | `webindex stack up\|down\|status\|path` | Everything at once. `path` prints where the compose file was written. |
-| `webindex doctor` | Which optional helpers answer, which extraction rungs exist on this machine. |
+| `webindex doctor` | Which optional helpers answer — SearXNG, Firecrawl, the extraction rungs, OCR — on this machine. |
 | `webindex version` | The engine version. |
 
 Nothing above needs an API key, and nothing is required: every optional helper
@@ -46,7 +48,7 @@ webindex stack path        # where the compose file landed, if you want to read 
 
 ## The MCP server
 
-`webindex mcp` exposes two tools. Point any MCP client at it:
+`webindex mcp` exposes three tools. Point any MCP client at it:
 
 ```bash
 claude mcp add webindex -- webindex mcp                    # stdio
@@ -55,6 +57,7 @@ claude mcp add --transport http webindex http://127.0.0.1:7340/mcp
 
 | Tool | Arguments | Returns |
 |---|---|---|
+| `webindex_search` | `query` (required), `limit`, `lang` | Candidate URLs with titles and snippets, from the local stack. Not page text — follow up with `webindex_fetch` on the ones worth reading. When no backend is running it fails loudly with which one was missing, rather than returning an empty list that reads like "nothing exists". |
 | `webindex_fetch` | `url` (required), `lang` | The page's readable text plus the rung that produced it. Handles HTML, PDFs and office documents, and falls back through Firecrawl and the Wayback Machine. Never raw bytes. |
 | `webindex_extract` | `path` (required) | The same for a file already on disk. |
 
@@ -76,13 +79,15 @@ A library of **primitives**, not a pipeline.
 
 | Layer | What it owns |
 |---|---|
+| Discovery | the SearXNG JSON API and Firecrawl's `/search`, with pagination, cross-page dedupe, and throttled-upstream detection |
 | Retrieval | HTTP with retry and byte caps, HTML→text, main-content extraction, Firecrawl, the PDF ladder (native → `pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → OCR), the office-document ladder, Wayback rescue, the fetch cache |
 | Text | keyword extraction, accent- and plural-folded matching, camelCase splitting, excerpting, URL canonicalisation and identity |
 | MCP | the whole protocol — negotiation, cancellation, schema validation, response capping, the error taxonomy — plus the stdio and HTTP transports |
 
-Ranking (BM25, RRF fusion, near-duplicate collapse, diversification) and discovery (the
-keyless search backends) are **not here yet**. They are the next layers to land; until they
-do, this is a retrieval engine, not a search engine.
+Discovery is deliberately thin: one query to the local stack, candidates back. There is no
+backend registry, no fan-out across twenty engines, no fusion. Ranking (BM25, RRF,
+near-duplicate collapse, diversification) is **not here yet** — a tool that needs it builds
+it on top of these primitives.
 
 ## What is deliberately out of scope
 

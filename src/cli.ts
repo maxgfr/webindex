@@ -21,6 +21,7 @@ import { enabledExtractors, extractPdf, ocrTools } from "./pdf.js";
 import { fetchAndExtract, htmlToText, looksLikePdfUrl } from "./fetch.js";
 import { firecrawlBase, probeFirecrawl } from "./firecrawl.js";
 import { composeControl, ensureComposeMaterialized, STACK_SERVICES, type StackAction } from "./stack.js";
+import { probeSearxng, search, searxngBase } from "./search.js";
 import { ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
@@ -28,11 +29,12 @@ import { startHttpServer } from "./mcp/http.js";
 configure({ name: "webindex", envPrefix: "WEBINDEX", cli: "webindex", contactUrl: "https://github.com/maxgfr/webindex" });
 
 const HELP = `webindex v${ENGINE_VERSION}
-Turn a URL or a file into clean, citable text — HTML, PDFs through a six-rung
-ladder ending in OCR, and office documents — and serve that to an agent over
-MCP. Zero dependencies, no API key.
+Find pages with a local keyless search stack, turn a URL or a file into clean,
+citable text — HTML, PDFs through a six-rung ladder ending in OCR, and office
+documents — and serve that to an agent over MCP. Zero dependencies, no API key.
 
 USAGE
+  webindex search <query> [--json] [--limit <n>] [--pages <n>] [--lang <tag>]
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>]
   webindex extract <file> [--json]
   webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>]
@@ -43,6 +45,9 @@ USAGE
   webindex version
 
 COMMANDS
+  search     Ask the local keyless stack for candidate URLs. Tries SearXNG,
+             then Firecrawl. Prints what it found, or says which backend was
+             missing and how to start it — those are different answers.
   fetch      Fetch a URL and print the extracted text. Routes PDFs and office
              documents to their ladders automatically, and falls back through
              Firecrawl and the Wayback Machine when a page resists.
@@ -75,6 +80,29 @@ function fail(msg: string): never {
 function flag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(`--${name}`);
   return i !== -1 ? argv[i + 1] : undefined;
+}
+
+/**
+ * The words of a multi-word argument, with flags removed. `search rate limiting
+ * --limit 5` is one query of two words, not two queries and a stray number —
+ * so a flag's VALUE has to be skipped too, which needs to know which flags take
+ * one.
+ */
+function positional(argv: string[], valued: string[]): string {
+  const out: string[] = [];
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i] ?? "";
+    if (a === "--") {
+      out.push(...argv.slice(i + 1)); // everything after `--` is literal
+      break;
+    }
+    if (a.startsWith("--")) {
+      if (valued.includes(a.slice(2))) i++;
+      continue;
+    }
+    out.push(a);
+  }
+  return out.join(" ").trim();
 }
 
 /** Extraction over bytes already in hand — the shared half of `extract`. */
@@ -113,6 +141,22 @@ export function webindexAdapter(): McpAdapter {
     version: ENGINE_VERSION,
     listTools: (): ToolDecl[] => [
       {
+        name: "webindex_search",
+        title: "Search the local keyless stack",
+        description:
+          "Ask the locally-running SearXNG (falling back to Firecrawl) for candidate URLs. Returns title, URL and snippet — not page text; follow up with webindex_fetch on the ones worth reading. " +
+          "Requires the local stack to be running; when it is not, says so rather than returning an empty result that reads like 'nothing exists'.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "What to search for." },
+            limit: { type: "number", description: "How many hits to aim for (default 10)." },
+            lang: { type: "string", description: "BCP-47 language tag, e.g. fr-FR." },
+          },
+          required: ["query"],
+        },
+      },
+      {
         name: "webindex_fetch",
         title: "Fetch a URL as clean text",
         description:
@@ -135,6 +179,7 @@ export function webindexAdapter(): McpAdapter {
       },
     ],
     capAdvice: {
+      webindex_search: "lower `limit`",
       webindex_fetch: "the page is very large; fetch it and read the file instead of inlining it",
       webindex_extract: "the document is very large; read it in pieces",
     },
@@ -145,6 +190,14 @@ export function webindexAdapter(): McpAdapter {
         const r = await fetchAndExtract(url, { acceptLanguage: args.lang ? String(args.lang) : undefined });
         if (!r.text) throw new ToolError(`Nothing readable at ${url}${r.note ? ` — ${r.note}` : ""}.`);
         return { text: `${r.text}\n\n---\nextractor: ${r.extractor ?? "native"}` };
+      }
+      if (name === "webindex_search") {
+        const q = String(args.query ?? "").trim();
+        if (!q) throw new ToolError("`query` is required.");
+        const r = await search(q, { limit: typeof args.limit === "number" ? args.limit : undefined, lang: args.lang ? String(args.lang) : undefined });
+        if (!r.hits.length) throw new ToolError(r.notes.join(" ") || "No results.");
+        const body = r.hits.map((h, i) => `${i + 1}. ${h.title}\n   ${h.url}${h.snippet ? `\n   ${h.snippet}` : ""}`).join("\n\n");
+        return { text: r.notes.length ? `${body}\n\n---\n${r.notes.join("\n")}` : body };
       }
       if (name === "webindex_extract") {
         const r = await extractLocal(String(args.path ?? ""));
@@ -165,6 +218,30 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
   if (cmd === "version" || cmd === "--version" || cmd === "-v") {
     process.stdout.write(ENGINE_VERSION + "\n");
+    return;
+  }
+
+  if (cmd === "search") {
+    const q = positional(argv, ["limit", "pages", "lang", "searxng", "firecrawl"]);
+    if (!q) fail("usage: webindex search <query>");
+    const r = await search(q, {
+      limit: flag(argv, "limit") ? Number(flag(argv, "limit")) : undefined,
+      pages: flag(argv, "pages") ? Number(flag(argv, "pages")) : undefined,
+      lang: flag(argv, "lang"),
+      searxng: flag(argv, "searxng"),
+      firecrawl: flag(argv, "firecrawl"),
+    });
+    if (argv.includes("--json")) {
+      process.stdout.write(JSON.stringify(r, null, 2) + "\n");
+      return;
+    }
+    for (const h of r.hits) {
+      process.stdout.write(`${h.title}\n  ${h.url}${h.snippet ? `\n  ${h.snippet.slice(0, 160)}` : ""}\n\n`);
+    }
+    // Notes go to stderr so `webindex search q | head` stays a clean URL list
+    // while the reason for a short one is still visible.
+    for (const n of r.notes) process.stderr.write(`  ${n}\n`);
+    if (!r.hits.length) process.exit(1);
     return;
   }
 
@@ -238,10 +315,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
   if (cmd === "doctor") {
     const base = firecrawlBase();
-    const fc = base ? await probeFirecrawl(base) : false;
+    const sx = searxngBase();
+    const [fc, sxUp] = await Promise.all([base ? probeFirecrawl(base) : false, sx ? probeSearxng(sx) : false]);
     const ocr = await ocrTools();
     const lines = [
       `webindex ${ENGINE_VERSION}`,
+      `  searxng     ${sx ? (sxUp ? `answering at ${sx}` : `not reachable at ${sx} — \`webindex searxng up\` starts it`) : "disabled"}`,
       `  firecrawl   ${base ? (fc ? `answering at ${base}` : `not reachable at ${base} — the built-in extractor is used instead`) : "disabled"}`,
       `  pdf rungs   ${enabledExtractors().join(", ")}`,
       `  doc rungs   ${enabledDocExtractors().join(", ") || "none (disabled)"}`,

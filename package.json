@@ -1,7 +1,7 @@
 {
   "name": "webindex",
   "version": "1.9.0",
-  "description": "Zero-dependency web-retrieval engine: turn a URL or a file into clean, citable text \u2014 HTML, PDFs through a six-rung ladder ending in OCR, office documents \u2014 and serve it over MCP. One vendorable engine.mjs, CLI + MCP server included. The web-side companion to codeindex.",
+  "description": "Zero-dependency web engine: find pages with a local keyless search stack, turn a URL or a file into clean, citable text \u2014 HTML, PDFs through a six-rung ladder ending in OCR, office documents \u2014 and serve it over MCP. One vendorable engine.mjs, CLI + MCP server included. The web-side companion to codeindex.",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "main": "scripts/engine.mjs",
@@ -40,8 +40,9 @@
     "retrieval",
     "scraping",
     "pdf-extraction",
-    "bm25",
-    "rrf",
+    "searxng",
+    "firecrawl",
+    "mcp",
     "zero-dependency",
     "engine"
   ],

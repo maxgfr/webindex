@@ -874,7 +874,7 @@ async function searchViaFirecrawl(query, limit, opts = {}) {
   const base = firecrawlBase(opts);
   if (!base) return { why: `Firecrawl disabled (--firecrawl off / ${envName("FIRECRAWL")}=off). Skipping.` };
   if (!await probeFirecrawl(base, firecrawlIsExplicit(opts))) {
-    return { why: `Firecrawl not reachable at ${base} (bring it up with \`docker compose --profile search --profile extract up -d --wait\`). Skipping.` };
+    return { why: `Firecrawl not reachable at ${base} (bring it up with \`${brand().cli} firecrawl up\`). Skipping.` };
   }
   const r = await postJson(base, "/search", { query, limit, sources: ["web"] }, SEARCH_TIMEOUT_MS);
   if (!r.ok) {
@@ -1361,8 +1361,8 @@ function canonicalizeUrl(raw) {
       if (!TRACKING_PARAMS.test(k)) keep.push([k, v]);
     }
     keep.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-    const search = keep.length ? "?" + keep.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&") : "";
-    return `${proto}//${host}${port ? ":" + port : ""}${path}${search}`.replace(/\/$/, "");
+    const search2 = keep.length ? "?" + keep.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&") : "";
+    return `${proto}//${host}${port ? ":" + port : ""}${path}${search2}`.replace(/\/$/, "");
   } catch {
     return raw.trim().replace(/#.*$/, "").replace(/\/$/, "");
   }
@@ -1540,6 +1540,114 @@ function acceptLanguageHeader(lang, region) {
   const R = resolveRegion(lang, region).toUpperCase();
   if (l === "en") return `${l}-${R},${l};q=0.9`;
   return `${l}-${R},${l};q=0.9,en;q=0.5`;
+}
+
+// src/search.ts
+var SEARXNG_DEFAULT_BASE = "http://localhost:8888";
+var PROBE_TIMEOUT_MS2 = 2e3;
+var QUERY_TIMEOUT_MS = 8e3;
+function searxngBase(opts = {}) {
+  const raw = (opts.searxng ?? env("SEARXNG") ?? SEARXNG_DEFAULT_BASE).trim();
+  if (!raw || raw.toLowerCase() === "off") return null;
+  return raw.replace(/\/+$/, "");
+}
+function searxngIsExplicit(opts = {}) {
+  return !!(opts.searxng ?? env("SEARXNG"));
+}
+var probeCache2 = /* @__PURE__ */ new Map();
+function resetSearxngProbeCache() {
+  probeCache2.clear();
+}
+function probeSearxng(base) {
+  let p = probeCache2.get(base);
+  if (!p) {
+    p = (async () => {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS2);
+      try {
+        const res = await fetch(`${base}/healthz`, { signal: ctrl.signal });
+        await res.text().catch(() => "");
+        return true;
+      } catch {
+        return false;
+      } finally {
+        clearTimeout(t);
+      }
+    })();
+    probeCache2.set(base, p);
+  }
+  return p;
+}
+async function searchViaSearxng(query, opts = {}) {
+  const base = searxngBase(opts);
+  if (!base) return { hits: [], notes: [`SearXNG disabled (${envName("SEARXNG")}=off).`] };
+  if (!await probeSearxng(base)) {
+    return {
+      hits: [],
+      notes: [
+        searxngIsExplicit(opts) ? `SearXNG not reachable at ${base}.` : `SearXNG not running at ${base} \u2014 start it with \`${brand().cli} searxng up\` for local, keyless discovery.`
+      ]
+    };
+  }
+  const pages = Math.max(1, opts.pages ?? 1);
+  const limit = Math.max(1, opts.limit ?? 10);
+  const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
+  const root = `${base}/search?q=${encodeURIComponent(query)}&format=json&safesearch=1` + (opts.lang ? `&language=${encodeURIComponent(opts.lang)}` : "");
+  const notes = [];
+  const seen = /* @__PURE__ */ new Set();
+  const hits = [];
+  const suspended = /* @__PURE__ */ new Map();
+  for (let p = 0; p < pages && hits.length < limit; p++) {
+    const r = await httpGet(root + (p > 0 ? `&pageno=${p + 1}` : ""), { accept: "application/json", acceptLanguage, timeoutMs: QUERY_TIMEOUT_MS });
+    if (!r.ok) {
+      if (p === 0) notes.push(r.status === 429 || r.status === 503 ? `SearXNG rate-limited (HTTP ${r.status}).` : `SearXNG unreachable (status ${r.status}).`);
+      break;
+    }
+    let data;
+    try {
+      data = JSON.parse(r.body);
+    } catch {
+      if (p === 0) notes.push("SearXNG returned a non-JSON body \u2014 is `format: json` enabled on that instance?");
+      break;
+    }
+    for (const e of data.unresponsive_engines ?? []) {
+      const pair = Array.isArray(e) ? e : [];
+      if (typeof pair[0] === "string") suspended.set(pair[0], typeof pair[1] === "string" ? pair[1] : "unavailable");
+    }
+    const before = hits.length;
+    for (const raw of data.results ?? []) {
+      const it = raw;
+      if (typeof it.url !== "string") continue;
+      const key = canonicalizeUrl(it.url);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hits.push({
+        url: it.url,
+        title: typeof it.title === "string" && it.title.trim() ? it.title.trim() : it.url,
+        snippet: typeof it.content === "string" ? it.content.trim() : "",
+        via: "searxng"
+      });
+      if (hits.length >= limit) break;
+    }
+    if (hits.length === before) break;
+    if (p < pages - 1 && pageDelayMs()) await sleep(pageDelayMs());
+  }
+  if (suspended.size) {
+    notes.push(`SearXNG upstreams throttled: ${[...suspended].map(([e, why]) => `${e} (${why})`).join(", ")} \u2014 fewer results than usual, not an empty web.`);
+  }
+  if (!hits.length && !notes.length) notes.push("SearXNG returned no results.");
+  return { hits, notes };
+}
+async function search(query, opts = {}) {
+  const q = query.trim();
+  if (!q) return { hits: [], notes: ["Empty query."] };
+  const viaSearxng = await searchViaSearxng(q, opts);
+  if (viaSearxng.hits.length) return viaSearxng;
+  const fc = await searchViaFirecrawl(q, opts.limit ?? 10, opts);
+  const hits = (fc.hits ?? []).map((h) => ({ url: h.url, title: h.title, snippet: h.description, via: "firecrawl" }));
+  const notes = [...viaSearxng.notes, ...fc.why ? [fc.why] : []];
+  if (!hits.length) notes.push(`No results from the local stack. \`${brand().cli} stack up\` starts SearXNG and Firecrawl together.`);
+  return { hits, notes };
 }
 
 // src/stack.ts
@@ -2536,6 +2644,7 @@ export {
   PromptError,
   RICH_TOOLS_SINCE,
   ResourceError,
+  SEARXNG_DEFAULT_BASE,
   SEARXNG_SETTINGS_YAML,
   SERVICE_PROFILES,
   STACK_SERVICES,
@@ -2617,6 +2726,7 @@ export {
   pdfToText,
   politeDelayMs,
   probeFirecrawl,
+  probeSearxng,
   pubmedAbstractUrl,
   rankedKeywords,
   readResource,
@@ -2628,13 +2738,18 @@ export {
   resetOcrBudget,
   resetPdfLadderCache,
   resetRunLocks,
+  resetSearxngProbeCache,
   resolveProvider,
   resolveRegion,
   resolveSkillRoot,
   runStdioServer,
   runWithInput,
   scrapeViaFirecrawl,
+  search,
   searchViaFirecrawl,
+  searchViaSearxng,
+  searxngBase,
+  searxngIsExplicit,
   setNoWrite,
   skillName,
   sleep,

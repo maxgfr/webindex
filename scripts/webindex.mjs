@@ -456,6 +456,7 @@ for (const [base, cls] of Object.entries(ACCENT_CLASSES)) {
 var FIRECRAWL_DEFAULT_BASE = "http://localhost:3002";
 var PROBE_TIMEOUT_MS = 2e3;
 var SCRAPE_TIMEOUT_MS = 45e3;
+var SEARCH_TIMEOUT_MS = 3e4;
 var SCRAPE_MAX_AGE_MS = 24 * 60 * 60 * 1e3;
 function firecrawlBase(opts = {}) {
   const raw = (opts.firecrawl ?? env("FIRECRAWL") ?? FIRECRAWL_DEFAULT_BASE).trim();
@@ -524,6 +525,24 @@ function mapScrapeResponse(json) {
     ...status !== void 0 ? { statusCode: status } : {}
   };
 }
+function mapSearchResponse(json) {
+  if (!json || typeof json !== "object") return [];
+  if (json.success === false) return [];
+  const data = json.data;
+  const web = Array.isArray(data) ? data : Array.isArray(data?.web) ? data.web : Array.isArray(data?.results) ? data.results : [];
+  const out = [];
+  for (const x of web) {
+    if (!x || typeof x.url !== "string" || !x.url) continue;
+    out.push({
+      url: x.url,
+      // `||` (not `??`): an empty title degrades to the URL, never blank.
+      title: cleanInline(String(x.title || x.url)),
+      description: cleanInline(String(x.description ?? x.snippet ?? "")).slice(0, 360),
+      ...typeof x.markdown === "string" && x.markdown.trim() ? { markdown: x.markdown } : {}
+    });
+  }
+  return out;
+}
 async function scrapeViaFirecrawl(url, opts = {}) {
   const base = firecrawlBase(opts);
   if (!base) return {};
@@ -552,6 +571,19 @@ async function scrapeViaFirecrawl(url, opts = {}) {
   if (!data) return { why: `Firecrawl returned no markdown for ${url} \u2014 fell back to the built-in extractor.` };
   return { data };
 }
+async function searchViaFirecrawl(query, limit, opts = {}) {
+  const base = firecrawlBase(opts);
+  if (!base) return { why: `Firecrawl disabled (--firecrawl off / ${envName("FIRECRAWL")}=off). Skipping.` };
+  if (!await probeFirecrawl(base, firecrawlIsExplicit(opts))) {
+    return { why: `Firecrawl not reachable at ${base} (bring it up with \`${brand().cli} firecrawl up\`). Skipping.` };
+  }
+  const r = await postJson(base, "/search", { query, limit, sources: ["web"] }, SEARCH_TIMEOUT_MS);
+  if (!r.ok) {
+    const why = r.status === 429 || r.status === 503 ? `rate-limited (HTTP ${r.status})` : `unreachable (status ${r.status || 0})`;
+    return { why: `Firecrawl search ${why} at ${base}.` };
+  }
+  return { hits: mapSearchResponse(r.data) };
+}
 
 // src/fetch.ts
 var DEFAULT_BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -561,6 +593,9 @@ function browserUa() {
 var RETRY_STATUS = /* @__PURE__ */ new Set([429, 503, 502, 504]);
 var maxAttempts = () => envInt("MAX_ATTEMPTS", 2, 1, 5);
 var defaultRetryMs = () => envInt("RETRY_MS", 600, 0, 5e3);
+function pageDelayMs() {
+  return envInt("PAGE_DELAY_MS", 350, 0, 5e3);
+}
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -1237,6 +1272,169 @@ function composeControl(service, action) {
   });
 }
 
+// src/locale.ts
+var LANG_COUNTRY = {
+  en: "us",
+  pt: "br",
+  ja: "jp",
+  zh: "cn",
+  ko: "kr",
+  sv: "se",
+  da: "dk",
+  cs: "cz",
+  el: "gr",
+  uk: "ua",
+  // Ukrainian language → Ukraine
+  ar: "xa",
+  // DuckDuckGo's "Arabia" region
+  he: "il",
+  hi: "in"
+};
+function baseLang(lang) {
+  return (lang || "en").split("-")[0].toLowerCase();
+}
+function resolveRegion(lang, region) {
+  if (region?.trim()) return region.trim().toLowerCase();
+  const parts = (lang || "en").split("-");
+  if (parts.length > 1 && parts[1]) return parts[1].toLowerCase();
+  const l = baseLang(lang);
+  return LANG_COUNTRY[l] ?? l;
+}
+function acceptLanguageHeader(lang, region) {
+  const l = baseLang(lang);
+  const R = resolveRegion(lang, region).toUpperCase();
+  if (l === "en") return `${l}-${R},${l};q=0.9`;
+  return `${l}-${R},${l};q=0.9,en;q=0.5`;
+}
+
+// src/url.ts
+var TRACKING_PARAMS = /^(utm_|fbclid$|gclid$|mc_|ref$|ref_src$|ref_url$|spm$|_hsenc$|_hsmi$|igshid$)/i;
+function canonicalizeUrl(raw) {
+  try {
+    const u = new URL(raw.trim());
+    const proto = u.protocol.toLowerCase();
+    const host = u.hostname.toLowerCase().replace(/^www\./, "");
+    let port = u.port;
+    if (proto === "http:" && port === "80" || proto === "https:" && port === "443") port = "";
+    const path = u.pathname.replace(/\/+$/, "");
+    const keep = [];
+    for (const [k, v] of u.searchParams) {
+      if (!TRACKING_PARAMS.test(k)) keep.push([k, v]);
+    }
+    keep.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+    const search2 = keep.length ? "?" + keep.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&") : "";
+    return `${proto}//${host}${port ? ":" + port : ""}${path}${search2}`.replace(/\/$/, "");
+  } catch {
+    return raw.trim().replace(/#.*$/, "").replace(/\/$/, "");
+  }
+}
+var MASK64 = (1n << 64n) - 1n;
+
+// src/search.ts
+var SEARXNG_DEFAULT_BASE = "http://localhost:8888";
+var PROBE_TIMEOUT_MS2 = 2e3;
+var QUERY_TIMEOUT_MS = 8e3;
+function searxngBase(opts = {}) {
+  const raw = (opts.searxng ?? env("SEARXNG") ?? SEARXNG_DEFAULT_BASE).trim();
+  if (!raw || raw.toLowerCase() === "off") return null;
+  return raw.replace(/\/+$/, "");
+}
+function searxngIsExplicit(opts = {}) {
+  return !!(opts.searxng ?? env("SEARXNG"));
+}
+var probeCache2 = /* @__PURE__ */ new Map();
+function probeSearxng(base) {
+  let p = probeCache2.get(base);
+  if (!p) {
+    p = (async () => {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS2);
+      try {
+        const res = await fetch(`${base}/healthz`, { signal: ctrl.signal });
+        await res.text().catch(() => "");
+        return true;
+      } catch {
+        return false;
+      } finally {
+        clearTimeout(t);
+      }
+    })();
+    probeCache2.set(base, p);
+  }
+  return p;
+}
+async function searchViaSearxng(query, opts = {}) {
+  const base = searxngBase(opts);
+  if (!base) return { hits: [], notes: [`SearXNG disabled (${envName("SEARXNG")}=off).`] };
+  if (!await probeSearxng(base)) {
+    return {
+      hits: [],
+      notes: [
+        searxngIsExplicit(opts) ? `SearXNG not reachable at ${base}.` : `SearXNG not running at ${base} \u2014 start it with \`${brand().cli} searxng up\` for local, keyless discovery.`
+      ]
+    };
+  }
+  const pages = Math.max(1, opts.pages ?? 1);
+  const limit = Math.max(1, opts.limit ?? 10);
+  const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
+  const root = `${base}/search?q=${encodeURIComponent(query)}&format=json&safesearch=1` + (opts.lang ? `&language=${encodeURIComponent(opts.lang)}` : "");
+  const notes = [];
+  const seen = /* @__PURE__ */ new Set();
+  const hits = [];
+  const suspended = /* @__PURE__ */ new Map();
+  for (let p = 0; p < pages && hits.length < limit; p++) {
+    const r = await httpGet(root + (p > 0 ? `&pageno=${p + 1}` : ""), { accept: "application/json", acceptLanguage, timeoutMs: QUERY_TIMEOUT_MS });
+    if (!r.ok) {
+      if (p === 0) notes.push(r.status === 429 || r.status === 503 ? `SearXNG rate-limited (HTTP ${r.status}).` : `SearXNG unreachable (status ${r.status}).`);
+      break;
+    }
+    let data;
+    try {
+      data = JSON.parse(r.body);
+    } catch {
+      if (p === 0) notes.push("SearXNG returned a non-JSON body \u2014 is `format: json` enabled on that instance?");
+      break;
+    }
+    for (const e of data.unresponsive_engines ?? []) {
+      const pair = Array.isArray(e) ? e : [];
+      if (typeof pair[0] === "string") suspended.set(pair[0], typeof pair[1] === "string" ? pair[1] : "unavailable");
+    }
+    const before = hits.length;
+    for (const raw of data.results ?? []) {
+      const it = raw;
+      if (typeof it.url !== "string") continue;
+      const key = canonicalizeUrl(it.url);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hits.push({
+        url: it.url,
+        title: typeof it.title === "string" && it.title.trim() ? it.title.trim() : it.url,
+        snippet: typeof it.content === "string" ? it.content.trim() : "",
+        via: "searxng"
+      });
+      if (hits.length >= limit) break;
+    }
+    if (hits.length === before) break;
+    if (p < pages - 1 && pageDelayMs()) await sleep(pageDelayMs());
+  }
+  if (suspended.size) {
+    notes.push(`SearXNG upstreams throttled: ${[...suspended].map(([e, why]) => `${e} (${why})`).join(", ")} \u2014 fewer results than usual, not an empty web.`);
+  }
+  if (!hits.length && !notes.length) notes.push("SearXNG returned no results.");
+  return { hits, notes };
+}
+async function search(query, opts = {}) {
+  const q = query.trim();
+  if (!q) return { hits: [], notes: ["Empty query."] };
+  const viaSearxng = await searchViaSearxng(q, opts);
+  if (viaSearxng.hits.length) return viaSearxng;
+  const fc = await searchViaFirecrawl(q, opts.limit ?? 10, opts);
+  const hits = (fc.hits ?? []).map((h) => ({ url: h.url, title: h.title, snippet: h.description, via: "firecrawl" }));
+  const notes = [...viaSearxng.notes, ...fc.why ? [fc.why] : []];
+  if (!hits.length) notes.push(`No results from the local stack. \`${brand().cli} stack up\` starts SearXNG and Firecrawl together.`);
+  return { hits, notes };
+}
+
 // src/mcp/protocol.ts
 var PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
 var LATEST_PROTOCOL = PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1];
@@ -1790,11 +1988,12 @@ function readBody(req) {
 // src/cli.ts
 configure({ name: "webindex", envPrefix: "WEBINDEX", cli: "webindex", contactUrl: "https://github.com/maxgfr/webindex" });
 var HELP = `webindex v${ENGINE_VERSION}
-Turn a URL or a file into clean, citable text \u2014 HTML, PDFs through a six-rung
-ladder ending in OCR, and office documents \u2014 and serve that to an agent over
-MCP. Zero dependencies, no API key.
+Find pages with a local keyless search stack, turn a URL or a file into clean,
+citable text \u2014 HTML, PDFs through a six-rung ladder ending in OCR, and office
+documents \u2014 and serve that to an agent over MCP. Zero dependencies, no API key.
 
 USAGE
+  webindex search <query> [--json] [--limit <n>] [--pages <n>] [--lang <tag>]
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>]
   webindex extract <file> [--json]
   webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>]
@@ -1805,6 +2004,9 @@ USAGE
   webindex version
 
 COMMANDS
+  search     Ask the local keyless stack for candidate URLs. Tries SearXNG,
+             then Firecrawl. Prints what it found, or says which backend was
+             missing and how to start it \u2014 those are different answers.
   fetch      Fetch a URL and print the extracted text. Routes PDFs and office
              documents to their ladders automatically, and falls back through
              Firecrawl and the Wayback Machine when a page resists.
@@ -1837,6 +2039,22 @@ function flag(argv, name) {
   const i = argv.indexOf(`--${name}`);
   return i !== -1 ? argv[i + 1] : void 0;
 }
+function positional(argv, valued) {
+  const out = [];
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i] ?? "";
+    if (a === "--") {
+      out.push(...argv.slice(i + 1));
+      break;
+    }
+    if (a.startsWith("--")) {
+      if (valued.includes(a.slice(2))) i++;
+      continue;
+    }
+    out.push(a);
+  }
+  return out.join(" ").trim();
+}
 async function extractLocal(path) {
   let bytes;
   try {
@@ -1863,6 +2081,20 @@ function webindexAdapter() {
     version: ENGINE_VERSION,
     listTools: () => [
       {
+        name: "webindex_search",
+        title: "Search the local keyless stack",
+        description: "Ask the locally-running SearXNG (falling back to Firecrawl) for candidate URLs. Returns title, URL and snippet \u2014 not page text; follow up with webindex_fetch on the ones worth reading. Requires the local stack to be running; when it is not, says so rather than returning an empty result that reads like 'nothing exists'.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "What to search for." },
+            limit: { type: "number", description: "How many hits to aim for (default 10)." },
+            lang: { type: "string", description: "BCP-47 language tag, e.g. fr-FR." }
+          },
+          required: ["query"]
+        }
+      },
+      {
         name: "webindex_fetch",
         title: "Fetch a URL as clean text",
         description: "Fetch a URL and return its readable text. Handles HTML, PDFs (native reader \u2192 pdf-inspector \u2192 anydoc \u2192 Firecrawl \u2192 pdftotext \u2192 OCR) and office documents, and falls back through Firecrawl and the Wayback Machine for pages that resist. Returns the extracted text plus which rung produced it \u2014 never raw bytes.",
@@ -1883,6 +2115,7 @@ function webindexAdapter() {
       }
     ],
     capAdvice: {
+      webindex_search: "lower `limit`",
       webindex_fetch: "the page is very large; fetch it and read the file instead of inlining it",
       webindex_extract: "the document is very large; read it in pieces"
     },
@@ -1896,6 +2129,19 @@ function webindexAdapter() {
 
 ---
 extractor: ${r.extractor ?? "native"}` };
+      }
+      if (name === "webindex_search") {
+        const q = String(args.query ?? "").trim();
+        if (!q) throw new ToolError("`query` is required.");
+        const r = await search(q, { limit: typeof args.limit === "number" ? args.limit : void 0, lang: args.lang ? String(args.lang) : void 0 });
+        if (!r.hits.length) throw new ToolError(r.notes.join(" ") || "No results.");
+        const body = r.hits.map((h, i) => `${i + 1}. ${h.title}
+   ${h.url}${h.snippet ? `
+   ${h.snippet}` : ""}`).join("\n\n");
+        return { text: r.notes.length ? `${body}
+
+---
+${r.notes.join("\n")}` : body };
       }
       if (name === "webindex_extract") {
         const r = await extractLocal(String(args.path ?? ""));
@@ -1917,6 +2163,32 @@ async function main(argv = process.argv.slice(2)) {
   }
   if (cmd === "version" || cmd === "--version" || cmd === "-v") {
     process.stdout.write(ENGINE_VERSION + "\n");
+    return;
+  }
+  if (cmd === "search") {
+    const q = positional(argv, ["limit", "pages", "lang", "searxng", "firecrawl"]);
+    if (!q) fail("usage: webindex search <query>");
+    const r = await search(q, {
+      limit: flag(argv, "limit") ? Number(flag(argv, "limit")) : void 0,
+      pages: flag(argv, "pages") ? Number(flag(argv, "pages")) : void 0,
+      lang: flag(argv, "lang"),
+      searxng: flag(argv, "searxng"),
+      firecrawl: flag(argv, "firecrawl")
+    });
+    if (argv.includes("--json")) {
+      process.stdout.write(JSON.stringify(r, null, 2) + "\n");
+      return;
+    }
+    for (const h of r.hits) {
+      process.stdout.write(`${h.title}
+  ${h.url}${h.snippet ? `
+  ${h.snippet.slice(0, 160)}` : ""}
+
+`);
+    }
+    for (const n of r.notes) process.stderr.write(`  ${n}
+`);
+    if (!r.hits.length) process.exit(1);
     return;
   }
   if (cmd === "fetch") {
@@ -1984,10 +2256,12 @@ async function main(argv = process.argv.slice(2)) {
   }
   if (cmd === "doctor") {
     const base = firecrawlBase();
-    const fc = base ? await probeFirecrawl(base) : false;
+    const sx = searxngBase();
+    const [fc, sxUp] = await Promise.all([base ? probeFirecrawl(base) : false, sx ? probeSearxng(sx) : false]);
     const ocr = await ocrTools();
     const lines = [
       `webindex ${ENGINE_VERSION}`,
+      `  searxng     ${sx ? sxUp ? `answering at ${sx}` : `not reachable at ${sx} \u2014 \`webindex searxng up\` starts it` : "disabled"}`,
       `  firecrawl   ${base ? fc ? `answering at ${base}` : `not reachable at ${base} \u2014 the built-in extractor is used instead` : "disabled"}`,
       `  pdf rungs   ${enabledExtractors().join(", ")}`,
       `  doc rungs   ${enabledDocExtractors().join(", ") || "none (disabled)"}`,
