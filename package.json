@@ -1,6 +1,6 @@
 {
   "name": "webindex",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Zero-dependency web-retrieval engine: fetch a URL into clean text (HTML, PDF through a six-rung ladder ending in OCR, office documents), plus the MCP transport. One vendorable engine.mjs, consumed by any tool that needs the web as evidence. The web-side companion to codeindex.",
   "type": "module",
   "packageManager": "pnpm@10.33.0",

@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.6.0](https://github.com/maxgfr/webindex/compare/v1.5.0...v1.6.0) (2026-08-08)
+
+
+### Features
+
+* **text:** expose the matcher's patterns and canonicalOf ([10caaf1](https://github.com/maxgfr/webindex/commit/10caaf1a1008f22774a7a96e71266cb45b7d3462))
+
 # [1.5.0](https://github.com/maxgfr/webindex/compare/v1.4.0...v1.5.0) (2026-08-08)
 
 
