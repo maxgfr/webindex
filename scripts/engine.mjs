@@ -1656,7 +1656,7 @@ import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, wr
 import { tmpdir as tmpdir2 } from "os";
 import { dirname, join as join2 } from "path";
 var COMPOSE_YAML = `# Optional, fully-local, no-API-key stack for a semantic mode, web
-# search and content extraction. Start it with \`webindex semantic up\` (or
+# search and content extraction. Start it with \`{{CLI}} semantic up\` (or
 # \`docker compose --profile all up -d\`). The published bundle stays
 # dependency-free \u2014 it only speaks HTTP to these containers on localhost;
 # nothing here is required for Tier-1 retrieval.
@@ -1665,7 +1665,7 @@ var COMPOSE_YAML = `# Optional, fully-local, no-API-key stack for a semantic mod
 #   --profile semantic  \u2192 qdrant + ollama (vector search)
 #   --profile search    \u2192 searxng (web discovery)
 #   --profile all       \u2192 everything above
-#   --profile extract   \u2192 firecrawl (content cleaning; \`webindex firecrawl up\`)
+#   --profile extract   \u2192 firecrawl (content cleaning; \`{{CLI}} firecrawl up\`)
 # \u2500\u2500 One stack, however many tools use it \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 # Any tool needing SearXNG or Firecrawl binds the SAME host ports. Run two from
 # separate compose projects and only one can ever be up: the second fails with
@@ -1703,7 +1703,7 @@ services:
 
   # Local embedding server \u2014 no key, no data leaves the machine. Pull the model
   # once: \`docker compose exec ollama ollama pull nomic-embed-text\`
-  # (\`webindex semantic up\` does this for you).
+  # (\`{{CLI}} semantic up\` does this for you).
   ollama:
     image: ollama/ollama:0.30.7
     container_name: skills-ollama
@@ -1749,7 +1749,7 @@ services:
   # docker/firecrawl/firecrawl.env for the tunables.
   #
   # Deliberately NOT in the "all" profile: it is ~3 GB of images and 5
-  # containers, and \`webindex semantic up\` must stay cheap.
+  # containers, and \`{{CLI}} semantic up\` must stay cheap.
   #
   #   docker compose --profile search --profile extract up -d --wait
   firecrawl:
@@ -1911,14 +1911,17 @@ MAX_RAM=0.8
 
 LOGGING_LEVEL=info
 `;
+function renderAsset(template) {
+  return template.replaceAll("{{CLI}}", brand().cli);
+}
 function ensureComposeMaterialized() {
   const base = join2(brand().cacheDir ?? join2(tmpdir2(), brand().name), "compose");
   const composePath = join2(base, "docker-compose.yml");
   const settingsPath = join2(base, "docker", "searxng", "settings.yml");
   const firecrawlEnvPath = join2(base, "docker", "firecrawl", "firecrawl.env");
-  writeIfChanged(composePath, COMPOSE_YAML);
-  writeIfChanged(settingsPath, SEARXNG_SETTINGS_YAML);
-  writeIfChanged(firecrawlEnvPath, FIRECRAWL_ENV);
+  writeIfChanged(composePath, renderAsset(COMPOSE_YAML));
+  writeIfChanged(settingsPath, renderAsset(SEARXNG_SETTINGS_YAML));
+  writeIfChanged(firecrawlEnvPath, renderAsset(FIRECRAWL_ENV));
   return composePath;
 }
 function writeIfChanged(path, content) {
@@ -2796,6 +2799,7 @@ export {
   pubmedAbstractUrl,
   rankedKeywords,
   readResource,
+  renderAsset,
   rescueViaWayback,
   resetBrand,
   resetDocLadderCache,

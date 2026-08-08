@@ -13,7 +13,7 @@ import { brand, env, envInt, envName } from "./brand.js";
 // copies drift from them.
 
 export const COMPOSE_YAML = `# Optional, fully-local, no-API-key stack for a semantic mode, web
-# search and content extraction. Start it with \`webindex semantic up\` (or
+# search and content extraction. Start it with \`{{CLI}} semantic up\` (or
 # \`docker compose --profile all up -d\`). The published bundle stays
 # dependency-free — it only speaks HTTP to these containers on localhost;
 # nothing here is required for Tier-1 retrieval.
@@ -22,7 +22,7 @@ export const COMPOSE_YAML = `# Optional, fully-local, no-API-key stack for a sem
 #   --profile semantic  → qdrant + ollama (vector search)
 #   --profile search    → searxng (web discovery)
 #   --profile all       → everything above
-#   --profile extract   → firecrawl (content cleaning; \`webindex firecrawl up\`)
+#   --profile extract   → firecrawl (content cleaning; \`{{CLI}} firecrawl up\`)
 # ── One stack, however many tools use it ─────────────────────────────────────
 # Any tool needing SearXNG or Firecrawl binds the SAME host ports. Run two from
 # separate compose projects and only one can ever be up: the second fails with
@@ -60,7 +60,7 @@ services:
 
   # Local embedding server — no key, no data leaves the machine. Pull the model
   # once: \`docker compose exec ollama ollama pull nomic-embed-text\`
-  # (\`webindex semantic up\` does this for you).
+  # (\`{{CLI}} semantic up\` does this for you).
   ollama:
     image: ollama/ollama:0.30.7
     container_name: skills-ollama
@@ -106,7 +106,7 @@ services:
   # docker/firecrawl/firecrawl.env for the tunables.
   #
   # Deliberately NOT in the "all" profile: it is ~3 GB of images and 5
-  # containers, and \`webindex semantic up\` must stay cheap.
+  # containers, and \`{{CLI}} semantic up\` must stay cheap.
   #
   #   docker compose --profile search --profile extract up -d --wait
   firecrawl:
@@ -279,14 +279,26 @@ LOGGING_LEVEL=info
 // content changed, so an upgrade refreshes it) and return the compose file path.
 // The searxng settings and the firecrawl env file keep their ./docker/...
 // relative paths, so the embedded copies stay byte-identical to the repo files.
+/**
+ * The embedded assets with `{{CLI}}` resolved to the consumer's command.
+ *
+ * The templates name a tool in their comments, and the tool they name is
+ * whoever wrote the file out — not this engine. A vendored copy that told the
+ * reader to run `webindex semantic up` would be naming a binary they do not
+ * have. Substituted at CALL time, per the lazy rule in src/brand.ts.
+ */
+export function renderAsset(template: string): string {
+  return template.replaceAll("{{CLI}}", brand().cli);
+}
+
 export function ensureComposeMaterialized(): string {
   const base = join(brand().cacheDir ?? join(tmpdir(), brand().name), "compose");
   const composePath = join(base, "docker-compose.yml");
   const settingsPath = join(base, "docker", "searxng", "settings.yml");
   const firecrawlEnvPath = join(base, "docker", "firecrawl", "firecrawl.env");
-  writeIfChanged(composePath, COMPOSE_YAML);
-  writeIfChanged(settingsPath, SEARXNG_SETTINGS_YAML);
-  writeIfChanged(firecrawlEnvPath, FIRECRAWL_ENV);
+  writeIfChanged(composePath, renderAsset(COMPOSE_YAML));
+  writeIfChanged(settingsPath, renderAsset(SEARXNG_SETTINGS_YAML));
+  writeIfChanged(firecrawlEnvPath, renderAsset(FIRECRAWL_ENV));
   return composePath;
 }
 

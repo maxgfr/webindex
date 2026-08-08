@@ -11,6 +11,7 @@ import {
   type StackRun,
   ensureComposeMaterialized,
   embedModel,
+  renderAsset,
   stackControl,
 } from "../src/stack.js";
 import { envName } from "../src/brand.js";
@@ -41,24 +42,32 @@ describe("the embedded assets", () => {
 
   it("names no particular consuming tool", () => {
     // The stack is shared infrastructure; naming one tool in the file every
-    // other tool also writes out is how the copies drift.
+    // other tool also writes out is how the copies drift. "webindex" counts:
+    // a vendored copy writing it out would be telling the reader to run a
+    // binary they do not have.
     const assets: [string, string][] = [
       ["compose", COMPOSE_YAML],
       ["searxng", SEARXNG_SETTINGS_YAML],
       ["firecrawl", FIRECRAWL_ENV],
     ];
     for (const [label, text] of assets) {
-      expect(text.toLowerCase(), label).not.toMatch(/ultrasearch|ultradoc|maxgfr\/construct/);
+      expect(text.toLowerCase(), label).not.toMatch(/ultrasearch|ultradoc|maxgfr\/construct|webindex/);
     }
+  });
+
+  it("addresses the reader in the consumer's own command", () => {
+    const rendered = renderAsset(COMPOSE_YAML);
+    expect(rendered).toContain("webindex-tests semantic up"); // the test brand
+    expect(rendered).not.toContain("{{CLI}}"); // no placeholder survives
   });
 });
 
 describe("materialisation", () => {
   it("writes the compose file and both assets, and is idempotent", () => {
     const first = ensureComposeMaterialized();
-    expect(readFileSync(first, "utf8")).toBe(COMPOSE_YAML);
-    expect(readFileSync(join(dirname(first), "docker", "searxng", "settings.yml"), "utf8")).toBe(SEARXNG_SETTINGS_YAML);
-    expect(readFileSync(join(dirname(first), "docker", "firecrawl", "firecrawl.env"), "utf8")).toBe(FIRECRAWL_ENV);
+    expect(readFileSync(first, "utf8")).toBe(renderAsset(COMPOSE_YAML));
+    expect(readFileSync(join(dirname(first), "docker", "searxng", "settings.yml"), "utf8")).toBe(renderAsset(SEARXNG_SETTINGS_YAML));
+    expect(readFileSync(join(dirname(first), "docker", "firecrawl", "firecrawl.env"), "utf8")).toBe(renderAsset(FIRECRAWL_ENV));
     expect(ensureComposeMaterialized()).toBe(first);
   });
 
