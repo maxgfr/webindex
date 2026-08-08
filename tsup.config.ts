@@ -26,7 +26,17 @@ export default defineConfig({
   target: "node18",
   platform: "node",
   bundle: true,
-  dts: true,
+  // Declarations for the LIBRARY entry only.
+  //
+  // `dts: true` generates them per entry, and with two entries sharing code
+  // tsup's dts bundler hoists the common types into a chunk that engine.d.mts
+  // then imports. Consumers vendor exactly two files, so that chunk never
+  // arrives: every MCP type silently resolves to nothing and their `McpAdapter`
+  // callbacks degrade to implicit any. That is how v1.7.0 shipped declarations
+  // 129 lines shorter than v1.6.0's and broke all three skills' typecheck.
+  //
+  // Nobody imports the CLI as a module anyway — it is a program.
+  dts: { entry: { engine: "src/index.ts" } },
   clean: false,
   minify: false,
   splitting: false,
