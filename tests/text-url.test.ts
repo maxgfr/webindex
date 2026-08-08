@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildMatcher, isStopword, keywords, rankedKeywords } from "../src/text.js";
+import { configure, resetBrand } from "../src/brand.js";
 import { canonicalizeUrl, domainOf, fnv1a64, LOCAL_FILE_DOMAIN, normalizeDoi } from "../src/url.js";
 
 // Ported from the blocks of each skill's util.test.ts whose subjects moved into
@@ -143,5 +144,32 @@ describe("isStopword", () => {
 
   it("is case-insensitive", () => {
     expect(isStopword("THE")).toBe(true);
+  });
+});
+
+describe("extraStopwords", () => {
+  it("lets a consumer drop words the shared list keeps", () => {
+    // ultradoc reads source repositories, where "test" and "request" appear in
+    // almost every file — keeping them as keywords scores every document alike.
+    // A market-research tool would say the opposite, so the engine cannot decide.
+    expect(isStopword("test")).toBe(false);
+    configure({ name: "docs-tool", envPrefix: "DOCS", cli: "docs", extraStopwords: ["request", "test"] });
+    expect(isStopword("test")).toBe(true);
+    expect(isStopword("TEST")).toBe(true);
+    expect(isStopword("maxRetries")).toBe(false);
+  });
+
+  it("applies to keyword extraction and the matcher, not just the predicate", () => {
+    // The two must agree: a term the tokeniser drops but the matcher keeps means
+    // a document ranks on a word its excerpt never highlights.
+    configure({ name: "docs-tool", envPrefix: "DOCS", cli: "docs", extraStopwords: ["test"] });
+    expect(keywords("how does the test harness retry?")).not.toContain("test");
+    expect(buildMatcher("test harness").matchLine("a test file").size).toBe(0);
+  });
+
+  it("is absent by default, so the shared list stands alone", () => {
+    resetBrand();
+    expect(isStopword("test")).toBe(false);
+    expect(keywords("the test harness")).toContain("test");
   });
 });

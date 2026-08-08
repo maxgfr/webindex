@@ -8,6 +8,8 @@
 // fold accents and plurals, split camelCase/snake_case, compile
 // accent-insensitive patterns. Deterministic, no LLM, no dependencies.
 
+import { brand } from "./brand.js";
+
 export function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -178,7 +180,13 @@ const STOPWORDS = new Set([
  * looks like a bug in neither.
  */
 export function isStopword(term: string): boolean {
-  return STOPWORDS.has(term.toLowerCase());
+  const t = term.toLowerCase();
+  if (STOPWORDS.has(t)) return true;
+  // Read through the brand, at CALL time, so a consumer's extras apply to
+  // buildMatcher and to its own tokeniser alike — the two must agree on what a
+  // term is, or a document ranks on a word the excerpt never highlights.
+  const extra = brand().extraStopwords;
+  return extra ? extra.some((w) => w.toLowerCase() === t) : false;
 }
 
 export function keywords(question: string): string[] {
@@ -188,7 +196,7 @@ export function keywords(question: string): string[] {
     if (!raw) continue;
     const lower = raw.toLowerCase();
     if (raw.length < 2) continue;
-    if (STOPWORDS.has(lower)) continue;
+    if (isStopword(lower)) continue;
     if (seen.has(lower)) continue;
     seen.add(lower);
     out.push(raw);
@@ -272,7 +280,7 @@ export function subtokens(raw: string): string[] {
   const out: string[] = [];
   for (const p of parts) {
     const lower = p.toLowerCase();
-    if (lower.length < 3 || STOPWORDS.has(lower)) continue;
+    if (lower.length < 3 || isStopword(lower)) continue;
     if (!out.includes(lower)) out.push(lower);
     if (out.length >= 4) break;
   }

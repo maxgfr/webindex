@@ -22,6 +22,20 @@ interface Brand {
      * the shared engine underneath.
      */
     contactUrl?: string;
+    /**
+     * Words this consumer wants dropped on top of the engine's list.
+     *
+     * The shared list is question scaffolding — "what", "is", "the", plus the
+     * French equivalents. What counts as noise BEYOND that is domain knowledge the
+     * engine cannot have: a documentation tool reading source repositories sees
+     * "test" and "request" in almost every file, so keeping them as keywords
+     * scores every document alike. A market-research tool would say the opposite.
+     *
+     * This exists so adopting the shared matcher is not an all-or-nothing choice.
+     * Without it a consumer with two extra words has to keep its own copy of the
+     * whole keyword machinery — which is exactly the duplication being removed.
+     */
+    extraStopwords?: string[];
 }
 /**
  * Declare the consuming skill's identity. Call once, as early as possible in

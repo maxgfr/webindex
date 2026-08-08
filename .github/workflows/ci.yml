@@ -82,3 +82,11 @@ jobs:
 
       - name: The bundle declares no runtime dependencies
         run: node scripts/check-vendorable.mjs
+
+      # Everything above runs webindex from inside webindex. This is the only
+      # job that asks the question the package actually has to answer: can a
+      # project with no relationship to this repo vendor one file and get a
+      # working engine? It builds a consumer elsewhere on disk, under a brand no
+      # skill uses, and exercises the real surface offline.
+      - name: The engine stands alone (third-party consumer, foreign brand)
+        run: node scripts/consumer-smoke.mjs
