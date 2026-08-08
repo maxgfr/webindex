@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.12.1](https://github.com/maxgfr/webindex/compare/v1.12.0...v1.12.1) (2026-08-08)
+
+
+### Bug Fixes
+
+* **stack:** materialise the compose under <PREFIX>_CACHE_DIR ([9609b0f](https://github.com/maxgfr/webindex/commit/9609b0f78dbdc4e0a8b2b535f06b2a3d8b1905c0))
+
 # [1.12.0](https://github.com/maxgfr/webindex/compare/v1.11.1...v1.12.0) (2026-08-08)
 
 
