@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.11.0](https://github.com/maxgfr/webindex/compare/v1.10.0...v1.11.0) (2026-08-08)
+
+
+### Features
+
+* **stack:** drive the containers as well as ship them ([0947790](https://github.com/maxgfr/webindex/commit/0947790f1c14c9dc242a8fe1f2905305d9065dcf))
+
 # [1.10.0](https://github.com/maxgfr/webindex/compare/v1.9.0...v1.10.0) (2026-08-08)
 
 
