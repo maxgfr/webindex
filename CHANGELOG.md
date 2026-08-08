@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.12.0](https://github.com/maxgfr/webindex/compare/v1.11.1...v1.12.0) (2026-08-08)
+
+
+### Features
+
+* **stack:** fold several services into one compose call ([b25a26e](https://github.com/maxgfr/webindex/commit/b25a26eeca53df1d0eb510a3831146e43ab8ea95))
+
 ## [1.11.1](https://github.com/maxgfr/webindex/compare/v1.11.0...v1.11.1) (2026-08-08)
 
 
