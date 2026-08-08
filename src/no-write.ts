@@ -3,10 +3,10 @@ import { envFlag } from "./brand.js";
 
 // The no-write gate.
 //
-// Every command worth running persists something: a gather lays down a whole
-// dossier directory, `render` an index.html/index.md pair, `brainstorm` a
-// BRAINSTORM.md. That is the right default — the workflow is file-mediated, and
-// the report tiers the model writes live beside the evidence it cites.
+// Every command worth running persists something: a run lays down a directory
+// of evidence, a render writes an index.html/index.md pair. That is the right
+// default — the workflow is file-mediated, and what the model writes lives
+// beside the material it cites.
 //
 // It is also unusable in a read-only phase: a planning phase, a sandbox, any
 // harness that forbids writes. There the caller wants one thing — real sources,

@@ -9,12 +9,66 @@ the code you have locally, webindex fetches what is out there.
 
 ```bash
 brew install maxgfr/tap/webindex
-
-webindex fetch https://example.com     # URL -> clean text
-webindex extract report.pdf            # a file already on disk
-webindex mcp                           # serve fetch/extract over MCP
-webindex doctor                        # which rungs and helpers are available
 ```
+
+## The command line
+
+| Command | What it does |
+|---|---|
+| `webindex fetch <url>` | Fetch a URL and print its readable text. Routes PDFs and office documents to their ladders, falls back through Firecrawl and the Wayback Machine when a page resists. `--json` adds the title, status, extractor and any note. `--lang fr-FR` sets Accept-Language, `--firecrawl <base>\|off` overrides the extractor. |
+| `webindex extract <file>` | The same extraction on a file already on disk — PDF, office document, HTML or plain text. `--json` as above. |
+| `webindex mcp` | Serve the two tools below to an agent. `--transport stdio` (default) or `http` with `--port`, `--bind`, `--allow-remote`. |
+| `webindex searxng up\|down\|status` | Drive the keyless SearXNG container. |
+| `webindex firecrawl up\|down\|status` | Drive Firecrawl, which cleans a page with a real headless browser. It delegates its own search to SearXNG, so this starts both. |
+| `webindex stack up\|down\|status\|path` | Everything at once. `path` prints where the compose file was written. |
+| `webindex doctor` | Which optional helpers answer, which extraction rungs exist on this machine. |
+| `webindex version` | The engine version. |
+
+Nothing above needs an API key, and nothing is required: every optional helper
+degrades to a note rather than an error.
+
+### The container stack is embedded
+
+`searxng`, `firecrawl` and `stack` do not need a checkout. The compose file, the
+SearXNG settings and the Firecrawl env are compiled into the binary and written
+out on first use — so they work from a Homebrew cellar, a global npm install or a
+vendored bundle alike.
+
+The stack uses one fixed project name and one set of container names, so several
+tools on the same machine share a single set of containers instead of fighting
+over the same host ports.
+
+```bash
+webindex firecrawl up      # searxng + firecrawl, detached, waits for health
+webindex stack status
+webindex stack path        # where the compose file landed, if you want to read it
+```
+
+## The MCP server
+
+`webindex mcp` exposes two tools. Point any MCP client at it:
+
+```bash
+claude mcp add webindex -- webindex mcp                    # stdio
+claude mcp add --transport http webindex http://127.0.0.1:7340/mcp
+```
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `webindex_fetch` | `url` (required), `lang` | The page's readable text plus the rung that produced it. Handles HTML, PDFs and office documents, and falls back through Firecrawl and the Wayback Machine. Never raw bytes. |
+| `webindex_extract` | `path` (required) | The same for a file already on disk. |
+
+The server implements `initialize`, `ping`, `tools/list`, `tools/call`,
+`resources/list`, `resources/read`, `prompts/list`, `prompts/get`, and
+`notifications/cancelled`. It negotiates protocol revisions from `2024-11-05` to
+`2025-11-25`, validates arguments against each tool's declared schema, withholds
+an oversized response rather than sending a truncated one, and distinguishes a
+tool that failed (a readable `isError` result) from a client that asked wrongly
+(a JSON-RPC error).
+
+Over HTTP it binds loopback only unless `--allow-remote`, checks the `Origin`
+header against DNS rebinding, and answers each request statelessly.
+
 
 ## What is in scope
 

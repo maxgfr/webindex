@@ -212,3 +212,24 @@ describe("the MCP tools", () => {
     for (const t of adapter.listTools(LATEST_PROTOCOL)) expect(adapter.capAdvice?.[t.name]).toBeTruthy();
   });
 });
+
+describe("the container stack", () => {
+  it("prints where the compose file was written", async () => {
+    expect(await run(["stack", "path"])).toBe(0);
+    expect(stdout().trim()).toMatch(/docker-compose\.yml$/);
+  });
+
+  it("rejects an action that is not up, down or status", async () => {
+    for (const cmd of ["searxng", "firecrawl", "stack"]) {
+      out = [];
+      err = [];
+      expect(await run([cmd, "restart"]), cmd).toBe(1);
+      expect(stderr(), cmd).toMatch(/usage: webindex/);
+    }
+  });
+
+  it("offers `path` only on stack, since the other two drive one service", async () => {
+    expect(await run(["searxng", "path"])).toBe(1);
+    expect(stderr()).toMatch(/up\|down\|status$/m);
+  });
+});

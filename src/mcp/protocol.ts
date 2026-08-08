@@ -1,12 +1,12 @@
 // The MCP wire rules, with no knowledge of what the tools do and no I/O. Kept
-// separate from tools.ts and server.ts so the parts that are pure functions of
+// separate from the server so the parts that are pure functions of
 // their input stay directly testable.
 //
 // Written by hand rather than pulled from @modelcontextprotocol/sdk: the shipped
 // bundle has zero runtime dependencies (design principle 2), and the surface an
-// server a skill needs — initialize, ping, tools/list, tools/call — is a few
+// server a consumer needs — initialize, ping, tools/list, tools/call — is a few
 // hundred lines. The vendored codeindex engine ships the same shape at
-// src/vendor/codeindex-engine.mjs:10468; this is that shape, retargeted.
+// the same shape codeindex's engine ships, retargeted.
 
 // Oldest first. We answer on whichever of these the client asks for, and fall
 // back to the newest when it asks for something we don't know — the spec's
@@ -118,7 +118,7 @@ export function validateArgs(schema: JsonSchema, args: Record<string, unknown>):
  * names the narrowing argument gets a smaller second call. Which argument that
  * is depends entirely on the tool, so the map is supplied by the consuming
  * skill through McpAdapter.capAdvice — the engine knows a response is oversized,
- * only the skill knows how to make it smaller.
+ * only the consumer knows how to make it smaller.
  */
 export type CapAdvice = Record<string, string>;
 

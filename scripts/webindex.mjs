@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import { readFileSync as readFileSync3 } from "fs";
+import { readFileSync as readFileSync4 } from "fs";
 import { basename as basename2 } from "path";
 import { pathToFileURL } from "url";
 
@@ -926,6 +926,317 @@ async function fetchAndExtract(url, opts = {}) {
   return { text, title, canonical, finalUrl: res.url, status: res.status, note: firecrawlNote };
 }
 
+// src/stack.ts
+import { spawn as spawn2 } from "child_process";
+import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
+import { tmpdir as tmpdir2 } from "os";
+import { dirname, join as join2 } from "path";
+var COMPOSE_YAML = `# Optional, fully-local, no-API-key stack for a semantic mode, web
+# search and content extraction. Start it with \`webindex semantic up\` (or
+# \`docker compose --profile all up -d\`). The published bundle stays
+# dependency-free \u2014 it only speaks HTTP to these containers on localhost;
+# nothing here is required for Tier-1 retrieval.
+#
+# Profiles let you start subsets:
+#   --profile semantic  \u2192 qdrant + ollama (vector search)
+#   --profile search    \u2192 searxng (web discovery)
+#   --profile all       \u2192 everything above
+#   --profile extract   \u2192 firecrawl (content cleaning; \`webindex firecrawl up\`)
+# \u2500\u2500 One stack, however many tools use it \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+# Any tool needing SearXNG or Firecrawl binds the SAME host ports. Run two from
+# separate compose projects and only one can ever be up: the second fails with
+# "port is already allocated", after leaving its sidecars running.
+#
+# So this file uses one fixed project name, one set of container names and one
+# set of volumes. A second tool bringing the stack up is a no-op against the
+# containers already running, and the whole thing costs one machine's worth of
+# RAM rather than one per tool.
+#
+# WARNING: any tool shipping its own copy of these service blocks must keep them
+# byte-identical. Docker compares the RESOLVED config, so a divergence makes an
+# up from one recreate the other's running containers.
+
+name: skills
+
+services:
+  # Vector database \u2014 Apache-2.0, self-hosted, no key.
+  qdrant:
+    image: qdrant/qdrant:v1.18.2
+    container_name: skills-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant:/qdrant/storage
+    restart: unless-stopped
+    profiles: ["semantic", "all"]
+    healthcheck:
+      # The image ships no curl/wget \u2014 probe the REST port over bash's /dev/tcp.
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Local embedding server \u2014 no key, no data leaves the machine. Pull the model
+  # once: \`docker compose exec ollama ollama pull nomic-embed-text\`
+  # (\`webindex semantic up\` does this for you).
+  ollama:
+    image: ollama/ollama:0.30.7
+    container_name: skills-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+    profiles: ["semantic", "all"]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Self-hosted metasearch for keyless web discovery. JSON output is enabled in
+  # docker/searxng/settings.yml so the engine can be queried programmatically.
+  # Also backs Firecrawl's keyless /search through SEARXNG_ENDPOINT.
+  searxng:
+    image: searxng/searxng:2026.6.11-a1490676e
+    container_name: skills-searxng
+    ports:
+      - "8888:8080"
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+    volumes:
+      - ./docker/searxng:/etc/searxng:rw
+    restart: unless-stopped
+    profiles: ["search", "all"]
+    healthcheck:
+      # busybox wget is in the image; /healthz answers on the container port.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Self-hosted Firecrawl \u2014 keyless content cleaning. Fetches a page with a real
+  # browser and returns main-content markdown, which beats the built-in regex
+  # HTML stripper on nav/cookie chrome and is the only way JS-rendered pages
+  # yield any text at all. Keyless because USE_DB_AUTHENTICATION=false; see
+  # docker/firecrawl/firecrawl.env for the tunables.
+  #
+  # Deliberately NOT in the "all" profile: it is ~3 GB of images and 5
+  # containers, and \`webindex semantic up\` must stay cheap.
+  #
+  #   docker compose --profile search --profile extract up -d --wait
+  firecrawl:
+    image: ghcr.io/firecrawl/firecrawl:2.10.5@sha256:8ce1af201332e1de046d70d5d516fbfe7f0f6229820d271d880873eeca531ea6
+    container_name: skills-firecrawl
+    ports:
+      - "3002:3002"
+    env_file:
+      - ./docker/firecrawl/firecrawl.env
+    environment:
+      # Wiring lives here; tunables live in the env file above.
+      - HOST=0.0.0.0
+      - PORT=3002
+      - ENV=local
+      - REDIS_URL=redis://firecrawl-redis:6379
+      - REDIS_RATE_LIMIT_URL=redis://firecrawl-redis:6379
+      - PLAYWRIGHT_MICROSERVICE_URL=http://firecrawl-playwright:3000/scrape
+      - POSTGRES_HOST=firecrawl-postgres
+      - NUQ_RABBITMQ_URL=amqp://firecrawl-rabbitmq:5672
+      # Keeps /search keyless by delegating to the searxng service above.
+      # Unreachable when the \`search\` profile is down \u2014 Firecrawl then falls
+      # back to DuckDuckGo on its own.
+      - SEARXNG_ENDPOINT=http://searxng:8080
+    command: node dist/src/harness.js --start-docker
+    depends_on:
+      firecrawl-redis:
+        condition: service_started
+      firecrawl-playwright:
+        condition: service_started
+      firecrawl-postgres:
+        condition: service_started
+      firecrawl-rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["extract"]
+    # The image ships no curl/wget, but it is a Node image \u2014 probe with node.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    # Trimmed for a 16 GB laptop; upstream asks for 4 CPU / 8 GB. Measured at
+    # 2.3 GB steady under 5 concurrent scrapes, so 3 GB was too tight a cap \u2014
+    # MAX_RAM=0.8 in the env file makes Firecrawl self-throttle at ~3.2 GB.
+    cpus: 2.0
+    mem_limit: 4g
+    memswap_limit: 4g
+
+  # Headless-browser sidecar \u2014 this is what makes JS-rendered pages extractable.
+  firecrawl-playwright:
+    image: ghcr.io/firecrawl/playwright-service:latest@sha256:8c50add7293201e575110e6c7489fa383a9dfc46f168936526a458e06ffc5c28
+    container_name: skills-firecrawl-playwright
+    environment:
+      - PORT=3000
+      - BLOCK_MEDIA=true
+      - MAX_CONCURRENT_PAGES=4
+    restart: unless-stopped
+    profiles: ["extract"]
+    cpus: 1.5
+    mem_limit: 2g
+    memswap_limit: 2g
+    tmpfs:
+      - /tmp/.cache:noexec,nosuid,size=512m
+
+  firecrawl-redis:
+    image: redis:alpine
+    container_name: skills-firecrawl-redis
+    command: redis-server --bind 0.0.0.0
+    restart: unless-stopped
+    profiles: ["extract"]
+
+  firecrawl-rabbitmq:
+    image: rabbitmq:3-management
+    container_name: skills-firecrawl-rabbitmq
+    restart: unless-stopped
+    profiles: ["extract"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  firecrawl-postgres:
+    image: ghcr.io/firecrawl/nuq-postgres:latest@sha256:aed86f62858f29bd971abddcdeb301c12888098d2cf5d33c1ba42b053bc460f6
+    container_name: skills-firecrawl-postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=postgres
+    volumes:
+      - firecrawl_pg:/var/lib/postgresql/data
+    restart: unless-stopped
+    profiles: ["extract"]
+
+volumes:
+  qdrant:
+  ollama:
+  firecrawl_pg:
+`;
+var SEARXNG_SETTINGS_YAML = `# Minimal SearXNG config for keyless, self-hosted web discovery. The important
+# bit is enabling the JSON output format so the CLI can query it
+# programmatically (\`/search?format=json\`) \u2014 most PUBLIC instances disable it,
+# which is why a local one ships here.
+#
+# The service names and ports below are deliberately stable, so several tools on
+# one machine share a single container rather than each starting their own.
+use_default_settings: true
+
+server:
+  # Override with a real random secret if you expose this beyond localhost.
+  secret_key: "searxng-local-dev-change-me"
+  # The limiter/bot-detection middleware answers 403 to format=json requests.
+  limiter: false
+  image_proxy: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+`;
+var FIRECRAWL_ENV = `# Tunables for the self-hosted Firecrawl stack (docker compose --profile extract).
+# Wiring (hostnames, ports, SEARXNG_ENDPOINT) lives in docker-compose.yml and
+# overrides anything set here.
+
+# THIS is what makes the API keyless. Turning it on would require a Supabase
+# project; there is no reason to for a localhost stack.
+USE_DB_AUTHENTICATION=false
+
+# Firecrawl's Rust PDF extractor, which is OFF by default upstream. Without it
+# Firecrawl falls back to pdf-parse (JS) for PDFs. Still keyless: this is the
+# local Rust path, not the MinerU / Fire PDF routes, which need API credentials.
+# Reached as a rung of the PDF ladder when the built-in reader finds no text.
+PDF_RUST_EXTRACT_ENABLE=true
+
+# Postgres credentials for the bundled nuq-postgres container. It is not
+# published on a host port, so these never leave the compose network.
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=postgres
+POSTGRES_PORT=5432
+
+# Admin queue dashboard at http://localhost:3002/admin/CHANGEME/queues
+BULL_AUTH_KEY=CHANGEME
+
+# Concurrency, trimmed for a laptop. Upstream defaults are 8/5/5/10 and assume
+# a 4-CPU / 8-GB box; these keep the stack near ~4 GB total.
+NUM_WORKERS_PER_QUEUE=2
+MAX_CONCURRENT_JOBS=3
+BROWSER_POOL_SIZE=2
+CRAWL_CONCURRENT_REQUESTS=4
+
+# Back off before the host runs out of headroom.
+MAX_CPU=0.8
+MAX_RAM=0.8
+
+LOGGING_LEVEL=info
+`;
+function ensureComposeMaterialized() {
+  const base = join2(brand().cacheDir ?? join2(tmpdir2(), brand().name), "compose");
+  const composePath = join2(base, "docker-compose.yml");
+  const settingsPath = join2(base, "docker", "searxng", "settings.yml");
+  const firecrawlEnvPath = join2(base, "docker", "firecrawl", "firecrawl.env");
+  writeIfChanged(composePath, COMPOSE_YAML);
+  writeIfChanged(settingsPath, SEARXNG_SETTINGS_YAML);
+  writeIfChanged(firecrawlEnvPath, FIRECRAWL_ENV);
+  return composePath;
+}
+function writeIfChanged(path, content) {
+  try {
+    if (existsSync2(path) && readFileSync2(path, "utf8") === content) return;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync2(path, content);
+  } catch {
+  }
+}
+var SERVICE_PROFILES = {
+  searxng: ["search"],
+  firecrawl: ["search", "extract"],
+  semantic: ["semantic"],
+  all: ["all", "extract"]
+};
+var STACK_SERVICES = Object.keys(SERVICE_PROFILES);
+function composeControl(service, action) {
+  const profiles = SERVICE_PROFILES[service];
+  if (!profiles) {
+    process.stderr.write(`${brand().cli}: unknown service "${service}" \u2014 expected one of ${STACK_SERVICES.join(", ")}
+`);
+    return Promise.resolve(1);
+  }
+  const file = ensureComposeMaterialized();
+  const flags = profiles.flatMap((p) => ["--profile", p]);
+  const verb = action === "status" ? ["ps"] : action === "up" ? ["up", "-d", "--wait"] : ["down"];
+  const args = ["compose", "-f", file, ...flags, ...verb];
+  return new Promise((resolve2) => {
+    const child = spawn2("docker", args, { stdio: "inherit" });
+    child.on("error", (e) => {
+      process.stderr.write(
+        e.code === "ENOENT" ? `${brand().cli}: docker not found on PATH. The stack is optional \u2014 every rung it provides degrades to a note.
+` : `${brand().cli}: ${e.message}
+`
+      );
+      resolve2(1);
+    });
+    child.on("close", (code) => resolve2(code ?? 1));
+  });
+}
+
 // src/mcp/protocol.ts
 var PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
 var LATEST_PROTOCOL = PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1];
@@ -1010,26 +1321,26 @@ function isOriginAllowed(origin, allowed = []) {
 }
 
 // src/mcp/resources.ts
-import { existsSync as existsSync2, readdirSync, readFileSync as readFileSync2, realpathSync, statSync } from "fs";
-import { basename, dirname, join as join2, resolve, sep } from "path";
+import { existsSync as existsSync3, readdirSync, readFileSync as readFileSync3, realpathSync, statSync } from "fs";
+import { basename, dirname as dirname2, join as join3, resolve, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
 function resolveSkillRoot(moduleDir) {
-  const here = moduleDir ?? dirname(fileURLToPath(import.meta.url));
+  const here = moduleDir ?? dirname2(fileURLToPath(import.meta.url));
   const name = brand().name;
   const candidates = [resolve(here, ".."), resolve(here, "..", "skills", name), resolve(here, "..", "..", "skills", name)];
-  return candidates.find((dir) => existsSync2(join2(dir, "SKILL.md")));
+  return candidates.find((dir) => existsSync3(join3(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
-  const refDir = join2(root, "references");
-  if (!existsSync2(refDir)) return out;
+  const refDir = join3(root, "references");
+  if (!existsSync3(refDir)) return out;
   for (const file of readdirSync(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join2("references", file), `${skillName()} reference: ${basename(file, ".md")}`));
+    out.push(describe(root, join3("references", file), `${skillName()} reference: ${basename(file, ".md")}`));
   }
   return out;
 }
@@ -1053,7 +1364,7 @@ function readResource(uri, moduleDir) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
   if (!statSync(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
-  return { uri, mimeType: "text/markdown", text: readFileSync2(targetReal, "utf8") };
+  return { uri, mimeType: "text/markdown", text: readFileSync3(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
 };
@@ -1064,14 +1375,14 @@ function describe(root, rel, fallbackTitle) {
     title: fallbackTitle,
     mimeType: "text/markdown"
   };
-  const summary = firstProse(join2(root, rel));
+  const summary = firstProse(join3(root, rel));
   if (summary) decl.description = summary;
   return decl;
 }
 function firstProse(file) {
   let text;
   try {
-    text = readFileSync2(file, "utf8");
+    text = readFileSync3(file, "utf8");
   } catch {
     return void 0;
   }
@@ -1480,13 +1791,16 @@ function readBody(req) {
 configure({ name: "webindex", envPrefix: "WEBINDEX", cli: "webindex", contactUrl: "https://github.com/maxgfr/webindex" });
 var HELP = `webindex v${ENGINE_VERSION}
 Turn a URL or a file into clean, citable text \u2014 HTML, PDFs through a six-rung
-ladder ending in OCR, and office documents. The engine three agent skills
-vendor, usable on its own.
+ladder ending in OCR, and office documents \u2014 and serve that to an agent over
+MCP. Zero dependencies, no API key.
 
 USAGE
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>]
   webindex extract <file> [--json]
   webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>]
+  webindex searxng   up|down|status
+  webindex firecrawl up|down|status
+  webindex stack     up|down|status|path
   webindex doctor
   webindex version
 
@@ -1496,6 +1810,11 @@ COMMANDS
              Firecrawl and the Wayback Machine when a page resists.
   extract    Same extraction, on a file already on disk.
   mcp        Serve fetch/extract to an agent over MCP (stdio by default).
+  searxng    Bring the keyless SearXNG container up or down, or show it.
+  firecrawl  Same for Firecrawl, which cleans a page with a real browser. It
+             delegates its own search to SearXNG, so this starts both.
+  stack      Everything at once; 'path' prints where the compose file was
+             written. The stack is EMBEDDED in this binary \u2014 no checkout needed.
   doctor     Report which optional helpers are reachable and which extraction
              rungs are available on this machine.
 
@@ -1521,7 +1840,7 @@ function flag(argv, name) {
 async function extractLocal(path) {
   let bytes;
   try {
-    bytes = readFileSync3(path);
+    bytes = readFileSync4(path);
   } catch (e) {
     fail(`cannot read ${path}: ${e.message}`);
   }
@@ -1648,6 +1967,19 @@ async function main(argv = process.argv.slice(2)) {
 `);
     process.stderr.write(`  client: claude mcp add --transport http webindex ${running.url}
 `);
+    return;
+  }
+  if (cmd === "searxng" || cmd === "firecrawl" || cmd === "stack") {
+    const action = argv[1] ?? "status";
+    if (cmd === "stack" && action === "path") {
+      process.stdout.write(ensureComposeMaterialized() + "\n");
+      return;
+    }
+    if (action !== "up" && action !== "down" && action !== "status") {
+      fail(`usage: webindex ${cmd} up|down|status${cmd === "stack" ? "|path" : ""}`);
+    }
+    const code = await composeControl(cmd === "stack" ? "all" : cmd, action);
+    if (code !== 0) process.exit(code);
     return;
   }
   if (cmd === "doctor") {

@@ -20,6 +20,7 @@ import { docFormatForContentType, docFormatForUrl, extractDocument, enabledDocEx
 import { enabledExtractors, extractPdf, ocrTools } from "./pdf.js";
 import { fetchAndExtract, htmlToText, looksLikePdfUrl } from "./fetch.js";
 import { firecrawlBase, probeFirecrawl } from "./firecrawl.js";
+import { composeControl, ensureComposeMaterialized, STACK_SERVICES, type StackAction } from "./stack.js";
 import { ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
@@ -28,13 +29,16 @@ configure({ name: "webindex", envPrefix: "WEBINDEX", cli: "webindex", contactUrl
 
 const HELP = `webindex v${ENGINE_VERSION}
 Turn a URL or a file into clean, citable text — HTML, PDFs through a six-rung
-ladder ending in OCR, and office documents. The engine three agent skills
-vendor, usable on its own.
+ladder ending in OCR, and office documents — and serve that to an agent over
+MCP. Zero dependencies, no API key.
 
 USAGE
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>]
   webindex extract <file> [--json]
   webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>]
+  webindex searxng   up|down|status
+  webindex firecrawl up|down|status
+  webindex stack     up|down|status|path
   webindex doctor
   webindex version
 
@@ -44,6 +48,11 @@ COMMANDS
              Firecrawl and the Wayback Machine when a page resists.
   extract    Same extraction, on a file already on disk.
   mcp        Serve fetch/extract to an agent over MCP (stdio by default).
+  searxng    Bring the keyless SearXNG container up or down, or show it.
+  firecrawl  Same for Firecrawl, which cleans a page with a real browser. It
+             delegates its own search to SearXNG, so this starts both.
+  stack      Everything at once; 'path' prints where the compose file was
+             written. The stack is EMBEDDED in this binary — no checkout needed.
   doctor     Report which optional helpers are reachable and which extraction
              rungs are available on this machine.
 
@@ -210,6 +219,20 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     // which is which.
     process.stderr.write(`webindex: MCP server listening on ${running.url}\n`);
     process.stderr.write(`  client: claude mcp add --transport http webindex ${running.url}\n`);
+    return;
+  }
+
+  if (cmd === "searxng" || cmd === "firecrawl" || cmd === "stack") {
+    const action = argv[1] ?? "status";
+    if (cmd === "stack" && action === "path") {
+      process.stdout.write(ensureComposeMaterialized() + "\n");
+      return;
+    }
+    if (action !== "up" && action !== "down" && action !== "status") {
+      fail(`usage: webindex ${cmd} up|down|status${cmd === "stack" ? "|path" : ""}`);
+    }
+    const code = await composeControl(cmd === "stack" ? "all" : cmd, action as StackAction);
+    if (code !== 0) process.exit(code);
     return;
   }
 

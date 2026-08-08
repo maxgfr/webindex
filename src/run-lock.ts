@@ -1,25 +1,23 @@
-// Serialize work that touches one dossier directory.
+// Serialise work that touches one directory.
 //
-// `addSource` is not concurrency-safe: it reads sources.json, checks whether
-// the URL is already there, assigns the next free [S#] and writes the file
-// back. Two overlapping fetches into the same dossier both read the same
-// highest id, both claim it, and one source silently overwrites the other —
-// which is worse than losing it, because the citation still resolves, just to
-// the wrong page. `render` and `verify` read that same file while it is being
-// rewritten.
+// The pattern this exists for: a caller reads an index file, checks whether a
+// URL is already in it, assigns the next free id and writes the file back. Two
+// overlapping calls both read the same highest id, both claim it, and one entry
+// silently overwrites the other — worse than losing it, because a citation to
+// it still resolves, just to the wrong page. Readers of that same file see it
+// mid-rewrite.
 //
-// The CLI never hit this because one process runs one command to completion.
-// The MCP server can have several tool calls in flight at once, and ingesting
-// a handful of URLs concurrently is the obvious thing for a client to do.
+// A CLI never hits this: one process runs one command to completion. An MCP
+// server can have several tool calls in flight at once, and ingesting a handful
+// of URLs concurrently is the obvious thing for a client to do.
 //
-// The fix is a promise chain per dossier — the smallest thing that is actually
-// correct. It is deliberately coarse: a `read` blocks a `fetch` on the SAME
-// dossier, while different dossiers stay fully parallel. Note what is NOT
-// locked: `gather` creates its own directory, so there is nothing to contend
-// for until it returns.
+// The fix is a promise chain per key — the smallest thing that is actually
+// correct. It is deliberately coarse: a read blocks a write on the SAME key,
+// while different keys stay fully parallel. Work that creates its own directory
+// has nothing to contend for and should not take a lock at all.
 //
-// This guards a single process. An MCP server and a CLI invocation writing the
-// same dossier side by side remains a known gap.
+// This guards a single process. Two processes writing the same directory side
+// by side remains a known gap.
 const chains = new Map<string, Promise<unknown>>();
 
 export function withRunLock<T>(slug: string, fn: () => Promise<T>): Promise<T> {

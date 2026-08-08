@@ -18,7 +18,8 @@ import { fileURLToPath } from "node:url";
 
 /**
  * Display name used in resource titles. Comes from the brand, so a consumer
- * called "reader" serves "reader: the skill".
+ * called "reader" serves "reader: the skill" — SKILL.md is the file convention
+ * being served, not an assumption about who is serving it.
  */
 export const skillName = (): string => brand().name;
 
@@ -50,7 +51,7 @@ export interface ResourceContents {
 // own payload without this module knowing any of them by name.
 //
 // `moduleDir` is injectable for the same reason the vendored engine makes it
-// injectable (codeindex-engine.mjs:5560): a test must be able to point this at
+// injectable: a test must be able to point this at
 // a fixture without staging a fake bundle on disk.
 export function resolveSkillRoot(moduleDir?: string): string | undefined {
   const here = moduleDir ?? dirname(fileURLToPath(import.meta.url));

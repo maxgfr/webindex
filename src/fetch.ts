@@ -13,7 +13,7 @@ import { scrapeViaFirecrawl } from "./firecrawl.js";
 // safe only while the env prefix was a compile-time literal. In a vendored
 // engine it is not: this module is imported before the consumer can call
 // configure(), so a `const X = envInt("UA", …)` would freeze webindex's own
-// default prefix and never see ULTRASEARCH_/CONSTRUCT_/ULTRADOC_ at all.
+// default prefix and never see the consumer's at all.
 //
 // Hence functions. See the lazy rule in brand.ts — this is the concrete case
 // it exists for. The cost is a call per use; the alternative is silently
@@ -34,7 +34,7 @@ export function browserUa(): string {
  * The polite, identifying User-Agent for well-behaved JSON/XML APIs (arXiv,
  * Crossref, OpenAlex, Europe PMC). Naming ourselves is what lets them
  * attribute and throttle us courteously instead of blocking outright — so it
- * names the consuming SKILL, not the shared engine underneath.
+ * names the consuming tool, not the shared engine underneath.
  */
 export function contactUa(): string {
   const b = brand();
@@ -504,7 +504,7 @@ export interface ExtractResult {
 // Note policy: a MISSING Firecrawl is silent — the localhost default not being
 // up is the normal case and a per-URL note about it would drown the dossier.
 // A Firecrawl that is up and still fails, or one the user asked for explicitly
-// and did not get, does emit a note (src/backends/firecrawl.ts decides which).
+// and did not get, does emit a note (the caller decides which).
 export async function fetchAndExtract(url: string, opts: { acceptLanguage?: string; firecrawl?: string } = {}): Promise<ExtractResult> {
   const wantsPdf = looksLikePdfUrl(url);
   // An office document skips the HTML Firecrawl path for the same reason a PDF
@@ -666,7 +666,7 @@ export function nearestHeading(lines: string[], anchor: number): string | undefi
   return heading;
 }
 
-// Query-focused, multi-sentence snippet (the lead shown in sources.json /
+// Query-focused, multi-sentence snippet (the lead a caller shows beside a
 // DOSSIER.md). Splits the page text into sentences, scores each by how many of
 // the question's keywords it covers, and stitches together the top few (in
 // document order) under their nearest heading — so the agent reads the most

@@ -81,6 +81,12 @@ export * from "./providers.js";
 // the keyless engines expect.
 export * from "./locale.js";
 
+// ── The optional local container stack ──────────────────────────────────────
+// SearXNG, Firecrawl and the semantic pair, embedded so they can be driven from
+// any install rather than only from a checkout. Everything here is optional:
+// each service degrades to a note when absent.
+export * from "./stack.js";
+
 // ── Serialising work per key ────────────────────────────────────────────────
 // A per-key promise chain, so two concurrent calls touching the same directory
 // or repository queue instead of racing.
