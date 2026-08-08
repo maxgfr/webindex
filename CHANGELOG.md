@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.11.1](https://github.com/maxgfr/webindex/compare/v1.11.0...v1.11.1) (2026-08-08)
+
+
+### Bug Fixes
+
+* **stack:** address the reader in the consumer's command, not the engine's ([2dbafae](https://github.com/maxgfr/webindex/commit/2dbafae1c6bdf906d69a800422931d8ca97820fe))
+
 # [1.11.0](https://github.com/maxgfr/webindex/compare/v1.10.0...v1.11.0) (2026-08-08)
 
 
