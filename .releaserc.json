@@ -1,5 +1,7 @@
 {
-  "branches": ["main"],
+  "branches": [
+    "main"
+  ],
   "plugins": [
     "@semantic-release/commit-analyzer",
     "@semantic-release/release-notes-generator",
@@ -19,7 +21,14 @@
     [
       "@semantic-release/git",
       {
-        "assets": ["package.json", "src/version.ts", "CHANGELOG.md", "scripts/engine.mjs", "scripts/engine.d.mts"],
+        "assets": [
+          "package.json",
+          "src/version.ts",
+          "CHANGELOG.md",
+          "scripts/engine.mjs",
+          "scripts/engine.d.mts",
+          "scripts/webindex.mjs"
+        ],
         "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }
     ],
@@ -27,8 +36,18 @@
       "@semantic-release/github",
       {
         "assets": [
-          { "path": "scripts/engine.mjs", "label": "engine.mjs (webindex ${nextRelease.version})" },
-          { "path": "scripts/engine.d.mts", "label": "engine.d.mts (webindex ${nextRelease.version})" }
+          {
+            "path": "scripts/engine.mjs",
+            "label": "engine.mjs (webindex ${nextRelease.version})"
+          },
+          {
+            "path": "scripts/engine.d.mts",
+            "label": "engine.d.mts (webindex ${nextRelease.version})"
+          },
+          {
+            "path": "scripts/webindex.mjs",
+            "label": "webindex.mjs \u2014 the CLI (${nextRelease.version})"
+          }
         ]
       }
     ]
