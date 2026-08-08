@@ -497,6 +497,21 @@ declare function accentPattern(text: string): string;
 interface KeywordMatcher {
     expanded: ExpandedKeyword[];
     canonicals: string[];
+    /**
+     * The compiled pattern sources, each with the keyword it attributes to.
+     *
+     * What makes the matcher usable by something other than this process: a
+     * consumer can hand these to ripgrep or any external scanner and still map
+     * the hits back to canonicals. Without them the matcher only works line by
+     * line in memory, which is the wrong shape for searching a whole repository.
+     */
+    patterns: {
+        source: string;
+        canonical: string;
+    }[];
+    /** Map a matched span — as an external scanner reports it — back to its keyword. */
+    canonicalOf(span: string): string | undefined;
+    /** Which canonicals does this line of text cover? */
     matchLine(line: string): Set<string>;
 }
 declare function buildMatcher(question: string, max?: number): KeywordMatcher;

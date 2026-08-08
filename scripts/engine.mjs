@@ -726,9 +726,12 @@ function makeMatcher(expanded) {
       regexes.push({ re: new RegExp(accentPattern(v.text), "i"), canonical: ek.canonical });
     }
   }
+  const patterns = expanded.flatMap((ek) => ek.variants.map((v) => ({ source: accentPattern(v.text), canonical: ek.canonical })));
   return {
     expanded,
     canonicals: expanded.map((e) => e.canonical),
+    patterns,
+    canonicalOf: (span) => regexes.find(({ re }) => new RegExp(`^(?:${re.source})$`, "i").test(span))?.canonical,
     matchLine: (line) => {
       const hit = /* @__PURE__ */ new Set();
       for (const { re, canonical } of regexes) {

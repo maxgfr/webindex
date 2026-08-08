@@ -191,3 +191,23 @@ describe("matcherFromTokens", () => {
     expect(matcherFromTokens(["", "retry", ""]).matchLine("a retry loop").size).toBe(1);
   });
 });
+
+describe("KeywordMatcher.patterns / canonicalOf", () => {
+  it("exposes pattern sources an external scanner can use", () => {
+    // The difference between a matcher that only works in memory and one that
+    // can drive ripgrep over a whole repository.
+    const m = buildMatcher("connectTimeout");
+    expect(m.patterns.length).toBeGreaterThan(0);
+    for (const p of m.patterns) {
+      expect(() => new RegExp(p.source, "i")).not.toThrow();
+      expect(m.canonicals).toContain(p.canonical);
+    }
+  });
+
+  it("maps a matched span back to its keyword", () => {
+    const m = buildMatcher("télémétrie");
+    expect(m.canonicalOf("telemetrie")).toBe(m.canonicals[0]);
+    expect(m.canonicalOf("télémétrie")).toBe(m.canonicals[0]);
+    expect(m.canonicalOf("unrelated")).toBeUndefined();
+  });
+});
