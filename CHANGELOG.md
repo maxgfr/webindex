@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.8.0](https://github.com/maxgfr/webindex/compare/v1.7.2...v1.8.0) (2026-08-08)
+
+
+### Features
+
+* add citability, provider URL shapes, locale and the run lock ([cef52e3](https://github.com/maxgfr/webindex/commit/cef52e318654ba36f5a12605e409aa71b33ebc26))
+
 ## [1.7.2](https://github.com/maxgfr/webindex/compare/v1.7.1...v1.7.2) (2026-08-08)
 
 
