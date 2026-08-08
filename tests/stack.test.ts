@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -28,6 +29,17 @@ describe("the embedded assets", () => {
     // One fixed project name is what lets several tools share one set of
     // containers instead of colliding on the same host ports.
     expect(COMPOSE_YAML).toMatch(/^name: \w+/m);
+  });
+
+  it("keeps Firecrawl out of the `all` profile", () => {
+    // Five containers and ~3 GB of images. Leaking it into `all` would make the
+    // cheap "start the local stack" command drag the whole extractor in.
+    const block = COMPOSE_YAML.slice(COMPOSE_YAML.indexOf("\n  firecrawl:"));
+    expect(block).toContain('profiles: ["extract"]');
+    expect(block).not.toContain('"all"');
+    // …while the cheap three keep theirs.
+    expect(COMPOSE_YAML).toContain('profiles: ["semantic", "all"]');
+    expect(COMPOSE_YAML).toContain('profiles: ["search", "all"]');
   });
 
   it("enables SearXNG's JSON output, which is the whole reason a local one ships", () => {
@@ -73,6 +85,19 @@ describe("materialisation", () => {
 
   it("lands under the configured brand's cache dir, not a shared one", () => {
     expect(ensureComposeMaterialized()).toContain("webindex-tests");
+  });
+
+  it("follows <PREFIX>_CACHE_DIR, like every other durable thing", () => {
+    // Without this, redirecting the cache moved the fetch cache and left the
+    // compose file behind in the temp dir — surprising, and on a machine that
+    // sweeps /tmp it is a running stack you can no longer control from state.
+    const dir = mkdtempSync(join(tmpdir(), "wi-cacheenv-"));
+    process.env[envName("CACHE_DIR")] = dir;
+    try {
+      expect(ensureComposeMaterialized()).toBe(join(dir, "compose", "docker-compose.yml"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

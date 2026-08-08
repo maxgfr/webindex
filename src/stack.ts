@@ -291,8 +291,22 @@ export function renderAsset(template: string): string {
   return template.replaceAll("{{CLI}}", brand().cli);
 }
 
+/**
+ * Where this brand keeps durable state. Resolved exactly as the fetch cache
+ * resolves it — `<PREFIX>_CACHE_DIR`, then the declared cacheDir, then a
+ * per-brand directory under the OS temp dir.
+ *
+ * Reading the env var matters: without it a caller who redirected the cache got
+ * their fetch cache moved and their compose file left behind in the temp dir,
+ * which is both surprising and, on a machine that sweeps /tmp, a stack that
+ * quietly stops being controllable from its own state.
+ */
+function cacheRoot(): string {
+  return env("CACHE_DIR") ?? brand().cacheDir ?? join(tmpdir(), brand().name);
+}
+
 export function ensureComposeMaterialized(): string {
-  const base = join(brand().cacheDir ?? join(tmpdir(), brand().name), "compose");
+  const base = join(cacheRoot(), "compose");
   const composePath = join(base, "docker-compose.yml");
   const settingsPath = join(base, "docker", "searxng", "settings.yml");
   const firecrawlEnvPath = join(base, "docker", "firecrawl", "firecrawl.env");
