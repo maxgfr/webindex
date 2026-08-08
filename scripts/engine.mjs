@@ -1990,14 +1990,29 @@ var STACKS = {
     postUp: (file, run) => STACKS.semantic.postUp(file, run)
   }
 };
+function combine(names) {
+  const specs = names.map((n) => STACKS[n]);
+  if (specs.some((x) => !x)) return null;
+  const found = specs;
+  if (found.length === 1) return found[0];
+  return {
+    profiles: [...new Set(found.flatMap((x) => x.profiles))],
+    summary: found.map((x) => x.summary).join("\n  "),
+    postUp: (file, run) => found.flatMap((x) => x.postUp?.(file, run) ?? [])
+  };
+}
 var STACK_SERVICES = Object.keys(STACKS);
 var SERVICE_PROFILES = Object.fromEntries(Object.entries(STACKS).map(([k, v]) => [k, v.profiles]));
 function stackControl(service, action, deps = {}) {
   const run = deps.run ?? defaultRun;
   const has = deps.has ?? defaultHas;
-  const tag = `${brand().cli} ${service}`;
-  const spec = STACKS[service];
-  if (!spec) return { message: `${brand().cli}: unknown service "${service}" \u2014 expected one of ${STACK_SERVICES.join(", ")}`, code: 1 };
+  const names = Array.isArray(service) ? service : [service];
+  const tag = `${brand().cli} ${names.join("+")}`;
+  const spec = combine(names);
+  if (!spec) {
+    const bad = names.filter((n) => !STACKS[n]);
+    return { message: `${brand().cli}: unknown service ${bad.map((b) => `"${b}"`).join(", ")} \u2014 expected one of ${STACK_SERVICES.join(", ")}`, code: 1 };
+  }
   if (action !== "up" && action !== "down" && action !== "status") {
     return { message: `${tag}: unknown action "${action}" (use: up | down | status)`, code: 1 };
   }

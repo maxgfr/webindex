@@ -707,7 +707,7 @@ declare const SERVICE_PROFILES: Record<string, string[]>;
  * because not having Docker is a normal state for this tool: everything the
  * stack provides is optional and degrades to a note.
  */
-declare function stackControl(service: string, action: string, deps?: StackDeps): StackResult;
+declare function stackControl(service: string | string[], action: string, deps?: StackDeps): StackResult;
 
 declare function withRunLock<T>(slug: string, fn: () => Promise<T>): Promise<T>;
 declare function resetRunLocks(): void;

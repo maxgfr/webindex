@@ -201,6 +201,27 @@ describe("stackControl", () => {
     ]);
   });
 
+  it("folds several services into ONE compose call", () => {
+    // Two calls against the same project make the second recreate what the
+    // first started, so a command meaning "semantic AND discovery" has to
+    // resolve to a single invocation with both profiles.
+    const { calls, deps } = fake();
+    const r = stackControl(["semantic", "searxng"], "up", deps);
+    expect(r.code).toBe(0);
+    const ups = calls.filter((c) => c.includes("up"));
+    expect(ups).toHaveLength(1);
+    expect(ups[0]).toEqual(expect.arrayContaining(["--profile", "semantic", "--profile", "search"]));
+    // Both summaries, and semantic's model pull, survive the fold.
+    expect(r.message).toContain("Qdrant");
+    expect(r.message).toContain("SearXNG");
+    expect(r.message).toContain(`${embedModel()} ready`);
+  });
+
+  it("names the unknown member of a combination, not the whole list", () => {
+    const { deps } = fake();
+    expect(stackControl(["semantic", "nope"], "up", deps).message).toContain('"nope"');
+  });
+
   it("drives the embedded file, never a checkout's", () => {
     const { calls, deps } = fake();
     stackControl("searxng", "status", deps);
