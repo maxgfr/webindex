@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.14.0](https://github.com/maxgfr/webindex/compare/v1.13.1...v1.14.0) (2026-08-09)
+
+
+### Features
+
+* **engine:** take the last 53 forks out of the consuming skills ([977bde7](https://github.com/maxgfr/webindex/commit/977bde77c049aa13e9ee669522e1414ef04458c8))
+
 ## [1.13.1](https://github.com/maxgfr/webindex/compare/v1.13.0...v1.13.1) (2026-08-09)
 
 
