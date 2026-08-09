@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { apiBase, canonicalRepoRef, forgeKind, listReleases, mapGithubIssues, repoFacts, resetCanonicalRepoCache, searchIssues } from "../src/forge.js";
+import { apiBase, forgeKind, listReleases, mapGithubIssues, repoFacts, resetCanonicalRepoCache, searchIssues } from "../src/forge.js";
 import { lookupPackage, normalizeRepoUrl, resolvePackage } from "../src/registry.js";
 import { resolveRepo } from "../src/repo.js";
 import { slugify } from "../src/text.js";
