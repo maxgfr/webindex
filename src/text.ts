@@ -395,3 +395,28 @@ export function buildMatcher(question: string, max = 8): KeywordMatcher {
 export function matcherFromTokens(tokens: string[], max = 8): KeywordMatcher {
   return makeMatcher(expandTokens(tokens.filter(Boolean), max));
 }
+
+/**
+ * Turn an arbitrary identifier into a filesystem-safe slug —
+ * `github.com/expressjs/express` → `github.com-expressjs-express`.
+ *
+ * Used as an on-disk cache key, which is why the normalisation matters: a
+ * repository named as `https://github.com/x/y.git`, `git@github.com:x/y.git`
+ * and `github.com/x/y` is ONE repository, and three slugs would mean three
+ * clones of it.
+ *
+ * `max` is a parameter because the two uses want different lengths — a repo
+ * identity is short and a research question is not — and truncating a question
+ * at a repo's length collides distinct runs.
+ */
+export function slugify(input: string, opts: { max?: number; fallback?: string } = {}): string {
+  const s = input
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^git@/, "")
+    .replace(/\.git$/, "")
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, opts.max ?? 120);
+  return s || (opts.fallback ?? "");
+}
