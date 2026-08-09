@@ -25,7 +25,12 @@ const PDF = Buffer.from("%PDF-1.4 a scan with no text layer");
 /** Both probes succeed, and `copyable-pdf` writes the .md it promises. */
 function toolsPresent(markdown = "OCR'd prose from the scan") {
   runMock.mockImplementation(async (_cmd, args) => {
-    const out = args[args.indexOf("-o") + 1];
+    // Guard the index before using it. `indexOf` returns -1 on the probe calls
+    // (`copyable-pdf --help`, `tesseract --version`, which carry no `-o`), and
+    // `args[-1 + 1]` is `args[0]` — so this used to write files literally named
+    // `--help` and `--version` into the repo root, and they got committed.
+    const i = args.indexOf("-o");
+    const out = i >= 0 ? args[i + 1] : undefined;
     if (out) writeFileSync(out.replace(/\.pdf$/, ".md"), markdown);
     return { ok: true, stdout: "" };
   });
