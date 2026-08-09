@@ -465,7 +465,60 @@ function decodeBody(bytes, contentType = "") {
   if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
   return bytes.toString("utf8");
 }
+var CP1252_C1 = [
+  8364,
+  129,
+  8218,
+  402,
+  8222,
+  8230,
+  8224,
+  8225,
+  710,
+  8240,
+  352,
+  8249,
+  338,
+  141,
+  381,
+  143,
+  144,
+  8216,
+  8217,
+  8220,
+  8221,
+  8226,
+  8211,
+  8212,
+  732,
+  8482,
+  353,
+  8250,
+  339,
+  157,
+  382,
+  376
+];
+var CP1252_LABELS = /* @__PURE__ */ new Set([
+  "windows-1252",
+  "cp1252",
+  "cp-1252",
+  "x-cp1252",
+  "ansi_x3.4-1968",
+  "iso-8859-1",
+  "iso8859-1",
+  "latin1",
+  "l1",
+  "us-ascii",
+  "ascii"
+]);
+function decodeCp1252(bytes) {
+  let out = "";
+  for (const b of bytes) out += String.fromCharCode(b >= 128 && b <= 159 ? CP1252_C1[b - 128] : b);
+  return out;
+}
 function decodeWith(bytes, encoding) {
+  if (CP1252_LABELS.has(encoding)) return decodeCp1252(bytes);
   try {
     return new TextDecoder(encoding, { fatal: false }).decode(bytes);
   } catch {

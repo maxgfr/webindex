@@ -321,3 +321,34 @@ describe("the remaining edges", () => {
     expect(pageMetadata('<script type="application/ld+json">   </script>').jsonLd).toEqual([]);
   });
 });
+
+describe("Windows-1252 without trusting the runtime", () => {
+  // CI caught this: `new TextDecoder("windows-1252")` gave the em dash on one
+  // Node version and U+0097 — the latin1 answer — on another. An engine with a
+  // Node 18 floor, vendored into environments it never sees, cannot let "which
+  // typographic characters survive" depend on how the runtime was compiled.
+  it("maps the whole C1 range the same way on any runtime", () => {
+    const c1 = Buffer.from(Array.from({ length: 32 }, (_, i) => 0x80 + i));
+    const decoded = decodeBody(c1, "text/html; charset=windows-1252");
+    expect(decoded).toContain("€"); // 0x80
+    expect(decoded).toContain("—"); // 0x97, the one CI caught
+    expect(decoded).toContain("–"); // 0x96
+    expect(decoded).toContain("’"); // 0x92
+    expect(decoded).toContain("…"); // 0x85
+    expect(decoded).toContain("™"); // 0x99
+    expect(decoded.length).toBe(32);
+  });
+
+  it("decodes a page labelled iso-8859-1 as cp1252, as the HTML spec requires", () => {
+    // A page declaring latin1 and using an em dash is common; one that genuinely
+    // wants U+0097 is not.
+    const bytes = Buffer.from([0x41, 0x97, 0x42]);
+    expect(decodeBody(bytes, "text/html; charset=iso-8859-1")).toBe("A—B");
+    expect(decodeBody(bytes, "text/html; charset=latin1")).toBe("A—B");
+  });
+
+  it("leaves the ASCII and high-latin ranges alone", () => {
+    const bytes = Buffer.from([0x41, 0x7f, 0xa0, 0xe9, 0xff]);
+    expect(decodeBody(bytes, "text/html; charset=windows-1252")).toBe("A\x7f éÿ");
+  });
+});

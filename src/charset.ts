@@ -11,8 +11,11 @@
 // refuses an unreadable text layer; the HTML path had nothing equivalent,
 // because nothing was checking.
 //
-// Node ships full ICU, so TextDecoder already knows these encodings. What was
-// missing was asking it.
+// TextDecoder knows most of these encodings, so the fix is largely to ask it —
+// with one exception. Windows-1252 is decoded from a table here rather than
+// delegated, because CI proved the delegation is not portable: the same byte
+// gave an em dash on one Node version and a raw control character on another.
+// See CP1252_C1 below.
 
 /** A BOM is authoritative — it beats every declaration. */
 function bomEncoding(bytes: Buffer): { encoding: string; skip: number } | undefined {
@@ -72,7 +75,51 @@ export function decodeBody(bytes: Buffer, contentType = ""): string {
   return bytes.toString("utf8");
 }
 
+// The 32 code points where Windows-1252 differs from ISO-8859-1 — the C1 range,
+// which cp1252 fills with typographic characters (curly quotes, en/em dashes,
+// the euro sign) and latin1 leaves as control characters.
+//
+// Hand-rolled rather than delegated to TextDecoder, and that is the point. On
+// one Node version `new TextDecoder("windows-1252")` produced the em dash for
+// 0x97; on another it produced U+0097, the raw control character — the latin1
+// answer. An engine whose floor is Node 18 and whose consumers vendor it into
+// unknown environments cannot have "which typographic characters survive"
+// depend on how the runtime was compiled. Thirty-two entries buy determinism.
+const CP1252_C1 = [
+  0x20ac, 0x0081, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008d, 0x017d, 0x008f, 0x0090, 0x2018, 0x2019,
+  0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x009d, 0x017e, 0x0178,
+];
+
+const CP1252_LABELS = new Set([
+  "windows-1252",
+  "cp1252",
+  "cp-1252",
+  "x-cp1252",
+  "ansi_x3.4-1968",
+  "iso-8859-1",
+  "iso8859-1",
+  "latin1",
+  "l1",
+  "us-ascii",
+  "ascii",
+]);
+
+/**
+ * Decode a Windows-1252 byte run.
+ *
+ * ISO-8859-1 and US-ASCII are routed here too, deliberately: the HTML spec says
+ * a document labelled `iso-8859-1` must be decoded as windows-1252, because in
+ * practice that is what the authors meant. A page declaring latin1 and using an
+ * em dash is common; a page genuinely wanting U+0097 is not.
+ */
+function decodeCp1252(bytes: Buffer): string {
+  let out = "";
+  for (const b of bytes) out += String.fromCharCode(b >= 0x80 && b <= 0x9f ? CP1252_C1[b - 0x80]! : b);
+  return out;
+}
+
 function decodeWith(bytes: Buffer, encoding: string): string {
+  if (CP1252_LABELS.has(encoding)) return decodeCp1252(bytes);
   try {
     // fatal:false so a stray malformed byte becomes U+FFFD rather than throwing
     // — one bad byte must not cost the whole page.
