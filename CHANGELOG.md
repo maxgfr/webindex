@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.13.1](https://github.com/maxgfr/webindex/compare/v1.13.0...v1.13.1) (2026-08-09)
+
+
+### Bug Fixes
+
+* **charset:** decode Windows-1252 from a table, not from the runtime ([680070d](https://github.com/maxgfr/webindex/commit/680070d599193a25f7645a95469272a27732e011))
+
 # [1.13.0](https://github.com/maxgfr/webindex/compare/v1.12.1...v1.13.0) (2026-08-09)
 
 
