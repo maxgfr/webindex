@@ -12,6 +12,13 @@ export interface MockResponse {
   // back these bytes and `text()` decodes them the way httpGet does, so a test
   // sees exactly the mojibake a real binary download produces.
   bytes?: Buffer;
+  // Serve the body in chunks of this size through the ReadableStream, instead of
+  // one chunk. Only needed to observe streaming behaviour — the cap has to cancel
+  // the transfer partway, which a single-chunk body cannot show.
+  chunkSize?: number;
+  // Called with each chunk's length as the stream produces it. A body that is
+  // capped must stop calling this well before the end.
+  onPull?: (bytes: number) => void;
 }
 
 export type Router = (url: string, init?: RequestInit) => MockResponse | undefined;
@@ -39,6 +46,30 @@ function makeResponse(r: MockResponse, requestedUrl: string) {
   const body = r.body ?? "";
   const contentType = r.contentType ?? "text/html";
   const headers = r.headers ?? {};
+  const payload = r.bytes ?? Buffer.from(body, "utf8");
+
+  // A real Response exposes a readable body, and httpGet streams it so a huge
+  // page is cancelled at the cap instead of being buffered whole. Serving one
+  // here (rather than only arrayBuffer/text) is what puts the tests on the same
+  // path as production — with only arrayBuffer, every case silently took the
+  // no-stream fallback and the cap was never actually exercised.
+  const stream = () =>
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const size = r.chunkSize ?? payload.length;
+        const start = offset;
+        if (start >= payload.length) {
+          controller.close();
+          return;
+        }
+        const chunk = payload.subarray(start, Math.min(start + Math.max(1, size), payload.length));
+        offset = start + chunk.length;
+        r.onPull?.(chunk.length);
+        controller.enqueue(new Uint8Array(chunk));
+      },
+    });
+  let offset = 0;
+
   return {
     ok: status >= 200 && status < 300,
     status,
@@ -51,12 +82,19 @@ function makeResponse(r: MockResponse, requestedUrl: string) {
         return null;
       },
     },
+    get body() {
+      return stream();
+    },
     async arrayBuffer() {
-      if (r.bytes) return r.bytes.buffer.slice(r.bytes.byteOffset, r.bytes.byteOffset + r.bytes.byteLength);
-      return new TextEncoder().encode(body).buffer;
+      // Counts as pulled, and counts WHOLE: arrayBuffer() materialises the
+      // entire response no matter what the caller intends to keep. Reporting it
+      // is what lets a test tell "streamed and cancelled at the cap" apart from
+      // "downloaded everything, then trimmed".
+      r.onPull?.(payload.length);
+      return payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength);
     },
     async text() {
-      return r.bytes ? r.bytes.toString("utf8") : body;
+      return payload.toString("utf8");
     },
   } as unknown as Response;
 }

@@ -1,4 +1,5 @@
 import { brand, env, envFlag, envInt } from "./brand.js";
+import { decodeBody } from "./charset.js";
 import { buildMatcher } from "./text.js";
 import { extractPdf } from "./pdf.js";
 import { extractDocument, docFormatForUrl, docFormatForContentType } from "./doc.js";
@@ -77,20 +78,88 @@ export interface HttpResult {
   url: string; // final URL after redirects (for post-redirect exclude re-check)
   bytes?: Buffer; // raw body, only when opts.binary (for PDF extraction)
   error?: string;
+  /** Cache validators, kept so a stale entry can be revalidated for free. */
+  etag?: string;
+  lastModified?: string;
+  /** True on an explicit 429, or a 403 that carries an exhausted quota header. */
+  rateLimited?: boolean;
+  /** Retry-After, parsed and capped, when the server sent one. */
+  retryAfterMs?: number;
 }
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// How long to wait before a retry: honor Retry-After (seconds) clamped to 5s,
-// else a small fixed backoff.
-function retryDelayMs(retryAfter: string | null): number {
-  if (retryAfter) {
-    const secs = Number(retryAfter);
-    if (Number.isFinite(secs)) return Math.min(Math.max(secs * 1000, 0), 5000);
+/**
+ * A rate-limit signal: an explicit 429, or a 403 whose remaining-quota header is
+ * zero — which is how GitHub's unauthenticated APIs report throttling. Worth
+ * separating from a plain 403, because one is "come back later" and the other is
+ * "you may never read this", and a caller that retries the second burns the
+ * quota it is waiting on.
+ */
+export function detectRateLimited(status: number, headers: Headers): boolean {
+  if (status === 429) return true;
+  return status === 403 && headers.get("x-ratelimit-remaining") === "0";
+}
+
+/**
+ * Parse `Retry-After` — delta-seconds or an HTTP-date — into a millisecond
+ * delay, clamped to `capMs`. Returns undefined when the header is absent or
+ * unparseable, so a caller can tell "no hint" from "wait zero".
+ */
+export function parseRetryAfter(headers: Headers, capMs = 5000): number | undefined {
+  const h = headers.get("retry-after");
+  if (!h) return undefined;
+  const secs = Number(h);
+  if (Number.isFinite(secs)) return Math.min(Math.max(0, secs) * 1000, capMs);
+  const when = Date.parse(h);
+  if (Number.isFinite(when)) return Math.min(Math.max(0, when - Date.now()), capMs);
+  return undefined;
+}
+
+// How long to wait before a retry: honor Retry-After (seconds or HTTP-date)
+// clamped to 5s, else a small fixed backoff.
+function retryDelayMs(headers: Headers): number {
+  return parseRetryAfter(headers) ?? defaultRetryMs();
+}
+
+/**
+ * Read a Response body, keeping at most `max` bytes and cancelling the transfer
+ * the moment the cap is crossed.
+ *
+ * This exists because `await res.arrayBuffer()` then `.subarray(0, max)` — what
+ * this module used to do — caps the VALUE and not the DOWNLOAD: a 2 GB response
+ * was fully allocated before being trimmed to 4 MB. A cap that only applies
+ * after the bytes are already in memory is not a cap.
+ *
+ * Falls back to a one-shot read where no readable stream is exposed.
+ */
+export async function readCapped(res: Response, max: number): Promise<string> {
+  return (await readCappedBytes(res, max)).toString("utf8");
+}
+
+/** Same streaming cap as `readCapped`, returning the raw bytes. */
+export async function readCappedBytes(res: Response, max: number): Promise<Buffer> {
+  const reader = res.body?.getReader?.();
+  if (!reader) return Buffer.from(await res.arrayBuffer()).subarray(0, max);
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value?.byteLength) continue;
+    const chunk = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    const remaining = max - total;
+    if (chunk.length >= remaining) {
+      chunks.push(chunk.subarray(0, remaining));
+      await reader.cancel().catch(() => {});
+      break;
+    }
+    chunks.push(chunk);
+    total += chunk.length;
   }
-  return defaultRetryMs();
+  return Buffer.concat(chunks);
 }
 
 // Minimal HTTP GET on Node's built-in fetch (Node ≥18) — no dependencies.
@@ -98,7 +167,17 @@ function retryDelayMs(retryAfter: string | null): number {
 // { ok:false }), and retries ONCE on a transient status or network error.
 export async function httpGet(
   url: string,
-  opts: { timeoutMs?: number; accept?: string; acceptLanguage?: string; maxBytes?: number; userAgent?: string; binary?: boolean } = {},
+  opts: {
+    timeoutMs?: number;
+    accept?: string;
+    acceptLanguage?: string;
+    maxBytes?: number;
+    userAgent?: string;
+    binary?: boolean;
+    /** Extra request headers, lower-cased. The escape hatch for conditional GET
+     *  (`if-none-match`, `if-modified-since`) and for an API that wants auth. */
+    headers?: Record<string, string>;
+  } = {},
 ): Promise<HttpResult> {
   let last: HttpResult = { ok: false, status: 0, body: "", contentType: "", url };
   for (let attempt = 0; attempt < maxAttempts(); attempt++) {
@@ -107,25 +186,46 @@ export async function httpGet(
     try {
       const headers: Record<string, string> = { "user-agent": opts.userAgent ?? browserUa(), accept: opts.accept ?? "*/*" };
       if (opts.acceptLanguage) headers["accept-language"] = opts.acceptLanguage;
+      for (const [k, v] of Object.entries(opts.headers ?? {})) headers[k.toLowerCase()] = v;
       const res = await fetch(url, {
         signal: ctrl.signal,
         redirect: "follow",
         headers,
       });
-      const buf = Buffer.from(await res.arrayBuffer());
       const max = opts.maxBytes ?? 4 * 1024 * 1024;
-      const capped = buf.subarray(0, max);
+      const meta = {
+        contentType: res.headers.get("content-type") ?? "",
+        url: res.url || url,
+        etag: res.headers.get("etag") ?? undefined,
+        lastModified: res.headers.get("last-modified") ?? undefined,
+        rateLimited: detectRateLimited(res.status, res.headers),
+        retryAfterMs: parseRetryAfter(res.headers),
+      };
+
+      // Refuse a body the server has already declared too big, before a single
+      // byte of it is read. Not retried: the size will be the same next time.
+      const declared = Number(res.headers.get("content-length"));
+      if (Number.isFinite(declared) && declared > max) {
+        ctrl.abort();
+        return { ok: false, status: res.status, body: "", ...meta, error: `response too large: ${declared} bytes > ${max} cap` };
+      }
+
+      // 304 carries no body by definition — reading it is not an error, and the
+      // caller (the cache) wants the status, not an empty-body complaint.
+      const bytes = res.status === 304 ? Buffer.alloc(0) : await readCappedBytes(res, max);
       const result: HttpResult = {
         ok: res.ok,
         status: res.status,
-        body: opts.binary ? "" : capped.toString("utf8"),
-        bytes: opts.binary ? capped : undefined,
-        contentType: res.headers.get("content-type") ?? "",
-        url: res.url || url,
+        // Decoded per the response's own encoding, not assumed UTF-8. A
+        // Windows-1252 page used to come back with every accented character
+        // replaced by U+FFFD, and nothing anywhere noticed.
+        body: opts.binary ? "" : decodeBody(bytes, meta.contentType),
+        bytes: opts.binary ? bytes : undefined,
+        ...meta,
       };
       if (RETRY_STATUS.has(res.status) && attempt < maxAttempts() - 1) {
         last = result;
-        await sleep(retryDelayMs(res.headers.get("retry-after")));
+        await sleep(retryDelayMs(res.headers));
         continue;
       }
       return result;
@@ -178,7 +278,7 @@ export async function httpJson(
       const result = { ok: res.ok, status: res.status, data };
       if (RETRY_STATUS.has(res.status) && attempt < maxAttempts() - 1) {
         last = result;
-        await sleep(retryDelayMs(res.headers.get("retry-after")));
+        await sleep(retryDelayMs(res.headers));
         continue;
       }
       return result;
@@ -492,6 +592,11 @@ export interface ExtractResult {
   status: number;
   extractor?: ExtractorId;
   canonical?: string; // the url the page declares for itself (rel=canonical / og:url)
+  // Carried up from the response so a cache can store them and revalidate later.
+  // Absent on the Firecrawl path, which does its own fetching and reports no
+  // origin validators — an entry written there simply re-downloads when stale.
+  etag?: string;
+  lastModified?: string;
 }
 
 // Fetch a URL and return its readable text + a title. HTML goes to Firecrawl
@@ -505,7 +610,17 @@ export interface ExtractResult {
 // up is the normal case and a per-URL note about it would drown the dossier.
 // A Firecrawl that is up and still fails, or one the user asked for explicitly
 // and did not get, does emit a note (the caller decides which).
-export async function fetchAndExtract(url: string, opts: { acceptLanguage?: string; firecrawl?: string } = {}): Promise<ExtractResult> {
+export async function fetchAndExtract(
+  url: string,
+  opts: {
+    acceptLanguage?: string;
+    firecrawl?: string;
+    /** Extra request headers for the built-in path — how the cache sends
+     *  `if-none-match` / `if-modified-since`. Firecrawl does its own fetching and
+     *  ignores these, which is why a revalidating caller skips it. */
+    headers?: Record<string, string>;
+  } = {},
+): Promise<ExtractResult> {
   const wantsPdf = looksLikePdfUrl(url);
   // An office document skips the HTML Firecrawl path for the same reason a PDF
   // does (see looksLikePdfUrl above): handing it to Firecrawl first would
@@ -530,12 +645,22 @@ export async function fetchAndExtract(url: string, opts: { acceptLanguage?: stri
     }
     firecrawlNote = fc.data ? `Firecrawl got HTTP ${fc.data.statusCode} for ${url} — fell back to the built-in extractor.` : fc.why;
   }
-  const fetchOpts = wantsPdf ? PDF_FETCH_OPTS : wantsDoc ? DOC_FETCH_OPTS : { accept: "text/html,text/plain,*/*", acceptLanguage: opts.acceptLanguage };
+  const base = wantsPdf ? PDF_FETCH_OPTS : wantsDoc ? DOC_FETCH_OPTS : { accept: "text/html,text/plain,*/*", acceptLanguage: opts.acceptLanguage };
+  const fetchOpts = opts.headers ? { ...base, headers: opts.headers } : base;
   const res = await httpGet(url, fetchOpts);
+  // 304 is a SUCCESS with no body: the caller sent validators and the origin
+  // confirmed nothing changed. Reported as-is so a cache can serve what it
+  // already has; a caller that sent no validators can never see this.
+  if (res.status === 304) {
+    return { text: "", finalUrl: res.url, status: 304, etag: res.etag ?? opts.headers?.["if-none-match"], lastModified: res.lastModified };
+  }
   if (!res.ok) {
     const why = res.status === 429 ? "rate-limited (HTTP 429)" : `status ${res.status}${res.error ? ", " + res.error : ""}`;
     return { text: "", finalUrl: res.url, status: res.status, note: `Could not fetch ${url} (${why}).` };
   }
+  // Only materialised when the origin actually sent one, so an entry written for
+  // a validator-less server keeps exactly the shape it had before.
+  const validators = res.etag || res.lastModified ? { etag: res.etag, lastModified: res.lastModified } : {};
   if (wantsPdf || /application\/pdf/i.test(res.contentType)) {
     // A content-type-only PDF (no .pdf in the URL) was fetched as text — refetch
     // the raw bytes so the extractor sees an intact binary.
@@ -560,6 +685,7 @@ export async function fetchAndExtract(url: string, opts: { acceptLanguage?: stri
       // existing dossier already assume.
       extractor: got.via && got.via !== "native" ? got.via : undefined,
       note: got.text ? firecrawlNote : `Fetched ${url} but could not extract text — ${got.reason}.`,
+      ...validators,
     };
   }
   // An office document, either because the URL said so or because only the
@@ -583,7 +709,7 @@ export async function fetchAndExtract(url: string, opts: { acceptLanguage?: stri
     // converter is available: it was usable before this ladder existed, so
     // refusing it would be a regression rather than a fix.
     if (!got.text && docFmt.textFallback && bytes?.length) {
-      return { text: bytes.toString("utf8"), finalUrl: res.url, status: res.status, note: firecrawlNote };
+      return { text: bytes.toString("utf8"), finalUrl: res.url, status: res.status, note: firecrawlNote, ...validators };
     }
     return {
       text: got.text,
@@ -591,13 +717,14 @@ export async function fetchAndExtract(url: string, opts: { acceptLanguage?: stri
       status: res.status,
       extractor: got.via,
       note: got.text ? firecrawlNote : `Fetched ${url} but could not extract text — ${got.reason}.`,
+      ...validators,
     };
   }
   const isHtml = /html/i.test(res.contentType) || /^\s*</.test(res.body);
   const text = isHtml ? htmlToText(extractMainHtml(res.body)) : res.body;
   const title = isHtml ? htmlTitle(res.body) : undefined;
   const canonical = isHtml ? htmlCanonicalUrl(res.body) : undefined;
-  return { text, title, canonical, finalUrl: res.url, status: res.status, note: firecrawlNote };
+  return { text, title, canonical, finalUrl: res.url, status: res.status, note: firecrawlNote, ...validators };
 }
 
 // Statuses where the origin is gone/blocked and a live re-fetch will never
@@ -647,6 +774,64 @@ export function looksLikeJunkExtraction(text: string): string | undefined {
   const head = t.slice(0, 800);
   for (const [re, reason] of JUNK_PATTERNS) if (re.test(head)) return reason;
   return undefined;
+}
+
+// Consent boilerplate that SURVIVES htmlToText — it lives in body <div>/<dialog>
+// rather than <nav>/<footer>, so the tag-based stripper keeps it, and on a
+// low-keyword page it is exactly what gets picked as the excerpt.
+//
+// The sibling of looksLikeJunkExtraction, not a rival: that one asks "is this
+// whole extraction a wall?" and refuses the page; this one asks "which LINES of
+// an otherwise good page are banner?" and drops those. A long article with a
+// cookie strip down one side needs the second, and the first will never fire on
+// it.
+const CONSENT_PATTERNS = [
+  /\bcookies?\b/i,
+  /\bconsent\b/i,
+  /\bgdpr\b/i,
+  /\bccpa\b/i,
+  /accept all\b/i,
+  /reject all\b/i,
+  /manage (?:preferences|choices|cookies|settings)/i,
+  /privacy (?:policy|preferences|choices)/i,
+  /tracking technolog/i,
+  /advertising partners/i,
+  /legitimate interest/i,
+];
+
+/**
+ * Drop consent-banner lines from extracted text, and say how many went.
+ *
+ * Deliberately conservative: a line goes only on two distinct pattern hits, or
+ * on one hit when the line is short enough to be a button ("Accept all
+ * cookies"). Prose that mentions cookies once inside a real sentence stays —
+ * this must never quietly delete the paragraph someone wanted to cite.
+ */
+export function stripConsentBoilerplate(text: string): { text: string; dropped: number } {
+  let dropped = 0;
+  const kept = text.split("\n").filter((line) => {
+    const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(line) ? 1 : 0), 0);
+    const isBanner = hits >= 2 || (hits === 1 && line.trim().length < 120);
+    if (isBanner) dropped++;
+    return !isBanner;
+  });
+  return { text: kept.join("\n"), dropped };
+}
+
+/**
+ * The page's `<meta name=description>`, falling back to `og:description`.
+ *
+ * Read from raw HTML because htmlToText drops `<head>` entirely. Worth having as
+ * a last-resort summary for a page whose body has nothing matching the question
+ * — better than citing a nav bar.
+ */
+export function metaDescriptionOf(html: string): string | undefined {
+  const m =
+    /<meta[^>]+name=["']description["'][^>]*content=["']([^"']+)["']/i.exec(html) ||
+    /<meta[^>]+content=["']([^"']+)["'][^>]*name=["']description["']/i.exec(html) ||
+    /<meta[^>]+property=["']og:description["'][^>]*content=["']([^"']+)["']/i.exec(html);
+  const d = m?.[1]?.replace(/\s+/g, " ").trim();
+  return d ? decodeEntities(d) : undefined;
 }
 
 // The markdown heading a line sits under, ignoring fenced code blocks.

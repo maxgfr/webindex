@@ -4,7 +4,7 @@ import { envName } from "../src/brand.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { cachedFetchAndExtract, cachePath } from "../src/cache.js";
+import { cacheClean, cacheStats, cachedFetchAndExtract, cachePath } from "../src/cache.js";
 import { installFetchMock } from "./fetchmock.js";
 
 let dir: string;
@@ -125,5 +125,112 @@ describe("cachedFetchAndExtract (--cache)", () => {
     await cachedFetchAndExtract(URL, {}, false, 1000);
     await cachedFetchAndExtract(URL, {}, false, 1000);
     expect(spy).toHaveBeenCalledTimes(2); // no disk cache consulted
+  });
+});
+
+describe("revalidating a stale entry instead of re-downloading it", () => {
+  const VALIDATED = { ...PAGE, headers: { etag: '"v1"', "last-modified": "Wed, 21 Oct 2015 07:28:00 GMT" } };
+
+  it("turns a stale hit into a 304 and keeps the stored body", async () => {
+    process.env[envName("CACHE_TTL_MS")] = "1000";
+    let seenIfNoneMatch: string | undefined;
+    const spy = installFetchMock((_url, init) => {
+      const h = (init?.headers ?? {}) as Record<string, string>;
+      seenIfNoneMatch = h["if-none-match"];
+      // Second call arrives with validators — answer "unchanged", no body.
+      return seenIfNoneMatch ? { status: 304, body: "" } : VALIDATED;
+    });
+
+    const first = await cachedFetchAndExtract(URL, {}, true, 1000);
+    expect(first.text).toContain("token buckets");
+
+    const revalidated = await cachedFetchAndExtract(URL, {}, true, 2001); // past the TTL
+    expect(seenIfNoneMatch).toBe('"v1"');
+    expect(spy).toHaveBeenCalledTimes(2);
+    // Served from disk despite being stale — the origin said nothing changed.
+    expect(revalidated.cached).toBe(true);
+    expect(revalidated.text).toBe(first.text);
+
+    // …and the 304 restamped it, so the next call inside the TTL costs nothing.
+    await cachedFetchAndExtract(URL, {}, true, 2500);
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("takes the new body when the origin says it changed", async () => {
+    process.env[envName("CACHE_TTL_MS")] = "1000";
+    let calls = 0;
+    const spy = installFetchMock(() => {
+      calls++;
+      return calls === 1 ? VALIDATED : { ...VALIDATED, body: "<html><body><article><p>rewritten prose about leaky buckets</p></article></body></html>" };
+    });
+
+    await cachedFetchAndExtract(URL, {}, true, 1000);
+    const fresh = await cachedFetchAndExtract(URL, {}, true, 2001);
+
+    // One revalidation request, not a 304-then-refetch pair: the conditional GET
+    // already carried the new body.
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(fresh.cached).toBeUndefined();
+    expect(fresh.text).toContain("leaky buckets");
+
+    // The replacement was stored, so the next call inside the TTL is a hit.
+    const hit = await cachedFetchAndExtract(URL, {}, true, 2100);
+    expect(hit.cached).toBe(true);
+    expect(hit.text).toContain("leaky buckets");
+  });
+
+  it("re-downloads normally when the origin sent no validators", async () => {
+    process.env[envName("CACHE_TTL_MS")] = "1000";
+    const spy = installFetchMock((_url, init) => {
+      const h = (init?.headers ?? {}) as Record<string, string>;
+      // Nothing to revalidate with, so nothing conditional may be sent.
+      expect(h["if-none-match"]).toBeUndefined();
+      expect(h["if-modified-since"]).toBeUndefined();
+      return PAGE;
+    });
+    await cachedFetchAndExtract(URL, {}, true, 1000);
+    await cachedFetchAndExtract(URL, {}, true, 2001);
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("cache introspection and eviction", () => {
+  it("reports entries, freshness and size", async () => {
+    process.env[envName("CACHE_TTL_MS")] = "1000";
+    installFetchMock(() => PAGE);
+    await cachedFetchAndExtract("https://a.test/1", {}, true, 1000);
+    await cachedFetchAndExtract("https://b.test/2", {}, true, 1000);
+
+    const fresh = cacheStats(1500);
+    expect(fresh.entries).toBe(2);
+    expect(fresh.fresh).toBe(2);
+    expect(fresh.stale).toBe(0);
+    expect(fresh.bytes).toBeGreaterThan(0);
+    expect(fresh.oldest).toBe(new Date(1000).toISOString());
+
+    const later = cacheStats(5000);
+    expect(later.fresh).toBe(0);
+    expect(later.stale).toBe(2);
+  });
+
+  it("evicts stale entries, or everything on demand", async () => {
+    process.env[envName("CACHE_TTL_MS")] = "1000";
+    installFetchMock(() => PAGE);
+    await cachedFetchAndExtract("https://a.test/1", {}, true, 1000);
+    await cachedFetchAndExtract("https://b.test/2", {}, true, 4000);
+
+    // At t=4500 only the first is stale.
+    expect(cacheClean(false, 4500)).toBe(1);
+    expect(cacheStats(4500).entries).toBe(1);
+
+    expect(cacheClean(true, 4500)).toBe(1);
+    expect(cacheStats(4500).entries).toBe(0);
+  });
+
+  it("reports an empty cache rather than failing when the directory is absent", () => {
+    rmSync(dir, { recursive: true, force: true });
+    const s = cacheStats(1000);
+    expect(s.entries).toBe(0);
+    expect(cacheClean(true, 1000)).toBe(0);
   });
 });

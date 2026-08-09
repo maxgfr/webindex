@@ -11,6 +11,10 @@ import {
   extractMainHtml,
   looksLikeJunkExtraction,
   rescueViaWayback,
+  detectRateLimited,
+  parseRetryAfter,
+  stripConsentBoilerplate,
+  metaDescriptionOf,
 } from "../src/fetch.js";
 import { installFetchMock, routes } from "./fetchmock.js";
 
@@ -172,5 +176,168 @@ describe("rescueViaWayback", () => {
     expect(r?.text).toContain("recovered archival prose");
     expect(r?.snapshotUrl).toBe("https://web.archive.org/snap");
     expect(r?.timestamp).toBe("20200102");
+  });
+});
+
+describe("the byte cap is a cap on the download, not on the value", () => {
+  // The regression this guards: httpGet used to do `await res.arrayBuffer()` and
+  // then `.subarray(0, max)`. Every byte the server sent was allocated first and
+  // trimmed afterwards, so `maxBytes` bounded the returned string while the
+  // process still paid for the whole response. On a hostile or merely large URL
+  // that is the difference between 4 MB and however much the origin feels like
+  // sending.
+  it("cancels the transfer once the cap is reached", async () => {
+    let produced = 0;
+    const CAP = 1024;
+    installFetchMock(() => ({
+      body: "x".repeat(512 * 1024),
+      chunkSize: 256,
+      onPull: (n) => {
+        produced += n;
+      },
+    }));
+
+    const r = await httpGet("https://big.test/page", { maxBytes: CAP });
+
+    expect(r.body.length).toBe(CAP);
+    // The producer must stop right after the cap — one chunk of slack, not 512×.
+    expect(produced).toBeLessThanOrEqual(CAP + 256);
+    expect(produced).toBeLessThan(512 * 1024);
+  });
+
+  it("refuses a body the server already declared over the cap, without reading it", async () => {
+    let produced = 0;
+    installFetchMock(() => ({
+      body: "y".repeat(8192),
+      chunkSize: 256,
+      headers: { "content-length": "8192" },
+      onPull: (n) => {
+        produced += n;
+      },
+    }));
+
+    const r = await httpGet("https://huge.test/page", { maxBytes: 1024 });
+
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/response too large: 8192 bytes > 1024 cap/);
+    expect(produced).toBe(0); // not a single byte of body was pulled
+  });
+
+  it("caps binary bodies the same way", async () => {
+    const r = await (async () => {
+      installFetchMock(() => ({ bytes: Buffer.alloc(64 * 1024, 7), chunkSize: 512 }));
+      return httpGet("https://big.test/doc.bin", { maxBytes: 2048, binary: true });
+    })();
+    expect(r.bytes?.length).toBe(2048);
+  });
+});
+
+describe("cache validators and throttling signals", () => {
+  it("surfaces ETag and Last-Modified so a stale entry can be revalidated", async () => {
+    installFetchMock(() => ({
+      body: "hello",
+      headers: { etag: '"abc123"', "last-modified": "Wed, 21 Oct 2015 07:28:00 GMT" },
+    }));
+    const r = await httpGet("https://x.test/a");
+    expect(r.etag).toBe('"abc123"');
+    expect(r.lastModified).toBe("Wed, 21 Oct 2015 07:28:00 GMT");
+  });
+
+  it("passes caller headers through, which is what conditional GET rides on", async () => {
+    const spy = installFetchMock(() => ({ status: 304, body: "" }));
+    const r = await httpGet("https://x.test/a", { headers: { "If-None-Match": '"abc123"' } });
+    expect((spy.mock.calls[0]![1] as RequestInit).headers).toMatchObject({ "if-none-match": '"abc123"' });
+    // 304 has no body by definition — that is a valid answer, not a short read.
+    expect(r.status).toBe(304);
+    expect(r.body).toBe("");
+  });
+
+  it("reads a 403 with an exhausted quota as rate limiting, and a plain 403 as not", async () => {
+    installFetchMock(() => ({ status: 403, body: "", headers: { "x-ratelimit-remaining": "0" } }));
+    expect((await httpGet("https://api.test/a")).rateLimited).toBe(true);
+
+    installFetchMock(() => ({ status: 403, body: "" }));
+    expect((await httpGet("https://api.test/b")).rateLimited).toBe(false);
+  });
+
+  // Driven directly rather than through httpGet: the retry loop sleeps for the
+  // delay it just parsed and then parses the SAME header again, by which time an
+  // HTTP-date has passed and correctly reads as 0. That is right for the loop and
+  // useless for pinning the parser.
+  it("parses Retry-After as delta-seconds or as an HTTP-date", () => {
+    const h = (v: string) => new Headers({ "retry-after": v });
+    expect(parseRetryAfter(h("2"))).toBe(2000);
+    expect(parseRetryAfter(h("0"))).toBe(0);
+    expect(parseRetryAfter(h("-5"))).toBe(0); // never negative
+    expect(parseRetryAfter(h("900"), 5000)).toBe(5000); // clamped
+    expect(parseRetryAfter(new Headers())).toBeUndefined(); // absent ≠ zero
+    expect(parseRetryAfter(h("not-a-date"))).toBeUndefined();
+
+    const ms = parseRetryAfter(h(new Date(Date.now() + 3000).toUTCString()));
+    expect(ms).toBeGreaterThan(1000);
+    expect(ms).toBeLessThanOrEqual(5000);
+  });
+
+  it("detectRateLimited separates an exhausted quota from a plain refusal", () => {
+    expect(detectRateLimited(429, new Headers())).toBe(true);
+    expect(detectRateLimited(403, new Headers({ "x-ratelimit-remaining": "0" }))).toBe(true);
+    expect(detectRateLimited(403, new Headers({ "x-ratelimit-remaining": "57" }))).toBe(false);
+    expect(detectRateLimited(403, new Headers())).toBe(false);
+    expect(detectRateLimited(200, new Headers())).toBe(false);
+  });
+});
+
+describe("stripConsentBoilerplate", () => {
+  it("drops banner lines and counts them, keeping the article", () => {
+    const text = [
+      "# Rate limiting",
+      "We use cookies and similar tracking technologies to personalise ads.",
+      "Accept all",
+      "Reject all",
+      "A token bucket refills at a fixed rate and caps at its burst size.",
+      "Manage preferences",
+    ].join("\n");
+    const r = stripConsentBoilerplate(text);
+    expect(r.dropped).toBe(4);
+    expect(r.text).toContain("token bucket refills");
+    expect(r.text).toContain("# Rate limiting");
+    expect(r.text).not.toMatch(/Accept all|Reject all|tracking technolog|Manage preferences/);
+  });
+
+  it("keeps real prose that merely mentions cookies once", () => {
+    // The failure mode worth guarding: an article ABOUT cookies losing the
+    // sentence someone wanted to cite. One hit on a long line is not a banner.
+    const line =
+      "The session cookie is signed with the server key, which is why rotating that key logs everybody out at once and why you should stage the rotation.";
+    const r = stripConsentBoilerplate(line);
+    expect(r.dropped).toBe(0);
+    expect(r.text).toBe(line);
+  });
+
+  it("leaves text with no banners byte-identical", () => {
+    const text = "# Title\n\nordinary prose\nmore prose";
+    expect(stripConsentBoilerplate(text)).toEqual({ text, dropped: 0 });
+  });
+});
+
+describe("metaDescriptionOf", () => {
+  it("reads name=description in either attribute order, then og:description", () => {
+    expect(metaDescriptionOf('<meta name="description" content="A token bucket primer">')).toBe("A token bucket primer");
+    expect(metaDescriptionOf('<meta content="Reversed attrs" name="description">')).toBe("Reversed attrs");
+    expect(metaDescriptionOf('<meta property="og:description" content="OG fallback">')).toBe("OG fallback");
+  });
+
+  it("prefers name=description over og:description", () => {
+    const html = '<meta property="og:description" content="og"><meta name="description" content="primary">';
+    expect(metaDescriptionOf(html)).toBe("primary");
+  });
+
+  it("collapses whitespace and decodes entities", () => {
+    expect(metaDescriptionOf('<meta name="description" content="a &amp; b\n   c">')).toBe("a & b c");
+  });
+
+  it("returns undefined when there is none, or it is empty", () => {
+    expect(metaDescriptionOf("<html><body>no head</body></html>")).toBeUndefined();
+    expect(metaDescriptionOf('<meta name="description" content="   ">')).toBeUndefined();
   });
 });
