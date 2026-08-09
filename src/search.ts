@@ -3,6 +3,7 @@ import { httpGet, pageDelayMs, sleep } from "./fetch.js";
 import { searchViaFirecrawl } from "./firecrawl.js";
 import { acceptLanguageHeader } from "./locale.js";
 import { canonicalizeUrl } from "./url.js";
+import { keylessEngines, searchViaKeyless, type KeylessEngine } from "./engines.js";
 
 // Discovery: turning a question into candidate URLs.
 //
@@ -10,11 +11,11 @@ import { canonicalizeUrl } from "./url.js";
 // be able to ask them something. Before this it could start a search engine and
 // not query it.
 //
-// Deliberately NOT the shape a full research pipeline wants. There is no
-// backend registry, no fan-out across twenty engines, no RRF fusion and no
-// ranking — a tool that needs those builds them on top. What this offers is the
-// primitive underneath: ask the local, keyless stack for candidate URLs, and
-// say honestly when it could not.
+// Deliberately NOT the shape a full research pipeline wants. This is a CASCADE
+// — local stack, then the keyless engines, then Firecrawl, first rung with hits
+// wins — and not a fan-out: querying five engines at once and fusing the pools
+// is a ranking decision, and the caller owns ranking (./rank.js has the parts).
+// There is still no backend registry and no scholarly-API layer here.
 
 /** The docker stack publishes SearXNG here. */
 export const SEARXNG_DEFAULT_BASE = "http://localhost:8888";
@@ -27,7 +28,7 @@ export interface SearchHit {
   title: string;
   snippet: string;
   /** Which engine produced it. */
-  via: "searxng" | "firecrawl";
+  via: "searxng" | "firecrawl" | KeylessEngine;
 }
 
 export interface SearchOptions {
@@ -42,6 +43,12 @@ export interface SearchOptions {
   region?: string;
   /** Result pages to walk. SearXNG paginates with `&pageno=`. */
   pages?: number;
+  /**
+   * Which keyless engines the cascade may fall back to, in order. Defaults to
+   * all of them; `[]` disables the keyless rung entirely, leaving the local
+   * stack as the only discovery path.
+   */
+  engines?: KeylessEngine[];
 }
 
 export interface SearchResult {
@@ -184,16 +191,23 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
 }
 
 /**
- * Search the local stack: SearXNG first, Firecrawl as the fallback.
+ * Search: the local stack first, then the keyless engines, then Firecrawl.
  *
- * SearXNG leads because it is the cheaper of the two and Firecrawl's own
- * keyless `/search` delegates to it anyway — going straight to Firecrawl would
- * pay for a browser stack to reach the same index.
+ * SearXNG leads because it is the cheapest and aggregates many upstreams at
+ * once. The keyless engines come next because they need nothing installed at
+ * all — an install with no Docker still discovers pages, which is the whole
+ * reason they are here. Mojeek is in that group deliberately: it runs its own
+ * crawler rather than reselling somebody else's index, so it answers when the
+ * DuckDuckGo family has nothing.
  *
- * Never throws. When nothing is reachable the result is empty hits plus notes
- * saying which piece was missing and how to start it, because "no results" and
- * "no search engine running" are different facts and a caller that cannot tell
- * them apart will report the wrong one.
+ * Firecrawl is last, not first: its own keyless `/search` delegates to SearXNG
+ * anyway, so reaching for it early pays for a browser stack to arrive at the
+ * same index.
+ *
+ * Never throws. When nothing answers, the result is empty hits plus notes saying
+ * which piece was missing and how to start it — "no results" and "no search
+ * engine running" are different facts, and a caller that cannot tell them apart
+ * reports the wrong one.
  */
 export async function search(query: string, opts: SearchOptions = {}): Promise<SearchResult> {
   const q = query.trim();
@@ -202,11 +216,27 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
   const viaSearxng = await searchViaSearxng(q, opts);
   if (viaSearxng.hits.length) return viaSearxng;
 
+  const notes = [...viaSearxng.notes];
+
+  // The keyless rung. Each engine is tried in turn and the FIRST one with hits
+  // wins — this is a fallback chain, not a fan-out: pooling several engines and
+  // fusing them is a ranking decision, and ranking belongs to the caller.
+  for (const engine of keylessEngines(opts)) {
+    const r = await searchViaKeyless(engine, q, { limit: opts.limit, pages: opts.pages, lang: opts.lang, region: opts.region });
+    if (r.hits.length) {
+      return { hits: r.hits.map((h) => ({ ...h, via: engine })), notes };
+    }
+    // Only a throttle is worth reporting. "Returned no results" from every
+    // engine in turn would bury the one note that matters under three that say
+    // the same thing.
+    if (r.throttled && r.note) notes.push(r.note);
+  }
+
   // searchViaFirecrawl runs its own probe and reports why it could not, so
   // there is no second copy of that logic here.
   const fc = await searchViaFirecrawl(q, opts.limit ?? 10, opts);
   const hits: SearchHit[] = (fc.hits ?? []).map((h) => ({ url: h.url, title: h.title, snippet: h.description, via: "firecrawl" as const }));
-  const notes = [...viaSearxng.notes, ...(fc.why ? [fc.why] : [])];
-  if (!hits.length) notes.push(`No results from the local stack. \`${brand().cli} stack up\` starts SearXNG and Firecrawl together.`);
+  if (fc.why) notes.push(fc.why);
+  if (!hits.length) notes.push(`No results from any engine. \`${brand().cli} stack up\` starts SearXNG and Firecrawl locally.`);
   return { hits, notes };
 }

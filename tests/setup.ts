@@ -55,6 +55,13 @@ beforeEach(() => {
   process.env[`${TEST_PREFIX}_FIRECRAWL`] = "off";
   process.env[`${TEST_PREFIX}_SEARXNG`] = "off";
 
+  // The keyless engines are the one discovery rung that talks to the PUBLIC
+  // internet rather than to localhost — so with the two above turned off, a
+  // bare `search()` would go and scrape duckduckgo.com. Off by default here;
+  // the suites that exercise them pass `engines` explicitly, which overrides
+  // this the same way an explicit Firecrawl base does.
+  process.env[`${TEST_PREFIX}_ENGINES`] = "off";
+
   // The PDF ladder shells out to npx and pdftotext: network access, ~90s
   // timeouts, and results that depend on which tools the developer happens to
   // have installed — the opposite of an offline, deterministic suite. Pin it to
