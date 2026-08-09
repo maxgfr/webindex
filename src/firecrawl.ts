@@ -83,6 +83,20 @@ export function resetFirecrawlProbeCache(): void {
 }
 
 /**
+ * Record that `base` stopped answering, so the rest of this run skips it.
+ *
+ * The probe runs once and is then trusted for the process — which is right for
+ * "it was never there" and wrong for "the container died at page 4 of 40". A
+ * caller that sees a request abort with no status knows something the memoised
+ * verdict does not, and without this every remaining page pays the timeout again.
+ * Both probe modes are marked down: the instance is gone whether or not the user
+ * named it.
+ */
+export function markFirecrawlDown(base: string): void {
+  for (const explicit of [true, false]) probeCache.set(`${base}|${explicit}`, Promise.resolve(false));
+}
+
+/**
  * Decide whether the thing that answered `GET {base}/` is actually Firecrawl.
  *
  * "Something is listening" is NOT the same question, and conflating them is a

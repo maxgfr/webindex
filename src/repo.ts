@@ -28,13 +28,25 @@ export interface RepoRef {
   slug: string;
 }
 
-/** Where clones live. `<PREFIX>_REPO_DIR` overrides. */
+/**
+ * Where clones live: `<PREFIX>_REPO_DIR`, then the brand's declared `repoDir`,
+ * then `<tmpdir>/<name>/repos`.
+ *
+ * The brand tier is what lets a consumer that already had a clone cache adopt
+ * this module at all. Without it, adopting moves every checkout: the clones the
+ * tool made yesterday are orphaned under the old path and re-fetched under the
+ * new one, and the cache commands still reading the old path report an empty
+ * cache that is not empty.
+ */
 export function repoCacheRoot(): string {
-  return env("REPO_DIR") ?? join(tmpdir(), brand().name, "repos");
+  return env("REPO_DIR") ?? brand().repoDir ?? join(tmpdir(), brand().name, "repos");
 }
 
 const cloneTimeoutMs = () => envInt("GIT_CLONE_TIMEOUT_MS", 300_000, 1000);
 const fetchTimeoutMs = () => envInt("GIT_FETCH_TIMEOUT_MS", 120_000, 1000);
+// Unshallowing a large repository is a full history transfer, so it gets its own
+// (much larger) ceiling rather than the per-fetch one.
+const historyTimeoutMs = () => envInt("GIT_HISTORY_TIMEOUT_MS", 300_000, 1000);
 
 /**
  * Parse any repository identifier into a `RepoRef`. Accepts a local directory,
@@ -183,22 +195,72 @@ export async function ensureClone(ref: RepoRef, opts: { refresh?: boolean; branc
   return dir;
 }
 
+// One verdict per working tree, per process: the probe and the fetch behind it
+// are expensive, and a `drill` that asks three times must not re-run them.
+const deepened = new Map<string, { ok: boolean; note?: string }>();
+
+/** Test seam: forget which working trees were deepened. */
+export function resetHistoryDepthCache(): void {
+  deepened.clear();
+}
+
 /**
- * Deepen a shallow clone so history-walking commands (`git log`, pickaxe
- * searches) have something to walk.
+ * Make a clone usable for history-walking commands (`git log -S/-G`, blame).
+ *
+ * There are TWO things to undo, and missing either one leaves the caller with a
+ * repository that answers slowly and wrongly:
+ *
+ *   --depth 1          no history to walk
+ *   --filter=blob:none no blob CONTENT to diff
+ *
+ * `ensureClone` above sets both. An earlier version of this function only looked
+ * for `.git/shallow` and only passed `--unshallow`, which produced the worst
+ * case of all: a full commit graph over a blobless object database, where every
+ * pickaxe comparison triggers a per-blob promisor fetch over the network. So the
+ * filter is cleared and `--refetch` re-pulls the objects in one transfer.
+ *
+ * Shallowness is read from `git rev-parse --is-shallow-repository` rather than
+ * from the presence of `.git/shallow`, which is git's private bookkeeping and not
+ * a contract.
  *
  * Returns a note rather than throwing when it cannot: a shallow clone still
  * answers every question about the CURRENT state, so failing the whole call
  * because history is unavailable would refuse the answers that are available.
  */
 export async function ensureHistoryDepth(dir: string, opts: { deepen?: number } = {}): Promise<{ ok: boolean; note?: string }> {
-  if (!have("git")) return { ok: false, note: "git is not installed — history is unavailable" };
-  const shallow = existsSync(join(dir, ".git", "shallow"));
-  if (!shallow) return { ok: true };
-  const full = await shAsync("git", ["-C", dir, "fetch", "--unshallow", "--filter=blob:none"], { timeoutMs: fetchTimeoutMs() });
+  const cached = deepened.get(dir);
+  if (cached) return cached;
+  const out = await computeHistoryDepth(dir, opts);
+  deepened.set(dir, out);
+  return out;
+}
+
+async function computeHistoryDepth(dir: string, opts: { deepen?: number }): Promise<{ ok: boolean; note?: string }> {
+  if (!have("git")) return { ok: false, note: "git is not installed — no commit history available." };
+  const probe = await shAsync("git", ["-C", dir, "rev-parse", "--is-shallow-repository"], { timeoutMs: 10_000 });
+  if (!probe.ok) return { ok: false, note: "Not a git working tree — no commit history available." };
+  // `git config <key>` exits 1 when the key is simply absent. That is "no filter
+  // configured", not a failure, which is why this reads `ok` rather than status.
+  const filter = await shAsync("git", ["-C", dir, "config", "remote.origin.partialclonefilter"], { timeoutMs: 10_000 });
+  const shallow = probe.stdout.trim() === "true";
+  const partial = filter.ok && filter.stdout.trim() !== "";
+  if (!shallow && !partial) return { ok: true };
+
+  if (partial) await shAsync("git", ["-C", dir, "config", "remote.origin.partialclonefilter", ""], { timeoutMs: 10_000 });
+  const full = await shAsync("git", ["-C", dir, "fetch", "--quiet", ...(partial ? ["--refetch"] : []), ...(shallow ? ["--unshallow"] : []), "origin"], {
+    timeoutMs: historyTimeoutMs(),
+  });
   if (full.ok) return { ok: true };
-  const deepen = await shAsync("git", ["-C", dir, "fetch", `--deepen=${opts.deepen ?? 500}`], { timeoutMs: fetchTimeoutMs() });
-  return deepen.ok ? { ok: true } : { ok: false, note: `could not deepen the shallow clone at ${dir}: ${deepen.stderr.trim() || `exit ${deepen.status}`}` };
+
+  // A partial refetch has no cheaper fallback — there is no "half the blobs"
+  // option — so only the purely-shallow case is worth a second, bounded attempt.
+  if (shallow && !partial) {
+    const deepen = await shAsync("git", ["-C", dir, "fetch", "--quiet", `--deepen=${opts.deepen ?? 500}`, "origin"], { timeoutMs: fetchTimeoutMs() });
+    return deepen.ok
+      ? { ok: true, note: `History deepened to ~${opts.deepen ?? 500} commits (full unshallow failed); older changes may be missing.` }
+      : { ok: false, note: "Shallow clone could not be deepened (offline?); history is limited to the latest commit." };
+  }
+  return { ok: false, note: "Could not fetch full history (offline, or the repo is too large); history results may be incomplete." };
 }
 
 /** The commit a working tree is on, or undefined when it is not a repo. */
@@ -213,7 +275,25 @@ export function originUrl(dir: string): string | undefined {
   return r.ok ? r.stdout.trim() || undefined : undefined;
 }
 
-/** Two commits are the same, tolerating one being absent. */
+// git's default abbreviation is 7 characters. Below that, a shared prefix is a
+// coincidence rather than an identity, so a 1-character "SHA" must not match
+// every commit in the repository.
+const MIN_ABBREV = 7;
+
+/**
+ * Two commits are the same, tolerating one being absent — and tolerating either
+ * being an ABBREVIATION of the other.
+ *
+ * The abbreviation half is load-bearing, not politeness. A stored artifact
+ * records the commit it was built against, and git abbreviates a SHA almost
+ * everywhere it prints one, so strict equality answers "different" to a full SHA
+ * compared against its own 7-character prefix. Downstream, that means every
+ * stored citation silently stops being re-validated against the working tree —
+ * a check that reports success while checking nothing.
+ */
 export function sameCommit(a: string | undefined, b: string | undefined): boolean {
-  return !!a && !!b && a === b;
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  return short.length >= MIN_ABBREV && long.startsWith(short);
 }

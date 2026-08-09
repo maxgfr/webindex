@@ -397,6 +397,115 @@ export function matcherFromTokens(tokens: string[], max = 8): KeywordMatcher {
 }
 
 /**
+ * The markdown heading a line sits under, ignoring heading-lookalikes inside
+ * fenced code blocks. `anchor` is a 0-based line index.
+ *
+ * Lives here rather than with the HTTP layer because it is a fact about text:
+ * the extractor happens to be what usually produces the markdown, but a caller
+ * reading a `.md` off disk has exactly the same question.
+ */
+export function nearestHeading(lines: string[], anchor: number): string | undefined {
+  let heading: string | undefined;
+  let inFence = false;
+  for (let i = 0; i <= anchor && i < lines.length; i++) {
+    const line = lines[i]!;
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const m = line.match(/^#{1,6}\s+(.+?)\s*#*\s*$/);
+    if (m) heading = m[1]!.trim();
+  }
+  return heading;
+}
+
+/** A passage of a document, chosen because it answers the question. */
+export interface ExcerptWindow {
+  /** First line kept, 0-based. */
+  start: number;
+  /** One past the last line kept. */
+  end: number;
+  /** The line the window was centred on. */
+  anchor: number;
+  /**
+   * How many DISTINCT question keywords the anchor line covered.
+   *
+   * Zero is meaningful and is not an error: it is the top-of-page fallback,
+   * emitted when nothing in the document matched. A caller that ranks evidence
+   * wants to know it is looking at boilerplate rather than at an answer.
+   */
+  score: number;
+  /** The markdown section the anchor sits under, when there is one. */
+  heading?: string;
+  snippet: string;
+}
+
+/**
+ * Find the passages of `text` that answer `question`.
+ *
+ * This is the half of "turn a page into excerpts" that is the same everywhere:
+ * score each line against the question, take the best ones, widen each into a
+ * readable window, and stop windows from overlapping. What an excerpt then IS —
+ * a citation, an evidence item, a snippet with a section title — is the caller's
+ * model and stays with the caller.
+ *
+ * Three decisions, each taken from whichever copy had it right:
+ *
+ * - Scoring goes through `buildMatcher`, so accents, plurals and camelCase
+ *   subtokens all match. A raw `line.includes(keyword)` misses "Générateur" for
+ *   "generateur" and "parseQuery" for "query".
+ * - `question` may be a LIST, and a line scores by its best single-question
+ *   coverage rather than by the union. A page then gets excerpted around the one
+ *   claim it actually supports instead of around a diluted average of all of them.
+ * - Windows are de-duplicated by RANGE OVERLAP, not by bucketing line numbers.
+ *   Fixed buckets let two near-identical excerpts straddle a boundary and both
+ *   survive, which is how the same paragraph ends up quoted twice.
+ */
+export function excerptWindows(
+  text: string,
+  question: string | string[],
+  opts: { perDoc?: number; before?: number; after?: number; maxChars?: number } = {},
+): ExcerptWindow[] {
+  const lines = text.split("\n");
+  const before = opts.before ?? 3;
+  const after = opts.after ?? 12;
+  const maxChars = opts.maxChars ?? 1500;
+  const perDoc = Math.max(1, opts.perDoc ?? 2);
+
+  const matchers = (Array.isArray(question) ? question : [question]).filter((q) => q.trim()).map((q) => buildMatcher(q));
+
+  const hits: { anchor: number; score: number }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    let score = 0;
+    for (const m of matchers) {
+      const cov = m.matchLine(lines[i]!).size;
+      if (cov > score) score = cov;
+    }
+    if (score > 0) hits.push({ anchor: i, score });
+  }
+  hits.sort((a, b) => b.score - a.score || a.anchor - b.anchor);
+
+  // Nothing matched: hand back the top of the document at score 0 rather than
+  // nothing at all. A caller with a pinned URL still needs SOMETHING to show,
+  // and the score tells it exactly how much to trust what it got.
+  const take = hits.length ? hits : [{ anchor: 0, score: 0 }];
+
+  const out: ExcerptWindow[] = [];
+  for (const h of take) {
+    if (out.length >= perDoc) break;
+    const start = Math.max(0, h.anchor - before);
+    const end = Math.min(lines.length, h.anchor + after);
+    if (out.some((w) => start < w.end && end > w.start)) continue;
+    const snippet = lines.slice(start, end).join("\n").slice(0, maxChars);
+    if (!snippet.trim()) continue;
+    const heading = nearestHeading(lines, h.anchor);
+    out.push({ start, end, anchor: h.anchor, score: h.score, ...(heading ? { heading } : {}), snippet });
+  }
+  return out;
+}
+
+/**
  * Turn an arbitrary identifier into a filesystem-safe slug —
  * `github.com/expressjs/express` → `github.com-expressjs-express`.
  *

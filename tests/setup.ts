@@ -2,6 +2,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach } from "vitest";
+// Only `brand` is imported here, and that is deliberate. A setup file runs
+// BEFORE every test module, so anything it pulls in is already in the module
+// cache by the time a suite's `vi.mock` would replace it — importing src/forge.js
+// from here (for its cache reset) silently un-mocked src/pdf/exec.js for the doc
+// and OCR ladders. Reset process-global caches in the suite that needs them.
 import { configure, resetBrand } from "../src/brand.js";
 
 // Every test runs under a throwaway brand whose prefix belongs to no real
@@ -78,6 +83,12 @@ beforeEach(() => {
   // dependent, seconds per page. A budget of 0 switches the rung off for the
   // whole suite; pdf-ocr.test.ts drives it with the subprocess layer stubbed.
   process.env[`${TEST_PREFIX}_OCR_MAX`] = "0";
+
+  // `canonicalRepoRef` prefers the `gh` CLI, which is a real subprocess making a
+  // real request — it walks straight past a stubbed `fetch`, so on a developer
+  // machine with `gh` installed the suite would silently test the network and on
+  // CI it would test the REST fallback. Same reasoning as the ladders above.
+  process.env[`${TEST_PREFIX}_NO_GH`] = "1";
 });
 
 afterEach(() => {

@@ -1,4 +1,5 @@
-import { env } from "./brand.js";
+import { env, envFlag } from "./brand.js";
+import { have, shAsync } from "./exec.js";
 import { contactUa, httpJson } from "./fetch.js";
 import type { RepoRef } from "./repo.js";
 
@@ -60,13 +61,19 @@ export function forgeKind(host: string): ForgeKind | undefined {
  * GitHub Enterprise is the awkward one: github.com serves `api.github.com`,
  * while a self-hosted install serves `<host>/api/v3`. Getting this wrong is a
  * 404 that reads like "no such repository".
+ *
+ * Takes a bare host string as well as a ref, because a provider layer routinely
+ * knows the host before it has resolved anything into a `RepoRef` — and having to
+ * fabricate one just to ask this question is exactly why a second copy of this
+ * function grew downstream.
  */
-export function apiBase(ref: RepoRef, opts: ForgeOptions = {}): string {
+export function apiBase(ref: Pick<RepoRef, "host"> | string, opts: ForgeOptions = {}): string {
   if (opts.apiBase) return opts.apiBase.replace(/\/+$/, "");
-  const kind = forgeKind(ref.host);
-  if (kind === "github") return ref.host === "github.com" ? "https://api.github.com" : `https://${ref.host}/api/v3`;
-  if (kind === "gitlab") return `https://${ref.host}/api/v4`;
-  return `https://${ref.host}/api/v1`;
+  const host = typeof ref === "string" ? ref : ref.host;
+  const kind = forgeKind(host);
+  if (kind === "github") return host === "github.com" ? "https://api.github.com" : `https://${host}/api/v3`;
+  if (kind === "gitlab") return `https://${host}/api/v4`;
+  return `https://${host}/api/v1`;
 }
 
 /** Auth headers when a token is in the environment; none when it is not. */
@@ -133,20 +140,73 @@ export function mapGithubIssues(raw: unknown[], kind: "issue" | "pr"): ForgeItem
     }));
 }
 
+// One answer per (host, owner, repo) per process. The lookup is a round-trip and
+// every search of a run asks the same question.
+const canonCache = new Map<string, Promise<{ owner: string; repo: string }>>();
+
+/** Test seam: forget which repositories were resolved. */
+export function resetCanonicalRepoCache(): void {
+  canonCache.clear();
+}
+
+// The `gh` CLI only talks to the host it is authenticated against, so it is
+// worth reaching for on github.com and useless anywhere else.
+//
+// `<PREFIX>_NO_GH` turns it off. That switch is not a nicety: shelling out is
+// the one path in this module that leaves the HTTP layer entirely, so a caller
+// with a stubbed `fetch` — every test suite, every offline run — would otherwise
+// find a real network call underneath a mock that appeared to control everything.
+// It also gives a user who would rather not spend their `gh` quota a way to say so.
+function ghUsable(host: string): boolean {
+  return /(^|\.)github\.com$/i.test(host) && !envFlag("NO_GH") && have("gh");
+}
+
+function splitSlug(full: string, fallback: { owner: string; repo: string }): { owner: string; repo: string } {
+  const i = full.indexOf("/");
+  return i > 0 ? { owner: full.slice(0, i), repo: full.slice(i + 1) } : fallback;
+}
+
 /**
- * The repository's canonical `owner/repo`, following renames.
+ * The repository's canonical owner and repo, following renames.
  *
- * A moved repository still answers on its old name through a redirect, but every
- * subsequent search keyed on the old name silently returns nothing — so this is
- * resolved once and the answer used everywhere after.
+ * A moved repository (calcom/cal.com → calcom/cal.diy) still answers on its old
+ * name through a redirect, but every subsequent SEARCH keyed on the old name
+ * fails with a 422 that reads like a malformed query. So this is resolved once
+ * and the answer used everywhere after.
+ *
+ * Prefers the `gh` CLI when it is installed and the host is github.com: it is
+ * already authenticated, so it resolves against a quota far above the anonymous
+ * one this would otherwise spend. Falls back to the keyless REST call — `gh` is
+ * a bonus, never a requirement.
+ *
+ * Returns the parts rather than a slug because a provider layer builds URLs from
+ * them; `canonicalRepo` below joins them for the callers that want the string.
  */
+export function canonicalRepoRef(ref: RepoRef, opts: ForgeOptions = {}): Promise<{ owner: string; repo: string }> {
+  const fallback = { owner: ref.owner ?? "", repo: ref.repo ?? "" };
+  if (!ref.owner || !ref.repo || forgeKind(ref.host) !== "github") return Promise.resolve(fallback);
+  const key = `${ref.host}/${ref.owner}/${ref.repo}`;
+  let hit = canonCache.get(key);
+  if (!hit) {
+    hit = (async () => {
+      if (ghUsable(ref.host)) {
+        const r = await shAsync("gh", ["api", `repos/${ref.owner}/${ref.repo}`, "--jq", ".full_name"], { timeoutMs: opts.timeoutMs ?? 15_000 });
+        if (r.ok && r.stdout.includes("/")) return splitSlug(r.stdout.trim(), fallback);
+      }
+      const r = await httpJson("GET", `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}`, undefined, reqOpts("github", opts));
+      const full = r.ok ? r.data?.full_name : undefined;
+      return typeof full === "string" && full.includes("/") ? splitSlug(full, fallback) : fallback;
+    })();
+    canonCache.set(key, hit);
+  }
+  return hit;
+}
+
+/** The same answer as `canonicalRepoRef`, as an `owner/repo` slug. */
 export async function canonicalRepo(ref: RepoRef, opts: ForgeOptions = {}): Promise<string | undefined> {
   if (!ref.owner || !ref.repo) return undefined;
-  const kind = forgeKind(ref.host);
-  if (kind !== "github") return `${ref.owner}/${ref.repo}`;
-  const r = await httpJson("GET", `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}`, undefined, reqOpts(kind, opts));
-  const full = r.ok ? r.data?.full_name : undefined;
-  return typeof full === "string" ? full : `${ref.owner}/${ref.repo}`;
+  const { owner, repo } = await canonicalRepoRef(ref, opts);
+  return `${owner}/${repo}`;
 }
 
 /**

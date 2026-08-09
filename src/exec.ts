@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { envInt } from "./brand.js";
 
 // Running a local command and reading what it said.
 //
@@ -24,6 +25,17 @@ export interface ShResult {
 
 const STDOUT_CAP = 24 * 1024 * 1024;
 
+/**
+ * How long a command may run before it is killed, when the caller names no
+ * timeout. `<PREFIX>_SH_TIMEOUT_MS` overrides.
+ *
+ * A tunable rather than a constant because the right ceiling is the consumer's:
+ * a tool whose longest command is `git rev-parse` and one that shells out to a
+ * clone of a large monorepo do not want the same number, and hardcoding 60s here
+ * was one of the reasons two consumers kept their own `sh`.
+ */
+const defaultTimeoutMs = () => envInt("SH_TIMEOUT_MS", 60_000, 1000);
+
 function toResult(status: number | null, stdout: string, stderr: string, err?: NodeJS.ErrnoException): ShResult {
   const missing = err?.code === "ENOENT";
   return {
@@ -35,13 +47,20 @@ function toResult(status: number | null, stdout: string, stderr: string, err?: N
   };
 }
 
-/** Is this executable on PATH? Cheap, memoised per process. */
+/**
+ * Is this executable on PATH? Cheap, memoised per process.
+ *
+ * A zero exit is not quite enough: some shells' `which` answers 0 while printing
+ * nothing for a shell builtin or an alias, which is not something `spawn` can
+ * run. Requiring a path on stdout is what both consumers already did, and it is
+ * the stricter, more honest test.
+ */
 const havePresence = new Map<string, boolean>();
 export function have(cmd: string): boolean {
   let hit = havePresence.get(cmd);
   if (hit === undefined) {
     const probe = spawnSync(process.platform === "win32" ? "where" : "which", [cmd], { encoding: "utf8" });
-    hit = probe.status === 0;
+    hit = probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
     havePresence.set(cmd, hit);
   }
   return hit;
@@ -57,7 +76,7 @@ export function sh(cmd: string, args: string[], opts: { cwd?: string; input?: st
   const r = spawnSync(cmd, args, {
     cwd: opts.cwd,
     input: opts.input,
-    timeout: opts.timeoutMs ?? 60_000,
+    timeout: opts.timeoutMs ?? defaultTimeoutMs(),
     encoding: "utf8",
     maxBuffer: STDOUT_CAP,
     env: opts.env ?? process.env,
@@ -74,6 +93,7 @@ export function sh(cmd: string, args: string[], opts: { cwd?: string; input?: st
  * long as all of them put together. SIGKILL on timeout, and never an orphan.
  */
 export function shAsync(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): Promise<ShResult> {
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   return new Promise((resolve) => {
     let settled = false;
     const done = (r: ShResult) => {
@@ -94,8 +114,8 @@ export function shAsync(cmd: string, args: string[], opts: { cwd?: string; timeo
     });
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      done({ ok: false, status: 124, stdout, stderr: stderr || `timed out after ${opts.timeoutMs ?? 60_000}ms` });
-    }, opts.timeoutMs ?? 60_000);
+      done({ ok: false, status: 124, stdout, stderr: stderr || `timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
     child.on("error", (e) => done(toResult(null, stdout, stderr, e as NodeJS.ErrnoException)));
     child.on("close", (code) => done(toResult(code, stdout, stderr)));
   });

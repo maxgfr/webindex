@@ -7,12 +7,13 @@ import { have, resetHaveCache, sh, shAsync } from "../src/exec.js";
 import { fetchFeed, fetchSitemap } from "../src/feed.js";
 import { listTags } from "../src/forge.js";
 import { lookupPackage } from "../src/registry.js";
-import { ensureClone, ensureHistoryDepth, headCommit, originUrl, repoCacheRoot, resolveRepo, sameCommit } from "../src/repo.js";
+import { ensureClone, ensureHistoryDepth, headCommit, originUrl, repoCacheRoot, resetHistoryDepthCache, resolveRepo, sameCommit } from "../src/repo.js";
 import { installFetchMock } from "./fetchmock.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
   resetHaveCache();
+  resetHistoryDepthCache();
 });
 
 // `node` is the one executable guaranteed present — this suite is running in it.
@@ -122,9 +123,12 @@ describe("git helpers over a real repository", () => {
   });
 
   it("says history is unavailable rather than failing the whole call", async () => {
-    // /tmp is not a shallow clone, so there is nothing to deepen — the honest
-    // answer is "fine", not an exception.
-    expect(await ensureHistoryDepth("/tmp")).toEqual({ ok: true });
+    // /tmp is not a working tree at all. The honest answer is a NOTE saying so,
+    // not an exception — and not `{ ok: true }` either, which is what this
+    // returned while it only looked for `.git/shallow`: a claim that a directory
+    // with no history has all of it. A caller that walks commits needs to be able
+    // to tell "nothing to deepen" from "nothing to walk".
+    expect(await ensureHistoryDepth("/tmp")).toEqual({ ok: false, note: expect.stringMatching(/not a git working tree/i) });
   });
 });
 
@@ -324,6 +328,26 @@ describe("cloning, against a real local repository", () => {
     expect(existsSync(join(dir, "MARKER"))).toBe(true);
   });
 
+  it("leaves a clone that already has everything alone", async () => {
+    expect(await ensureHistoryDepth(origin)).toEqual({ ok: true });
+  });
+
+  it("undoes a blobless FILTER, not just a shallow depth", async () => {
+    const dir = await ensureClone(resolveRepo(`file://${origin}`));
+    // Pinned explicitly rather than relying on what the local transport
+    // negotiated: the state under test is a clone whose depth is fine and whose
+    // object database is missing blob content. `ensureClone` produces exactly
+    // that against a real remote.
+    sh("git", ["-C", dir, "config", "remote.origin.partialclonefilter", "blob:none"]);
+
+    expect(await ensureHistoryDepth(dir)).toEqual({ ok: true });
+    // The filter is gone. Leaving it in place was the real failure of the
+    // version that only looked for `.git/shallow`: history became walkable while
+    // every `git log -S` comparison still fetched each blob over the wire, one
+    // promisor request at a time.
+    expect(sh("git", ["-C", dir, "config", "remote.origin.partialclonefilter"]).stdout.trim()).toBe("");
+  });
+
   it("picks up new upstream commits with refresh", async () => {
     const ref = resolveRepo(`file://${origin}`);
     const dir = await ensureClone(ref);
@@ -347,6 +371,21 @@ describe("cloning, against a real local repository", () => {
   it("reports both attempts when a clone cannot succeed", async () => {
     const missing = resolveRepo(`file://${join(origin, "nope")}`);
     await expect(ensureClone(missing)).rejects.toThrow(/git clone failed[\s\S]*attempt 1[\s\S]*attempt 2/);
+  });
+
+  it("names a missing git binary instead of reporting a clone failure", async () => {
+    // "there is no git on this machine" and "git could not clone that" want
+    // completely different answers, and a caller told the second when the first
+    // is true goes looking at their network.
+    const PATH = process.env.PATH;
+    process.env.PATH = mkdtempSync(join(tmpdir(), "wi-nopath-"));
+    resetHaveCache();
+    try {
+      await expect(ensureClone(resolveRepo(`file://${origin}`))).rejects.toThrow(/git is not installed or not on PATH/);
+    } finally {
+      process.env.PATH = PATH;
+      resetHaveCache();
+    }
   });
 
   it("clones a named branch", async () => {

@@ -1,11 +1,16 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { apiBase, forgeKind, listReleases, mapGithubIssues, repoFacts, searchIssues } from "../src/forge.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { apiBase, canonicalRepoRef, forgeKind, listReleases, mapGithubIssues, repoFacts, resetCanonicalRepoCache, searchIssues } from "../src/forge.js";
 import { lookupPackage, normalizeRepoUrl, resolvePackage } from "../src/registry.js";
 import { resolveRepo } from "../src/repo.js";
 import { slugify } from "../src/text.js";
 import { installFetchMock } from "./fetchmock.js";
 
 afterEach(() => vi.unstubAllGlobals());
+
+// A rename is resolved once per (host, owner, repo) and remembered for the
+// process — right for a run, wrong across cases, where the second test using a
+// ref would be answered by the first test's mock instead of its own.
+beforeEach(() => resetCanonicalRepoCache());
 
 describe("resolveRepo", () => {
   it("parses every identifier shape onto the same repository", () => {

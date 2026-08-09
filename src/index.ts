@@ -53,6 +53,7 @@ export {
   firecrawlIsExplicit,
   looksLikeFirecrawl,
   mapScrapeResponse,
+  markFirecrawlDown,
   mapSearchResponse,
   probeFirecrawl,
   resetFirecrawlProbeCache,
@@ -64,7 +65,11 @@ export {
   type ScrapeAttempt,
 } from "./firecrawl.js";
 
-// ── Text: keywords and matching ─────────────────────────────────────────────
+// ── Text: keywords, matching, and excerpt windows ───────────────────────────
+// `excerptWindows` is the scanning half of "turn a page into excerpts": score
+// lines against the question, widen the best ones into readable passages, stop
+// them overlapping. What an excerpt then IS — a citation, an evidence item —
+// stays with the consumer, because that is its model and not this one's.
 export * from "./text.js";
 
 // ── URL identity ────────────────────────────────────────────────────────────

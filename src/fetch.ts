@@ -1,6 +1,8 @@
-import { brand, env, envFlag, envInt } from "./brand.js";
+import { brand, countFetch, env, envFlag, envInt } from "./brand.js";
 import { decodeBody } from "./charset.js";
-import { buildMatcher } from "./text.js";
+// `nearestHeading` moved to text.ts — it is a fact about markdown, not about
+// HTTP — and is still exported from the package root, so no consumer sees it move.
+import { buildMatcher, nearestHeading } from "./text.js";
 import { extractPdf } from "./pdf.js";
 import { extractDocument, docFormatForUrl, docFormatForContentType } from "./doc.js";
 // Cyclic by design: firecrawl.ts is a CLIENT of this HTTP layer, and this layer
@@ -39,7 +41,21 @@ export function browserUa(): string {
  */
 export function contactUa(): string {
   const b = brand();
-  return `${b.name}/1.x (+${b.contactUrl ?? `https://github.com/maxgfr/${b.name}`})`;
+  return `${b.name}/${b.version ?? "1.x"} (+${b.contactUrl ?? `https://github.com/maxgfr/${b.name}`})`;
+}
+
+/**
+ * The User-Agent an unlabelled request carries, per the brand's declared policy.
+ *
+ * Two defensible policies, and the choice belongs to the consuming tool rather
+ * than to this layer. `browser` (the default) optimises for getting the page:
+ * several keyless endpoints serve 403 or empty to anything that admits to being
+ * a script. `contact` optimises for being a good citizen — it names the tool and
+ * where to complain about it — and pays for that with the occasional refusal,
+ * which `fetchAndExtract` answers by retrying once as a browser.
+ */
+export function defaultUa(): string {
+  return brand().defaultUa === "contact" ? contactUa() : browserUa();
 }
 
 // Transient statuses worth one retry; a single throttled call would otherwise
@@ -124,6 +140,13 @@ function retryDelayMs(headers: Headers): number {
   return parseRetryAfter(headers) ?? defaultRetryMs();
 }
 
+// Total attempts for a call: the caller's `retries` (extra tries on top of the
+// first) when given, otherwise the env-wide policy. Clamped, because a typo in a
+// retry count should cost one extra request, not a hundred.
+function attemptsFor(retries: number | undefined): number {
+  return retries === undefined ? maxAttempts() : Math.min(4, Math.max(0, Math.trunc(retries))) + 1;
+}
+
 /**
  * Read a Response body, keeping at most `max` bytes and cancelling the transfer
  * the moment the cap is crossed.
@@ -177,14 +200,19 @@ export async function httpGet(
     /** Extra request headers, lower-cased. The escape hatch for conditional GET
      *  (`if-none-match`, `if-modified-since`) and for an API that wants auth. */
     headers?: Record<string, string>;
+    /** Extra attempts on a transient failure, overriding `<PREFIX>_MAX_ATTEMPTS`.
+     *  Per-call because the right number is per-endpoint: a probe wants 0, a
+     *  paper download off a flaky mirror wants 2. */
+    retries?: number;
   } = {},
 ): Promise<HttpResult> {
+  const attempts = attemptsFor(opts.retries);
   let last: HttpResult = { ok: false, status: 0, body: "", contentType: "", url };
-  for (let attempt = 0; attempt < maxAttempts(); attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 20_000);
     try {
-      const headers: Record<string, string> = { "user-agent": opts.userAgent ?? browserUa(), accept: opts.accept ?? "*/*" };
+      const headers: Record<string, string> = { "user-agent": opts.userAgent ?? defaultUa(), accept: opts.accept ?? "*/*" };
       if (opts.acceptLanguage) headers["accept-language"] = opts.acceptLanguage;
       for (const [k, v] of Object.entries(opts.headers ?? {})) headers[k.toLowerCase()] = v;
       const res = await fetch(url, {
@@ -213,6 +241,7 @@ export async function httpGet(
       // 304 carries no body by definition — reading it is not an error, and the
       // caller (the cache) wants the status, not an empty-body complaint.
       const bytes = res.status === 304 ? Buffer.alloc(0) : await readCappedBytes(res, max);
+      countFetch(bytes.length, false);
       const result: HttpResult = {
         ok: res.ok,
         status: res.status,
@@ -223,7 +252,7 @@ export async function httpGet(
         bytes: opts.binary ? bytes : undefined,
         ...meta,
       };
-      if (RETRY_STATUS.has(res.status) && attempt < maxAttempts() - 1) {
+      if (RETRY_STATUS.has(res.status) && attempt < attempts - 1) {
         last = result;
         await sleep(retryDelayMs(res.headers));
         continue;
@@ -231,7 +260,7 @@ export async function httpGet(
       return result;
     } catch (e) {
       last = { ok: false, status: 0, body: "", contentType: "", url, error: (e as Error).message };
-      if (attempt < maxAttempts() - 1) await sleep(defaultRetryMs());
+      if (attempt < attempts - 1) await sleep(defaultRetryMs());
     } finally {
       clearTimeout(t);
     }
@@ -248,17 +277,18 @@ export async function httpJson(
   method: string,
   url: string,
   body?: unknown,
-  opts: { timeoutMs?: number; accept?: string; acceptLanguage?: string; userAgent?: string; headers?: Record<string, string> } = {},
+  opts: { timeoutMs?: number; accept?: string; acceptLanguage?: string; userAgent?: string; headers?: Record<string, string>; retries?: number } = {},
 ): Promise<{ ok: boolean; status: number; data: any; error?: string }> {
+  const attempts = attemptsFor(opts.retries);
   let last: { ok: boolean; status: number; data: any; error?: string } = { ok: false, status: 0, data: undefined };
-  for (let attempt = 0; attempt < maxAttempts(); attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 20_000);
     try {
       const headers: Record<string, string> = {
         "content-type": "application/json",
         accept: opts.accept ?? "application/json",
-        "user-agent": opts.userAgent ?? browserUa(),
+        "user-agent": opts.userAgent ?? defaultUa(),
       };
       if (opts.acceptLanguage) headers["accept-language"] = opts.acceptLanguage;
       for (const [k, v] of Object.entries(opts.headers ?? {})) headers[k.toLowerCase()] = v;
@@ -269,6 +299,7 @@ export async function httpJson(
         body: body === undefined ? undefined : JSON.stringify(body),
       });
       const text = await res.text();
+      countFetch(Buffer.byteLength(text), false);
       let data: any;
       try {
         data = text ? JSON.parse(text) : undefined;
@@ -276,7 +307,7 @@ export async function httpJson(
         data = text;
       }
       const result = { ok: res.ok, status: res.status, data };
-      if (RETRY_STATUS.has(res.status) && attempt < maxAttempts() - 1) {
+      if (RETRY_STATUS.has(res.status) && attempt < attempts - 1) {
         last = result;
         await sleep(retryDelayMs(res.headers));
         continue;
@@ -284,7 +315,7 @@ export async function httpJson(
       return result;
     } catch (e) {
       last = { ok: false, status: 0, data: undefined, error: (e as Error).message };
-      if (attempt < maxAttempts() - 1) await sleep(defaultRetryMs());
+      if (attempt < attempts - 1) await sleep(defaultRetryMs());
     } finally {
       clearTimeout(t);
     }
@@ -392,24 +423,37 @@ const ENTITIES: Record<string, string> = {
   "&Uuml;": "Ü",
 };
 
-// Decode the common named entities plus decimal/hex numeric references.
+// The table above, keyed by bare name, for the single-pass decoder below.
+const ENTITY_BY_NAME = new Map(Object.entries(ENTITIES).map(([k, v]) => [k.slice(1, -1), v]));
+const ENTITY_RE = /&(#[xX][0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g;
+
+/**
+ * Decode the common named entities plus decimal/hex numeric references, in ONE
+ * non-rescanning pass.
+ *
+ * The pass count is the whole design. Decoding numeric refs and then walking the
+ * named table with split/join re-reads its own output, so `&amp;lt;` — which is
+ * how a document writes the literal text "&lt;" — becomes "&lt;" and then "<".
+ * The page said one thing and the extract says another, which for a page
+ * documenting markup is most of its content. One pass cannot do that: each
+ * reference is replaced exactly once, from the original text.
+ *
+ * Names are matched case-SENSITIVELY, because case is meaningful here: `&dagger;`
+ * is † and `&Dagger;` is ‡. An unknown name is left exactly as written rather
+ * than guessed at or blanked.
+ */
 export function decodeEntities(s: string): string {
-  let out = s.replace(/&#x([0-9a-fA-F]+);/g, (_m, h) => {
-    try {
-      return String.fromCodePoint(parseInt(h, 16));
-    } catch {
-      return " ";
+  return s.replace(ENTITY_RE, (m, ref: string) => {
+    if (ref[0] === "#") {
+      const n = ref[1] === "x" || ref[1] === "X" ? Number.parseInt(ref.slice(2), 16) : Number(ref.slice(1));
+      try {
+        return Number.isFinite(n) ? String.fromCodePoint(n) : " ";
+      } catch {
+        return " "; // out of range — a space beats throwing on one bad codepoint
+      }
     }
+    return ENTITY_BY_NAME.get(ref) ?? m;
   });
-  out = out.replace(/&#(\d+);/g, (_m, n) => {
-    try {
-      return String.fromCodePoint(Number(n));
-    } catch {
-      return " ";
-    }
-  });
-  for (const [k, v] of Object.entries(ENTITIES)) out = out.split(k).join(v);
-  return out;
 }
 
 // Clean a backend-provided inline field (a title or one-line snippet) that may
@@ -433,7 +477,14 @@ export function htmlToText(html: string): string {
   s = s.replace(/<!--[\s\S]*?-->/g, " ");
   s = s.replace(/<(script|style|noscript|head|nav|footer|svg|template)[\s\S]*?<\/\1>/gi, " ");
   s = s.replace(/<h([1-6])(?:\s[^>]*)?>/gi, (_m, n) => "\n" + "#".repeat(Number(n)) + " ");
-  s = s.replace(/<\/(p|div|section|article|li|tr|h[1-6]|pre|blockquote|br)>/gi, "\n");
+  s = s.replace(/<\/(p|div|section|article|li|tr|td|th|ul|ol|h[1-6]|pre|blockquote|br)>/gi, "\n");
+  // Break on OPENING block tags too, not only closing ones. Unclosed `<li>` and
+  // `<td>` are valid HTML and extremely common, and with closing tags alone a
+  // whole list or table row collapses onto one line — which then reads as a
+  // single sentence to anything scoring lines against a question. Headings are
+  // excluded because the rule above already turned them into markdown markers;
+  // matching them here as well would double every one of them.
+  s = s.replace(/<(p|div|section|article|li|tr|td|th|ul|ol|pre|blockquote|table)\b[^>]*>/gi, "\n");
   s = s.replace(/<(br|hr)\s*\/?>/gi, "\n");
   s = s.replace(/<[^>]+>/g, " ");
   s = decodeEntities(s);
@@ -592,6 +643,16 @@ export interface ExtractResult {
   status: number;
   extractor?: ExtractorId;
   canonical?: string; // the url the page declares for itself (rel=canonical / og:url)
+  /**
+   * The page's own one-line summary (`<meta name=description>`, else
+   * `og:description`).
+   *
+   * Worth carrying because extraction drops `<head>` entirely, so a caller that
+   * finds nothing in the body matching its question has no second-best left —
+   * and citing a nav bar is worse than citing the summary the page wrote about
+   * itself. Only ever set on the HTML path.
+   */
+  metaDescription?: string;
   // Carried up from the response so a cache can store them and revalidate later.
   // Absent on the Firecrawl path, which does its own fetching and reports no
   // origin validators — an entry written there simply re-downloads when stale.
@@ -619,6 +680,15 @@ export async function fetchAndExtract(
      *  `if-none-match` / `if-modified-since`. Firecrawl does its own fetching and
      *  ignores these, which is why a revalidating caller skips it. */
     headers?: Record<string, string>;
+    /**
+     * Drop consent-banner lines from the extracted text.
+     *
+     * Opt-in, and applied to the BUILT-IN extractor's HTML only. Never to
+     * Firecrawl markdown: main-content extraction has already removed the
+     * banner, so all the heuristic could still do there is damage — on a page
+     * documenting HTTP cookies it would eat the article.
+     */
+    stripConsent?: boolean;
   } = {},
 ): Promise<ExtractResult> {
   const wantsPdf = looksLikePdfUrl(url);
@@ -647,7 +717,14 @@ export async function fetchAndExtract(
   }
   const base = wantsPdf ? PDF_FETCH_OPTS : wantsDoc ? DOC_FETCH_OPTS : { accept: "text/html,text/plain,*/*", acceptLanguage: opts.acceptLanguage };
   const fetchOpts = opts.headers ? { ...base, headers: opts.headers } : base;
-  const res = await httpGet(url, fetchOpts);
+  let res = await httpGet(url, fetchOpts);
+  // A brand that identifies itself honestly gets refused by some hosts. Retry
+  // once wearing a browser UA before giving up — but only for a brand that had
+  // actually chosen the polite one, since retrying a browser UA with the same
+  // browser UA is a wasted round-trip. A 304 is a success and never lands here.
+  if (!res.ok && brand().defaultUa === "contact" && (res.status === 403 || res.status === 429)) {
+    res = await httpGet(url, { ...fetchOpts, userAgent: browserUa(), acceptLanguage: opts.acceptLanguage ?? "en-US,en;q=0.9" });
+  }
   // 304 is a SUCCESS with no body: the caller sent validators and the origin
   // confirmed nothing changed. Reported as-is so a cache can serve what it
   // already has; a caller that sent no validators can never see this.
@@ -721,10 +798,12 @@ export async function fetchAndExtract(
     };
   }
   const isHtml = /html/i.test(res.contentType) || /^\s*</.test(res.body);
-  const text = isHtml ? htmlToText(extractMainHtml(res.body)) : res.body;
+  const stripped = isHtml ? htmlToText(extractMainHtml(res.body)) : res.body;
+  const text = isHtml && opts.stripConsent ? stripConsentBoilerplate(stripped).text : stripped;
   const title = isHtml ? htmlTitle(res.body) : undefined;
   const canonical = isHtml ? htmlCanonicalUrl(res.body) : undefined;
-  return { text, title, canonical, finalUrl: res.url, status: res.status, note: firecrawlNote, ...validators };
+  const metaDescription = isHtml ? metaDescriptionOf(res.body) : undefined;
+  return { text, title, canonical, metaDescription, finalUrl: res.url, status: res.status, note: firecrawlNote, ...validators };
 }
 
 // Statuses where the origin is gone/blocked and a live re-fetch will never
@@ -832,23 +911,6 @@ export function metaDescriptionOf(html: string): string | undefined {
     /<meta[^>]+property=["']og:description["'][^>]*content=["']([^"']+)["']/i.exec(html);
   const d = m?.[1]?.replace(/\s+/g, " ").trim();
   return d ? decodeEntities(d) : undefined;
-}
-
-// The markdown heading a line sits under, ignoring fenced code blocks.
-export function nearestHeading(lines: string[], anchor: number): string | undefined {
-  let heading: string | undefined;
-  let inFence = false;
-  for (let i = 0; i <= anchor && i < lines.length; i++) {
-    const line = lines[i]!;
-    if (/^\s*(```|~~~)/.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
-    const m = line.match(/^#{1,6}\s+(.+?)\s*#*\s*$/);
-    if (m) heading = m[1]!.trim();
-  }
-  return heading;
 }
 
 // Query-focused, multi-sentence snippet (the lead a caller shows beside a

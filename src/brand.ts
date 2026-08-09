@@ -36,8 +36,55 @@ export interface Brand {
   envPrefix: string;
   /** The command users type, used when a note tells them what to run. */
   cli: string;
+  /**
+   * The consumer's own release version, for the polite User-Agent.
+   *
+   * Without it every consumer identifies as `<name>/1.x`, which is the one
+   * thing that header exists to avoid being: a maintainer looking at their logs
+   * to decide whether to throttle a client cannot tell one release from another,
+   * and cannot tell a fixed version from the one that was hammering them.
+   */
+  version?: string;
   /** Root for on-disk caches. Defaults to `<tmpdir>/<name>` when unset. */
   cacheDir?: string;
+  /**
+   * Root for cloned working trees. Defaults to `<tmpdir>/<name>/repos`.
+   *
+   * Exists because a consumer that already had its own clone cache cannot adopt
+   * `ensureClone` without it: the engine would key clones somewhere else, which
+   * orphans every checkout the tool has already made and splits one cache in
+   * two. Declaring the directory it already uses makes adoption free.
+   */
+  repoDir?: string;
+  /**
+   * How long a cached page stays fresh. Defaults to 24h.
+   *
+   * A per-consumer decision, not a universal one: a research tool that re-runs
+   * the same question all day wants a week, a search tool wants a day. It was
+   * the reason one consumer kept its own cache rather than adopt this one.
+   */
+  cacheTtlMs?: number;
+  /**
+   * Which User-Agent unlabelled requests carry.
+   *
+   * `browser` (the default, and the historical behaviour) sends a realistic
+   * desktop UA, because several keyless endpoints serve 403 or empty to obvious
+   * bots. `contact` sends the polite identifying one instead and falls back to
+   * the browser UA exactly once, on a 403/429 — the "identify honestly, disguise
+   * only when refused" policy one consumer chose deliberately and would have
+   * lost by adopting this layer.
+   */
+  defaultUa?: "browser" | "contact";
+  /**
+   * Called once per response body read: bytes, and whether the cache served it.
+   *
+   * The observability seam. Without it a consumer that instruments retrieval —
+   * attributing bytes to the concurrent angle that issued the request — has to
+   * keep its own `httpGet` to keep counting, which is the whole duplication this
+   * engine exists to remove. Never throws into the caller: a failing counter must
+   * not fail a fetch.
+   */
+  onFetch?: (bytes: number, cached: boolean) => void;
   /**
    * Where a rate-limited API maintainer can find out who is calling.
    *
@@ -100,6 +147,22 @@ export function brand(): Readonly<Brand> {
 /** Restore the default identity. Test-only; production code configures once. */
 export function resetBrand(): void {
   current = { ...DEFAULT_BRAND };
+}
+
+/**
+ * Report a response body to the consumer's traffic counter, if it declared one.
+ *
+ * Swallows anything the hook throws. A counter is instrumentation; a broken one
+ * must not be able to fail the fetch it was measuring.
+ */
+export function countFetch(bytes: number, cached = false): void {
+  const hook = current.onFetch;
+  if (!hook) return;
+  try {
+    hook(bytes, cached);
+  } catch {
+    /* instrumentation never breaks retrieval */
+  }
 }
 
 /** Full variable name for a suffix, e.g. `env` name for "SEARXNG". */
