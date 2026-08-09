@@ -7,10 +7,14 @@ import { brand, env, envInt, envName } from "./brand.js";
 // The optional local Docker stack, embedded so `webindex semantic up|down|status`
 // and `webindex firecrawl up|down|status` work from ANY install location (npx
 // skills add, npm, a curled bundle) — not just a dev checkout where
-// docker-compose.yml sits beside the source. The repo files
-// (docker-compose.yml, docker/searxng/settings.yml, docker/firecrawl/firecrawl.env)
-// remain the editable source of truth; tests/compose.test.ts fails if these
-// copies drift from them.
+// docker-compose.yml sits beside the source.
+//
+// The constants below are the ONLY copy. There is no docker-compose.yml,
+// docker/searxng/settings.yml or docker/firecrawl/firecrawl.env in the repo to
+// drift from — an earlier version of this comment named a tests/compose.test.ts
+// that guarded exactly that, and neither the sibling files nor the test exist
+// any more. Edit the strings here; `ensureComposeMaterialized()` writes them out
+// under <PREFIX>_CACHE_DIR on demand, and tests/stack.test.ts covers that path.
 
 export const COMPOSE_YAML = `# Optional, fully-local, no-API-key stack for a semantic mode, web
 # search and content extraction. Start it with \`{{CLI}} semantic up\` (or
