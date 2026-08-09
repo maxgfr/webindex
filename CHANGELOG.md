@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.13.0](https://github.com/maxgfr/webindex/compare/v1.12.1...v1.13.0) (2026-08-09)
+
+
+### Bug Fixes
+
+* **cli:** route every stack service the engine declares ([e0be326](https://github.com/maxgfr/webindex/commit/e0be3268f0347d27b24a6ed921c434d7982535d3))
+* **test:** stop the OCR stub writing files named --help and --version ([d0bfe42](https://github.com/maxgfr/webindex/commit/d0bfe427feb7bb4166475d4ccdfaa197feb85296))
+
+
+### Features
+
+* **cli,mcp:** surface every layer, and gate the docs against the code ([bbccd03](https://github.com/maxgfr/webindex/commit/bbccd0327d38df961fdd65d7fc047f730253d86f))
+* **engines:** keyless web engines, and a discovery cascade ([479ad63](https://github.com/maxgfr/webindex/commit/479ad639ea6e2e3cc54a8cd2ef3ebcfa8e13ced9))
+* **fetch,cache:** stream the byte cap, revalidate, and decode what was sent ([67983f3](https://github.com/maxgfr/webindex/commit/67983f342d649aefb0c6ec31dce994063faa9a3a))
+* **forge:** forges, package registries, and repository refs ([0993f89](https://github.com/maxgfr/webindex/commit/0993f897145e81ac841030ebceb2905d793846cd))
+* **rank:** fusion, BM25F, near-duplicate collapse and diversification ([177f142](https://github.com/maxgfr/webindex/commit/177f142cb03d1f401bad6c36916680b817b94df6))
+* **web:** robots.txt, sitemaps, feeds and structured metadata ([e41bb6a](https://github.com/maxgfr/webindex/commit/e41bb6aa44651224b42c90943905339095e3fdc2))
+
 ## [1.12.1](https://github.com/maxgfr/webindex/compare/v1.12.0...v1.12.1) (2026-08-08)
 
 
