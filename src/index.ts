@@ -70,6 +70,13 @@ export * from "./text.js";
 // ── URL identity ────────────────────────────────────────────────────────────
 export * from "./url.js";
 
+// ── Ranking ─────────────────────────────────────────────────────────────────
+// Turning a pool of candidates into a reading order: RRF fusion, BM25F, SimHash
+// near-duplicate collapse, MMR diversification, identity parsing. Every function
+// is generic over the caller's item type — the engine ranks, it does not model
+// evidence.
+export * from "./rank.js";
+
 // ── Is this URL worth citing, and where does its text live? ─────────────────
 // Whether a URL addresses a specific document or is a bare API endpoint, and
 // how to turn a landing page into the readable version of the same work.
@@ -81,9 +88,57 @@ export * from "./providers.js";
 // the keyless engines expect.
 export * from "./locale.js";
 
+// ── Running a local command ─────────────────────────────────────────────────
+// `git`, `gh`, a converter — with the one distinction that matters kept: the
+// command failed, or the command is not installed.
+export * from "./exec.js";
+
+// ── Naming a repository, and getting a working tree ─────────────────────────
+// resolveRepo parses every identifier shape onto one ref; ensureClone gives it a
+// shallow, blobless checkout, deepened on demand.
+export * from "./repo.js";
+
+// ── Forge APIs ──────────────────────────────────────────────────────────────
+// GitHub, GitLab and Gitea: issues, pull requests, releases, tags, repo facts.
+// Keyless by default; a token raises the quota rather than being required.
+export * from "./forge.js";
+
+// ── Package registries ──────────────────────────────────────────────────────
+// A library's NAME → its repository, docs, current version, licence and whether
+// it is deprecated. One request instead of a web search and a guess.
+export * from "./registry.js";
+
+// ── Character encoding ──────────────────────────────────────────────────────
+// Bytes → text, honouring a BOM, the Content-Type charset and `<meta charset>`.
+// httpGet uses this; it is exported because a caller holding bytes from
+// somewhere else has the same problem.
+export * from "./charset.js";
+
+// ── robots.txt ──────────────────────────────────────────────────────────────
+// Advisory, on purpose: it answers whether a URL is ours to fetch. It does not
+// gate fetchAndExtract — following one citation is not crawling.
+export * from "./robots.js";
+
+// ── What a page says about itself ───────────────────────────────────────────
+// JSON-LD, OpenGraph and the standard meta tags: author, dates, type, canonical.
+export * from "./structured.js";
+
+// ── Feeds and sitemaps ──────────────────────────────────────────────────────
+// The two machine-readable indexes a site publishes about its own content.
+export * from "./feed.js";
+
+// ── Keyless web engines ─────────────────────────────────────────────────────
+// The HTML endpoints that answer with no key, no container and no account:
+// result-block parsers, pagination shapes, and the throttled-vs-unreachable
+// distinction. Provider shape rots on somebody else's schedule, so it deserves
+// exactly one maintained copy rather than one per tool.
+export * from "./engines.js";
+
 // ── Discovery ───────────────────────────────────────────────────────────────
-// Turning a question into candidate URLs, using the local keyless stack. A
-// primitive, not a pipeline: no backend fan-out, no fusion, no ranking.
+// Turning a question into candidate URLs: the local stack, then the keyless
+// engines, then Firecrawl. A cascade, not a fan-out — the first rung with hits
+// wins, because pooling several engines and fusing them is a ranking decision
+// and ranking is the caller's to make (with ./rank.js, if it wants).
 export * from "./search.js";
 
 // ── The optional local container stack ──────────────────────────────────────
@@ -91,6 +146,11 @@ export * from "./search.js";
 // any install rather than only from a checkout. Everything here is optional:
 // each service degrades to a note when absent.
 export * from "./stack.js";
+
+// ── Bounded concurrency ─────────────────────────────────────────────────────
+// Retrieval is latency-bound, so N pages should overlap — but not all of them,
+// or a keyless engine starts answering 429 to everything.
+export * from "./pool.js";
 
 // ── Serialising work per key ────────────────────────────────────────────────
 // A per-key promise chain, so two concurrent calls touching the same directory

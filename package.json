@@ -16,7 +16,9 @@
     "scripts/engine.mjs",
     "scripts/engine.d.mts",
     "scripts/webindex.mjs",
-    "src"
+    "src",
+    "SKILL.md",
+    "references"
   ],
   "engines": {
     "node": ">=18"
@@ -30,8 +32,9 @@
     "lint": "biome ci .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
-    "check:build": "tsup && node scripts/postbuild.mjs && node scripts/check-vendorable.mjs && node scripts/consumer-smoke.mjs && git diff --exit-code -- scripts/engine.mjs scripts/engine.d.mts scripts/webindex.mjs",
+    "check:build": "tsup && node scripts/postbuild.mjs && node scripts/check-vendorable.mjs && node scripts/consumer-smoke.mjs && node scripts/verify-bundle.mjs && git diff --exit-code -- scripts/engine.mjs scripts/engine.d.mts scripts/webindex.mjs",
     "verify:vendorable": "node scripts/check-vendorable.mjs",
+    "verify:bundle": "node scripts/verify-bundle.mjs",
     "release": "semantic-release",
     "verify:standalone": "node scripts/consumer-smoke.mjs"
   },
