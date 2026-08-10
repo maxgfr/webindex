@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.15.1](https://github.com/maxgfr/webindex/compare/v1.15.0...v1.15.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* **orchestrate:** refuse a run directory that does not exist ([7a54c66](https://github.com/maxgfr/webindex/commit/7a54c6627112514ea9b82e1043bec175181102d8))
+
 # [1.15.0](https://github.com/maxgfr/webindex/compare/v1.14.0...v1.15.0) (2026-08-10)
 
 
