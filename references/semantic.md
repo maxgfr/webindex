@@ -1,7 +1,7 @@
 # The semantic layer — embeddings, vectors, and why fuse
 
 `semantic up` has started Ollama and Qdrant and pulled `nomic-embed-text` since
-v1.11. Until v1.19 nothing in the engine could call either: the containers were
+v1.11. Until v1.15 nothing in the engine could call either: the containers were
 provisioned and unreachable.
 
 Everything here is **local and keyless**. No account, no API key, and no text
