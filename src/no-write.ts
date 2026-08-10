@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { envFlag } from "./brand.js";
 
 // The no-write gate.
@@ -55,6 +55,14 @@ export function ensureDir(dir: string): void {
  * callers keep their existing shape — which means a caller that PRINTS the
  * returned path must check `isNoWrite()` first, or it advertises a file that
  * does not exist. The CLI does exactly that.
+ *
+ * The write is ATOMIC (see writeFileAtomic). Every artifact this engine and its
+ * consumers produce is read back by something — a manifest by the next command,
+ * an index by a concurrent MCP tool call, a report by the agent that cited it —
+ * and a plain writeFileSync leaves a window where a reader sees a truncated
+ * file and `JSON.parse` throws on it. Only one of the eight consuming skills
+ * had noticed and written its own atomic helper; making it the default here
+ * means none of the other seven has to.
  */
 export function writeArtifact(path: string, content: string): string {
   if (isNoWrite()) {
@@ -66,8 +74,37 @@ export function writeArtifact(path: string, content: string): string {
     else collected.push({ path, content });
     return path;
   }
-  writeFileSync(path, content);
+  writeFileAtomic(path, content);
   return path;
+}
+
+// A monotonic suffix so two writers in ONE process cannot collide on the temp
+// name itself. Combined with the pid it is unique across processes too.
+let tmpCounter = 0;
+
+/**
+ * Write a file so a concurrent reader sees either the old bytes or the new
+ * ones, never a half-written file. `rename` is atomic within a filesystem, and
+ * the temp file is a SIBLING so it always is one — a temp in os.tmpdir() would
+ * cross a mount point and silently degrade to a copy.
+ *
+ * Bypasses the no-write gate on purpose: this is the durability primitive, and
+ * `writeArtifact` above is the gated caller. A caller holding a path of its own
+ * that must not be written under `--stdout` calls `writeArtifact`, not this.
+ */
+export function writeFileAtomic(path: string, content: string): void {
+  const tmp = `${path}.${process.pid}.${tmpCounter++}.tmp`;
+  try {
+    writeFileSync(tmp, content);
+    renameSync(tmp, path);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* the temp file may never have been created */
+    }
+    throw e;
+  }
 }
 
 /** Drain the collected artifacts. Empty when writes actually went to disk. */

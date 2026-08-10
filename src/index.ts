@@ -168,7 +168,20 @@ export * from "./cache.js";
 // ── The write gate ──────────────────────────────────────────────────────────
 // One switch every write passes through, so read-only operation is a property
 // of this module rather than a promise each command has to keep individually.
-export { type Artifact, ensureDir, isNoWrite, resetNoWrite, setNoWrite, takeArtifacts, writeArtifact } from "./no-write.js";
+// `writeArtifact` is atomic; `writeFileAtomic` is the ungated primitive under it.
+export { type Artifact, ensureDir, isNoWrite, resetNoWrite, setNoWrite, takeArtifacts, writeArtifact, writeFileAtomic } from "./no-write.js";
+
+// ── The run directory ───────────────────────────────────────────────────────
+// Naming a run, reading what is in it without throwing, and writing back
+// safely. The manifest's SHAPE stays with the consumer — this knows a run
+// directory holds JSON, not what the JSON means.
+export * from "./run.js";
+
+// ── The command-line harness ────────────────────────────────────────────────
+// A validating argv parser driven by the caller's own flag tables, the exit-code
+// taxonomy, and the matchers a docs↔CLI drift gate reads. Used BY command lines;
+// it is not one itself, so nothing here touches process.argv at module scope.
+export * from "./cli-kit.js";
 
 // ── MCP transport ───────────────────────────────────────────────────────────
 // The whole protocol: version negotiation, notification vs request,

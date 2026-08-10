@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { main, webindexAdapter } from "../src/cli.js";
+import { BOOL_FLAGS, HELP, main, VALUE_FLAGS, webindexAdapter } from "../src/cli.js";
+import { documentedFlags, missingFromHelp } from "../src/cli-kit.js";
 import { ToolError } from "../src/mcp/server.js";
 import { LATEST_PROTOCOL } from "../src/mcp/protocol.js";
 import { STACK_SERVICES } from "../src/stack.js";
@@ -242,10 +243,30 @@ describe("doctor", () => {
 });
 
 describe("unknown input", () => {
+  // Exit 2, not 1. A caller scripting this engine has to tell "your query had
+  // no results" (1) from "you spelled it wrong" (2); collapsing both onto 1
+  // makes a typo look like an empty web.
   it("names the unknown command and points at help", async () => {
-    expect(await run(["frobnicate"])).toBe(1);
+    expect(await run(["frobnicate"])).toBe(2);
     expect(stderr()).toMatch(/unknown command "frobnicate"/);
     expect(stderr()).toMatch(/--help/);
+  });
+
+  it("rejects an unknown flag instead of silently dropping it", async () => {
+    // `--limt 5` used to run the whole search with the default budget and
+    // report success. Declaring the flag surface is what makes it an error.
+    expect(await run(["search", "x", "--limt", "5"])).toBe(2);
+    expect(stderr()).toMatch(/unknown flag "--limt"/);
+  });
+
+  it("rejects a value flag left without a value", async () => {
+    expect(await run(["search", "x", "--limit"])).toBe(2);
+    expect(stderr()).toMatch(/missing value for --limit/);
+  });
+
+  it("rejects a non-numeric budget rather than reading it as no budget", async () => {
+    expect(await run(["search", "x", "--limit", "abc"])).toBe(2);
+    expect(stderr()).toMatch(/whole number/);
   });
 
   it("rejects an unknown mcp transport", async () => {
@@ -645,5 +666,21 @@ describe("the empty and JSON shapes of the lookup commands", () => {
     });
     await run(["prs", "github.com/a/b", "--terms", "fix"]);
     expect(decodeURIComponent(q)).toContain("is:pr");
+  });
+});
+
+// The source-layer half of the docs↔CLI drift gate. Its artifact-layer twin runs
+// over the BUILT bundle in each skill's packaging check; both read the same
+// matchers from src/cli-kit.ts, so the two cannot disagree about what "covered"
+// means. SKILL.md tells agents `--help` is the full surface — this is what keeps
+// that sentence true.
+describe("the docs↔CLI drift gate", () => {
+  it("names every flag it accepts in --help", () => {
+    expect(missingFromHelp(HELP, [...VALUE_FLAGS, ...BOOL_FLAGS])).toEqual([]);
+  });
+
+  it("documents no flag it would reject", () => {
+    const universe = new Set([...VALUE_FLAGS, ...BOOL_FLAGS, "help", "version"]);
+    expect(documentedFlags(HELP).filter((f) => !universe.has(f))).toEqual([]);
   });
 });

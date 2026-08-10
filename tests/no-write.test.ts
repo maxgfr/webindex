@@ -1,9 +1,9 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { envName } from "../src/brand.js";
-import { ensureDir, isNoWrite, resetNoWrite, setNoWrite, takeArtifacts, writeArtifact } from "../src/no-write.js";
+import { ensureDir, isNoWrite, resetNoWrite, setNoWrite, takeArtifacts, writeArtifact, writeFileAtomic } from "../src/no-write.js";
 
 // Purpose-written rather than ported: upstream this module is covered through
 // the CLI and the MCP handlers, neither of which lives in the engine. What the
@@ -76,6 +76,39 @@ describe("writeArtifact", () => {
     writeArtifact(join(dir, "a.md"), "a");
     expect(takeArtifacts()).toHaveLength(1);
     expect(takeArtifacts()).toEqual([]);
+  });
+});
+
+describe("writeFileAtomic", () => {
+  it("leaves no temp file behind on success", () => {
+    // A stray sibling .tmp is not cosmetic: a run directory is read back by an
+    // agent and by the next command, and both enumerate it.
+    const p = join(dir, "manifest.json");
+    writeFileAtomic(p, "{}");
+    expect(readdirSync(dir)).toEqual(["manifest.json"]);
+  });
+
+  it("replaces existing content rather than appending to it", () => {
+    const p = join(dir, "index.json");
+    writeFileAtomic(p, "old and longer");
+    writeFileAtomic(p, "new");
+    expect(readFileSync(p, "utf8")).toBe("new");
+  });
+
+  it("cleans up its temp file when the rename cannot happen", () => {
+    // Renaming onto a DIRECTORY fails on every platform, which is the cheapest
+    // way to reach the failure path without stubbing node:fs.
+    const target = join(dir, "occupied");
+    ensureDir(target);
+    expect(() => writeFileAtomic(target, "x")).toThrow();
+    expect(readdirSync(dir)).toEqual(["occupied"]);
+  });
+
+  it("is what writeArtifact uses, so every artifact is torn-read-proof", () => {
+    const p = join(dir, "REPORT.md");
+    writeArtifact(p, "body");
+    expect(readFileSync(p, "utf8")).toBe("body");
+    expect(readdirSync(dir)).toEqual(["REPORT.md"]);
   });
 });
 

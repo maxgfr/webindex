@@ -1752,12 +1752,223 @@ declare function ensureDir(dir: string): void;
  * callers keep their existing shape — which means a caller that PRINTS the
  * returned path must check `isNoWrite()` first, or it advertises a file that
  * does not exist. The CLI does exactly that.
+ *
+ * The write is ATOMIC (see writeFileAtomic). Every artifact this engine and its
+ * consumers produce is read back by something — a manifest by the next command,
+ * an index by a concurrent MCP tool call, a report by the agent that cited it —
+ * and a plain writeFileSync leaves a window where a reader sees a truncated
+ * file and `JSON.parse` throws on it. Only one of the eight consuming skills
+ * had noticed and written its own atomic helper; making it the default here
+ * means none of the other seven has to.
  */
 declare function writeArtifact(path: string, content: string): string;
+/**
+ * Write a file so a concurrent reader sees either the old bytes or the new
+ * ones, never a half-written file. `rename` is atomic within a filesystem, and
+ * the temp file is a SIBLING so it always is one — a temp in os.tmpdir() would
+ * cross a mount point and silently degrade to a copy.
+ *
+ * Bypasses the no-write gate on purpose: this is the durability primitive, and
+ * `writeArtifact` above is the gated caller. A caller holding a path of its own
+ * that must not be written under `--stdout` calls `writeArtifact`, not this.
+ */
+declare function writeFileAtomic(path: string, content: string): void;
 /** Drain the collected artifacts. Empty when writes actually went to disk. */
 declare function takeArtifacts(): Artifact[];
 /** Test seam: clear both the switch and anything collected under it. */
 declare function resetNoWrite(): void;
+
+/**
+ * The readable id a default output folder is named after: `run-YYYYMMDD-HHMMSS`.
+ *
+ * LOCAL time, not UTC, and that is the point: the person reading `ls` is the
+ * person who started the run, and a folder stamped three hours off their clock
+ * is a folder they cannot find. Sortable lexicographically, which is what makes
+ * `ls` order runs chronologically for free.
+ *
+ * The Date is a parameter so tests can pin it. Callers pass nothing.
+ */
+declare function runId(d?: Date): string;
+/**
+ * Shell-single-quote a value for a command line this engine EMITS — the
+ * free-text question and every path in an orchestration runbook.
+ *
+ * Single quotes are the only POSIX shell context with zero expansion: backticks,
+ * `$`, `|`, `;`, `&&` and newlines all stay literal inside them. An embedded
+ * single quote closes and reopens the quoting (' → '"'"'), which is the one
+ * escape the form does not admit directly.
+ *
+ * Newlines collapse to spaces so an emitted command stays ONE line. A runbook
+ * is copy-pasted by a human or a subagent; a command that wraps across lines is
+ * a command that gets pasted half-executed.
+ */
+declare function shq(s: string): string;
+/**
+ * Read and parse a JSON file, or return undefined.
+ *
+ * Absent, unreadable and malformed collapse to the SAME answer on purpose. Every
+ * caller of this in a run directory is asking "is this worklist ready?", and a
+ * file that exists but does not parse is not ready — it is the half-written or
+ * hand-edited state, and treating it as a hard error would strand a run that the
+ * prerequisite command can simply regenerate.
+ *
+ * It does NOT validate the shape. The caller knows what it asked for; this
+ * returns whatever parsed, typed as what the caller claimed. A caller that acts
+ * on a field must still check the field is there — which is why every worklist
+ * reader in the consuming skills tests `Array.isArray(...)` before trusting it.
+ */
+declare function readJsonSafe<T>(path: string): T | undefined;
+/**
+ * Read a run's manifest. Same tolerance as readJsonSafe, and the same warning:
+ * the type parameter is the caller's claim, not a guarantee.
+ */
+declare function readManifest<T>(dir: string, file?: string): T | undefined;
+/**
+ * Write a run's manifest — atomically, and through the no-write gate.
+ *
+ * Atomic because this is the file most likely to be read while it is written:
+ * an MCP server answering a tool call and a CLI in another terminal both reach
+ * for it, and a torn read is a `JSON.parse` throw in whichever got there first.
+ * Gated because a run under `--stdout` must leave the filesystem as it found it.
+ *
+ * Returns the path it wrote (or would have written) — so a caller that PRINTS
+ * it must check `isNoWrite()` first, the same contract as `writeArtifact`.
+ */
+declare function writeManifest(dir: string, value: unknown, file?: string): string;
+
+/** The command did what it was asked. */
+declare const EXIT_OK = 0;
+/** The command ran and the answer is a failure: nothing found, a gate refused. */
+declare const EXIT_FAILURE = 1;
+/** The invocation itself was wrong: unknown command, unknown flag, missing value. */
+declare const EXIT_USAGE = 2;
+/**
+ * The invocation was malformed. Carries EXIT_USAGE so a caller can map every
+ * parse failure to the right code without matching on the message.
+ *
+ * Thrown, not printed: the parser has no business owning stderr, and a test
+ * that asserts on a message should not have to capture a stream to read it.
+ */
+declare class UsageError extends Error {
+    readonly exitCode = 2;
+}
+interface CliSpec {
+    /** Every command word the CLI answers to. */
+    commands: Iterable<string>;
+    /** Flags that take a value: `--out <dir>` or `--out=<dir>`. */
+    valueFlags: Iterable<string>;
+    /** Flags that are present or absent: `--json`. Never take a value. */
+    boolFlags: Iterable<string>;
+}
+/** A parsed invocation of one command. */
+interface CommandArgs {
+    command: string;
+    /** Bare words, in order, with flags and their values removed. */
+    positional: string[];
+    values: Record<string, string>;
+    bools: ReadonlySet<string>;
+}
+/**
+ * What an argv turned out to be. `--help` and `--version` are outcomes rather
+ * than commands because every CLI answers them the same way and none of them
+ * wants a case in its command switch for it.
+ */
+type ParsedArgs = {
+    kind: "help";
+} | {
+    kind: "version";
+} | ({
+    kind: "command";
+} & CommandArgs);
+/**
+ * Parse an argv against a spec.
+ *
+ * Rejects, rather than ignoring: an unknown flag is a typo, and a CLI that
+ * silently drops `--limt 5` runs the whole command with the wrong budget and
+ * reports success. That silence is what this replaces — webindex's own CLI read
+ * flags with `argv.indexOf("--" + name)` and accepted anything.
+ *
+ * Throws UsageError on: an unknown command, an unknown flag, a value flag with
+ * no value, and a boolean flag given one.
+ */
+declare function parseArgs(argv: readonly string[], spec: CliSpec): ParsedArgs;
+/** A value flag, or undefined. */
+declare function argValue(p: CommandArgs, name: string): string | undefined;
+/** Whether a boolean flag was given. */
+declare function argBool(p: CommandArgs, name: string): boolean;
+/**
+ * A value flag as an integer, or undefined when absent.
+ *
+ * Throws UsageError on a value that is not one, rather than returning NaN. A
+ * NaN budget propagates into a comparison that is false whichever way it is
+ * written, so `--limit abc` would silently mean "no limit" — the opposite of
+ * what was asked.
+ */
+declare function argInt(p: CommandArgs, name: string): number | undefined;
+/** A comma-separated value flag as a trimmed, empty-free list. Absent → []. */
+declare function argList(p: CommandArgs, name: string): string[];
+/**
+ * A value flag constrained to a set. Absent → undefined; present and outside
+ * the set → UsageError naming what was expected.
+ */
+declare function argOneOf<T extends string>(p: CommandArgs, name: string, allowed: readonly T[]): T | undefined;
+/**
+ * The positional words as one string.
+ *
+ * `search rate limiting --limit 5` is ONE query of two words, not two queries
+ * and a stray number. The parser already dropped the flag and its value, so
+ * joining what is left is the whole of it — which is why this is three lines
+ * here and was a 25-line hand-rolled scanner in src/cli.ts.
+ */
+declare function positionalText(p: CommandArgs): string;
+/** JSON as a CLI writes it: two-space indent, one trailing newline. */
+declare function jsonLine(value: unknown): string;
+/**
+ * A fresh global regex matching a documented `--flag`.
+ *
+ * The lookbehind skips a `--` glued to a word tail (`foo--bar`, `---`) so a
+ * bold, parenthesised or em-dashed flag is still seen.
+ *
+ * Returns a NEW regex per call on purpose: a global regex carries `lastIndex`
+ * between uses, so a shared one silently skips matches in the second caller.
+ */
+declare function docFlagRegex(): RegExp;
+/** Every distinct `--flag` a document mentions, in first-seen order. */
+declare function documentedFlags(text: string): string[];
+/**
+ * Whether a help text mentions `--flag` as a whole token.
+ *
+ * The lookahead is what stops `--run` from being "covered" by `--run-root`, and
+ * `--shard` by `--shards`. Without it the gate passes on precisely the pairs it
+ * exists to catch.
+ */
+declare function helpCoversFlag(help: string, flag: string): boolean;
+/** The flags a CLI accepts that its help text never names. */
+declare function missingFromHelp(help: string, flags: Iterable<string>): string[];
+/**
+ * The pipe-separated value list documented for `--<flag>` on one line, or null
+ * when the line carries no such enumeration.
+ *
+ * The list must FOLLOW the flag with only non-letters in between, so a markdown
+ * table's pipes elsewhere on the line cannot false-positive. Backticks are
+ * stripped first so `` `a`|`b` `` still matches, and an escaped `\|` — which is
+ * how a literal pipe must be written inside a table cell — is unescaped first,
+ * because an enumeration in a table cell is still an enumeration.
+ */
+declare function pipedEnum(line: string, flag: string): string[] | null;
+/**
+ * Whether this process was started AS the CLI, rather than imported.
+ *
+ * Importing a bundle must not run it: the skill-bundle gate imports each built
+ * artifact to read its flag tables, and a `main()` that fired on import would
+ * turn a verification step into a run.
+ *
+ * Matches the basename against the configured brand, so a consumer's
+ * `scripts/ultrasearch.mjs`, a Homebrew `bin/ultrasearch` symlink and a global
+ * npm shim all count, while `node -e 'import(...)'` does not. brand() is read at
+ * CALL time — the lazy rule in brand.ts applies here like everywhere else.
+ */
+declare function isInvokedDirectly(argv1?: string | undefined, cli?: string): boolean;
 
 declare const PROTOCOL_VERSIONS: readonly ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
 type ProtocolVersion = (typeof PROTOCOL_VERSIONS)[number];
@@ -1935,4 +2146,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, type ToolDecl, ToolError, type ToolOutcome, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, applyRelevanceFloor, arxivIdFromUrl, assessExtractedText, assessPdfText, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, cleanInline, configure, contactUa, contentCoverage, createServer, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, dedupeByUrl, dedupeNearDuplicates, defaultUa, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFormatForContentType, docFormatForUrl, doiFromUrl, domainOf, embedModel, enabledDocExtractors, enabledExtractors, ensureClone, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractPdf, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, have, headCommit, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, keylessEngines, keywords, listReleases, listResources, listTags, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, matcherFromTokens, metaDescriptionOf, nearestHeading, negotiateProtocol, normalizeDoi, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, originUrl, pageDelayMs, pageMetadata, parseDdgHtml, parseDdgLite, parseFeed, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, politeDelayMs, probeFirecrawl, probeSearxng, pubmedAbstractUrl, rankedKeywords, readCapped, readCappedBytes, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runStdioServer, runWithInput, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripTags, structuredContentFor, subtokens, takeArtifacts, throttleReason, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type CliSpec, type CommandArgs, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, type ToolDecl, ToolError, type ToolOutcome, UsageError, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, cleanInline, configure, contactUa, contentCoverage, createServer, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, dedupeByUrl, dedupeNearDuplicates, defaultUa, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embedModel, enabledDocExtractors, enabledExtractors, ensureClone, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractPdf, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, have, headCommit, helpCoversFlag, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, listReleases, listResources, listTags, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalizeDoi, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeSearxng, pubmedAbstractUrl, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripTags, structuredContentFor, subtokens, takeArtifacts, throttleReason, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };

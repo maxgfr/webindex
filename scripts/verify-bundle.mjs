@@ -18,7 +18,7 @@
 
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const problems = [];
@@ -49,38 +49,55 @@ for (const m of skill.matchAll(/references\/([\w.-]+\.md)/g)) {
 }
 
 // ── The CLI ─────────────────────────────────────────────────────────────────
+// Read from the BUILT artifacts, not scraped out of the source.
+//
+// This gate used to recover the flag surface with `/flag\(argv, "([a-z-]+)"\)/`
+// over src/cli.ts — it inferred what the CLI accepted by pattern-matching the
+// call sites that read each flag. That worked only for as long as every flag
+// was read exactly that way: the moment the CLI adopted the engine's own
+// parser, the regex matched nothing, the flag set was empty, and all thirty
+// documented flags reported as drift at once. An inference that fragile is
+// itself the drift risk.
+//
+// Both artifacts export what the gate needs, so it can simply ask:
+// scripts/webindex.mjs declares the tables and HELP, scripts/engine.mjs owns the
+// matchers — the same ones tests/cli.test.ts uses at the source layer, so the
+// two halves of this gate cannot disagree about what "covered" means.
+//
+// Importing is safe: main() is behind isInvokedDirectly(), which is false here.
+const bundlePath = join(root, "scripts", "webindex.mjs");
+check(existsSync(bundlePath), "scripts/webindex.mjs is built (run `pnpm run build`)");
+const cliBundle = await import(pathToFileURL(bundlePath).href);
+const { helpCoversFlag, documentedFlags } = await import(pathToFileURL(join(root, "scripts", "engine.mjs")).href);
+
+const { VALUE_FLAGS, BOOL_FLAGS, COMMANDS, HELP: help } = cliBundle;
+check(
+  Array.isArray(VALUE_FLAGS) && Array.isArray(BOOL_FLAGS) && Array.isArray(COMMANDS) && typeof help === "string",
+  "the CLI bundle exports VALUE_FLAGS / BOOL_FLAGS / COMMANDS / HELP for this gate",
+);
+check(help.length > 0, "HELP block exported by the CLI bundle");
+
+const cliFlags = new Set([...VALUE_FLAGS, ...BOOL_FLAGS]);
 const cli = readFileSync(join(root, "src", "cli.ts"), "utf8");
-const help = /const HELP = `([\s\S]*?)`;/.exec(cli)?.[1] ?? "";
-check(help.length > 0, "HELP block found in src/cli.ts");
 
-// Commands the dispatch actually handles: `cmd === "x"` and the STACK_SERVICES
-// route. Derived from the source so a new command cannot be added invisibly.
-const dispatched = new Set();
-for (const m of cli.matchAll(/cmd === "([a-z-]+)"/g)) dispatched.add(m[1]);
-
-// The stack services are routed by table (`STACK_SERVICES.includes(cmd)`), not
-// by a literal comparison — which is exactly how `semantic` stayed undocumented
-// in the CLI for four releases. Read the table too, or this gate has the same
-// blind spot the code had. `all` is excluded: the CLI spells it `stack`.
-const stackSrc = readFileSync(join(root, "src", "stack.ts"), "utf8");
-const stacksBlock = /const STACKS: Record<string, StackSpec> = \{([\s\S]*?)\n\};/.exec(stackSrc)?.[1] ?? "";
-const services = [...stacksBlock.matchAll(/^ {2}([a-z-]+): \{/gm)].map((m) => m[1]).filter((s) => s !== "all");
-check(services.length > 0, `stack services read from the engine's own table (${services.join(", ")})`);
-for (const s of services) dispatched.add(s);
-
-// The help and version aliases are the ONE thing a usage block should not list
-// five times over. They are handled in the same branch and documented by the
-// block existing at all.
-const ALIASES = new Set(["--help", "-h", "help", "--version", "-v"]);
+// A. Every command the parser accepts is named in HELP. COMMANDS is the table
+// the parser itself validates against, so a command missing from HELP is a
+// command no reader can find — which is how `semantic` stayed invisible for
+// four releases.
 const helpCommands = new Set([...help.matchAll(/^\s+webindex ([a-z-]+)/gm)].map((m) => m[1]));
-for (const cmd of dispatched) {
-  if (ALIASES.has(cmd)) continue;
-  check(helpCommands.has(cmd), `HELP documents \`webindex ${cmd}\``);
+for (const cmd of COMMANDS) check(helpCommands.has(cmd), `HELP documents \`webindex ${cmd}\``);
+
+// B. And the inverse, which the old scrape could not ask: a `cmd === "x"`
+// branch for a name COMMANDS does not carry is unreachable, because the parser
+// rejects that word before dispatch ever sees it. Dead code that reads as a
+// feature.
+for (const m of cli.matchAll(/cmd === "([a-z-]+)"/g)) {
+  check(COMMANDS.includes(m[1]), `dispatch branch \`cmd === "${m[1]}"\` is a declared command (otherwise unreachable)`);
 }
 
-// Flags: the CLI reads them through flag(argv,"x") and argv.includes("--x").
-const cliFlags = new Set([...cli.matchAll(/flag\(argv, "([a-z-]+)"\)/g)].map((m) => m[1]));
-for (const m of cli.matchAll(/argv\.includes\("--([a-z-]+)"\)/g)) cliFlags.add(m[1]);
+// C. HELP names every flag the CLI accepts. SKILL.md tells agents `--help` is
+// the full surface; this is the artifact-layer half of keeping that true.
+for (const f of cliFlags) check(helpCoversFlag(help, f), `HELP names --${f}`);
 
 // Flags a doc claims. `--foo` inside a fenced example counts: an example that
 // does not run is worse than no example.
@@ -102,11 +119,14 @@ const ALLOWED_FOREIGN = new Set([
   "unshallow",
   "deepen",
 ]);
+// `--help` and `--version` are answered by the parser rather than declared as
+// flags, so they are legitimately documented and legitimately absent from the
+// tables.
+const universe = new Set([...cliFlags, "help", "version"]);
 for (const { f, text } of docs) {
-  for (const m of text.matchAll(/(?<![\w-])--([a-z][a-z0-9-]*)/g)) {
-    const name = m[1];
-    if (ALLOWED_FOREIGN.has(name)) continue;
-    check(cliFlags.has(name), `${f}: --${name} exists in the CLI`);
+  for (const name of documentedFlags(text)) {
+    if (ALLOWED_FOREIGN.has(name) || universe.has(name)) continue;
+    check(false, `${f}: --${name} does not exist in the CLI`);
   }
 }
 

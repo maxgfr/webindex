@@ -3541,7 +3541,7 @@ import { join as join4 } from "path";
 import { tmpdir as tmpdir4 } from "os";
 
 // src/no-write.ts
-import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync3 } from "fs";
+import { mkdirSync as mkdirSync3, renameSync, unlinkSync, writeFileSync as writeFileSync3 } from "fs";
 var flagged = false;
 function setNoWrite(on) {
   flagged = on;
@@ -3561,8 +3561,22 @@ function writeArtifact(path, content) {
     else collected.push({ path, content });
     return path;
   }
-  writeFileSync3(path, content);
+  writeFileAtomic(path, content);
   return path;
+}
+var tmpCounter = 0;
+function writeFileAtomic(path, content) {
+  const tmp = `${path}.${process.pid}.${tmpCounter++}.tmp`;
+  try {
+    writeFileSync3(tmp, content);
+    renameSync(tmp, path);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+    }
+    throw e;
+  }
 }
 function takeArtifacts() {
   return collected.splice(0, collected.length);
@@ -3748,6 +3762,157 @@ function cacheClean(all = false, now = Date.now()) {
   return removed;
 }
 
+// src/run.ts
+import { join as join5 } from "path";
+import { readFileSync as readFileSync4 } from "fs";
+function pad(n) {
+  return String(n).padStart(2, "0");
+}
+function runId(d = /* @__PURE__ */ new Date()) {
+  return `run-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+function shq(s) {
+  return `'${s.replace(/\r?\n/g, " ").replaceAll("'", `'"'"'`)}'`;
+}
+function readJsonSafe(path) {
+  try {
+    return JSON.parse(readFileSync4(path, "utf8"));
+  } catch {
+    return void 0;
+  }
+}
+function readManifest(dir, file = "manifest.json") {
+  return readJsonSafe(join5(dir, file));
+}
+function writeManifest(dir, value, file = "manifest.json") {
+  return writeArtifact(join5(dir, file), `${JSON.stringify(value, null, 2)}
+`);
+}
+
+// src/cli-kit.ts
+import { basename as basename2 } from "path";
+var EXIT_OK = 0;
+var EXIT_FAILURE = 1;
+var EXIT_USAGE = 2;
+var UsageError = class extends Error {
+  exitCode = EXIT_USAGE;
+};
+function parseArgs(argv, spec) {
+  const commands = new Set(spec.commands);
+  const valueFlags = new Set(spec.valueFlags);
+  const boolFlags = new Set(spec.boolFlags);
+  if (argv.length === 0) return { kind: "help" };
+  if (isHelpWord(argv[0])) return { kind: "help" };
+  if (isVersionWord(argv[0])) return { kind: "version" };
+  const command = argv[0];
+  if (!commands.has(command)) {
+    throw new UsageError(`unknown command "${command}" \u2014 run --help for the supported commands`);
+  }
+  const values = {};
+  const bools = /* @__PURE__ */ new Set();
+  const positional = [];
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--") {
+      positional.push(...argv.slice(i + 1));
+      break;
+    }
+    if (!arg.startsWith("--") && arg !== "-h" && arg !== "-v") {
+      positional.push(arg);
+      continue;
+    }
+    const eq = arg.indexOf("=");
+    const key = eq !== -1 ? arg.slice(2, eq) : arg.slice(2);
+    if (!boolFlags.has(key) && !valueFlags.has(key)) {
+      if (isHelpWord(arg)) return { kind: "help" };
+      if (isVersionWord(arg)) return { kind: "version" };
+    }
+    if (boolFlags.has(key)) {
+      if (eq !== -1) throw new UsageError(`--${key} is a boolean flag and takes no value`);
+      bools.add(key);
+      continue;
+    }
+    if (!valueFlags.has(key)) {
+      throw new UsageError(`unknown flag "--${key}" \u2014 run --help for the supported options`);
+    }
+    if (eq !== -1) {
+      values[key] = arg.slice(eq + 1);
+      continue;
+    }
+    const next = argv[i + 1];
+    if (next === void 0 || next.startsWith("--")) {
+      throw new UsageError(`missing value for --${key}`);
+    }
+    values[key] = next;
+    i++;
+  }
+  return { kind: "command", command, positional, values, bools };
+}
+function isHelpWord(a) {
+  return a === "--help" || a === "-h" || a === "help";
+}
+function isVersionWord(a) {
+  return a === "--version" || a === "-v" || a === "version";
+}
+function argValue(p, name) {
+  return p.values[name];
+}
+function argBool(p, name) {
+  return p.bools.has(name);
+}
+function argInt(p, name) {
+  const raw = p.values[name];
+  if (raw === void 0) return void 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) {
+    throw new UsageError(`--${name} expects a whole number, got "${raw}"`);
+  }
+  return n;
+}
+function argList(p, name) {
+  const raw = p.values[name];
+  if (raw === void 0) return [];
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+function argOneOf(p, name, allowed) {
+  const raw = p.values[name];
+  if (raw === void 0) return void 0;
+  if (!allowed.includes(raw)) {
+    throw new UsageError(`invalid --${name} "${raw}" \u2014 expected one of: ${allowed.join(", ")}`);
+  }
+  return raw;
+}
+function positionalText(p) {
+  return p.positional.join(" ");
+}
+function jsonLine(value) {
+  return `${JSON.stringify(value, null, 2)}
+`;
+}
+function docFlagRegex() {
+  return /(?<![a-z0-9-])--([a-z][a-z0-9-]*)/g;
+}
+function documentedFlags(text) {
+  const seen = /* @__PURE__ */ new Set();
+  for (const m of text.matchAll(docFlagRegex())) seen.add(m[1]);
+  return [...seen];
+}
+function helpCoversFlag(help, flag) {
+  return new RegExp(`--${escapeRegExp(flag)}(?![a-z0-9-])`).test(help);
+}
+function missingFromHelp(help, flags) {
+  return [...flags].filter((f) => !helpCoversFlag(help, f));
+}
+function pipedEnum(line, flag) {
+  const cleaned = line.replace(/`/g, "").replace(/\\\|/g, "|");
+  const m = cleaned.match(new RegExp(`--${escapeRegExp(flag)}[^a-z|]*((?:[a-z][a-z0-9-]*\\s*\\|\\s*)+[a-z][a-z0-9-]*)`));
+  return m ? m[1].split("|").map((s) => s.trim()) : null;
+}
+function isInvokedDirectly(argv1 = process.argv[1], cli = brand().cli) {
+  if (!argv1) return false;
+  return basename2(argv1).replace(/\.(mjs|cjs|js)$/, "") === cli;
+}
+
 // src/mcp/protocol.ts
 var PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
 var LATEST_PROTOCOL = PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1];
@@ -3833,8 +3998,8 @@ function isOriginAllowed(origin, allowed = []) {
 }
 
 // src/mcp/resources.ts
-import { existsSync as existsSync5, readdirSync as readdirSync3, readFileSync as readFileSync4, realpathSync, statSync as statSync3 } from "fs";
-import { basename as basename2, dirname as dirname2, join as join5, resolve as resolve2, sep } from "path";
+import { existsSync as existsSync5, readdirSync as readdirSync3, readFileSync as readFileSync5, realpathSync, statSync as statSync3 } from "fs";
+import { basename as basename3, dirname as dirname2, join as join6, resolve as resolve2, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
@@ -3842,17 +4007,17 @@ function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname2(fileURLToPath(import.meta.url));
   const name = brand().name;
   const candidates = [resolve2(here, ".."), resolve2(here, "..", "skills", name), resolve2(here, "..", "..", "skills", name)];
-  return candidates.find((dir) => existsSync5(join5(dir, "SKILL.md")));
+  return candidates.find((dir) => existsSync5(join6(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
-  const refDir = join5(root, "references");
+  const refDir = join6(root, "references");
   if (!existsSync5(refDir)) return out;
   for (const file of readdirSync3(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join5("references", file), `${skillName()} reference: ${basename2(file, ".md")}`));
+    out.push(describe(root, join6("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
   }
   return out;
 }
@@ -3876,7 +4041,7 @@ function readResource(uri, moduleDir) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
   if (!statSync3(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
-  return { uri, mimeType: "text/markdown", text: readFileSync4(targetReal, "utf8") };
+  return { uri, mimeType: "text/markdown", text: readFileSync5(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
 };
@@ -3887,14 +4052,14 @@ function describe(root, rel, fallbackTitle) {
     title: fallbackTitle,
     mimeType: "text/markdown"
   };
-  const summary = firstProse(join5(root, rel));
+  const summary = firstProse(join6(root, rel));
   if (summary) decl.description = summary;
   return decl;
 }
 function firstProse(file) {
   let text;
   try {
-    text = readFileSync4(file, "utf8");
+    text = readFileSync5(file, "utf8");
   } catch {
     return void 0;
   }
@@ -4312,6 +4477,9 @@ export {
   ERR_INVALID_PARAMS,
   ERR_INVALID_REQUEST,
   ERR_METHOD_NOT_FOUND,
+  EXIT_FAILURE,
+  EXIT_OK,
+  EXIT_USAGE,
   FIRECRAWL_DEFAULT_BASE,
   FIRECRAWL_ENV,
   KEYLESS_ENGINES,
@@ -4329,12 +4497,18 @@ export {
   SERVICE_PROFILES,
   STACK_SERVICES,
   ToolError,
+  UsageError,
   accentPattern,
   acceptLanguageHeader,
   addressedIdCount,
   apiBase,
   apiPrefix,
   applyRelevanceFloor,
+  argBool,
+  argInt,
+  argList,
+  argOneOf,
+  argValue,
   arxivIdFromUrl,
   assessExtractedText,
   assessPdfText,
@@ -4377,8 +4551,10 @@ export {
   detectRateLimited,
   discoverFeeds,
   diversify,
+  docFlagRegex,
   docFormatForContentType,
   docFormatForUrl,
+  documentedFlags,
   doiFromUrl,
   domainOf,
   embedModel,
@@ -4415,6 +4591,7 @@ export {
   hammingDistance,
   have,
   headCommit,
+  helpCoversFlag,
   htmlCanonicalUrl,
   htmlTitle,
   htmlToText,
@@ -4424,11 +4601,13 @@ export {
   isApiEndpoint,
   isCacheFresh,
   isCitableUrl,
+  isInvokedDirectly,
   isKeylessEngine,
   isNoWrite,
   isOriginAllowed,
   isProtocolVersion,
   isStopword,
+  jsonLine,
   keylessEngines,
   keywords,
   listReleases,
@@ -4445,6 +4624,7 @@ export {
   markFirecrawlDown,
   matcherFromTokens,
   metaDescriptionOf,
+  missingFromHelp,
   nearestHeading,
   negotiateProtocol,
   normalizeDoi,
@@ -4455,6 +4635,7 @@ export {
   originUrl,
   pageDelayMs,
   pageMetadata,
+  parseArgs,
   parseDdgHtml,
   parseDdgLite,
   parseFeed,
@@ -4463,13 +4644,17 @@ export {
   parseRobots,
   parseSitemap,
   pdfToText,
+  pipedEnum,
   politeDelayMs,
+  positionalText,
   probeFirecrawl,
   probeSearxng,
   pubmedAbstractUrl,
   rankedKeywords,
   readCapped,
   readCappedBytes,
+  readJsonSafe,
+  readManifest,
   readResource,
   recencyScore,
   renderAsset,
@@ -4496,6 +4681,7 @@ export {
   resolveSkillRoot,
   revalidationHeaders,
   rrf,
+  runId,
   runStdioServer,
   runWithInput,
   sameCommit,
@@ -4511,6 +4697,7 @@ export {
   setNoWrite,
   sh,
   shAsync,
+  shq,
   simhash,
   skillName,
   sleep,
@@ -4526,5 +4713,7 @@ export {
   urlDeclaresIdentity,
   validateArgs,
   withRunLock,
-  writeArtifact
+  writeArtifact,
+  writeFileAtomic,
+  writeManifest
 };

@@ -30,20 +30,34 @@ import { resolveRepo } from "./repo.js";
 import { listReleases, repoFacts, searchIssues } from "./forge.js";
 import { resolvePackage, type RegistryKind } from "./registry.js";
 import { bm25MatchedTerms, bm25Score, bm25Tokenize, buildBm25Index, dedupeNearDuplicates, diversify } from "./rank.js";
+import {
+  argBool,
+  argInt,
+  argValue,
+  type CliSpec,
+  type CommandArgs,
+  EXIT_FAILURE,
+  EXIT_USAGE,
+  isInvokedDirectly,
+  jsonLine,
+  parseArgs,
+  positionalText,
+  UsageError,
+} from "./cli-kit.js";
 import { ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
 
 configure({ name: "webindex", envPrefix: "WEBINDEX", cli: "webindex", contactUrl: "https://github.com/maxgfr/webindex" });
 
-const HELP = `webindex v${ENGINE_VERSION}
+export const HELP = `webindex v${ENGINE_VERSION}
 Find pages with a local keyless search stack, turn a URL or a file into clean,
 citable text — HTML, PDFs through a six-rung ladder ending in OCR, and office
 documents — and serve that to an agent over MCP. Zero dependencies, no API key.
 
 USAGE
   webindex search <query> [--json] [--limit <n>] [--pages <n>] [--lang <tag>]
-                          [--engine ddg|ddglite|mojeek|off]
+                          [--engine ddg|ddglite|mojeek|off] [--searxng <base>|off]
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>]
   webindex extract <file> [--json]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--json]
@@ -51,12 +65,12 @@ USAGE
   webindex issues <ref> [--terms "<words>"] [--limit <n>] [--json]
   webindex prs <ref> [--terms "<words>"] [--limit <n>] [--json]
   webindex releases <ref> [--limit <n>] [--json]
-  webindex package <name> [--registry npm|pypi|crates] [--json]
+  webindex package <name> [--registry npm|pypi|crates] [--version <semver>] [--json]
   webindex meta <url> [--json]
   webindex robots <url> [--json]
   webindex sitemap <url> [--max <n>] [--json]
   webindex feed <url> [--json]
-  webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>]
+  webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>] [--allow-remote]
   webindex searxng   up|down|status
   webindex firecrawl up|down|status
   webindex semantic  up|down|status
@@ -117,37 +131,60 @@ ENVIRONMENT
 
 Every optional helper degrades to a note. Nothing here needs an API key.`;
 
+// The flag surface, declared rather than discovered.
+//
+// Exported because two gates read them: tests/cli.test.ts asserts HELP names
+// every one of them (SKILL.md promises `--help` is the full surface), and the
+// skill-bundle gate reads the same tables off the built artifact to check the
+// docs never document a flag the CLI would reject.
+//
+// Declaring them is also what makes `--limt 5` an error. It used to be silently
+// dropped, and the command then ran to completion with the default budget and
+// reported success.
+export const VALUE_FLAGS = [
+  "limit",
+  "pages",
+  "lang",
+  "searxng",
+  "firecrawl",
+  "engine",
+  "query",
+  "docs",
+  "transport",
+  "port",
+  "bind",
+  "registry",
+  "version",
+  "terms",
+  "max",
+];
+export const BOOL_FLAGS = ["json", "allow-remote", "all"];
+export const COMMANDS = [
+  "search",
+  "fetch",
+  "extract",
+  "rank",
+  "repo",
+  "issues",
+  "prs",
+  "releases",
+  "package",
+  "meta",
+  "robots",
+  "sitemap",
+  "feed",
+  "mcp",
+  "cache",
+  "doctor",
+  ...STACK_SERVICES.filter((s) => s !== "all"),
+  "stack",
+];
+
+const SPEC: CliSpec = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS };
+
 function fail(msg: string): never {
   process.stderr.write(`webindex: ${msg}\n`);
-  process.exit(1);
-}
-
-function flag(argv: string[], name: string): string | undefined {
-  const i = argv.indexOf(`--${name}`);
-  return i !== -1 ? argv[i + 1] : undefined;
-}
-
-/**
- * The words of a multi-word argument, with flags removed. `search rate limiting
- * --limit 5` is one query of two words, not two queries and a stray number —
- * so a flag's VALUE has to be skipped too, which needs to know which flags take
- * one.
- */
-function positional(argv: string[], valued: string[]): string {
-  const out: string[] = [];
-  for (let i = 1; i < argv.length; i++) {
-    const a = argv[i] ?? "";
-    if (a === "--") {
-      out.push(...argv.slice(i + 1)); // everything after `--` is literal
-      break;
-    }
-    if (a.startsWith("--")) {
-      if (valued.includes(a.slice(2))) i++;
-      continue;
-    }
-    out.push(a);
-  }
-  return out.join(" ").trim();
+  process.exit(EXIT_FAILURE);
 }
 
 /** Extraction over bytes already in hand — the shared half of `extract`. */
@@ -535,33 +572,51 @@ export function webindexAdapter(): McpAdapter {
   };
 }
 
+/**
+ * A malformed invocation exits 2, a failed one exits 1.
+ *
+ * The distinction is the reason the taxonomy exists: a caller scripting this
+ * engine has to tell "your query had no results" from "you spelled the flag
+ * wrong", and collapsing both onto 1 makes a typo look like an empty web.
+ */
 export async function main(argv = process.argv.slice(2)): Promise<void> {
-  const cmd = argv[0];
+  try {
+    await dispatch(argv);
+  } catch (e) {
+    if (!(e instanceof UsageError)) throw e;
+    process.stderr.write(`webindex: ${e.message}\n`);
+    process.exit(EXIT_USAGE);
+  }
+}
 
-  if (!cmd || cmd === "--help" || cmd === "-h" || cmd === "help") {
+async function dispatch(argv: string[]): Promise<void> {
+  const parsed = parseArgs(argv, SPEC);
+  if (parsed.kind === "help") {
     process.stdout.write(HELP + "\n");
     return;
   }
-  if (cmd === "version" || cmd === "--version" || cmd === "-v") {
+  if (parsed.kind === "version") {
     process.stdout.write(ENGINE_VERSION + "\n");
     return;
   }
+  const args: CommandArgs = parsed;
+  const cmd = args.command;
 
   if (cmd === "search") {
-    const q = positional(argv, ["limit", "pages", "lang", "searxng", "firecrawl", "engine"]);
+    const q = positionalText(args);
     if (!q) fail("usage: webindex search <query>");
-    const engine = flag(argv, "engine");
+    const engine = argValue(args, "engine");
     if (engine && engine !== "off" && !isKeylessEngine(engine)) fail(`unknown --engine "${engine}" — expected one of ${KEYLESS_ENGINES.join(", ")}, or off`);
     const r = await search(q, {
-      limit: flag(argv, "limit") ? Number(flag(argv, "limit")) : undefined,
-      pages: flag(argv, "pages") ? Number(flag(argv, "pages")) : undefined,
-      lang: flag(argv, "lang"),
-      searxng: flag(argv, "searxng"),
-      firecrawl: flag(argv, "firecrawl"),
+      limit: argInt(args, "limit"),
+      pages: argInt(args, "pages"),
+      lang: argValue(args, "lang"),
+      searxng: argValue(args, "searxng"),
+      firecrawl: argValue(args, "firecrawl"),
       ...(engine ? { engines: engine === "off" ? [] : [engine as KeylessEngine] } : {}),
     });
-    if (argv.includes("--json")) {
-      process.stdout.write(JSON.stringify(r, null, 2) + "\n");
+    if (argBool(args, "json")) {
+      process.stdout.write(jsonLine(r));
       return;
     }
     for (const h of r.hits) {
@@ -575,11 +630,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 
   if (cmd === "fetch") {
-    const url = argv[1];
-    if (!url || url.startsWith("--")) fail("usage: webindex fetch <url>");
+    const url = args.positional[0];
+    if (!url) fail("usage: webindex fetch <url>");
     if (!/^https?:\/\//i.test(url)) fail("fetch needs an http(s) URL");
-    const r = await fetchAndExtract(url, { acceptLanguage: flag(argv, "lang"), firecrawl: flag(argv, "firecrawl") });
-    if (argv.includes("--json")) {
+    const r = await fetchAndExtract(url, { acceptLanguage: argValue(args, "lang"), firecrawl: argValue(args, "firecrawl") });
+    if (argBool(args, "json")) {
       process.stdout.write(
         JSON.stringify({ url, title: r.title, extractor: r.extractor, status: r.status, chars: r.text.length, note: r.note, text: r.text }, null, 2) + "\n",
       );
@@ -591,10 +646,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 
   if (cmd === "extract") {
-    const path = argv[1];
-    if (!path || path.startsWith("--")) fail("usage: webindex extract <file>");
+    const path = args.positional[0];
+    if (!path) fail("usage: webindex extract <file>");
     const r = await extractLocal(path);
-    if (argv.includes("--json")) {
+    if (argBool(args, "json")) {
       process.stdout.write(
         JSON.stringify({ file: basename(path), extractor: r.extractor, chars: r.text.length, reason: r.reason, text: r.text }, null, 2) + "\n",
       );
@@ -606,17 +661,17 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 
   if (cmd === "mcp") {
-    const transport = flag(argv, "transport") ?? "stdio";
+    const transport = argValue(args, "transport") ?? "stdio";
     if (transport === "stdio") {
       await runStdioServer(webindexAdapter());
       return;
     }
     if (transport !== "http") fail(`unknown transport "${transport}" — expected stdio or http`);
-    const port = Number(flag(argv, "port") ?? 7340);
+    const port = argInt(args, "port") ?? 7340;
     if (!Number.isInteger(port) || port < 0 || port > 65535) fail("invalid --port");
     let running: Awaited<ReturnType<typeof startHttpServer>>;
     try {
-      running = await startHttpServer(webindexAdapter(), { port, bind: flag(argv, "bind"), allowRemote: argv.includes("--allow-remote") });
+      running = await startHttpServer(webindexAdapter(), { port, bind: argValue(args, "bind"), allowRemote: argBool(args, "allow-remote") });
     } catch (e) {
       fail((e as Error).message);
     }
@@ -636,7 +691,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // `all` is excluded because the CLI already spells it `stack`; two spellings
   // of one action is how a help text starts lying.
   if ((STACK_SERVICES.includes(cmd) && cmd !== "all") || cmd === "stack") {
-    const action = argv[1] ?? "status";
+    const action = args.positional[0] ?? "status";
     if (cmd === "stack" && action === "path") {
       process.stdout.write(ensureComposeMaterialized() + "\n");
       return;
@@ -655,9 +710,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 
   if (cmd === "rank") {
-    const question = flag(argv, "query");
+    const question = argValue(args, "query");
     if (!question) fail("usage: webindex rank --query <question> --docs <file.json|-> [--limit <n>] [--json]");
-    const src = flag(argv, "docs") ?? "-";
+    const src = argValue(args, "docs") ?? "-";
     let payload: string;
     try {
       payload = src === "-" ? readFileSync(0, "utf8") : readFileSync(src, "utf8");
@@ -670,10 +725,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     } catch (e) {
       fail((e as Error).message);
     }
-    const limit = flag(argv, "limit") ? Number(flag(argv, "limit")) : undefined;
+    const limit = argInt(args, "limit");
     const r = rankDocuments(question, docs, limit);
-    if (argv.includes("--json")) {
-      process.stdout.write(JSON.stringify(r, null, 2) + "\n");
+    if (argBool(args, "json")) {
+      process.stdout.write(jsonLine(r));
       return;
     }
     // Human form on stdout, the collapse note on stderr — so `| head` stays a
@@ -694,15 +749,18 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // What a code host and a package registry say about a project. Read-only,
   // keyless, and answering from the record rather than from a README.
   if (cmd === "repo" || cmd === "issues" || cmd === "prs" || cmd === "releases" || cmd === "package") {
-    const target = positional(argv, ["limit", "registry", "version", "terms"]);
+    const target = positionalText(args);
     if (!target) fail(`usage: webindex ${cmd} <${cmd === "package" ? "name" : "repo"}> [--json]`);
-    const asJson = argv.includes("--json");
-    const limit = flag(argv, "limit") ? Number(flag(argv, "limit")) : undefined;
-    const emit = (obj: unknown, human: string[]) => process.stdout.write(asJson ? `${JSON.stringify(obj, null, 2)}\n` : `${human.join("\n")}\n`);
+    const asJson = argBool(args, "json");
+    const limit = argInt(args, "limit");
+    const emit = (obj: unknown, human: string[]) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}\n`);
 
     if (cmd === "package") {
-      const reg = flag(argv, "registry") as RegistryKind | undefined;
-      const p = await resolvePackage(target, { ...(reg ? { registry: reg } : {}), ...(flag(argv, "version") ? { version: flag(argv, "version") } : {}) });
+      const reg = argValue(args, "registry") as RegistryKind | undefined;
+      const p = await resolvePackage(target, {
+        ...(reg ? { registry: reg } : {}),
+        ...(argValue(args, "version") ? { version: argValue(args, "version") } : {}),
+      });
       if (!p) fail(`no registry knows a package called "${target}"`);
       emit(p, [
         `  registry    ${p.registry}`,
@@ -737,7 +795,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     const r =
       cmd === "releases"
         ? await listReleases(ref, { ...(limit ? { limit } : {}) })
-        : await searchIssues(ref, (flag(argv, "terms") ?? "").split(/\s+/).filter(Boolean), cmd === "prs" ? "pr" : "issue", { ...(limit ? { limit } : {}) });
+        : await searchIssues(ref, (argValue(args, "terms") ?? "").split(/\s+/).filter(Boolean), cmd === "prs" ? "pr" : "issue", {
+            ...(limit ? { limit } : {}),
+          });
     if (!r.items.length) fail(r.note ?? `nothing found for ${target}`);
     emit(
       r,
@@ -751,11 +811,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // answer "who published this, when" and "what else is here" without paying for
   // a full extraction.
   if (cmd === "meta" || cmd === "robots" || cmd === "sitemap" || cmd === "feed") {
-    const target = positional(argv, ["max"]);
+    const target = positionalText(args);
     if (!target) fail(`usage: webindex ${cmd} <url>`);
     if (!/^https?:\/\//i.test(target)) fail("expected an http(s) URL");
-    const asJson = argv.includes("--json");
-    const emit = (obj: unknown, human: string[]) => process.stdout.write(asJson ? `${JSON.stringify(obj, null, 2)}\n` : `${human.join("\n")}\n`);
+    const asJson = argBool(args, "json");
+    const emit = (obj: unknown, human: string[]) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}\n`);
 
     if (cmd === "robots") {
       const r = await fetchRobots(target);
@@ -771,7 +831,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     }
     if (cmd === "sitemap") {
       const robots = await fetchRobots(target);
-      const s = await fetchSitemap(target, { sitemaps: robots.sitemaps, max: flag(argv, "max") ? Number(flag(argv, "max")) : undefined });
+      const s = await fetchSitemap(target, { sitemaps: robots.sitemaps, max: argInt(args, "max") });
       if (!s.urls.length && !s.sitemaps.length) fail(`no sitemap found for ${target}`);
       emit(
         s,
@@ -818,17 +878,17 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 
   if (cmd === "cache") {
-    const action = argv[1] ?? "status";
+    const action = args.positional[0] ?? "status";
     if (action !== "status" && action !== "clean") fail("usage: webindex cache status|clean [--all]");
     if (action === "clean") {
-      const all = argv.includes("--all");
+      const all = argBool(args, "all");
       const removed = cacheClean(all);
       process.stdout.write(`${removed} entr${removed === 1 ? "y" : "ies"} removed (${all ? "all" : "stale only"}) from ${cacheDir()}\n`);
       return;
     }
     const s = cacheStats();
-    if (argv.includes("--json")) {
-      process.stdout.write(JSON.stringify(s, null, 2) + "\n");
+    if (argBool(args, "json")) {
+      process.stdout.write(jsonLine(s));
       return;
     }
     const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(1)} MB`;
@@ -866,10 +926,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   fail(`unknown command "${cmd}" — run \`webindex --help\``);
 }
 
-// Only when run as a program. Importing this module must not start anything.
-if (process.argv[1] && /webindex(\.mjs)?$/.test(process.argv[1])) {
+// Only when run as a program. Importing this module must not start anything —
+// the skill-bundle gate imports the built artifact to read its flag tables.
+if (isInvokedDirectly()) {
   main().catch((e) => {
     process.stderr.write(`webindex: ${(e as Error).message}\n`);
-    process.exit(1);
+    process.exit(EXIT_FAILURE);
   });
 }

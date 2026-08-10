@@ -2,7 +2,7 @@
 
 // src/cli.ts
 import { readFileSync as readFileSync5 } from "fs";
-import { basename as basename3 } from "path";
+import { basename as basename4 } from "path";
 import { pathToFileURL } from "url";
 
 // src/brand.ts
@@ -2061,7 +2061,7 @@ import { join as join3 } from "path";
 import { tmpdir as tmpdir3 } from "os";
 
 // src/no-write.ts
-import { mkdirSync as mkdirSync2, writeFileSync as writeFileSync3 } from "fs";
+import { mkdirSync as mkdirSync2, renameSync, unlinkSync, writeFileSync as writeFileSync3 } from "fs";
 var flagged = false;
 function isNoWrite() {
   return flagged || envFlag("NO_WRITE");
@@ -2993,6 +2993,97 @@ function diversify(items, tokensOf, lambda = 0.75) {
   return out;
 }
 
+// src/cli-kit.ts
+import { basename as basename2 } from "path";
+var EXIT_FAILURE = 1;
+var EXIT_USAGE = 2;
+var UsageError = class extends Error {
+  exitCode = EXIT_USAGE;
+};
+function parseArgs(argv, spec) {
+  const commands = new Set(spec.commands);
+  const valueFlags = new Set(spec.valueFlags);
+  const boolFlags = new Set(spec.boolFlags);
+  if (argv.length === 0) return { kind: "help" };
+  if (isHelpWord(argv[0])) return { kind: "help" };
+  if (isVersionWord(argv[0])) return { kind: "version" };
+  const command = argv[0];
+  if (!commands.has(command)) {
+    throw new UsageError(`unknown command "${command}" \u2014 run --help for the supported commands`);
+  }
+  const values = {};
+  const bools = /* @__PURE__ */ new Set();
+  const positional = [];
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--") {
+      positional.push(...argv.slice(i + 1));
+      break;
+    }
+    if (!arg.startsWith("--") && arg !== "-h" && arg !== "-v") {
+      positional.push(arg);
+      continue;
+    }
+    const eq = arg.indexOf("=");
+    const key = eq !== -1 ? arg.slice(2, eq) : arg.slice(2);
+    if (!boolFlags.has(key) && !valueFlags.has(key)) {
+      if (isHelpWord(arg)) return { kind: "help" };
+      if (isVersionWord(arg)) return { kind: "version" };
+    }
+    if (boolFlags.has(key)) {
+      if (eq !== -1) throw new UsageError(`--${key} is a boolean flag and takes no value`);
+      bools.add(key);
+      continue;
+    }
+    if (!valueFlags.has(key)) {
+      throw new UsageError(`unknown flag "--${key}" \u2014 run --help for the supported options`);
+    }
+    if (eq !== -1) {
+      values[key] = arg.slice(eq + 1);
+      continue;
+    }
+    const next = argv[i + 1];
+    if (next === void 0 || next.startsWith("--")) {
+      throw new UsageError(`missing value for --${key}`);
+    }
+    values[key] = next;
+    i++;
+  }
+  return { kind: "command", command, positional, values, bools };
+}
+function isHelpWord(a) {
+  return a === "--help" || a === "-h" || a === "help";
+}
+function isVersionWord(a) {
+  return a === "--version" || a === "-v" || a === "version";
+}
+function argValue(p, name) {
+  return p.values[name];
+}
+function argBool(p, name) {
+  return p.bools.has(name);
+}
+function argInt(p, name) {
+  const raw = p.values[name];
+  if (raw === void 0) return void 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) {
+    throw new UsageError(`--${name} expects a whole number, got "${raw}"`);
+  }
+  return n;
+}
+function positionalText(p) {
+  return p.positional.join(" ");
+}
+function jsonLine(value) {
+  return `${JSON.stringify(value, null, 2)}
+`;
+}
+function isInvokedDirectly(argv1 = process.argv[1], cli = brand().cli) {
+  if (!argv1) return false;
+  return basename2(argv1).replace(/\.(mjs|cjs|js)$/, "") === cli;
+}
+
 // src/mcp/protocol.ts
 var PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
 var LATEST_PROTOCOL = PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1];
@@ -3078,7 +3169,7 @@ function isOriginAllowed(origin, allowed = []) {
 
 // src/mcp/resources.ts
 import { existsSync as existsSync5, readdirSync as readdirSync3, readFileSync as readFileSync4, realpathSync, statSync as statSync3 } from "fs";
-import { basename as basename2, dirname as dirname2, join as join5, resolve as resolve2, sep } from "path";
+import { basename as basename3, dirname as dirname2, join as join5, resolve as resolve2, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
@@ -3096,7 +3187,7 @@ function listResources(moduleDir) {
   if (!existsSync5(refDir)) return out;
   for (const file of readdirSync3(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join5("references", file), `${skillName()} reference: ${basename2(file, ".md")}`));
+    out.push(describe(root, join5("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
   }
   return out;
 }
@@ -3552,7 +3643,7 @@ documents \u2014 and serve that to an agent over MCP. Zero dependencies, no API 
 
 USAGE
   webindex search <query> [--json] [--limit <n>] [--pages <n>] [--lang <tag>]
-                          [--engine ddg|ddglite|mojeek|off]
+                          [--engine ddg|ddglite|mojeek|off] [--searxng <base>|off]
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>]
   webindex extract <file> [--json]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--json]
@@ -3560,12 +3651,12 @@ USAGE
   webindex issues <ref> [--terms "<words>"] [--limit <n>] [--json]
   webindex prs <ref> [--terms "<words>"] [--limit <n>] [--json]
   webindex releases <ref> [--limit <n>] [--json]
-  webindex package <name> [--registry npm|pypi|crates] [--json]
+  webindex package <name> [--registry npm|pypi|crates] [--version <semver>] [--json]
   webindex meta <url> [--json]
   webindex robots <url> [--json]
   webindex sitemap <url> [--max <n>] [--json]
   webindex feed <url> [--json]
-  webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>]
+  webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>] [--allow-remote]
   webindex searxng   up|down|status
   webindex firecrawl up|down|status
   webindex semantic  up|down|status
@@ -3625,30 +3716,49 @@ ENVIRONMENT
   WEBINDEX_UA            override the browser User-Agent
 
 Every optional helper degrades to a note. Nothing here needs an API key.`;
+var VALUE_FLAGS = [
+  "limit",
+  "pages",
+  "lang",
+  "searxng",
+  "firecrawl",
+  "engine",
+  "query",
+  "docs",
+  "transport",
+  "port",
+  "bind",
+  "registry",
+  "version",
+  "terms",
+  "max"
+];
+var BOOL_FLAGS = ["json", "allow-remote", "all"];
+var COMMANDS = [
+  "search",
+  "fetch",
+  "extract",
+  "rank",
+  "repo",
+  "issues",
+  "prs",
+  "releases",
+  "package",
+  "meta",
+  "robots",
+  "sitemap",
+  "feed",
+  "mcp",
+  "cache",
+  "doctor",
+  ...STACK_SERVICES.filter((s) => s !== "all"),
+  "stack"
+];
+var SPEC = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS };
 function fail(msg) {
   process.stderr.write(`webindex: ${msg}
 `);
-  process.exit(1);
-}
-function flag(argv, name) {
-  const i = argv.indexOf(`--${name}`);
-  return i !== -1 ? argv[i + 1] : void 0;
-}
-function positional(argv, valued) {
-  const out = [];
-  for (let i = 1; i < argv.length; i++) {
-    const a = argv[i] ?? "";
-    if (a === "--") {
-      out.push(...argv.slice(i + 1));
-      break;
-    }
-    if (a.startsWith("--")) {
-      if (valued.includes(a.slice(2))) i++;
-      continue;
-    }
-    out.push(a);
-  }
-  return out.join(" ").trim();
+  process.exit(EXIT_FAILURE);
 }
 async function extractLocal(path) {
   let bytes;
@@ -3975,30 +4085,42 @@ extractor: ${r.extractor}` };
   };
 }
 async function main(argv = process.argv.slice(2)) {
-  const cmd = argv[0];
-  if (!cmd || cmd === "--help" || cmd === "-h" || cmd === "help") {
+  try {
+    await dispatch(argv);
+  } catch (e) {
+    if (!(e instanceof UsageError)) throw e;
+    process.stderr.write(`webindex: ${e.message}
+`);
+    process.exit(EXIT_USAGE);
+  }
+}
+async function dispatch(argv) {
+  const parsed = parseArgs(argv, SPEC);
+  if (parsed.kind === "help") {
     process.stdout.write(HELP + "\n");
     return;
   }
-  if (cmd === "version" || cmd === "--version" || cmd === "-v") {
+  if (parsed.kind === "version") {
     process.stdout.write(ENGINE_VERSION + "\n");
     return;
   }
+  const args = parsed;
+  const cmd = args.command;
   if (cmd === "search") {
-    const q = positional(argv, ["limit", "pages", "lang", "searxng", "firecrawl", "engine"]);
+    const q = positionalText(args);
     if (!q) fail("usage: webindex search <query>");
-    const engine = flag(argv, "engine");
+    const engine = argValue(args, "engine");
     if (engine && engine !== "off" && !isKeylessEngine(engine)) fail(`unknown --engine "${engine}" \u2014 expected one of ${KEYLESS_ENGINES.join(", ")}, or off`);
     const r = await search(q, {
-      limit: flag(argv, "limit") ? Number(flag(argv, "limit")) : void 0,
-      pages: flag(argv, "pages") ? Number(flag(argv, "pages")) : void 0,
-      lang: flag(argv, "lang"),
-      searxng: flag(argv, "searxng"),
-      firecrawl: flag(argv, "firecrawl"),
+      limit: argInt(args, "limit"),
+      pages: argInt(args, "pages"),
+      lang: argValue(args, "lang"),
+      searxng: argValue(args, "searxng"),
+      firecrawl: argValue(args, "firecrawl"),
       ...engine ? { engines: engine === "off" ? [] : [engine] } : {}
     });
-    if (argv.includes("--json")) {
-      process.stdout.write(JSON.stringify(r, null, 2) + "\n");
+    if (argBool(args, "json")) {
+      process.stdout.write(jsonLine(r));
       return;
     }
     for (const h of r.hits) {
@@ -4014,11 +4136,11 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (cmd === "fetch") {
-    const url = argv[1];
-    if (!url || url.startsWith("--")) fail("usage: webindex fetch <url>");
+    const url = args.positional[0];
+    if (!url) fail("usage: webindex fetch <url>");
     if (!/^https?:\/\//i.test(url)) fail("fetch needs an http(s) URL");
-    const r = await fetchAndExtract(url, { acceptLanguage: flag(argv, "lang"), firecrawl: flag(argv, "firecrawl") });
-    if (argv.includes("--json")) {
+    const r = await fetchAndExtract(url, { acceptLanguage: argValue(args, "lang"), firecrawl: argValue(args, "firecrawl") });
+    if (argBool(args, "json")) {
       process.stdout.write(
         JSON.stringify({ url, title: r.title, extractor: r.extractor, status: r.status, chars: r.text.length, note: r.note, text: r.text }, null, 2) + "\n"
       );
@@ -4029,12 +4151,12 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (cmd === "extract") {
-    const path = argv[1];
-    if (!path || path.startsWith("--")) fail("usage: webindex extract <file>");
+    const path = args.positional[0];
+    if (!path) fail("usage: webindex extract <file>");
     const r = await extractLocal(path);
-    if (argv.includes("--json")) {
+    if (argBool(args, "json")) {
       process.stdout.write(
-        JSON.stringify({ file: basename3(path), extractor: r.extractor, chars: r.text.length, reason: r.reason, text: r.text }, null, 2) + "\n"
+        JSON.stringify({ file: basename4(path), extractor: r.extractor, chars: r.text.length, reason: r.reason, text: r.text }, null, 2) + "\n"
       );
       return;
     }
@@ -4043,17 +4165,17 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (cmd === "mcp") {
-    const transport = flag(argv, "transport") ?? "stdio";
+    const transport = argValue(args, "transport") ?? "stdio";
     if (transport === "stdio") {
       await runStdioServer(webindexAdapter());
       return;
     }
     if (transport !== "http") fail(`unknown transport "${transport}" \u2014 expected stdio or http`);
-    const port = Number(flag(argv, "port") ?? 7340);
+    const port = argInt(args, "port") ?? 7340;
     if (!Number.isInteger(port) || port < 0 || port > 65535) fail("invalid --port");
     let running;
     try {
-      running = await startHttpServer(webindexAdapter(), { port, bind: flag(argv, "bind"), allowRemote: argv.includes("--allow-remote") });
+      running = await startHttpServer(webindexAdapter(), { port, bind: argValue(args, "bind"), allowRemote: argBool(args, "allow-remote") });
     } catch (e) {
       fail(e.message);
     }
@@ -4064,7 +4186,7 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (STACK_SERVICES.includes(cmd) && cmd !== "all" || cmd === "stack") {
-    const action = argv[1] ?? "status";
+    const action = args.positional[0] ?? "status";
     if (cmd === "stack" && action === "path") {
       process.stdout.write(ensureComposeMaterialized() + "\n");
       return;
@@ -4077,9 +4199,9 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (cmd === "rank") {
-    const question = flag(argv, "query");
+    const question = argValue(args, "query");
     if (!question) fail("usage: webindex rank --query <question> --docs <file.json|-> [--limit <n>] [--json]");
-    const src = flag(argv, "docs") ?? "-";
+    const src = argValue(args, "docs") ?? "-";
     let payload;
     try {
       payload = src === "-" ? readFileSync5(0, "utf8") : readFileSync5(src, "utf8");
@@ -4092,10 +4214,10 @@ async function main(argv = process.argv.slice(2)) {
     } catch (e) {
       fail(e.message);
     }
-    const limit = flag(argv, "limit") ? Number(flag(argv, "limit")) : void 0;
+    const limit = argInt(args, "limit");
     const r = rankDocuments(question, docs, limit);
-    if (argv.includes("--json")) {
-      process.stdout.write(JSON.stringify(r, null, 2) + "\n");
+    if (argBool(args, "json")) {
+      process.stdout.write(jsonLine(r));
       return;
     }
     process.stdout.write(
@@ -4112,16 +4234,18 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (cmd === "repo" || cmd === "issues" || cmd === "prs" || cmd === "releases" || cmd === "package") {
-    const target = positional(argv, ["limit", "registry", "version", "terms"]);
+    const target = positionalText(args);
     if (!target) fail(`usage: webindex ${cmd} <${cmd === "package" ? "name" : "repo"}> [--json]`);
-    const asJson = argv.includes("--json");
-    const limit = flag(argv, "limit") ? Number(flag(argv, "limit")) : void 0;
-    const emit = (obj, human) => process.stdout.write(asJson ? `${JSON.stringify(obj, null, 2)}
-` : `${human.join("\n")}
+    const asJson = argBool(args, "json");
+    const limit = argInt(args, "limit");
+    const emit = (obj, human) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}
 `);
     if (cmd === "package") {
-      const reg = flag(argv, "registry");
-      const p = await resolvePackage(target, { ...reg ? { registry: reg } : {}, ...flag(argv, "version") ? { version: flag(argv, "version") } : {} });
+      const reg = argValue(args, "registry");
+      const p = await resolvePackage(target, {
+        ...reg ? { registry: reg } : {},
+        ...argValue(args, "version") ? { version: argValue(args, "version") } : {}
+      });
       if (!p) fail(`no registry knows a package called "${target}"`);
       emit(p, [
         `  registry    ${p.registry}`,
@@ -4150,7 +4274,9 @@ async function main(argv = process.argv.slice(2)) {
       ]);
       return;
     }
-    const r = cmd === "releases" ? await listReleases(ref, { ...limit ? { limit } : {} }) : await searchIssues(ref, (flag(argv, "terms") ?? "").split(/\s+/).filter(Boolean), cmd === "prs" ? "pr" : "issue", { ...limit ? { limit } : {} });
+    const r = cmd === "releases" ? await listReleases(ref, { ...limit ? { limit } : {} }) : await searchIssues(ref, (argValue(args, "terms") ?? "").split(/\s+/).filter(Boolean), cmd === "prs" ? "pr" : "issue", {
+      ...limit ? { limit } : {}
+    });
     if (!r.items.length) fail(r.note ?? `nothing found for ${target}`);
     emit(
       r,
@@ -4162,12 +4288,11 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (cmd === "meta" || cmd === "robots" || cmd === "sitemap" || cmd === "feed") {
-    const target = positional(argv, ["max"]);
+    const target = positionalText(args);
     if (!target) fail(`usage: webindex ${cmd} <url>`);
     if (!/^https?:\/\//i.test(target)) fail("expected an http(s) URL");
-    const asJson = argv.includes("--json");
-    const emit = (obj, human) => process.stdout.write(asJson ? `${JSON.stringify(obj, null, 2)}
-` : `${human.join("\n")}
+    const asJson = argBool(args, "json");
+    const emit = (obj, human) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}
 `);
     if (cmd === "robots") {
       const r = await fetchRobots(target);
@@ -4183,7 +4308,7 @@ async function main(argv = process.argv.slice(2)) {
     }
     if (cmd === "sitemap") {
       const robots = await fetchRobots(target);
-      const s = await fetchSitemap(target, { sitemaps: robots.sitemaps, max: flag(argv, "max") ? Number(flag(argv, "max")) : void 0 });
+      const s = await fetchSitemap(target, { sitemaps: robots.sitemaps, max: argInt(args, "max") });
       if (!s.urls.length && !s.sitemaps.length) fail(`no sitemap found for ${target}`);
       emit(
         s,
@@ -4207,8 +4332,8 @@ async function main(argv = process.argv.slice(2)) {
       if (!found.length) fail(`${target} advertises no feed`);
       const feeds = [];
       for (const f of found) {
-        const parsed = await fetchFeed(f);
-        if (parsed) feeds.push({ url: f, ...parsed });
+        const parsed2 = await fetchFeed(f);
+        if (parsed2) feeds.push({ url: f, ...parsed2 });
       }
       if (!feeds.length) fail(`${target} advertises ${found.length} feed(s), none of which parsed`);
       emit(
@@ -4231,18 +4356,18 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (cmd === "cache") {
-    const action = argv[1] ?? "status";
+    const action = args.positional[0] ?? "status";
     if (action !== "status" && action !== "clean") fail("usage: webindex cache status|clean [--all]");
     if (action === "clean") {
-      const all = argv.includes("--all");
+      const all = argBool(args, "all");
       const removed = cacheClean(all);
       process.stdout.write(`${removed} entr${removed === 1 ? "y" : "ies"} removed (${all ? "all" : "stale only"}) from ${cacheDir()}
 `);
       return;
     }
     const s = cacheStats();
-    if (argv.includes("--json")) {
-      process.stdout.write(JSON.stringify(s, null, 2) + "\n");
+    if (argBool(args, "json")) {
+      process.stdout.write(jsonLine(s));
       return;
     }
     const mb = (n) => `${(n / (1024 * 1024)).toFixed(1)} MB`;
@@ -4277,14 +4402,18 @@ async function main(argv = process.argv.slice(2)) {
   }
   fail(`unknown command "${cmd}" \u2014 run \`webindex --help\``);
 }
-if (process.argv[1] && /webindex(\.mjs)?$/.test(process.argv[1])) {
+if (isInvokedDirectly()) {
   main().catch((e) => {
     process.stderr.write(`webindex: ${e.message}
 `);
-    process.exit(1);
+    process.exit(EXIT_FAILURE);
   });
 }
 export {
+  BOOL_FLAGS,
+  COMMANDS,
+  HELP,
+  VALUE_FLAGS,
   main,
   webindexAdapter
 };
