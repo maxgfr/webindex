@@ -2447,14 +2447,20 @@ interface PhaseDefinition<T = unknown> extends PhaseEmission {
     /** The worklist filename, relative to the run directory. */
     worklist: string;
     /**
-     * The fan-out ids in a parsed worklist, or undefined when it is not usable.
+     * The fan-out ids for this phase, or undefined when it is not ready.
      *
      * Returning undefined is how a file that exists but is half-written stays
      * "not ready" instead of producing a workflow over garbage — which is why
      * every consumer's version of this tested `Array.isArray(...)` before
      * trusting the parse.
+     *
+     * `run` and `engineAbs` come along because a phase's units are not always a
+     * field of one file: one consumer derives its research gaps by ANALYSING the
+     * whole run, and needs the engine path to write each unit's drill command
+     * into the id itself. A callback that only ever saw the parsed worklist
+     * forced that phase to stay forked.
      */
-    ids(parsed: T): string[] | undefined;
+    ids(parsed: T | undefined, run: string, engineAbs: string): string[] | undefined;
     /** The engine command that produces this worklist. Shown when it is missing. */
     prerequisite(run: string, engineAbs: string, parsed?: T): string;
 }

@@ -90,6 +90,33 @@ describe("listPhases", () => {
     expect(listPhases(run, ENGINE, DEFS)[1]?.prerequisite).toBe(`node ${ENGINE} verify --run ${run}`);
   });
 
+  it("hands the run and the engine path to ids, for a phase whose units are not one file's field", () => {
+    // One consumer derives its research gaps by ANALYSING the whole run, and
+    // writes each unit's drill command into the id. A callback that only saw
+    // the parsed worklist forced that phase to stay forked.
+    plan(1);
+    const seen: { run?: string; engine?: string; parsed?: unknown } = {};
+    const DERIVED: PhaseDefinition<Plan> = {
+      ...GATHER,
+      ids: (parsed, run, engineAbs) => {
+        Object.assign(seen, { run, engine: engineAbs, parsed });
+        return [`derived-from-${run.split("/").pop()}`];
+      },
+    };
+    const [ph] = listPhases(run, ENGINE, [DERIVED]);
+    expect(seen.run).toBe(run);
+    expect(seen.engine).toBe(ENGINE);
+    expect(seen.parsed).toEqual({ subQuestions: [{ id: "Q1" }] });
+    expect(ph?.ids).toEqual([`derived-from-${run.split("/").pop()}`]);
+  });
+
+  it("lets ids answer even when the worklist file is absent", () => {
+    // The corollary: a phase that reads the run rather than a file must still
+    // be able to report itself ready.
+    const [ph] = listPhases(run, ENGINE, [{ ...GATHER, ids: () => ["a", "b"] }]);
+    expect(ph).toMatchObject({ ready: true, items: 2 });
+  });
+
   it("hands the parsed worklist back, so a phase's own emitters can read it", () => {
     plan(1);
     expect(listPhases<Plan>(run, ENGINE, [GATHER])[0]?.parsed).toEqual({ subQuestions: [{ id: "Q1" }] });

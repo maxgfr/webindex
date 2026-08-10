@@ -4573,7 +4573,7 @@ function listPhases(runDir, engineAbs, defs) {
   return defs.map((def) => {
     const worklist = join7(run, def.worklist);
     const parsed = readJsonSafe(worklist);
-    const ids = parsed === void 0 ? void 0 : def.ids(parsed);
+    const ids = def.ids(parsed, run, engineAbs);
     const ready = ids !== void 0;
     return {
       name: def.name,
