@@ -88,13 +88,19 @@ anything also fails, so the list cannot rot.
 
 ## `bundle` and the assertion nothing else could make
 
-The installer early-returns on a `SKILL.md` at the repository **root** and
-installs that file alone — the sibling `scripts/` and `references/` are dropped.
-A skill is only bundled whole when its `SKILL.md` lives in `skills/<name>/`.
+A skill is bundled predictably only when its `SKILL.md` lives in
+`skills/<name>/`. That layout is what every consumer here targets, and the
+assertion holds it in place.
 
-No test of the skill's behaviour would ever catch that: the repo works
-perfectly, and what users install is a lone markdown file describing an engine
-that is not there.
+The original argument was sharper: the installer early-returned on a root
+`SKILL.md` and installed that file alone, so the sibling `scripts/` and
+`references/` were dropped and users got a lone markdown file describing an
+engine that is not there. **Measured against `skills` v1.5.22, that is no longer
+what happens** — a root `SKILL.md` is installed together with the rest of the
+repository. The rule is kept because `skills/<name>/` remains the layout the
+installer treats predictably and the one every repo here already uses, but the
+failure it was written against has moved. Nothing pins the installer's behaviour
+from here, so this is worth re-measuring when it matters.
 
 The rest is docs↔CLI drift, read from the **built** artifact rather than
 inferred from source. An earlier version recovered the flag surface by
