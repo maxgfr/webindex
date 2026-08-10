@@ -4110,11 +4110,11 @@ async function embedOne(text, opts = {}) {
   return r.vectors[0];
 }
 function cosine(a, b) {
-  const n = Math.min(a.length, b.length);
+  if (a.length === 0 || a.length !== b.length) return 0;
   let dot = 0;
   let ma = 0;
   let mb = 0;
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < a.length; i++) {
     const x = a[i];
     const y = b[i];
     dot += x * y;
@@ -4122,7 +4122,8 @@ function cosine(a, b) {
     mb += y * y;
   }
   if (ma === 0 || mb === 0) return 0;
-  return dot / (Math.sqrt(ma) * Math.sqrt(mb));
+  const r = dot / (Math.sqrt(ma) * Math.sqrt(mb));
+  return Number.isFinite(r) ? r : 0;
 }
 function normalize(v) {
   let m = 0;

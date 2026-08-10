@@ -137,8 +137,17 @@ describe("vector arithmetic", () => {
     expect(Number.isNaN(cosine([0, 0], [0, 0]))).toBe(false);
   });
 
-  it("compares vectors of unequal length over their shared prefix", () => {
-    expect(cosine([1, 0, 99], [1, 0])).toBeCloseTo(1);
+  it("refuses vectors of different lengths rather than scoring a shared prefix", () => {
+    // Different lengths means two different models. A prefix score is a
+    // plausible number for a comparison that has no meaning.
+    expect(cosine([1, 0, 99], [1, 0])).toBe(0);
+    expect(cosine([], [])).toBe(0);
+  });
+
+  it("collapses a non-finite component to zero", () => {
+    // A broken embedding response reaching a sort comparator.
+    expect(cosine([Number.NaN, 1], [1, 1])).toBe(0);
+    expect(cosine([Number.POSITIVE_INFINITY, 1], [1, 1])).toBe(0);
   });
 
   it("normalizes to unit length, and leaves a zero vector alone", () => {

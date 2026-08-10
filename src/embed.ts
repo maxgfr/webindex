@@ -124,19 +124,27 @@ export async function embedOne(text: string, opts: { base?: string; model?: stri
 // ── Vector arithmetic ───────────────────────────────────────────────────────
 
 /**
- * Cosine similarity, in [-1, 1].
+ * Cosine similarity, in [-1, 1]. Zero whenever the answer would not be a number.
  *
- * Returns 0 for a zero-magnitude vector rather than NaN. NaN propagates through
- * every comparison as false, so a single degenerate embedding would silently
- * sort to the bottom of one ranking and the top of another depending on how the
- * comparator was written.
+ * Three ways that happens, and all three collapse to 0 rather than propagating:
+ *
+ *   - a zero-magnitude vector;
+ *   - vectors of DIFFERENT length, which for embeddings means two different
+ *     models. Scoring them over a shared prefix produces a plausible number for
+ *     a comparison that has no meaning, which is worse than refusing;
+ *   - a non-finite component — a NaN or an Infinity that reached the caller
+ *     from a broken embedding response.
+ *
+ * NaN compares false whichever way a comparator is written, so one degenerate
+ * vector would sort to the bottom of one ranking and the top of another
+ * depending on how someone happened to spell the sort.
  */
 export function cosine(a: readonly number[], b: readonly number[]): number {
-  const n = Math.min(a.length, b.length);
+  if (a.length === 0 || a.length !== b.length) return 0;
   let dot = 0;
   let ma = 0;
   let mb = 0;
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < a.length; i++) {
     const x = a[i] as number;
     const y = b[i] as number;
     dot += x * y;
@@ -144,7 +152,8 @@ export function cosine(a: readonly number[], b: readonly number[]): number {
     mb += y * y;
   }
   if (ma === 0 || mb === 0) return 0;
-  return dot / (Math.sqrt(ma) * Math.sqrt(mb));
+  const r = dot / (Math.sqrt(ma) * Math.sqrt(mb));
+  return Number.isFinite(r) ? r : 0;
 }
 
 /** A unit-length copy. A zero vector is returned unchanged, for the reason above. */
