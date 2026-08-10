@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.17.0](https://github.com/maxgfr/webindex/compare/v1.16.0...v1.17.0) (2026-08-10)
+
+
+### Features
+
+* **orchestrate:** let a caller paste constants into the emitted workflow ([bffc3bc](https://github.com/maxgfr/webindex/commit/bffc3bca28b0f5108c49a1cd6ec2728f390af81d))
+
 # [1.16.0](https://github.com/maxgfr/webindex/compare/v1.15.2...v1.16.0) (2026-08-10)
 
 
