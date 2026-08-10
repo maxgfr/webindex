@@ -426,9 +426,27 @@ export function uncitedIds(cited: Iterable<string>, known: Iterable<string>): st
  * Applied to both sides of any containment test, which is the point: a report
  * writing "10,000" and a source writing "10 000" are stating the same figure,
  * and a comparison that says otherwise generates a false accusation.
+ *
+ * A comma is only a GROUP separator when it is followed by exactly three digits
+ * that no further digit follows. Everywhere else it is a DECIMAL comma and
+ * becomes a point, because most of the world writes "0,25" for what an English
+ * source writes "0.25". Stripping it unconditionally — as this did until the
+ * distinction was drawn — turned "0,25" into "025" and "1,5" into "15", so a
+ * report accused itself of inventing every figure it had correctly transcribed.
+ * That is not a corner case: the skills built on this engine are told to search
+ * in the audience's language and report in the user's, so a French report over
+ * English sources is the normal path, not the odd one.
+ *
+ * "1,000" stays ambiguous by construction and is read as one thousand — the
+ * three-digit group is the far more common convention in the corpora these
+ * tools fetch. NBSP, narrow NBSP and apostrophe are never decimal marks, so
+ * they are still stripped between any two digits.
  */
 export function normalizeNumeralText(text: string): string {
-  return text.replace(/(\d)[,\u00A0\u202F' ](?=\d)/g, "$1");
+  return text
+    .replace(/(\d)[\u00A0\u202F'](?=\d)/g, "$1")
+    .replace(/(\d)[, ](\d{3})(?!\d)/g, "$1$2")
+    .replace(/(\d),(?=\d)/g, "$1.");
 }
 
 /**
@@ -440,9 +458,14 @@ export function normalizeNumeralText(text: string): string {
  * "3 ways" are prose. Capped at 8, deduped, in order.
  */
 export function extractNumerals(text: string, max = 8): string[] {
-  const cleaned = stripInlineCode(text)
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/\[[^\]\n]+\](?!\()/g, " ");
+  // Normalise BEFORE matching, not after: the token pattern below never allowed
+  // a plain space, so "1 000 requests" used to match as "1" (dropped as a single
+  // digit) and "000" — the figure vanished and a phantom took its place.
+  const cleaned = normalizeNumeralText(
+    stripInlineCode(text)
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+      .replace(/\[[^\]\n]+\](?!\()/g, " "),
+  );
   const out: string[] = [];
   for (const m of cleaned.matchAll(/\d[\d,\u00A0\u202F']*(?:\.\d+)?%?/g)) {
     const numeric = normalizeNumeralText(m[0] as string).replace(/[,\u00A0\u202F'%]/g, "");

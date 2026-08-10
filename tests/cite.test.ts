@@ -224,6 +224,34 @@ describe("numerals", () => {
     expect(extractNumerals("10 20 30 40 50 60 70 80 90 100")).toHaveLength(8);
     expect(extractNumerals("10 20 30", 2)).toEqual(["10", "20"]);
   });
+
+  // A comma between digits is a group separator in English and a DECIMAL mark
+  // almost everywhere else. Stripping it unconditionally turned "0,25" into
+  // "025" and "1,5" into "15" — so a report written in the reader's language
+  // over English sources accused itself of inventing every figure it had
+  // correctly transcribed. The skills on this engine are told to search in the
+  // audience's language and report in the user's, which makes that the normal
+  // path rather than the odd one.
+  it("reads a decimal comma as a decimal point, not as a group separator", () => {
+    expect(normalizeNumeralText("0,25")).toBe("0.25");
+    expect(normalizeNumeralText("1,5")).toBe("1.5");
+    expect(extractNumerals("0,25 %")).toEqual(["0.25"]);
+    expect(extractNumerals("1,5 million")).toEqual(["1.5"]);
+  });
+
+  it("still reads a three-digit group as one number, comma or space", () => {
+    expect(normalizeNumeralText("1,000")).toBe("1000");
+    expect(normalizeNumeralText("1 000")).toBe("1000");
+    // The token pattern never allowed a plain space, so this used to come back
+    // as "000" with the leading 1 dropped as a bare single digit.
+    expect(extractNumerals("1 000 requêtes par seconde")).toEqual(["1000"]);
+  });
+
+  it("lets a figure survive translation between the two notations", () => {
+    const source = extractNumerals("For a 60-second window, 150ms of skew is 0.25%");
+    const report = extractNumerals("150 ms représentent 0,25 % sur une fenêtre de 60 secondes");
+    expect(report.filter((n) => !source.includes(n))).toEqual([]);
+  });
 });
 
 describe("stripInlineCode", () => {
