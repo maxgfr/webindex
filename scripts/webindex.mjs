@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import { readFileSync as readFileSync5 } from "fs";
-import { basename as basename4 } from "path";
+import { existsSync as existsSync7, readFileSync as readFileSync9 } from "fs";
+import { basename as basename4, join as join12, relative as relative2, resolve as resolve3 } from "path";
 import { pathToFileURL } from "url";
 
 // src/brand.ts
@@ -124,12 +124,12 @@ function binaryName(name) {
   return process.platform === "win32" && name === "npx" ? "npx.cmd" : name;
 }
 function runWithInput(cmd, args, input, timeoutMs) {
-  return new Promise((resolve3) => {
+  return new Promise((resolve4) => {
     let child;
     try {
       child = spawn(binaryName(cmd), args, { stdio: ["pipe", "pipe", "pipe"] });
     } catch (e) {
-      resolve3({ ok: false, stdout: "", error: e.message });
+      resolve4({ ok: false, stdout: "", error: e.message });
       return;
     }
     const chunks = [];
@@ -139,7 +139,7 @@ function runWithInput(cmd, args, input, timeoutMs) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve3(r);
+      resolve4(r);
     };
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
@@ -527,6 +527,9 @@ function decodeWith(bytes, encoding) {
 }
 
 // src/text.ts
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 var STOPWORDS = /* @__PURE__ */ new Set([
   "the",
   "a",
@@ -1983,6 +1986,573 @@ async function probeQdrant(base = qdrantBase()) {
   return probed2;
 }
 
+// src/skillkit/config.ts
+import { join as join4 } from "path";
+
+// src/run.ts
+import { join as join3 } from "path";
+import { readFileSync as readFileSync3 } from "fs";
+
+// src/no-write.ts
+import { mkdirSync as mkdirSync2, renameSync, unlinkSync, writeFileSync as writeFileSync3 } from "fs";
+var flagged = false;
+function isNoWrite() {
+  return flagged || envFlag("NO_WRITE");
+}
+var collected = [];
+function ensureDir(dir) {
+  if (isNoWrite()) return;
+  mkdirSync2(dir, { recursive: true });
+}
+function writeArtifact(path, content) {
+  if (isNoWrite()) {
+    const at = collected.findIndex((a) => a.path === path);
+    if (at !== -1) collected[at] = { path, content };
+    else collected.push({ path, content });
+    return path;
+  }
+  writeFileAtomic(path, content);
+  return path;
+}
+var tmpCounter = 0;
+function writeFileAtomic(path, content) {
+  const tmp = `${path}.${process.pid}.${tmpCounter++}.tmp`;
+  try {
+    writeFileSync3(tmp, content);
+    renameSync(tmp, path);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+    }
+    throw e;
+  }
+}
+
+// src/run.ts
+function readJsonSafe(path) {
+  try {
+    return JSON.parse(readFileSync3(path, "utf8"));
+  } catch {
+    return void 0;
+  }
+}
+
+// src/skillkit/config.ts
+var SKILL_CONFIG = "skill.json";
+var DEFAULT_FILES = [
+  { remote: "scripts/engine.mjs", local: "{name}-engine.mjs" },
+  { remote: "scripts/engine.d.mts", local: "{name}-engine.d.mts" }
+];
+function readSkillConfig(root) {
+  const path = join4(root, SKILL_CONFIG);
+  const raw = readJsonSafe(path);
+  if (!raw) return { errors: [`no readable ${SKILL_CONFIG} at ${path} \u2014 run \`skill init\` to scaffold one.`] };
+  const errors = [];
+  const name = typeof raw.name === "string" && raw.name ? raw.name : void 0;
+  if (!name) errors.push(`${SKILL_CONFIG}: "name" must be a non-empty string.`);
+  const engines = {};
+  const rawEngines = raw.engines;
+  if (!rawEngines || typeof rawEngines !== "object") {
+    errors.push(`${SKILL_CONFIG}: "engines" must be an object of { repo, minRef, meta }.`);
+  } else {
+    for (const [key, value] of Object.entries(rawEngines)) {
+      const e = value;
+      if (typeof e?.repo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(e.repo)) {
+        errors.push(`${SKILL_CONFIG}: engines.${key}.repo must be "owner/name".`);
+        continue;
+      }
+      if (typeof e.minRef !== "string" || !/^v\d+\.\d+\.\d+/.test(e.minRef)) {
+        errors.push(`${SKILL_CONFIG}: engines.${key}.minRef must be a "vX.Y.Z" tag.`);
+        continue;
+      }
+      const meta = typeof e.meta === "string" && e.meta ? e.meta : `${key}.meta.json`;
+      const files = Array.isArray(e.files) && e.files.length ? e.files : DEFAULT_FILES.map((f) => ({ ...f, local: f.local.replace("{name}", key) }));
+      engines[key] = { repo: e.repo, minRef: e.minRef, meta, files };
+    }
+    if (!Object.keys(engines).length && !errors.length) errors.push(`${SKILL_CONFIG}: "engines" is empty \u2014 nothing to vendor or police.`);
+  }
+  const floor = raw.usageFloor;
+  if (floor !== void 0 && (typeof floor !== "number" || !Number.isInteger(floor) || floor < 0)) {
+    errors.push(`${SKILL_CONFIG}: "usageFloor" must be a non-negative integer.`);
+  }
+  const forks = raw.forks;
+  if (forks !== void 0 && (typeof forks !== "object" || forks === null || Array.isArray(forks))) {
+    errors.push(`${SKILL_CONFIG}: "forks" must be an object of "path:Name" -> reason.`);
+  }
+  const foreign = raw.allowedForeignFlags;
+  if (foreign !== void 0 && (!Array.isArray(foreign) || foreign.some((f) => typeof f !== "string"))) {
+    errors.push(`${SKILL_CONFIG}: "allowedForeignFlags" must be an array of strings.`);
+  }
+  if (errors.length) return { errors };
+  return {
+    config: {
+      name,
+      vendorDir: typeof raw.vendorDir === "string" && raw.vendorDir ? raw.vendorDir : join4("src", "vendor"),
+      engines,
+      usageFloor: typeof floor === "number" ? floor : 0,
+      forks: forks ?? {},
+      allowedForeignFlags: foreign ?? []
+    },
+    errors: []
+  };
+}
+function compareTags(a, b) {
+  const parts = (t) => String(t).replace(/^v/, "").split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const [x, y] = [parts(a), parts(b)];
+  for (let i = 0; i < 3; i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+// src/skillkit/usage.ts
+import { readdirSync, readFileSync as readFileSync4, statSync } from "fs";
+import { join as join5, relative } from "path";
+var DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|enum)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm;
+var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*"(?:\.{1,2}\/)*engine\.js"/g;
+function engineExports(dts) {
+  const block = /export\s*\{([\s\S]*?)\}\s*;?\s*$/.exec(dts);
+  if (!block) return /* @__PURE__ */ new Set();
+  return new Set(
+    block[1].split(",").map(
+      (s) => s.trim().replace(/^type\s+/, "").split(/\s+as\s+/).pop()
+    ).filter((s) => Boolean(s))
+  );
+}
+function walkSources(dir, skip = "vendor", out = []) {
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    const p = join5(dir, e);
+    if (statSync(p).isDirectory()) {
+      if (e !== skip) walkSources(p, skip, out);
+    } else if (e.endsWith(".ts")) out.push(p);
+  }
+  return out;
+}
+function auditEngineUsage(root, config, dts) {
+  const surface = engineExports(dts);
+  const files = walkSources(join5(root, "src"));
+  const forks = new Map(Object.entries(config.forks));
+  const collisions = [];
+  const tolerated = [];
+  const imported = /* @__PURE__ */ new Set();
+  for (const file of files) {
+    const src = readFileSync4(file, "utf8");
+    const rel = relative(root, file);
+    for (const m of src.matchAll(DECL)) {
+      const name = m[1] ?? m[2];
+      if (!name || !surface.has(name)) continue;
+      const why = forks.get(`${rel}:${name}`);
+      if (why) tolerated.push({ file: rel, name, why });
+      else collisions.push({ file: rel, name });
+    }
+    for (const m of src.matchAll(USES_ENGINE)) {
+      for (const raw of m[1].split(",")) {
+        const name = raw.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0];
+        if (name) imported.add(name);
+      }
+    }
+  }
+  const seen = new Set(tolerated.map((t) => `${t.file}:${t.name}`));
+  const stale = [...forks.keys()].filter((k) => !seen.has(k));
+  return { collisions, tolerated, stale, imported: [...imported], surface: surface.size };
+}
+
+// src/skillkit/vendor.ts
+import { createHash } from "crypto";
+import { readFileSync as readFileSync5 } from "fs";
+import { join as join6 } from "path";
+var sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
+function checkPins(root, config) {
+  return Object.entries(config.engines).map(([name, pin]) => {
+    const problems = [];
+    const metaPath = join6(root, config.vendorDir, pin.meta);
+    const meta = readJsonSafe(metaPath);
+    if (!meta?.tag || !meta.sha256) {
+      return {
+        engine: name,
+        ok: false,
+        problems: [`no readable pin at ${config.vendorDir}/${pin.meta} \u2014 run \`skill vendor --engine ${name} --ref <tag>\` first.`]
+      };
+    }
+    for (const f of pin.files ?? []) {
+      const local = join6(root, config.vendorDir, f.local);
+      let actual;
+      try {
+        actual = sha256(readFileSync5(local));
+      } catch {
+        problems.push(`${config.vendorDir}/${f.local} is missing \u2014 the pin records it but it is not on disk.`);
+        continue;
+      }
+      const expected = meta.sha256[f.local];
+      if (!expected) problems.push(`${config.vendorDir}/${f.local} is not recorded in ${pin.meta} \u2014 re-pin.`);
+      else if (actual !== expected) problems.push(`DRIFT in ${config.vendorDir}/${f.local} \u2014 the bytes differ from the ${meta.tag} pin.`);
+    }
+    if (!problems.length && compareTags(meta.tag, pin.minRef) < 0) {
+      problems.push(
+        `STALE ${name} pin \u2014 vendored ${meta.tag}, but this repo's source needs at least ${pin.minRef}. Run \`skill vendor --engine ${name} --ref ${pin.minRef}\` (or newer).`
+      );
+    }
+    return { engine: name, ok: problems.length === 0, tag: meta.tag, engineVersion: meta.engineVersion, problems };
+  });
+}
+async function vendorEngine(root, config, name, ref, fetchFile) {
+  const pin = config.engines[name];
+  if (!pin) return { written: [], errors: [`unknown engine "${name}" \u2014 expected one of: ${Object.keys(config.engines).join(", ")}.`] };
+  const vendorDir = join6(root, config.vendorDir);
+  ensureDir(vendorDir);
+  const sums = {};
+  const written = [];
+  for (const f of pin.files ?? []) {
+    const url = `https://raw.githubusercontent.com/${pin.repo}/${ref}/${f.remote}`;
+    const buf = await fetchFile(url);
+    if (!buf) return { written, errors: [`could not fetch ${url}`] };
+    const local = join6(vendorDir, f.local);
+    writeFileAtomic(local, buf);
+    sums[f.local] = sha256(buf);
+    written.push(local);
+  }
+  const first = (pin.files ?? [])[0];
+  const bundle = first ? readFileSync5(join6(vendorDir, first.local), "utf8") : "";
+  const engineVersion = /ENGINE_VERSION = "([^"]+)"/.exec(bundle)?.[1];
+  if (!engineVersion || `v${engineVersion}` !== ref) {
+    return {
+      written,
+      errors: [
+        `the ${name} bundle reports ENGINE_VERSION=${engineVersion ?? "?"} but the pinned ref is ${ref} \u2014 refusing to record a pin that disagrees with its bytes.`
+      ]
+    };
+  }
+  const meta = { tag: ref, engineVersion, sha256: sums, syncedAt: (/* @__PURE__ */ new Date()).toISOString() };
+  const metaPath = join6(vendorDir, pin.meta);
+  writeFileAtomic(metaPath, `${JSON.stringify(meta, null, 2)}
+`);
+  written.push(metaPath);
+  return { written, errors: [], tag: ref, engineVersion };
+}
+
+// src/skillkit/bundle.ts
+import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "fs";
+import { join as join7 } from "path";
+
+// src/cli-kit.ts
+import { basename } from "path";
+var EXIT_FAILURE = 1;
+var EXIT_USAGE = 2;
+var UsageError = class extends Error {
+  exitCode = EXIT_USAGE;
+};
+function parseArgs(argv, spec) {
+  const commands = new Set(spec.commands);
+  const valueFlags = new Set(spec.valueFlags);
+  const boolFlags = new Set(spec.boolFlags);
+  if (argv.length === 0) return { kind: "help" };
+  if (isHelpWord(argv[0])) return { kind: "help" };
+  if (isVersionWord(argv[0])) return { kind: "version" };
+  const command = argv[0];
+  if (!commands.has(command)) {
+    throw new UsageError(`unknown command "${command}" \u2014 run --help for the supported commands`);
+  }
+  const values = {};
+  const bools = /* @__PURE__ */ new Set();
+  const positional = [];
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--") {
+      positional.push(...argv.slice(i + 1));
+      break;
+    }
+    if (!arg.startsWith("--") && arg !== "-h" && arg !== "-v") {
+      positional.push(arg);
+      continue;
+    }
+    const eq = arg.indexOf("=");
+    const key = eq !== -1 ? arg.slice(2, eq) : arg.slice(2);
+    if (!boolFlags.has(key) && !valueFlags.has(key)) {
+      if (isHelpWord(arg)) return { kind: "help" };
+      if (isVersionWord(arg)) return { kind: "version" };
+    }
+    if (boolFlags.has(key)) {
+      if (eq !== -1) throw new UsageError(`--${key} is a boolean flag and takes no value`);
+      bools.add(key);
+      continue;
+    }
+    if (!valueFlags.has(key)) {
+      throw new UsageError(`unknown flag "--${key}" \u2014 run --help for the supported options`);
+    }
+    if (eq !== -1) {
+      values[key] = arg.slice(eq + 1);
+      continue;
+    }
+    const next = argv[i + 1];
+    if (next === void 0 || next.startsWith("--")) {
+      throw new UsageError(`missing value for --${key}`);
+    }
+    values[key] = next;
+    i++;
+  }
+  return { kind: "command", command, positional, values, bools };
+}
+function isHelpWord(a) {
+  return a === "--help" || a === "-h" || a === "help";
+}
+function isVersionWord(a) {
+  return a === "--version" || a === "-v" || a === "version";
+}
+function argValue(p, name) {
+  return p.values[name];
+}
+function argBool(p, name) {
+  return p.bools.has(name);
+}
+function argInt(p, name) {
+  const raw = p.values[name];
+  if (raw === void 0) return void 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) {
+    throw new UsageError(`--${name} expects a whole number, got "${raw}"`);
+  }
+  return n;
+}
+function positionalText(p) {
+  return p.positional.join(" ");
+}
+function jsonLine(value) {
+  return `${JSON.stringify(value, null, 2)}
+`;
+}
+function docFlagRegex() {
+  return /(?<![a-z0-9-])--([a-z][a-z0-9-]*)/g;
+}
+function documentedFlags(text) {
+  const seen = /* @__PURE__ */ new Set();
+  for (const m of text.matchAll(docFlagRegex())) seen.add(m[1]);
+  return [...seen];
+}
+function helpCoversFlag(help, flag) {
+  return new RegExp(`--${escapeRegExp(flag)}(?![a-z0-9-])`).test(help);
+}
+function isInvokedDirectly(argv1 = process.argv[1], cli = brand().cli) {
+  if (!argv1) return false;
+  return basename(argv1).replace(/\.(mjs|cjs|js)$/, "") === cli;
+}
+
+// src/skillkit/bundle.ts
+var DESC_MAX = 1e3;
+function auditSkillBundle(root, config, cli) {
+  const out = [];
+  const check = (ok, message) => out.push({ ok, message });
+  const name = config.name;
+  const skillDir = join7(root, "skills", name);
+  check(
+    !existsSync3(join7(root, "SKILL.md")),
+    existsSync3(join7(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name}/SKILL.md` : "no root SKILL.md"
+  );
+  const skillMd = join7(skillDir, "SKILL.md");
+  if (!existsSync3(skillMd)) {
+    check(false, `missing skills/${name}/SKILL.md \u2014 the skill package has no SKILL.md`);
+    return out;
+  }
+  const raw = readFileSync6(skillMd, "utf8");
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
+  if (!fm) {
+    check(false, `skills/${name}/SKILL.md has no frontmatter block`);
+    return out;
+  }
+  check(true, "packaged SKILL.md present with frontmatter");
+  const front = fm[1];
+  const declared = /^name:\s*(.+)$/m.exec(front)?.[1]?.trim();
+  check(
+    declared === name,
+    declared === name ? `frontmatter name "${name}" matches the config` : `frontmatter name "${declared ?? ""}" != skill.json name "${name}"`
+  );
+  const desc = /^description:\s*(.+)$/m.exec(front)?.[1]?.trim();
+  if (!desc) {
+    check(false, "frontmatter has no description");
+  } else {
+    const len = desc.replace(/^["']|["']$/g, "").length;
+    check(
+      len <= DESC_MAX,
+      len <= DESC_MAX ? `description ${len} chars (<= ${DESC_MAX})` : `description ${len} chars exceeds the ${DESC_MAX}-char headroom cap`
+    );
+  }
+  const refsDir = join7(skillDir, "references");
+  if (existsSync3(refsDir)) {
+    const files = readdirSync2(refsDir).filter((f) => f.endsWith(".md"));
+    for (const m of new Set(raw.match(/references\/[\w.-]+\.md/g) ?? [])) {
+      check(
+        existsSync3(join7(skillDir, m)),
+        existsSync3(join7(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
+      );
+    }
+    for (const f of files) {
+      check(
+        raw.includes(`references/${f}`),
+        raw.includes(`references/${f}`) ? `references/${f} is linked` : `references/${f} exists but SKILL.md never mentions it`
+      );
+    }
+  }
+  const bundleRel = `scripts/${name}.mjs`;
+  const rootBundle = join7(root, bundleRel);
+  const pkgBundle = join7(skillDir, bundleRel);
+  if (!existsSync3(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
+  else if (!existsSync3(pkgBundle)) check(false, `missing skills/${name}/${bundleRel} \u2014 run \`skill copy\``);
+  else {
+    const same = readFileSync6(rootBundle).equals(readFileSync6(pkgBundle));
+    check(
+      same,
+      same ? `embedded engine is byte-identical to ${bundleRel}` : `skills/${name}/${bundleRel} differs from ${bundleRel} \u2014 run \`skill copy\` and commit`
+    );
+  }
+  if (!cli) return out;
+  const universe = /* @__PURE__ */ new Set([...cli.valueFlags, ...cli.boolFlags, "help", "version", ...config.allowedForeignFlags]);
+  const docs = [["SKILL.md", raw]];
+  if (existsSync3(refsDir)) {
+    for (const f of readdirSync2(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync6(join7(refsDir, f), "utf8")]);
+  }
+  let unknown = 0;
+  for (const [file, text] of docs) {
+    for (const flag of documentedFlags(text)) {
+      if (universe.has(flag)) continue;
+      check(false, `${file} documents unknown flag --${flag} (add it to allowedForeignFlags only if it belongs to another tool)`);
+      unknown++;
+    }
+  }
+  if (!unknown) check(true, `every --flag documented across ${docs.length} skill file(s) exists in the CLI`);
+  const missing = [...cli.valueFlags, ...cli.boolFlags].filter((f) => !helpCoversFlag(cli.help, f));
+  check(missing.length === 0, missing.length === 0 ? "--help covers the whole flag surface" : `--help omits: ${missing.map((f) => `--${f}`).join(", ")}`);
+  for (const cmd of cli.commands ?? []) {
+    const named = new RegExp(`^\\s+${name} ${cmd}\\b`, "m").test(cli.help);
+    check(named, named ? `--help documents \`${name} ${cmd}\`` : `--help never names the \`${cmd}\` command`);
+  }
+  return out;
+}
+
+// src/skillkit/scaffold.ts
+import { join as join8 } from "path";
+var enginesJson = (engine, repo, minRef) => JSON.stringify(
+  {
+    _comment: "The packaging contract for this skill, read by `skill vendor|check|bundle`. `forks` is a ratchet: entries may leave, never arrive \u2014 so the next declaration shadowing an engine export is an argued decision rather than a quiet copy. `usageFloor` goes up when a layer lands and never down to make a red run pass.",
+    name: engine,
+    engines: { webindex: { repo, minRef, meta: "webindex.meta.json" } },
+    usageFloor: 0,
+    forks: {},
+    allowedForeignFlags: []
+  },
+  null,
+  2
+);
+var engineShim = (name, prefix) => `// The vendored engine, configured for this skill.
+//
+// Everything in src/ reaches the engine through THIS module, never through
+// src/vendor/ directly. That is the whole point: you cannot obtain an engine
+// function without first importing the module that configures it, so there is
+// no ordering hazard to remember and no entry point that can forget \u2014 a new CLI
+// command, a new MCP handler and a test all get a configured engine for free.
+//
+// The engine reads \`${prefix}_*\` at CALL time, so every variable a user has
+// already exported keeps working. \`cli\` names this tool inside engine-emitted
+// notes, and \`contactUrl\` goes into the polite User-Agent rate-limited APIs
+// see \u2014 it must identify ${name}, not the shared engine underneath.
+import { configure } from "./vendor/webindex-engine.mjs";
+
+configure({
+  name: "${name}",
+  envPrefix: "${prefix}",
+  cli: "${name}",
+  contactUrl: "https://github.com/maxgfr/${name}",
+});
+
+export * from "./vendor/webindex-engine.mjs";
+`;
+var ci = (name) => `name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run lint
+      - run: pnpm test
+
+  # The packaging gates. Each one has caught a real defect in a sibling skill:
+  # a pin nine releases stale, a re-forked engine layer running beside the
+  # vendored one, and a SKILL.md at the repo root that would have installed
+  # alone without its engine.
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - run: npx webindex skill check
+      - run: npx webindex skill bundle
+      - run: npx webindex skill vendor --check
+`;
+var gitignore = `node_modules/
+coverage/
+*.tsbuildinfo
+`;
+function scaffoldSkill(root, name, opts = {}) {
+  const errors = [];
+  if (!/^[a-z][a-z0-9-]*$/.test(name)) {
+    return { written: [], errors: [`"${name}" is not a usable skill name \u2014 lower-case letters, digits and hyphens, starting with a letter.`] };
+  }
+  const prefix = name.toUpperCase().replace(/-/g, "_");
+  const files = {
+    [SKILL_CONFIG]: `${enginesJson(name, opts.engineRepo ?? "maxgfr/webindex", opts.minRef ?? "v1.15.0")}
+`,
+    [join8("src", "engine.ts")]: engineShim(name, prefix),
+    [join8("skills", name, "SKILL.md")]: `---
+name: ${name}
+description: TODO \u2014 one sentence saying WHEN to use this skill, under 1000 characters.
+---
+
+# ${name}
+
+TODO
+`,
+    [join8(".github", "workflows", "ci.yml")]: ci(name),
+    ".gitignore": gitignore
+  };
+  const written = [];
+  const exists = opts.exists;
+  for (const [rel, content] of Object.entries(files)) {
+    const path = join8(root, rel);
+    if (exists?.(path)) {
+      errors.push(`${rel} already exists \u2014 left alone.`);
+      continue;
+    }
+    ensureDir(join8(path, ".."));
+    written.push(writeArtifact(path, content));
+  }
+  return { written, errors };
+}
+
 // src/locale.ts
 var LANG_COUNTRY = {
   en: "us",
@@ -2268,21 +2838,12 @@ async function search(query, opts = {}) {
 }
 
 // src/cache.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync3, readdirSync, rmSync as rmSync2, statSync, writeFileSync as writeFileSync4 } from "fs";
-import { join as join3 } from "path";
+import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync7, readdirSync as readdirSync3, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync4 } from "fs";
+import { join as join9 } from "path";
 import { tmpdir as tmpdir3 } from "os";
-
-// src/no-write.ts
-import { mkdirSync as mkdirSync2, renameSync, unlinkSync, writeFileSync as writeFileSync3 } from "fs";
-var flagged = false;
-function isNoWrite() {
-  return flagged || envFlag("NO_WRITE");
-}
-
-// src/cache.ts
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
-  return env("CACHE_DIR") ?? brand().cacheDir ?? join3(tmpdir3(), brand().name, "cache");
+  return env("CACHE_DIR") ?? brand().cacheDir ?? join9(tmpdir3(), brand().name, "cache");
 }
 function ttlMs() {
   const fallback = brand().cacheTtlMs ?? DEFAULT_TTL_MS;
@@ -2295,18 +2856,18 @@ function isCacheFresh(entry, now = Date.now()) {
 function cacheStats(now = Date.now()) {
   const dir = cacheDir();
   const out = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
-  if (!existsSync3(dir)) return out;
+  if (!existsSync4(dir)) return out;
   let oldest = Number.POSITIVE_INFINITY;
   let newest = 0;
-  for (const name of readdirSync(dir)) {
-    const abs = join3(dir, name);
+  for (const name of readdirSync3(dir)) {
+    const abs = join9(dir, name);
     try {
-      out.bytes += statSync(abs).size;
+      out.bytes += statSync2(abs).size;
     } catch {
     }
     if (!name.endsWith(".json")) continue;
     try {
-      const entry = JSON.parse(readFileSync3(abs, "utf8"));
+      const entry = JSON.parse(readFileSync7(abs, "utf8"));
       if (typeof entry.cachedAt !== "number") continue;
       out.entries++;
       if (isCacheFresh(entry, now)) out.fresh++;
@@ -2324,15 +2885,15 @@ function cacheStats(now = Date.now()) {
 }
 function cacheClean(all = false, now = Date.now()) {
   const dir = cacheDir();
-  if (!existsSync3(dir) || isNoWrite()) return 0;
+  if (!existsSync4(dir) || isNoWrite()) return 0;
   let removed = 0;
-  for (const name of readdirSync(dir)) {
+  for (const name of readdirSync3(dir)) {
     if (!name.endsWith(".json")) continue;
-    const abs = join3(dir, name);
+    const abs = join9(dir, name);
     let drop = all;
     if (!drop) {
       try {
-        const entry = JSON.parse(readFileSync3(abs, "utf8"));
+        const entry = JSON.parse(readFileSync7(abs, "utf8"));
         drop = !isCacheFresh(entry, now);
       } catch {
         drop = true;
@@ -2654,9 +3215,9 @@ function pageMetadata(html) {
 }
 
 // src/repo.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, readdirSync as readdirSync2, rmSync as rmSync3, statSync as statSync2 } from "fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync4, readdirSync as readdirSync4, rmSync as rmSync3, statSync as statSync3 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
-import { basename, join as join4, resolve } from "path";
+import { basename as basename2, join as join10, resolve } from "path";
 
 // src/exec.ts
 import { spawn as spawn2, spawnSync as spawnSync2 } from "child_process";
@@ -2684,13 +3245,13 @@ function have(cmd) {
 }
 function shAsync(cmd, args, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
-  return new Promise((resolve3) => {
+  return new Promise((resolve4) => {
     let settled = false;
     const done = (r) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve3(r);
+      resolve4(r);
     };
     const child = spawn2(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
@@ -2715,8 +3276,8 @@ function resolveRepo(raw) {
   const trimmed = raw.trim();
   if (trimmed) {
     const asPath = resolve(trimmed);
-    if (existsSync4(asPath) && statSync2(asPath).isDirectory()) {
-      return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename(asPath)}-${asPath}`)}` };
+    if (existsSync5(asPath) && statSync3(asPath).isDirectory()) {
+      return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename2(asPath)}-${asPath}`)}` };
     }
   }
   const file = /^file:\/\/(\/.*)$/.exec(trimmed);
@@ -2725,7 +3286,7 @@ function resolveRepo(raw) {
     return {
       raw: trimmed,
       host: "file",
-      ...basename(p) ? { repo: basename(p) } : {},
+      ...basename2(p) ? { repo: basename2(p) } : {},
       cloneUrl: trimmed,
       isLocal: false,
       slug: `file-${slugify(p)}`
@@ -3030,97 +3591,6 @@ async function resolvePackage(name, opts = {}) {
   return void 0;
 }
 
-// src/cli-kit.ts
-import { basename as basename2 } from "path";
-var EXIT_FAILURE = 1;
-var EXIT_USAGE = 2;
-var UsageError = class extends Error {
-  exitCode = EXIT_USAGE;
-};
-function parseArgs(argv, spec) {
-  const commands = new Set(spec.commands);
-  const valueFlags = new Set(spec.valueFlags);
-  const boolFlags = new Set(spec.boolFlags);
-  if (argv.length === 0) return { kind: "help" };
-  if (isHelpWord(argv[0])) return { kind: "help" };
-  if (isVersionWord(argv[0])) return { kind: "version" };
-  const command = argv[0];
-  if (!commands.has(command)) {
-    throw new UsageError(`unknown command "${command}" \u2014 run --help for the supported commands`);
-  }
-  const values = {};
-  const bools = /* @__PURE__ */ new Set();
-  const positional = [];
-  for (let i = 1; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--") {
-      positional.push(...argv.slice(i + 1));
-      break;
-    }
-    if (!arg.startsWith("--") && arg !== "-h" && arg !== "-v") {
-      positional.push(arg);
-      continue;
-    }
-    const eq = arg.indexOf("=");
-    const key = eq !== -1 ? arg.slice(2, eq) : arg.slice(2);
-    if (!boolFlags.has(key) && !valueFlags.has(key)) {
-      if (isHelpWord(arg)) return { kind: "help" };
-      if (isVersionWord(arg)) return { kind: "version" };
-    }
-    if (boolFlags.has(key)) {
-      if (eq !== -1) throw new UsageError(`--${key} is a boolean flag and takes no value`);
-      bools.add(key);
-      continue;
-    }
-    if (!valueFlags.has(key)) {
-      throw new UsageError(`unknown flag "--${key}" \u2014 run --help for the supported options`);
-    }
-    if (eq !== -1) {
-      values[key] = arg.slice(eq + 1);
-      continue;
-    }
-    const next = argv[i + 1];
-    if (next === void 0 || next.startsWith("--")) {
-      throw new UsageError(`missing value for --${key}`);
-    }
-    values[key] = next;
-    i++;
-  }
-  return { kind: "command", command, positional, values, bools };
-}
-function isHelpWord(a) {
-  return a === "--help" || a === "-h" || a === "help";
-}
-function isVersionWord(a) {
-  return a === "--version" || a === "-v" || a === "version";
-}
-function argValue(p, name) {
-  return p.values[name];
-}
-function argBool(p, name) {
-  return p.bools.has(name);
-}
-function argInt(p, name) {
-  const raw = p.values[name];
-  if (raw === void 0) return void 0;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || !Number.isInteger(n)) {
-    throw new UsageError(`--${name} expects a whole number, got "${raw}"`);
-  }
-  return n;
-}
-function positionalText(p) {
-  return p.positional.join(" ");
-}
-function jsonLine(value) {
-  return `${JSON.stringify(value, null, 2)}
-`;
-}
-function isInvokedDirectly(argv1 = process.argv[1], cli = brand().cli) {
-  if (!argv1) return false;
-  return basename2(argv1).replace(/\.(mjs|cjs|js)$/, "") === cli;
-}
-
 // src/mcp/protocol.ts
 var PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
 var LATEST_PROTOCOL = PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1];
@@ -3205,8 +3675,8 @@ function isOriginAllowed(origin, allowed = []) {
 }
 
 // src/mcp/resources.ts
-import { existsSync as existsSync5, readdirSync as readdirSync3, readFileSync as readFileSync4, realpathSync, statSync as statSync3 } from "fs";
-import { basename as basename3, dirname as dirname2, join as join5, resolve as resolve2, sep } from "path";
+import { existsSync as existsSync6, readdirSync as readdirSync5, readFileSync as readFileSync8, realpathSync, statSync as statSync4 } from "fs";
+import { basename as basename3, dirname as dirname2, join as join11, resolve as resolve2, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
@@ -3214,17 +3684,17 @@ function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname2(fileURLToPath(import.meta.url));
   const name = brand().name;
   const candidates = [resolve2(here, ".."), resolve2(here, "..", "skills", name), resolve2(here, "..", "..", "skills", name)];
-  return candidates.find((dir) => existsSync5(join5(dir, "SKILL.md")));
+  return candidates.find((dir) => existsSync6(join11(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
-  const refDir = join5(root, "references");
-  if (!existsSync5(refDir)) return out;
-  for (const file of readdirSync3(refDir).sort()) {
+  const refDir = join11(root, "references");
+  if (!existsSync6(refDir)) return out;
+  for (const file of readdirSync5(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join5("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
+    out.push(describe(root, join11("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
   }
   return out;
 }
@@ -3247,8 +3717,8 @@ function readResource(uri, moduleDir) {
   if (targetReal !== rootReal && !targetReal.startsWith(rootReal + sep)) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
-  if (!statSync3(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
-  return { uri, mimeType: "text/markdown", text: readFileSync4(targetReal, "utf8") };
+  if (!statSync4(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
+  return { uri, mimeType: "text/markdown", text: readFileSync8(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
 };
@@ -3259,14 +3729,14 @@ function describe(root, rel, fallbackTitle) {
     title: fallbackTitle,
     mimeType: "text/markdown"
   };
-  const summary = firstProse(join5(root, rel));
+  const summary = firstProse(join11(root, rel));
   if (summary) decl.description = summary;
   return decl;
 }
 function firstProse(file) {
   let text;
   try {
-    text = readFileSync4(file, "utf8");
+    text = readFileSync8(file, "utf8");
   } catch {
     return void 0;
   }
@@ -3524,14 +3994,14 @@ function startHttpServer(adapter, opts = {}) {
   server.requestTimeout = 0;
   server.headersTimeout = 6e4;
   server.keepAliveTimeout = 12e4;
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     server.once("error", reject);
     server.listen(opts.port ?? 0, bind, () => {
       server.removeListener("error", reject);
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : opts.port ?? 0;
       const host = bind.includes(":") ? `[${bind}]` : bind;
-      resolve3({
+      resolve4({
         server,
         port,
         url: `http://${host}:${port}${MCP_PATH}`,
@@ -3640,7 +4110,7 @@ function sendJson(res, status, body, origin, extra = {}) {
 }
 var DRAIN_LIMIT = MAX_BODY_BYTES * 8;
 function readBody(req) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const chunks = [];
     let size = 0;
     let over = false;
@@ -3664,7 +4134,7 @@ function readBody(req) {
     });
     req.on("end", () => {
       if (over) reject(new Error("too large"));
-      else resolve3(Buffer.concat(chunks).toString("utf8"));
+      else resolve4(Buffer.concat(chunks).toString("utf8"));
     });
     req.on("error", reject);
     req.on("aborted", () => reject(new Error("client aborted the request")));
@@ -3699,6 +4169,9 @@ USAGE
   webindex semantic  up|down|status
   webindex stack     up|down|status|path
   webindex cache     status|clean [--all] [--json]
+  webindex skill     check|bundle|copy|doctor [--root <dir>] [--json]
+  webindex skill     vendor [--engine <name>] --ref <tag> | --check
+  webindex skill     init <name> [--root <dir>]
   webindex doctor
   webindex version
 
@@ -3739,6 +4212,14 @@ COMMANDS
              written. The stack is EMBEDDED in this binary \u2014 no checkout needed.
   cache      What the on-disk fetch cache holds, and how to evict it. 'clean'
              drops stale entries, '--all' drops every one.
+  skill      The packaging toolchain for a repository built ON this engine,
+             driven by its skill.json. 'vendor' pins an engine by tag and
+             sha256 (--check re-verifies offline, and fails a pin older than
+             the source needs); 'check' refuses any module that DECLARES a name
+             the engine exports; 'bundle' proves \`skills add\` would install a
+             working skill rather than a lone SKILL.md; 'copy' embeds the built
+             engine in the package; 'init' scaffolds a new skill repository.
+             Dev-time only \u2014 it reads a repo, it never runs inside one.
   doctor     Report which optional helpers are reachable and which extraction
              rungs are available on this machine.
 
@@ -3757,6 +4238,9 @@ ENVIRONMENT
 
 Every optional helper degrades to a note. Nothing here needs an API key.`;
 var VALUE_FLAGS = [
+  "root",
+  "ref",
+  "engine",
   "limit",
   "pages",
   "lang",
@@ -3773,7 +4257,7 @@ var VALUE_FLAGS = [
   "terms",
   "max"
 ];
-var BOOL_FLAGS = ["json", "allow-remote", "all"];
+var BOOL_FLAGS = ["json", "allow-remote", "all", "check"];
 var COMMANDS = [
   "search",
   "fetch",
@@ -3791,6 +4275,7 @@ var COMMANDS = [
   "mcp",
   "cache",
   "doctor",
+  "skill",
   ...STACK_SERVICES.filter((s) => s !== "all"),
   "stack"
 ];
@@ -3803,7 +4288,7 @@ function fail(msg) {
 async function extractLocal(path) {
   let bytes;
   try {
-    bytes = readFileSync5(path);
+    bytes = readFileSync9(path);
   } catch (e) {
     fail(`cannot read ${path}: ${e.message}`);
   }
@@ -4244,7 +4729,7 @@ async function dispatch(argv) {
     const src = argValue(args, "docs") ?? "-";
     let payload;
     try {
-      payload = src === "-" ? readFileSync5(0, "utf8") : readFileSync5(src, "utf8");
+      payload = src === "-" ? readFileSync9(0, "utf8") : readFileSync9(src, "utf8");
     } catch (e) {
       fail(`cannot read ${src === "-" ? "stdin" : src}: ${e.message}`);
     }
@@ -4421,6 +4906,169 @@ async function dispatch(argv) {
       ].join("\n") + "\n"
     );
     return;
+  }
+  if (cmd === "skill") {
+    const action = args.positional[0] ?? "";
+    const root = resolve3(argValue(args, "root") ?? process.cwd());
+    const asJson = argBool(args, "json");
+    if (action === "init") {
+      const name = args.positional[1];
+      if (!name) fail("usage: webindex skill init <name> [--root <dir>]");
+      const r = scaffoldSkill(root, name, { exists: existsSync7 });
+      for (const e of r.errors) process.stderr.write(`  ${e}
+`);
+      process.stdout.write(asJson ? jsonLine(r) : `${r.written.map((p) => `  wrote ${relative2(root, p)}`).join("\n")}
+`);
+      if (!r.written.length) process.exit(EXIT_FAILURE);
+      return;
+    }
+    const { config, errors: configErrors } = readSkillConfig(root);
+    if (!config) {
+      for (const e of configErrors) process.stderr.write(`webindex: ${e}
+`);
+      process.exit(EXIT_FAILURE);
+    }
+    if (action === "vendor") {
+      if (argBool(args, "check")) {
+        const statuses = checkPins(root, config);
+        if (asJson) process.stdout.write(jsonLine(statuses));
+        else
+          for (const s of statuses) {
+            if (s.ok) process.stdout.write(`  ok   ${s.engine} matches the ${s.tag} pin (${s.engineVersion})
+`);
+            else for (const p of s.problems) process.stderr.write(`  FAIL ${p}
+`);
+          }
+        if (statuses.some((s) => !s.ok)) process.exit(EXIT_FAILURE);
+        return;
+      }
+      const ref = argValue(args, "ref");
+      if (!ref) fail("usage: webindex skill vendor [--engine <name>] --ref <tag>   |   webindex skill vendor --check");
+      const only = argValue(args, "engine");
+      const names = only ? [only] : Object.keys(config.engines);
+      const fetchFile = async (url) => {
+        const res = await httpGet(url, { binary: true, maxBytes: 64 * 1024 * 1024 });
+        return res.ok ? res.bytes : void 0;
+      };
+      for (const n of names) {
+        const r = await vendorEngine(root, config, n, ref, fetchFile);
+        for (const w of r.written) process.stdout.write(`  wrote ${relative2(root, w)}
+`);
+        if (r.errors.length) {
+          for (const e of r.errors) process.stderr.write(`webindex: ${e}
+`);
+          process.exit(EXIT_FAILURE);
+        }
+        process.stdout.write(`  pinned ${n} ${r.tag} (${r.engineVersion})
+`);
+      }
+      return;
+    }
+    if (action === "check") {
+      const engineName = Object.keys(config.engines)[0];
+      const pin = config.engines[engineName];
+      const dtsFile = pin?.files?.find((f) => f.local.endsWith(".d.mts"))?.local;
+      let dts = "";
+      try {
+        dts = readFileSync9(join12(root, config.vendorDir, dtsFile ?? ""), "utf8");
+      } catch {
+        fail(`cannot read the vendored declarations for "${engineName}" \u2014 run \`webindex skill vendor --ref <tag>\` first`);
+      }
+      const report = auditEngineUsage(root, config, dts);
+      if (asJson) {
+        process.stdout.write(jsonLine(report));
+      } else {
+        for (const c of report.collisions) process.stderr.write(`  FAIL ${c.file} declares ${c.name}, which the engine already exports
+`);
+        if (report.collisions.length)
+          process.stderr.write('\n  Re-export it from ./engine.js instead. (`export { X } from "./engine.js"` is fine and is not flagged.)\n');
+        for (const s of report.stale) process.stderr.write(`  FAIL forks entry "${s}" no longer matches anything \u2014 delete it
+`);
+        if (report.imported.length < config.usageFloor) {
+          process.stderr.write(`  FAIL only ${report.imported.length} distinct engine symbols are imported, floor is ${config.usageFloor}.
+`);
+          process.stderr.write("       A layer stopped being used. If that was deliberate, lower the floor in the same commit.\n");
+        }
+      }
+      const failed = report.collisions.length > 0 || report.stale.length > 0 || report.imported.length < config.usageFloor;
+      if (failed) process.exit(EXIT_FAILURE);
+      if (!asJson) {
+        const forks = report.tolerated.length ? `, ${report.tolerated.length} known fork(s) still to adopt` : ", no local re-declarations";
+        process.stdout.write(
+          `  ok   ${report.imported.length} engine symbols in use (floor ${config.usageFloor})${forks}, of a ${report.surface}-symbol surface.
+`
+        );
+      }
+      return;
+    }
+    if (action === "bundle") {
+      const built = join12(root, "scripts", `${config.name}.mjs`);
+      let surface;
+      if (existsSync7(built)) {
+        try {
+          const mod = await import(pathToFileURL(built).href);
+          if (typeof mod.HELP === "string" && Array.isArray(mod.VALUE_FLAGS) && Array.isArray(mod.BOOL_FLAGS)) {
+            surface = {
+              help: mod.HELP,
+              valueFlags: mod.VALUE_FLAGS,
+              boolFlags: mod.BOOL_FLAGS,
+              ...Array.isArray(mod.COMMANDS) ? { commands: mod.COMMANDS } : {}
+            };
+          } else {
+            process.stderr.write("  note the built CLI exports no HELP/VALUE_FLAGS/BOOL_FLAGS \u2014 the docs\u2194CLI half of this gate is skipped.\n");
+          }
+        } catch (e) {
+          process.stderr.write(`  note could not import ${relative2(root, built)} for the drift gate: ${e.message}
+`);
+        }
+      }
+      const checks = auditSkillBundle(root, config, surface);
+      if (asJson) process.stdout.write(jsonLine(checks));
+      else for (const c of checks) (c.ok ? process.stdout : process.stderr).write(`  ${c.ok ? "ok  " : "FAIL"} ${c.message}
+`);
+      const bad = checks.filter((c) => !c.ok).length;
+      if (bad) {
+        process.stderr.write(`
+webindex: ${bad} problem(s) \u2014 the published skill would not install correctly.
+`);
+        process.exit(EXIT_FAILURE);
+      }
+      if (!asJson) process.stdout.write(`
+  skills/${config.name}/ installs as a complete skill.
+`);
+      return;
+    }
+    if (action === "copy") {
+      const from = join12(root, "scripts", `${config.name}.mjs`);
+      if (!existsSync7(from)) fail(`missing ${relative2(root, from)} \u2014 run the build first`);
+      const to = join12(root, "skills", config.name, "scripts", `${config.name}.mjs`);
+      ensureDir(join12(to, ".."));
+      writeArtifact(to, readFileSync9(from, "utf8"));
+      process.stdout.write(`  copied ${relative2(root, from)} -> ${relative2(root, to)}
+`);
+      return;
+    }
+    if (action === "doctor") {
+      const statuses = checkPins(root, config);
+      const rows = statuses.map((s) => ({
+        engine: s.engine,
+        tag: s.tag ?? "-",
+        minRef: config.engines[s.engine]?.minRef ?? "-",
+        ok: s.ok,
+        problems: s.problems
+      }));
+      if (asJson) process.stdout.write(jsonLine({ name: config.name, usageFloor: config.usageFloor, forks: Object.keys(config.forks).length, engines: rows }));
+      else {
+        process.stdout.write(`${config.name}
+`);
+        for (const r of rows) process.stdout.write(`  ${r.engine.padEnd(12)}${r.tag} (needs >= ${r.minRef})${r.ok ? "" : ` \u2014 ${r.problems[0]}`}
+`);
+        process.stdout.write(`  forks       ${Object.keys(config.forks).length} still to adopt
+`);
+      }
+      return;
+    }
+    fail("usage: webindex skill check|bundle|vendor|copy|doctor|init");
   }
   if (cmd === "doctor") {
     const base = firecrawlBase();

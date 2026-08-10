@@ -1787,7 +1787,7 @@ declare function writeArtifact(path: string, content: string): string;
  * `writeArtifact` above is the gated caller. A caller holding a path of its own
  * that must not be written under `--stdout` calls `writeArtifact`, not this.
  */
-declare function writeFileAtomic(path: string, content: string): void;
+declare function writeFileAtomic(path: string, content: string | Uint8Array): void;
 /** Drain the collected artifacts. Empty when writes actually went to disk. */
 declare function takeArtifacts(): Artifact[];
 /** Test seam: clear both the switch and anything collected under it. */

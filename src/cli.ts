@@ -10,8 +10,8 @@
 // What it offers is what the engine actually does today: discover candidate
 // URLs through the local keyless stack, turn a URL or a local file into clean
 // text, drive the containers, and serve all of that to an agent over MCP.
-import { readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { basename, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { configure } from "./brand.js";
 import { ENGINE_VERSION } from "./version.js";
@@ -22,6 +22,7 @@ import { firecrawlBase, probeFirecrawl } from "./firecrawl.js";
 import { embedModel, ensureComposeMaterialized, STACK_SERVICES, stackControl } from "./stack.js";
 import { ollamaBase, probeOllama } from "./embed.js";
 import { probeQdrant, qdrantBase } from "./vector.js";
+import { auditEngineUsage, auditSkillBundle, checkPins, readSkillConfig, scaffoldSkill, vendorEngine, type CliSurface } from "./skillkit/index.js";
 import { isKeylessEngine, KEYLESS_ENGINES, type KeylessEngine } from "./engines.js";
 import { probeSearxng, search, searxngBase } from "./search.js";
 import { cacheClean, cacheDir, cacheStats } from "./cache.js";
@@ -46,6 +47,7 @@ import {
   positionalText,
   UsageError,
 } from "./cli-kit.js";
+import { ensureDir, writeArtifact } from "./no-write.js";
 import { ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
@@ -78,6 +80,9 @@ USAGE
   webindex semantic  up|down|status
   webindex stack     up|down|status|path
   webindex cache     status|clean [--all] [--json]
+  webindex skill     check|bundle|copy|doctor [--root <dir>] [--json]
+  webindex skill     vendor [--engine <name>] --ref <tag> | --check
+  webindex skill     init <name> [--root <dir>]
   webindex doctor
   webindex version
 
@@ -118,6 +123,14 @@ COMMANDS
              written. The stack is EMBEDDED in this binary — no checkout needed.
   cache      What the on-disk fetch cache holds, and how to evict it. 'clean'
              drops stale entries, '--all' drops every one.
+  skill      The packaging toolchain for a repository built ON this engine,
+             driven by its skill.json. 'vendor' pins an engine by tag and
+             sha256 (--check re-verifies offline, and fails a pin older than
+             the source needs); 'check' refuses any module that DECLARES a name
+             the engine exports; 'bundle' proves \`skills add\` would install a
+             working skill rather than a lone SKILL.md; 'copy' embeds the built
+             engine in the package; 'init' scaffolds a new skill repository.
+             Dev-time only — it reads a repo, it never runs inside one.
   doctor     Report which optional helpers are reachable and which extraction
              rungs are available on this machine.
 
@@ -147,6 +160,9 @@ Every optional helper degrades to a note. Nothing here needs an API key.`;
 // dropped, and the command then ran to completion with the default budget and
 // reported success.
 export const VALUE_FLAGS = [
+  "root",
+  "ref",
+  "engine",
   "limit",
   "pages",
   "lang",
@@ -163,7 +179,7 @@ export const VALUE_FLAGS = [
   "terms",
   "max",
 ];
-export const BOOL_FLAGS = ["json", "allow-remote", "all"];
+export const BOOL_FLAGS = ["json", "allow-remote", "all", "check"];
 export const COMMANDS = [
   "search",
   "fetch",
@@ -181,6 +197,7 @@ export const COMMANDS = [
   "mcp",
   "cache",
   "doctor",
+  "skill",
   ...STACK_SERVICES.filter((s) => s !== "all"),
   "stack",
 ];
@@ -907,6 +924,164 @@ async function dispatch(argv: string[]): Promise<void> {
       ].join("\n") + "\n",
     );
     return;
+  }
+
+  // The packaging toolchain for a repo built ON this engine. Dev-time: it reads
+  // a repository, it never runs inside one — which is exactly why it can serve
+  // the skills that do not vendor this engine at all.
+  if (cmd === "skill") {
+    const action = args.positional[0] ?? "";
+    const root = resolve(argValue(args, "root") ?? process.cwd());
+    const asJson = argBool(args, "json");
+
+    if (action === "init") {
+      const name = args.positional[1];
+      if (!name) fail("usage: webindex skill init <name> [--root <dir>]");
+      const r = scaffoldSkill(root, name, { exists: existsSync });
+      for (const e of r.errors) process.stderr.write(`  ${e}\n`);
+      process.stdout.write(asJson ? jsonLine(r) : `${r.written.map((p) => `  wrote ${relative(root, p)}`).join("\n")}\n`);
+      if (!r.written.length) process.exit(EXIT_FAILURE);
+      return;
+    }
+
+    const { config, errors: configErrors } = readSkillConfig(root);
+    if (!config) {
+      for (const e of configErrors) process.stderr.write(`webindex: ${e}\n`);
+      process.exit(EXIT_FAILURE);
+    }
+
+    if (action === "vendor") {
+      // `--check` is offline on purpose: this runs in CI on every commit, and a
+      // gate that needs the network goes red when GitHub does.
+      if (argBool(args, "check")) {
+        const statuses = checkPins(root, config);
+        if (asJson) process.stdout.write(jsonLine(statuses));
+        else
+          for (const s of statuses) {
+            if (s.ok) process.stdout.write(`  ok   ${s.engine} matches the ${s.tag} pin (${s.engineVersion})\n`);
+            else for (const p of s.problems) process.stderr.write(`  FAIL ${p}\n`);
+          }
+        if (statuses.some((s) => !s.ok)) process.exit(EXIT_FAILURE);
+        return;
+      }
+      const ref = argValue(args, "ref");
+      if (!ref) fail("usage: webindex skill vendor [--engine <name>] --ref <tag>   |   webindex skill vendor --check");
+      const only = argValue(args, "engine");
+      const names = only ? [only] : Object.keys(config.engines);
+      const fetchFile = async (url: string) => {
+        const res = await httpGet(url, { binary: true, maxBytes: 64 * 1024 * 1024 });
+        return res.ok ? res.bytes : undefined;
+      };
+      for (const n of names) {
+        const r = await vendorEngine(root, config, n, ref, fetchFile);
+        for (const w of r.written) process.stdout.write(`  wrote ${relative(root, w)}\n`);
+        if (r.errors.length) {
+          for (const e of r.errors) process.stderr.write(`webindex: ${e}\n`);
+          process.exit(EXIT_FAILURE);
+        }
+        process.stdout.write(`  pinned ${n} ${r.tag} (${r.engineVersion})\n`);
+      }
+      return;
+    }
+
+    if (action === "check") {
+      const engineName = Object.keys(config.engines)[0] as string;
+      const pin = config.engines[engineName];
+      const dtsFile = pin?.files?.find((f) => f.local.endsWith(".d.mts"))?.local;
+      let dts = "";
+      try {
+        dts = readFileSync(join(root, config.vendorDir, dtsFile ?? ""), "utf8");
+      } catch {
+        fail(`cannot read the vendored declarations for "${engineName}" — run \`webindex skill vendor --ref <tag>\` first`);
+      }
+      const report = auditEngineUsage(root, config, dts);
+      if (asJson) {
+        process.stdout.write(jsonLine(report));
+      } else {
+        for (const c of report.collisions) process.stderr.write(`  FAIL ${c.file} declares ${c.name}, which the engine already exports\n`);
+        if (report.collisions.length)
+          process.stderr.write('\n  Re-export it from ./engine.js instead. (`export { X } from "./engine.js"` is fine and is not flagged.)\n');
+        for (const s of report.stale) process.stderr.write(`  FAIL forks entry "${s}" no longer matches anything — delete it\n`);
+        if (report.imported.length < config.usageFloor) {
+          process.stderr.write(`  FAIL only ${report.imported.length} distinct engine symbols are imported, floor is ${config.usageFloor}.\n`);
+          process.stderr.write("       A layer stopped being used. If that was deliberate, lower the floor in the same commit.\n");
+        }
+      }
+      const failed = report.collisions.length > 0 || report.stale.length > 0 || report.imported.length < config.usageFloor;
+      if (failed) process.exit(EXIT_FAILURE);
+      if (!asJson) {
+        const forks = report.tolerated.length ? `, ${report.tolerated.length} known fork(s) still to adopt` : ", no local re-declarations";
+        process.stdout.write(
+          `  ok   ${report.imported.length} engine symbols in use (floor ${config.usageFloor})${forks}, of a ${report.surface}-symbol surface.\n`,
+        );
+      }
+      return;
+    }
+
+    if (action === "bundle") {
+      // Importing the built CLI is how the gate learns the flag surface without
+      // inferring it: the bundle's own isInvokedDirectly() keeps main() from
+      // firing, so reading it is not running it.
+      const built = join(root, "scripts", `${config.name}.mjs`);
+      let surface: CliSurface | undefined;
+      if (existsSync(built)) {
+        try {
+          const mod = (await import(pathToFileURL(built).href)) as Record<string, unknown>;
+          if (typeof mod.HELP === "string" && Array.isArray(mod.VALUE_FLAGS) && Array.isArray(mod.BOOL_FLAGS)) {
+            surface = {
+              help: mod.HELP,
+              valueFlags: mod.VALUE_FLAGS as string[],
+              boolFlags: mod.BOOL_FLAGS as string[],
+              ...(Array.isArray(mod.COMMANDS) ? { commands: mod.COMMANDS as string[] } : {}),
+            };
+          } else {
+            process.stderr.write("  note the built CLI exports no HELP/VALUE_FLAGS/BOOL_FLAGS — the docs↔CLI half of this gate is skipped.\n");
+          }
+        } catch (e) {
+          process.stderr.write(`  note could not import ${relative(root, built)} for the drift gate: ${(e as Error).message}\n`);
+        }
+      }
+      const checks = auditSkillBundle(root, config, surface);
+      if (asJson) process.stdout.write(jsonLine(checks));
+      else for (const c of checks) (c.ok ? process.stdout : process.stderr).write(`  ${c.ok ? "ok  " : "FAIL"} ${c.message}\n`);
+      const bad = checks.filter((c) => !c.ok).length;
+      if (bad) {
+        process.stderr.write(`\nwebindex: ${bad} problem(s) — the published skill would not install correctly.\n`);
+        process.exit(EXIT_FAILURE);
+      }
+      if (!asJson) process.stdout.write(`\n  skills/${config.name}/ installs as a complete skill.\n`);
+      return;
+    }
+
+    if (action === "copy") {
+      const from = join(root, "scripts", `${config.name}.mjs`);
+      if (!existsSync(from)) fail(`missing ${relative(root, from)} — run the build first`);
+      const to = join(root, "skills", config.name, "scripts", `${config.name}.mjs`);
+      ensureDir(join(to, ".."));
+      writeArtifact(to, readFileSync(from, "utf8"));
+      process.stdout.write(`  copied ${relative(root, from)} -> ${relative(root, to)}\n`);
+      return;
+    }
+
+    if (action === "doctor") {
+      const statuses = checkPins(root, config);
+      const rows = statuses.map((s) => ({
+        engine: s.engine,
+        tag: s.tag ?? "-",
+        minRef: config.engines[s.engine]?.minRef ?? "-",
+        ok: s.ok,
+        problems: s.problems,
+      }));
+      if (asJson) process.stdout.write(jsonLine({ name: config.name, usageFloor: config.usageFloor, forks: Object.keys(config.forks).length, engines: rows }));
+      else {
+        process.stdout.write(`${config.name}\n`);
+        for (const r of rows) process.stdout.write(`  ${r.engine.padEnd(12)}${r.tag} (needs >= ${r.minRef})${r.ok ? "" : ` — ${r.problems[0]}`}\n`);
+        process.stdout.write(`  forks       ${Object.keys(config.forks).length} still to adopt\n`);
+      }
+      return;
+    }
+
+    fail("usage: webindex skill check|bundle|vendor|copy|doctor|init");
   }
 
   if (cmd === "doctor") {

@@ -92,7 +92,7 @@ let tmpCounter = 0;
  * `writeArtifact` above is the gated caller. A caller holding a path of its own
  * that must not be written under `--stdout` calls `writeArtifact`, not this.
  */
-export function writeFileAtomic(path: string, content: string): void {
+export function writeFileAtomic(path: string, content: string | Uint8Array): void {
   const tmp = `${path}.${process.pid}.${tmpCounter++}.tmp`;
   try {
     writeFileSync(tmp, content);

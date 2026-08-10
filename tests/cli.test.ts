@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -682,5 +683,155 @@ describe("the docs↔CLI drift gate", () => {
   it("documents no flag it would reject", () => {
     const universe = new Set([...VALUE_FLAGS, ...BOOL_FLAGS, "help", "version"]);
     expect(documentedFlags(HELP).filter((f) => !universe.has(f))).toEqual([]);
+  });
+});
+
+// The `skill` command family, driven end to end through main(). The library
+// half is covered in tests/skillkit.test.ts; this is the wiring — which is what
+// a skill's CI actually invokes, and where an exit code being wrong turns a
+// gate into a decoration.
+describe("webindex skill", () => {
+  let repo: string;
+
+  const writeIn = (rel: string, content: string) => {
+    const p = join(repo, rel);
+    mkdirSync(join(p, ".."), { recursive: true });
+    writeFileSync(p, content);
+    return p;
+  };
+
+  const skillJson = (over: Record<string, unknown> = {}) =>
+    writeIn(
+      "skill.json",
+      JSON.stringify({
+        name: "reader",
+        engines: { webindex: { repo: "maxgfr/webindex", minRef: "v1.0.0", meta: "webindex.meta.json" } },
+        usageFloor: 0,
+        forks: {},
+        allowedForeignFlags: [],
+        ...over,
+      }),
+    );
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), "webindex-skillcli-"));
+  });
+  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+  it("scaffolds a new skill repository", async () => {
+    expect(await run(["skill", "init", "newskill", "--root", repo])).toBe(0);
+    expect(stdout()).toContain("skill.json");
+    expect(readFileSync(join(repo, "src", "engine.ts"), "utf8")).toContain('envPrefix: "NEWSKILL"');
+  });
+
+  it("asks for a name rather than scaffolding an unnamed skill", async () => {
+    expect(await run(["skill", "init", "--root", repo])).toBe(1);
+    expect(stderr()).toMatch(/usage: webindex skill init/);
+  });
+
+  it("refuses to run any gate without a readable skill.json", async () => {
+    expect(await run(["skill", "check", "--root", repo])).toBe(1);
+    expect(stderr()).toMatch(/no readable skill\.json/);
+  });
+
+  it("passes a tree that re-exports the engine rather than declaring over it", async () => {
+    skillJson();
+    writeIn("src/vendor/webindex-engine.d.mts", "export { rrf, slugify };");
+    writeIn("src/util.ts", 'export { rrf } from "./engine.js";');
+    expect(await run(["skill", "check", "--root", repo])).toBe(0);
+    expect(stdout()).toMatch(/1 engine symbols in use/);
+  });
+
+  it("fails, non-zero, on a re-forked engine export", async () => {
+    // The whole point of the gate: a second implementation beside the vendored
+    // one, with every other check green.
+    skillJson();
+    writeIn("src/vendor/webindex-engine.d.mts", "export { rrf };");
+    writeIn("src/util.ts", "export function rrf() {}");
+    expect(await run(["skill", "check", "--root", repo])).toBe(1);
+    expect(stderr()).toMatch(/declares rrf, which the engine already exports/);
+  });
+
+  it("fails when a layer stopped being used", async () => {
+    skillJson({ usageFloor: 5 });
+    writeIn("src/vendor/webindex-engine.d.mts", "export { rrf };");
+    writeIn("src/util.ts", 'export { rrf } from "./engine.js";');
+    expect(await run(["skill", "check", "--root", repo])).toBe(1);
+    expect(stderr()).toMatch(/floor is 5/);
+  });
+
+  it("says to vendor first when there are no declarations to read", async () => {
+    skillJson();
+    expect(await run(["skill", "check", "--root", repo])).toBe(1);
+    expect(stderr()).toMatch(/skill vendor --ref/);
+  });
+
+  it("verifies a pin offline, and fails a stale one", async () => {
+    skillJson();
+    const bundle = 'const ENGINE_VERSION = "1.0.0";';
+    writeIn("src/vendor/webindex-engine.mjs", bundle);
+    writeIn("src/vendor/webindex-engine.d.mts", "export {};");
+    writeIn(
+      "src/vendor/webindex.meta.json",
+      JSON.stringify({
+        tag: "v1.0.0",
+        engineVersion: "1.0.0",
+        sha256: {
+          "webindex-engine.mjs": createHash("sha256").update(bundle).digest("hex"),
+          "webindex-engine.d.mts": createHash("sha256").update("export {};").digest("hex"),
+        },
+        syncedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    expect(await run(["skill", "vendor", "--check", "--root", repo])).toBe(0);
+    expect(stdout()).toMatch(/matches the v1\.0\.0 pin/);
+
+    skillJson({ engines: { webindex: { repo: "maxgfr/webindex", minRef: "v9.0.0", meta: "webindex.meta.json" } } });
+    out = [];
+    err = [];
+    expect(await run(["skill", "vendor", "--check", "--root", repo])).toBe(1);
+    expect(stderr()).toMatch(/STALE webindex pin/);
+  });
+
+  it("asks for a ref when told to vendor without one", async () => {
+    skillJson();
+    expect(await run(["skill", "vendor", "--root", repo])).toBe(1);
+    expect(stderr()).toMatch(/--ref <tag>/);
+  });
+
+  it("passes a well-shaped package and fails a root SKILL.md", async () => {
+    skillJson();
+    writeIn("skills/reader/SKILL.md", "---\nname: reader\ndescription: Use it.\n---\n");
+    writeIn("scripts/reader.mjs", "// built");
+    writeIn("skills/reader/scripts/reader.mjs", "// built");
+    expect(await run(["skill", "bundle", "--root", repo])).toBe(0);
+    expect(stdout()).toMatch(/installs as a complete skill/);
+
+    writeIn("SKILL.md", "---\nname: reader\n---\n");
+    out = [];
+    err = [];
+    expect(await run(["skill", "bundle", "--root", repo])).toBe(1);
+    expect(stderr()).toMatch(/would install it alone, dropping the engine/);
+  });
+
+  it("embeds the built engine in the package", async () => {
+    skillJson();
+    writeIn("scripts/reader.mjs", "// built bundle");
+    expect(await run(["skill", "copy", "--root", repo])).toBe(0);
+    expect(readFileSync(join(repo, "skills", "reader", "scripts", "reader.mjs"), "utf8")).toBe("// built bundle");
+  });
+
+  it("reports the pins and the outstanding forks", async () => {
+    skillJson({ forks: { "src/util.ts:rrf": "adopt in v2" } });
+    expect(await run(["skill", "doctor", "--root", repo, "--json"])).toBe(0);
+    const parsed = JSON.parse(stdout());
+    expect(parsed).toMatchObject({ name: "reader", forks: 1 });
+    expect(parsed.engines[0]).toMatchObject({ engine: "webindex", minRef: "v1.0.0", ok: false });
+  });
+
+  it("names the actions it knows when given one it does not", async () => {
+    skillJson();
+    expect(await run(["skill", "frobnicate", "--root", repo])).toBe(1);
+    expect(stderr()).toMatch(/usage: webindex skill check\|bundle\|vendor\|copy\|doctor\|init/);
   });
 });
