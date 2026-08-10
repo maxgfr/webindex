@@ -23,6 +23,7 @@
 // never knows what a claim is, what an evidence item is, or what its agents are
 // being asked to decide.
 
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { brand } from "./brand.js";
 import { ensureDir, writeArtifact } from "./no-write.js";
@@ -154,6 +155,13 @@ export function orchestrateRun<T>(
   opts: OrchestrateOptions = {},
 ): OrchestrateResult {
   const run = resolve(runDir);
+  // A run directory that does not exist is a typo, not an empty run. Without
+  // this the `ensureDir` below would CREATE it and the command would report a
+  // successful orchestration of nothing — which is how a mistyped --run comes
+  // to look like a run with no work in it.
+  if (!existsSync(run)) {
+    return { exitCode: 2, written: [], notices: [], errors: [`run dir not found: ${run}`], phases: [] };
+  }
   const phases = listPhases(run, engineAbs, defs);
   const byName = new Map(defs.map((d) => [d.name, d]));
   const small = opts.smallWorklist ?? SMALL_WORKLIST;

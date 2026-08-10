@@ -120,6 +120,17 @@ describe("orchestrateRun", () => {
     expect(existsSync(join(run, "orchestration", "verify.workflow.mjs"))).toBe(false);
   });
 
+  it("refuses a run directory that does not exist", () => {
+    // A typo, not an empty run. Without the check `ensureDir` would CREATE the
+    // directory and the command would report a successful orchestration of
+    // nothing — a mistyped --run looking like a run with no work in it.
+    const missing = join(run, "not-a-run");
+    const r = orchestrateRun(missing, ENGINE, DEFS, contracts);
+    expect(r.exitCode).toBe(2);
+    expect(r.errors[0]).toMatch(/run dir not found/);
+    expect(existsSync(missing)).toBe(false);
+  });
+
   it("refuses an unknown phase", () => {
     const r = orchestrateRun(run, ENGINE, DEFS, contracts, { phase: "gathr" });
     expect(r.exitCode).toBe(2);

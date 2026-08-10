@@ -4438,6 +4438,7 @@ function extractNumerals(text, max = 8) {
 }
 
 // src/orchestrate.ts
+import { existsSync as existsSync5 } from "fs";
 import { join as join7, resolve as resolve2 } from "path";
 
 // src/orchestrate/templates.ts
@@ -4586,6 +4587,9 @@ function listPhases(runDir, engineAbs, defs) {
 }
 function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
   const run = resolve2(runDir);
+  if (!existsSync5(run)) {
+    return { exitCode: 2, written: [], notices: [], errors: [`run dir not found: ${run}`], phases: [] };
+  }
   const phases = listPhases(run, engineAbs, defs);
   const byName = new Map(defs.map((d) => [d.name, d]));
   const small = opts.smallWorklist ?? SMALL_WORKLIST;
@@ -4849,7 +4853,7 @@ function isOriginAllowed(origin, allowed = []) {
 }
 
 // src/mcp/resources.ts
-import { existsSync as existsSync5, readdirSync as readdirSync3, readFileSync as readFileSync5, realpathSync, statSync as statSync3 } from "fs";
+import { existsSync as existsSync6, readdirSync as readdirSync3, readFileSync as readFileSync5, realpathSync, statSync as statSync3 } from "fs";
 import { basename as basename3, dirname as dirname2, join as join8, resolve as resolve3, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
@@ -4858,14 +4862,14 @@ function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname2(fileURLToPath(import.meta.url));
   const name = brand().name;
   const candidates = [resolve3(here, ".."), resolve3(here, "..", "skills", name), resolve3(here, "..", "..", "skills", name)];
-  return candidates.find((dir) => existsSync5(join8(dir, "SKILL.md")));
+  return candidates.find((dir) => existsSync6(join8(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
   const refDir = join8(root, "references");
-  if (!existsSync5(refDir)) return out;
+  if (!existsSync6(refDir)) return out;
   for (const file of readdirSync3(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
     out.push(describe(root, join8("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
