@@ -21,7 +21,11 @@ import { fetchAndExtract, htmlToText, httpGet, looksLikePdfUrl } from "./fetch.j
 import { firecrawlBase, probeFirecrawl } from "./firecrawl.js";
 import { embedModel, ensureComposeMaterialized, STACK_SERVICES, stackControl } from "./stack.js";
 import { ollamaBase, probeOllama } from "./embed.js";
-import { probeQdrant, qdrantBase } from "./vector.js";
+import { hybridSearch, probeQdrant, qdrantBase } from "./vector.js";
+import { embed } from "./embed.js";
+import { crawlSite } from "./crawl.js";
+import { extractTables, tableToMarkdown } from "./tables.js";
+import { fingerprint, hasChanged } from "./changed.js";
 import { auditEngineUsage, auditSkillBundle, checkPins, readSkillConfig, scaffoldSkill, vendorEngine, type CliSurface } from "./skillkit/index.js";
 import { isKeylessEngine, KEYLESS_ENGINES, type KeylessEngine } from "./engines.js";
 import { probeSearxng, search, searxngBase } from "./search.js";
@@ -80,6 +84,11 @@ USAGE
   webindex semantic  up|down|status
   webindex stack     up|down|status|path
   webindex cache     status|clean [--all] [--json]
+  webindex crawl <url> --max <n> [--depth <n>] [--cross-origin] [--json]
+  webindex tables <url> [--markdown] [--json]
+  webindex embed <text> [--json]
+  webindex hybrid --query <q> [--docs <file.json|->] [--limit <n>] [--json]
+  webindex changed <url> [--etag <v>] [--hash <sha256>] [--json]
   webindex skill     check|bundle|copy|doctor [--root <dir>] [--json]
   webindex skill     vendor [--engine <name>] --ref <tag> | --check
   webindex skill     init <name> [--root <dir>]
@@ -123,6 +132,23 @@ COMMANDS
              written. The stack is EMBEDDED in this binary — no checkout needed.
   cache      What the on-disk fetch cache holds, and how to evict it. 'clean'
              drops stale entries, '--all' drops every one.
+  crawl      Walk a site from a seed, breadth-first, honouring robots.txt at
+             every hop. --max is REQUIRED: following one citation is not
+             crawling and needs no permission, but enumerating a site is, and
+             an unbounded walk is the one thing here that can inconvenience
+             somebody else's server.
+  tables     The tables on a page as headers and rows, with colspan and rowspan
+             resolved. Plain extraction flattens a table into prose in which
+             every figure has lost its row and column.
+  embed      Vectors for a text, from the local Ollama. No key, and nothing
+             leaves the machine. Needs \`webindex semantic up\`.
+  hybrid     Rank documents against a question with BOTH retrievers, fused by
+             RRF: BM25F cannot find a page that never uses your words, and a
+             dense index cannot match an exact identifier. Degrades to the
+             lexical half, with a note, when no embedding server answers.
+  changed    Whether a URL changed since a fingerprint you already hold. A 304
+             costs one round trip and no body; the answer says how it was
+             decided, because etag and content-hash are different evidence.
   skill      The packaging toolchain for a repository built ON this engine,
              driven by its skill.json. 'vendor' pins an engine by tag and
              sha256 (--check re-verifies offline, and fails a pin older than
@@ -163,6 +189,9 @@ export const VALUE_FLAGS = [
   "root",
   "ref",
   "engine",
+  "depth",
+  "etag",
+  "hash",
   "limit",
   "pages",
   "lang",
@@ -179,7 +208,7 @@ export const VALUE_FLAGS = [
   "terms",
   "max",
 ];
-export const BOOL_FLAGS = ["json", "allow-remote", "all", "check"];
+export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin"];
 export const COMMANDS = [
   "search",
   "fetch",
@@ -198,6 +227,11 @@ export const COMMANDS = [
   "cache",
   "doctor",
   "skill",
+  "crawl",
+  "tables",
+  "embed",
+  "hybrid",
+  "changed",
   ...STACK_SERVICES.filter((s) => s !== "all"),
   "stack",
 ];
@@ -469,6 +503,49 @@ export function webindexAdapter(): McpAdapter {
           "instead of a web search guessing.",
         inputSchema: { type: "object", properties: { url: { type: "string", description: "A feed URL, or a page that links to one." } }, required: ["url"] },
       },
+      {
+        name: "webindex_tables",
+        title: "The tables on a page, as data",
+        description:
+          "Extract every <table> as headers and rows, with colspan and rowspan resolved. Plain extraction flattens a table into a run of cell text, which reads " +
+          "plausibly while every figure has lost the row and column it belonged to — use this whenever the answer is IN a table.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string", description: "The page holding the table(s)." },
+            markdown: { type: "boolean", description: "Render as markdown instead of JSON rows." },
+          },
+          required: ["url"],
+        },
+      },
+      {
+        name: "webindex_embed",
+        title: "Embed text with the local model",
+        description:
+          "Turn text into vectors with the local Ollama, which needs no key and sends nothing off the machine. Returns one vector per input, in input order. " +
+          "Answers with a note rather than an error when the service is not running.",
+        inputSchema: {
+          type: "object",
+          properties: { texts: { type: "array", items: { type: "string" }, description: "The texts to embed." } },
+          required: ["texts"],
+        },
+      },
+      {
+        name: "webindex_crawl",
+        title: "Walk a site, within a budget",
+        description:
+          "Follow links from a seed page, breadth-first, honouring robots.txt at EVERY hop and staying on the seed's origin. `max` pages is required — enumerating " +
+          "someone else's site is the one operation here that can inconvenience them, so the budget is not optional. Returns each page's URL, title and text.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string", description: "The seed page." },
+            max: { type: "number", description: "Hard ceiling on pages fetched. Required." },
+            depth: { type: "number", description: "How many links deep to follow (default 2)." },
+          },
+          required: ["url", "max"],
+        },
+      },
     ],
     capAdvice: {
       webindex_search: "lower `limit`",
@@ -483,6 +560,9 @@ export function webindexAdapter(): McpAdapter {
       webindex_fetch: "the page is very large; fetch it and read the file instead of inlining it",
       webindex_extract: "the document is very large; read it in pieces",
       webindex_rank: "lower `limit`, or send shorter `text` per document — the ranking only needs enough to score",
+      webindex_tables: "this page's tables are enormous; fetch it and read the file instead of inlining them",
+      webindex_embed: "send fewer `texts` — a vector per input is large, and they are rarely worth reading inline",
+      webindex_crawl: "lower `max`, or `depth` — a crawl's whole output is the sum of its pages",
     },
     async callTool(name, args) {
       if (name === "webindex_fetch") {
@@ -588,6 +668,43 @@ export function webindexAdapter(): McpAdapter {
         }
         if (!feeds.length) throw new ToolError(`${url} advertises ${found.length} feed(s), none of which parsed.`);
         return { text: JSON.stringify(feeds, null, 2) };
+      }
+      if (name === "webindex_tables") {
+        const url = String(args.url ?? "");
+        if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
+        const page = await httpGet(url, { accept: "text/html,*/*" });
+        if (!page.ok) throw new ToolError(`could not fetch ${url} (status ${page.status})`);
+        const tables = extractTables(page.body);
+        if (!tables.length) throw new ToolError(`${url} has no tables — use webindex_fetch for its text.`);
+        return { text: args.markdown ? tables.map(tableToMarkdown).join("\n\n") : JSON.stringify(tables, null, 2) };
+      }
+      if (name === "webindex_embed") {
+        const texts = Array.isArray(args.texts) ? args.texts.map(String) : [];
+        if (!texts.length) throw new ToolError("`texts` must be a non-empty array of strings.");
+        const r = await embed(texts);
+        if (!r.vectors.length) throw new ToolError(r.note ?? "the embedding server returned nothing.");
+        return { text: JSON.stringify({ model: r.model, dimensions: r.vectors[0]?.length ?? 0, vectors: r.vectors }, null, 2) };
+      }
+      if (name === "webindex_crawl") {
+        const url = String(args.url ?? "");
+        if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
+        const max = Number(args.max);
+        if (!Number.isInteger(max) || max < 1)
+          throw new ToolError("`max` is required and must be a positive whole number — a crawl without a budget is not one.");
+        const r = await crawlSite(url, { maxPages: max, ...(args.depth !== undefined ? { maxDepth: Number(args.depth) } : {}) });
+        if (!r.pages.length) throw new ToolError(`nothing readable from ${url}${r.notes.length ? ` — ${r.notes[0]}` : ""}`);
+        return {
+          text: JSON.stringify(
+            {
+              pages: r.pages.map((p) => ({ url: p.url, depth: p.depth, title: p.title, text: p.text })),
+              disallowed: r.disallowed,
+              pending: r.pending.length,
+              notes: r.notes,
+            },
+            null,
+            2,
+          ),
+        };
       }
       throw new ToolError(`unknown tool: ${name}`);
     },
@@ -923,6 +1040,112 @@ async function dispatch(argv: string[]): Promise<void> {
         ...(s.oldest ? [`  oldest   ${s.oldest}`, `  newest   ${s.newest}`] : []),
       ].join("\n") + "\n",
     );
+    return;
+  }
+
+  if (cmd === "crawl") {
+    const seed = positionalText(args);
+    if (!seed) fail("usage: webindex crawl <url> --max <n>");
+    if (!/^https?:\/\//i.test(seed)) fail("crawl needs an http(s) URL");
+    const max = argInt(args, "max");
+    // Required, not defaulted. Enumerating someone else's site is the one
+    // operation here that can inconvenience them, so the budget is a decision
+    // the caller makes rather than one this command makes for them.
+    if (max === undefined) fail("crawl needs --max <n> — an unbounded walk of somebody else's site is not something to do by accident");
+    const r = await crawlSite(seed, {
+      maxPages: max,
+      ...(argInt(args, "depth") !== undefined ? { maxDepth: argInt(args, "depth") as number } : {}),
+      crossOrigin: argBool(args, "cross-origin"),
+    });
+    if (argBool(args, "json")) {
+      process.stdout.write(jsonLine(r));
+    } else {
+      for (const p of r.pages) process.stdout.write(`${p.url}${p.title ? `\n  ${p.title}` : ""}\n`);
+      for (const d of r.disallowed) process.stderr.write(`  disallowed: ${d}\n`);
+      for (const n of r.notes) process.stderr.write(`  ${n}\n`);
+    }
+    if (!r.pages.length) process.exit(EXIT_FAILURE);
+    return;
+  }
+
+  if (cmd === "tables") {
+    const url = positionalText(args);
+    if (!url) fail("usage: webindex tables <url>");
+    if (!/^https?:\/\//i.test(url)) fail("tables needs an http(s) URL");
+    const page = await httpGet(url, { accept: "text/html,*/*" });
+    if (!page.ok) fail(`could not fetch ${url} (status ${page.status})`);
+    const tables = extractTables(page.body);
+    if (!tables.length) fail(`no tables on ${url}`);
+    process.stdout.write(argBool(args, "json") ? jsonLine(tables) : `${tables.map(tableToMarkdown).join("\n\n")}\n`);
+    return;
+  }
+
+  if (cmd === "embed") {
+    const text = positionalText(args);
+    if (!text) fail("usage: webindex embed <text>");
+    const r = await embed([text]);
+    if (!r.vectors.length) fail(r.note ?? "the embedding server returned nothing");
+    process.stdout.write(
+      argBool(args, "json") ? jsonLine({ model: r.model, dimensions: r.vectors[0]?.length ?? 0, vector: r.vectors[0] }) : `${(r.vectors[0] ?? []).join(" ")}\n`,
+    );
+    return;
+  }
+
+  if (cmd === "hybrid") {
+    const question = argValue(args, "query");
+    if (!question) fail("usage: webindex hybrid --query <question> --docs <file.json|->");
+    const src = argValue(args, "docs") ?? "-";
+    let payload: string;
+    try {
+      payload = src === "-" ? readFileSync(0, "utf8") : readFileSync(src, "utf8");
+    } catch (e) {
+      fail(`cannot read ${src === "-" ? "stdin" : src}: ${(e as Error).message}`);
+    }
+    let docs: RankInput[];
+    try {
+      docs = parseRankDocs(payload, "--docs");
+    } catch (e) {
+      fail((e as Error).message);
+    }
+    const r = await hybridSearch(
+      question,
+      docs.map((d, i) => ({ id: d.url ?? String(i), title: d.title ?? "", headings: "", body: d.text ?? "" })),
+      { ...(argInt(args, "limit") !== undefined ? { limit: argInt(args, "limit") as number } : {}) },
+    );
+    if (argBool(args, "json")) {
+      process.stdout.write(jsonLine(r));
+      return;
+    }
+    process.stdout.write(
+      `${r.hits.map((h, i) => `${i + 1}. [${h.score.toFixed(4)}] ${h.doc.title || h.doc.id}\n   ${h.doc.id}   lexical#${h.lexicalRank ?? "-"} dense#${h.denseRank ?? "-"}`).join("\n")}\n`,
+    );
+    // The note goes to stderr, so the reason a run ranked lexically is visible
+    // without landing in the middle of the ranking.
+    if (r.note) process.stderr.write(`  ${r.note}\n`);
+    return;
+  }
+
+  if (cmd === "changed") {
+    const url = positionalText(args);
+    if (!url) fail("usage: webindex changed <url> [--etag <v>] [--hash <sha256>]");
+    if (!/^https?:\/\//i.test(url)) fail("changed needs an http(s) URL");
+    const etag = argValue(args, "etag");
+    const hash = argValue(args, "hash");
+    if (!etag && !hash) {
+      const f = await fingerprint(url);
+      process.stdout.write(argBool(args, "json") ? jsonLine(f) : `etag ${f.etag ?? "-"}\nhash ${f.contentHash ?? "-"}\n`);
+      return;
+    }
+    const v = await hasChanged(url, { ...(etag ? { etag } : {}), ...(hash ? { contentHash: hash } : {}) });
+    if (argBool(args, "json")) {
+      process.stdout.write(jsonLine(v));
+    } else {
+      process.stdout.write(`${v.changed === undefined ? "unknown" : v.changed ? "changed" : "unchanged"} (via ${v.via})\n`);
+      if (v.note) process.stderr.write(`  ${v.note}\n`);
+    }
+    // Exit 1 on "could not tell", so a watcher script never reads an error as
+    // "nothing to do". `changed` itself is not a failure.
+    if (v.changed === undefined) process.exit(EXIT_FAILURE);
     return;
   }
 

@@ -1751,9 +1751,36 @@ ${up.stderr}` : ""}`, code: 1 };
   return { message: [`${tag}: ${spec.summary}`, ...spec.postUp?.(file, run) ?? []].join("\n"), code: 0 };
 }
 
+// src/pool.ts
+async function mapLimit(items, limit, fn) {
+  const width = Math.max(1, Math.floor(limit));
+  if (items.length <= 1 || width === 1) {
+    const out = [];
+    for (let i = 0; i < items.length; i++) out.push(await fn(items[i], i));
+    return out;
+  }
+  const results = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(width, items.length) }, async () => {
+    for (; ; ) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 // src/embed.ts
 function ollamaBase() {
   return env("OLLAMA") ?? "http://localhost:11434";
+}
+function embedConcurrency() {
+  return Math.max(1, envInt("EMBED_CONCURRENCY", 4));
+}
+function embedBatch() {
+  return Math.max(1, envInt("EMBED_BATCH", 16));
 }
 var probed;
 async function probeOllama(base = ollamaBase()) {
@@ -1762,6 +1789,45 @@ async function probeOllama(base = ollamaBase()) {
   const r = await httpJson("GET", `${base.replace(/\/+$/, "")}/api/tags`, void 0, { timeoutMs: 2e3, retries: 0 });
   probed = r.ok;
   return probed;
+}
+async function embed(texts, opts = {}) {
+  const model = opts.model ?? embedModel();
+  if (texts.length === 0) return { vectors: [], model };
+  const base = (opts.base ?? ollamaBase()).replace(/\/+$/, "");
+  if (base.toLowerCase() === "off") return { vectors: [], model, note: "embeddings are disabled (OLLAMA=off)." };
+  if (!await probeOllama(base)) {
+    return { vectors: [], model, note: `no embedding server at ${base} \u2014 \`${brand().cli} semantic up\` starts Ollama and pulls ${model}.` };
+  }
+  const batches = [];
+  const width = embedBatch();
+  for (let i = 0; i < texts.length; i += width) batches.push(texts.slice(i, i + width));
+  let note;
+  const results = await mapLimit(batches, opts.concurrency ?? embedConcurrency(), async (batch) => {
+    const r = await httpJson("POST", `${base}/api/embed`, { model, input: batch }, { timeoutMs: 6e4 });
+    const got = r.ok ? r.data?.embeddings : void 0;
+    if (!got || got.length !== batch.length) {
+      note ??= `embedding failed at ${base} (${r.error ?? `status ${r.status}`}) \u2014 is \`${model}\` pulled? \`${brand().cli} semantic up\` pulls it.`;
+      return void 0;
+    }
+    return got;
+  });
+  if (results.some((r) => r === void 0)) return { vectors: [], model, ...note ? { note } : {} };
+  return { vectors: results.flat(), model };
+}
+function cosine(a, b) {
+  const n = Math.min(a.length, b.length);
+  let dot = 0;
+  let ma = 0;
+  let mb = 0;
+  for (let i = 0; i < n; i++) {
+    const x = a[i];
+    const y = b[i];
+    dot += x * y;
+    ma += x * x;
+    mb += y * y;
+  }
+  if (ma === 0 || mb === 0) return 0;
+  return dot / (Math.sqrt(ma) * Math.sqrt(mb));
 }
 
 // src/url.ts
@@ -1798,6 +1864,16 @@ function fnv1a64(s) {
 }
 
 // src/rank.ts
+function rrf(lists, keyOf, k = 60) {
+  const score = /* @__PURE__ */ new Map();
+  for (const list of lists) {
+    list.forEach((item, idx) => {
+      const key = keyOf(item);
+      score.set(key, (score.get(key) ?? 0) + 1 / (k + idx + 1));
+    });
+  }
+  return score;
+}
 function bm25Tokenize(text) {
   if (!text) return [];
   const out = [];
@@ -1985,6 +2061,492 @@ async function probeQdrant(base = qdrantBase()) {
   probed2 = r.ok;
   return probed2;
 }
+async function hybridSearch(question, docs, opts = {}) {
+  if (docs.length === 0) return { hits: [] };
+  const index = buildBm25Index(question, docs);
+  const lexical = [...docs].sort((a, b) => bm25Score(index, b) - bm25Score(index, a));
+  const embedded = await embed([question, ...docs.map((d) => [d.title, d.headings, d.body].filter(Boolean).join("\n"))], {
+    ...opts.base !== void 0 ? { base: opts.base } : {},
+    ...opts.model !== void 0 ? { model: opts.model } : {}
+  });
+  let dense = [];
+  let note = embedded.note;
+  if (embedded.vectors.length === docs.length + 1) {
+    const q = embedded.vectors[0];
+    const scored = docs.map((doc, i) => ({ doc, sim: cosine(q, embedded.vectors[i + 1]) }));
+    dense = scored.sort((a, b) => b.sim - a.sim).map((s) => s.doc);
+  } else if (!note) {
+    note = "the dense lane returned an unexpected number of vectors \u2014 ranking lexically only.";
+  }
+  const lists = dense.length ? [lexical, dense] : [lexical];
+  const fused = rrf(lists, (d) => d.id, opts.k ?? envInt("RRF_K", 60));
+  const lexRank = new Map(lexical.map((d, i) => [d.id, i + 1]));
+  const denseRank = new Map(dense.map((d, i) => [d.id, i + 1]));
+  const hits = [...docs].map((doc) => ({
+    doc,
+    score: fused.get(doc.id) ?? 0,
+    ...lexRank.has(doc.id) ? { lexicalRank: lexRank.get(doc.id) } : {},
+    ...denseRank.has(doc.id) ? { denseRank: denseRank.get(doc.id) } : {}
+  })).sort((a, b) => b.score - a.score);
+  return { hits: opts.limit ? hits.slice(0, opts.limit) : hits, ...note ? { note } : {} };
+}
+
+// src/feed.ts
+function tagText(block, ...names) {
+  for (const name of names) {
+    const m = new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)<\\/${name}>`, "i").exec(block);
+    if (!m) continue;
+    const raw = m[1];
+    const inner = /<!\[CDATA\[([\s\S]*?)\]\]>/.exec(raw)?.[1] ?? raw;
+    const text = decodeEntities(inner.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+    if (text) return text;
+  }
+  return void 0;
+}
+function itemUrl(block) {
+  const link = /<link\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/i.exec(block);
+  if (link) {
+    const alts = [...block.matchAll(/<link\b([^>]*)>/gi)].map((m) => m[1]).filter((attrs) => !/\brel\s*=\s*["'](?:self|edit|replies|enclosure)["']/i.test(attrs));
+    for (const attrs of alts) {
+      const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1];
+      if (href) return decodeEntities(href).trim();
+    }
+    return decodeEntities(link[1]).trim();
+  }
+  return tagText(block, "link", "guid");
+}
+function parseFeed(xml) {
+  const isAtom = /<feed\b[^>]*xmlns\s*=\s*["'][^"']*www\.w3\.org\/2005\/Atom/i.test(xml) || /<entry\b/i.test(xml);
+  const isRss = /<rss\b/i.test(xml) || /<channel\b/i.test(xml);
+  if (!isAtom && !isRss) return void 0;
+  const kind = isAtom && !isRss ? "atom" : "rss";
+  const itemRe = kind === "atom" ? /<entry\b[\s\S]*?<\/entry>/gi : /<item\b[\s\S]*?<\/item>/gi;
+  const items = [];
+  for (const m of xml.matchAll(itemRe)) {
+    const block = m[0];
+    const it = {};
+    const title2 = tagText(block, "title");
+    if (title2) it.title = title2;
+    const url = itemUrl(block);
+    if (url) it.url = url;
+    const published = tagText(block, "pubDate", "published", "updated", "dc:date");
+    if (published) it.published = published;
+    const summary = tagText(block, "description", "summary");
+    if (summary) it.summary = summary;
+    const id = tagText(block, "guid", "id");
+    if (id) it.id = id;
+    if (it.title || it.url) items.push(it);
+  }
+  const head = xml.replace(itemRe, "");
+  const title = tagText(head, "title");
+  return { kind, items, ...title ? { title } : {} };
+}
+function discoverFeeds(html, baseUrl) {
+  const out = [];
+  for (const m of html.matchAll(/<link\b([^>]*)>/gi)) {
+    const attrs = m[1];
+    if (!/\brel\s*=\s*["']?alternate\b/i.test(attrs)) continue;
+    if (!/\btype\s*=\s*["'](?:application\/(?:rss|atom)\+xml|application\/feed\+json)["']/i.test(attrs)) continue;
+    const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1];
+    if (!href) continue;
+    try {
+      const abs = new URL(decodeEntities(href).trim(), baseUrl).href;
+      if (!out.includes(abs)) out.push(abs);
+    } catch {
+    }
+  }
+  return out;
+}
+function parseSitemap(xml) {
+  const out = { urls: [], sitemaps: [] };
+  const isIndex = /<sitemapindex\b/i.test(xml);
+  for (const m of xml.matchAll(/<(sitemap|url)\b[\s\S]*?<\/\1>/gi)) {
+    const block = m[0];
+    const loc = tagText(block, "loc");
+    if (!loc) continue;
+    if (isIndex || m[1].toLowerCase() === "sitemap") {
+      out.sitemaps.push(loc);
+    } else {
+      const lastmod = tagText(block, "lastmod");
+      out.urls.push({ loc, ...lastmod ? { lastmod } : {} });
+    }
+  }
+  return out;
+}
+async function fetchSitemap(url, opts = {}) {
+  const out = { urls: [], sitemaps: [] };
+  let origin;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    return out;
+  }
+  const queue = [...opts.sitemaps ?? [], `${origin}/sitemap.xml`];
+  const seen = /* @__PURE__ */ new Set();
+  let fetched = 0;
+  const max = Math.max(1, opts.max ?? 3);
+  while (queue.length && fetched < max) {
+    const next = queue.shift();
+    if (seen.has(next)) continue;
+    seen.add(next);
+    const r = await httpGet(next, { accept: "application/xml,text/xml,*/*", timeoutMs: 1e4 });
+    fetched++;
+    if (!r.ok || !r.body.trim()) continue;
+    const parsed = parseSitemap(r.body);
+    out.urls.push(...parsed.urls);
+    for (const s of parsed.sitemaps) {
+      if (!out.sitemaps.includes(s)) out.sitemaps.push(s);
+      queue.push(s);
+    }
+  }
+  return out;
+}
+async function fetchFeed(url) {
+  const r = await httpGet(url, { accept: "application/atom+xml,application/rss+xml,application/xml,*/*", timeoutMs: 1e4 });
+  if (!r.ok || !r.body.trim()) return void 0;
+  return parseFeed(r.body);
+}
+
+// src/robots.ts
+var EMPTY = { rules: [], sitemaps: [], absent: true };
+function parseRobots(body, userAgent) {
+  const ua = userAgent.toLowerCase();
+  const groups = /* @__PURE__ */ new Map();
+  const delays = /* @__PURE__ */ new Map();
+  const sitemaps = [];
+  let current2 = [];
+  let inHeader = false;
+  for (const raw of body.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, "").trim();
+    if (!line) continue;
+    const sep2 = line.indexOf(":");
+    if (sep2 === -1) continue;
+    const field = line.slice(0, sep2).trim().toLowerCase();
+    const value = line.slice(sep2 + 1).trim();
+    if (field === "sitemap") {
+      if (value) sitemaps.push(value);
+      continue;
+    }
+    if (field === "user-agent") {
+      if (!inHeader) current2 = [];
+      current2.push(value.toLowerCase());
+      inHeader = true;
+      for (const g of current2) if (!groups.has(g)) groups.set(g, []);
+      continue;
+    }
+    inHeader = false;
+    if (!current2.length) continue;
+    if (field === "allow" || field === "disallow") {
+      for (const g of current2) groups.get(g).push({ allow: field === "allow", path: value });
+    } else if (field === "crawl-delay") {
+      const n = Number(value);
+      if (Number.isFinite(n) && n >= 0) for (const g of current2) delays.set(g, n * 1e3);
+    }
+  }
+  let chosen;
+  for (const g of groups.keys()) {
+    if (g === "*") continue;
+    if (ua.includes(g) && (!chosen || g.length > chosen.length)) chosen = g;
+  }
+  chosen ??= groups.has("*") ? "*" : void 0;
+  if (chosen === void 0) return { rules: [], sitemaps, absent: false };
+  const rules = [...groups.get(chosen)].sort((a, b) => b.path.length - a.path.length || (a.allow === b.allow ? 0 : a.allow ? -1 : 1));
+  const crawlDelayMs = delays.get(chosen);
+  return { rules, sitemaps, absent: false, ...crawlDelayMs !== void 0 ? { crawlDelayMs } : {} };
+}
+function ruleMatches(pattern, path) {
+  if (pattern === "") return false;
+  const anchored = pattern.endsWith("$");
+  const body = anchored ? pattern.slice(0, -1) : pattern;
+  if (!body.includes("*")) return anchored ? path === body : path.startsWith(body);
+  const re = new RegExp(`^${body.split("*").map(escapeRe).join(".*")}${anchored ? "$" : ""}`);
+  return re.test(path);
+}
+function escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function isAllowed(robots, url) {
+  if (robots.absent || !robots.rules.length) return true;
+  let path;
+  try {
+    const u = new URL(url);
+    path = u.pathname + u.search;
+  } catch {
+    return true;
+  }
+  for (const rule of robots.rules) if (ruleMatches(rule.path, path)) return rule.allow;
+  return true;
+}
+var cache = /* @__PURE__ */ new Map();
+async function fetchRobots(url) {
+  if (envFlag("NO_ROBOTS")) return EMPTY;
+  let origin;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    return EMPTY;
+  }
+  let p = cache.get(origin);
+  if (!p) {
+    p = (async () => {
+      const r = await httpGet(`${origin}/robots.txt`, { accept: "text/plain", timeoutMs: 5e3, maxBytes: 512 * 1024 });
+      if (!r.ok || !r.body.trim()) return EMPTY;
+      return parseRobots(r.body, env("ROBOTS_UA") ?? brand().name);
+    })();
+    cache.set(origin, p);
+  }
+  return p;
+}
+
+// src/crawl.ts
+var nextFree = /* @__PURE__ */ new Map();
+function hostDelayMs() {
+  return envInt("POLITE_DELAY_MS", 400, 0, 5e3);
+}
+function hostOf(url) {
+  try {
+    return new URL(url).host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+async function awaitHostSlot(url, delayMs = hostDelayMs(), now = Date.now()) {
+  const host = hostOf(url);
+  if (!host || delayMs <= 0) return 0;
+  const free = nextFree.get(host) ?? 0;
+  const waited = Math.max(0, free - now);
+  nextFree.set(host, Math.max(free, now) + delayMs);
+  if (waited > 0) await sleep(waited);
+  return waited;
+}
+function linksFrom(html, baseUrl) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const m of html.matchAll(/<a\b[^>]*?\bhref\s*=\s*["']([^"'#]+)["']/gi)) {
+    const raw = m[1].trim();
+    if (/^(mailto|tel|javascript|data):/i.test(raw)) continue;
+    try {
+      const abs = new URL(raw, baseUrl);
+      if (abs.protocol !== "http:" && abs.protocol !== "https:") continue;
+      abs.hash = "";
+      const canon = canonicalizeUrl(abs.href);
+      if (!seen.has(canon)) {
+        seen.add(canon);
+        out.push(abs.href);
+      }
+    } catch {
+    }
+  }
+  return out;
+}
+function sameOrigin(a, b) {
+  try {
+    const x = new URL(a);
+    const y = new URL(b);
+    return x.protocol === y.protocol && x.host === y.host;
+  } catch {
+    return false;
+  }
+}
+async function crawlSite(seed, opts = {}) {
+  const maxPages = Math.max(1, opts.maxPages ?? 20);
+  const maxDepth = Math.max(0, opts.maxDepth ?? 2);
+  const notes = [];
+  const disallowed = [];
+  const pages = [];
+  let robots = { rules: [], sitemaps: [], absent: true };
+  if (!opts.ignoreRobots) {
+    robots = await fetchRobots(seed);
+    if (robots.absent) notes.push("no robots.txt \u2014 nothing was refused, but nothing was granted either.");
+  } else {
+    notes.push("robots.txt was not consulted (ignoreRobots) \u2014 only correct on a site you own.");
+  }
+  const delay = opts.delayMs ?? robots.crawlDelayMs ?? hostDelayMs();
+  if (robots.crawlDelayMs && opts.delayMs === void 0) notes.push(`honouring the declared Crawl-delay of ${robots.crawlDelayMs}ms.`);
+  const seen = /* @__PURE__ */ new Set([canonicalizeUrl(seed)]);
+  const queue = [{ url: seed, depth: 0 }];
+  if (opts.useSitemap !== false && maxDepth > 0) {
+    const sm = await fetchSitemap(seed, { sitemaps: robots.sitemaps });
+    let added = 0;
+    for (const entry of sm.urls) {
+      const canon = canonicalizeUrl(entry.loc);
+      if (seen.has(canon)) continue;
+      if (!opts.crossOrigin && !sameOrigin(entry.loc, seed)) continue;
+      seen.add(canon);
+      queue.push({ url: entry.loc, depth: 1 });
+      added++;
+    }
+    if (added) notes.push(`seeded ${added} URL(s) from the sitemap.`);
+  }
+  while (queue.length && pages.length < maxPages) {
+    const next = queue.shift();
+    if (!next) break;
+    if (!opts.ignoreRobots && !isAllowed(robots, next.url)) {
+      disallowed.push(next.url);
+      continue;
+    }
+    await awaitHostSlot(next.url, delay);
+    const r = await fetchAndExtract(next.url, { keepHtml: next.depth < maxDepth });
+    if (!r.text) {
+      notes.push(`${next.url}: ${r.note ?? "nothing readable"}`);
+      continue;
+    }
+    const links = r.html ? linksFrom(r.html, next.url) : [];
+    const page = {
+      url: next.url,
+      depth: next.depth,
+      ...r.title ? { title: r.title } : {},
+      text: r.text,
+      extractor: r.extractor ?? "native",
+      links
+    };
+    pages.push(page);
+    opts.onPage?.(page);
+    if (next.depth >= maxDepth) continue;
+    for (const link of links) {
+      const canon = canonicalizeUrl(link);
+      if (seen.has(canon)) continue;
+      if (!opts.crossOrigin && !sameOrigin(link, seed)) continue;
+      seen.add(canon);
+      queue.push({ url: link, depth: next.depth + 1 });
+    }
+  }
+  if (queue.length) notes.push(`stopped at the ${maxPages}-page budget with ${queue.length} URL(s) still queued.`);
+  return { pages, pending: queue.map((q) => q.url), disallowed, notes };
+}
+
+// src/tables.ts
+function decodeEntities2(s) {
+  return s.replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(Number.parseInt(h, 16))).replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d))).replace(/&nbsp;/gi, " ").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&amp;/gi, "&");
+}
+function cellText(html) {
+  return decodeEntities2(
+    html.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]*>/g, "").replace(/\s+/g, " ")
+  ).trim();
+}
+function intAttr(tag, name) {
+  const m = new RegExp(`\\b${name}\\s*=\\s*["']?(\\d+)`, "i").exec(tag);
+  const n = m ? Number(m[1]) : 1;
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, 100) : 1;
+}
+function parseRow(rowHtml) {
+  const cells = [];
+  for (const m of rowHtml.matchAll(/<(t[hd])\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi)) {
+    cells.push({
+      text: cellText(m[3]),
+      colspan: intAttr(m[2], "colspan"),
+      rowspan: intAttr(m[2], "rowspan"),
+      header: m[1].toLowerCase() === "th"
+    });
+  }
+  return cells;
+}
+function expand(rows) {
+  const grid = [];
+  const carried = /* @__PURE__ */ new Map();
+  rows.forEach((cells, r) => {
+    const out = [];
+    let c = 0;
+    const skipCarried = () => {
+      while (carried.has(`${r}:${c}`)) {
+        out[c] = carried.get(`${r}:${c}`);
+        c++;
+      }
+      return c;
+    };
+    for (const cell of cells) {
+      const startCol = skipCarried();
+      for (let i = 0; i < cell.colspan; i++) {
+        out[startCol + i] = cell.text;
+        for (let j = 1; j < cell.rowspan; j++) carried.set(`${r + j}:${startCol + i}`, cell.text);
+      }
+      c = startCol + cell.colspan;
+    }
+    skipCarried();
+    grid.push(out);
+  });
+  const width = grid.reduce((w, row) => Math.max(w, row.length), 0);
+  return grid.map((row) => Array.from({ length: width }, (_, i) => row[i] ?? ""));
+}
+function extractTables(html) {
+  const tables = [];
+  for (const m of html.matchAll(/<table\b[^>]*>([\s\S]*?)<\/table\s*>/gi)) {
+    const inner = m[1];
+    const caption = /<caption\b[^>]*>([\s\S]*?)<\/caption\s*>/i.exec(inner);
+    const rawRows = [];
+    for (const r of inner.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr\s*>/gi)) {
+      const cells = parseRow(r[1]);
+      if (cells.length) rawRows.push(cells);
+    }
+    if (!rawRows.length) continue;
+    const grid = expand(rawRows);
+    const headerIndex = rawRows.findIndex((cells) => cells.every((c) => c.header));
+    const headers = headerIndex === 0 ? grid[0] : [];
+    const rows = headerIndex === 0 ? grid.slice(1) : grid;
+    if (!rows.length) continue;
+    tables.push({ ...caption ? { caption: cellText(caption[1]) } : {}, headers, rows });
+  }
+  return tables;
+}
+function tableToMarkdown(table) {
+  const width = Math.max(table.headers.length, ...table.rows.map((r) => r.length), 1);
+  const esc = (s) => s.replace(/\|/g, "\\|");
+  const line = (cells) => `| ${Array.from({ length: width }, (_, i) => esc(cells[i] ?? "")).join(" | ")} |`;
+  const out = [];
+  if (table.caption) out.push(`**${table.caption}**`, "");
+  out.push(line(table.headers.length ? table.headers : Array.from({ length: width }, () => "")));
+  out.push(`|${" --- |".repeat(width)}`);
+  for (const row of table.rows) out.push(line(row));
+  return out.join("\n");
+}
+
+// src/changed.ts
+import { createHash } from "crypto";
+function contentHash(body) {
+  return createHash("sha256").update(body).digest("hex");
+}
+async function fingerprint(url, opts = {}) {
+  const res = await httpGet(url, opts);
+  return {
+    url,
+    ...res.etag ? { etag: res.etag } : {},
+    ...res.lastModified ? { lastModified: res.lastModified } : {},
+    ...res.ok ? { contentHash: contentHash(res.body) } : {},
+    bytes: res.body.length,
+    status: res.status,
+    fetchedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+async function hasChanged(url, previous, opts = {}) {
+  const headers = {};
+  if (previous?.etag) headers["if-none-match"] = previous.etag;
+  if (previous?.lastModified) headers["if-modified-since"] = previous.lastModified;
+  const res = await httpGet(url, { ...opts, ...Object.keys(headers).length ? { headers } : {} });
+  const observed = {
+    url,
+    ...res.etag ? { etag: res.etag } : {},
+    ...res.lastModified ? { lastModified: res.lastModified } : {},
+    ...res.ok && res.body ? { contentHash: contentHash(res.body) } : {},
+    bytes: res.body.length,
+    status: res.status,
+    fetchedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (res.status === 304) return { changed: false, via: "not-modified", fingerprint: { ...observed, ...previous, status: 304, bytes: 0 } };
+  if (!res.ok) {
+    return { via: "unknown", fingerprint: observed, note: `could not read ${url}: ${res.error ?? `status ${res.status}`}` };
+  }
+  if (!previous || !previous.etag && !previous.lastModified && !previous.contentHash) {
+    return { changed: false, via: "unknown", fingerprint: observed, note: "no previous observation \u2014 this is the baseline." };
+  }
+  if (previous.etag && observed.etag) return { changed: previous.etag !== observed.etag, via: "etag", fingerprint: observed };
+  if (previous.lastModified && observed.lastModified) {
+    return { changed: previous.lastModified !== observed.lastModified, via: "last-modified", fingerprint: observed };
+  }
+  if (previous.contentHash && observed.contentHash) {
+    return { changed: previous.contentHash !== observed.contentHash, via: "hash", fingerprint: observed };
+  }
+  return { via: "unknown", fingerprint: observed, note: "nothing comparable between the two observations \u2014 store contentHash to make this answerable." };
+}
 
 // src/skillkit/config.ts
 import { join as join4 } from "path";
@@ -2166,10 +2728,10 @@ function auditEngineUsage(root, config, dts) {
 }
 
 // src/skillkit/vendor.ts
-import { createHash } from "crypto";
+import { createHash as createHash2 } from "crypto";
 import { readFileSync as readFileSync5 } from "fs";
 import { join as join6 } from "path";
-var sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
+var sha256 = (buf) => createHash2("sha256").update(buf).digest("hex");
 function checkPins(root, config) {
   return Object.entries(config.engines).map(([name, pin]) => {
     const problems = [];
@@ -2908,213 +3470,6 @@ function cacheClean(all = false, now = Date.now()) {
     }
   }
   return removed;
-}
-
-// src/robots.ts
-var EMPTY = { rules: [], sitemaps: [], absent: true };
-function parseRobots(body, userAgent) {
-  const ua = userAgent.toLowerCase();
-  const groups = /* @__PURE__ */ new Map();
-  const delays = /* @__PURE__ */ new Map();
-  const sitemaps = [];
-  let current2 = [];
-  let inHeader = false;
-  for (const raw of body.split(/\r?\n/)) {
-    const line = raw.replace(/#.*$/, "").trim();
-    if (!line) continue;
-    const sep2 = line.indexOf(":");
-    if (sep2 === -1) continue;
-    const field = line.slice(0, sep2).trim().toLowerCase();
-    const value = line.slice(sep2 + 1).trim();
-    if (field === "sitemap") {
-      if (value) sitemaps.push(value);
-      continue;
-    }
-    if (field === "user-agent") {
-      if (!inHeader) current2 = [];
-      current2.push(value.toLowerCase());
-      inHeader = true;
-      for (const g of current2) if (!groups.has(g)) groups.set(g, []);
-      continue;
-    }
-    inHeader = false;
-    if (!current2.length) continue;
-    if (field === "allow" || field === "disallow") {
-      for (const g of current2) groups.get(g).push({ allow: field === "allow", path: value });
-    } else if (field === "crawl-delay") {
-      const n = Number(value);
-      if (Number.isFinite(n) && n >= 0) for (const g of current2) delays.set(g, n * 1e3);
-    }
-  }
-  let chosen;
-  for (const g of groups.keys()) {
-    if (g === "*") continue;
-    if (ua.includes(g) && (!chosen || g.length > chosen.length)) chosen = g;
-  }
-  chosen ??= groups.has("*") ? "*" : void 0;
-  if (chosen === void 0) return { rules: [], sitemaps, absent: false };
-  const rules = [...groups.get(chosen)].sort((a, b) => b.path.length - a.path.length || (a.allow === b.allow ? 0 : a.allow ? -1 : 1));
-  const crawlDelayMs = delays.get(chosen);
-  return { rules, sitemaps, absent: false, ...crawlDelayMs !== void 0 ? { crawlDelayMs } : {} };
-}
-function ruleMatches(pattern, path) {
-  if (pattern === "") return false;
-  const anchored = pattern.endsWith("$");
-  const body = anchored ? pattern.slice(0, -1) : pattern;
-  if (!body.includes("*")) return anchored ? path === body : path.startsWith(body);
-  const re = new RegExp(`^${body.split("*").map(escapeRe).join(".*")}${anchored ? "$" : ""}`);
-  return re.test(path);
-}
-function escapeRe(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-function isAllowed(robots, url) {
-  if (robots.absent || !robots.rules.length) return true;
-  let path;
-  try {
-    const u = new URL(url);
-    path = u.pathname + u.search;
-  } catch {
-    return true;
-  }
-  for (const rule of robots.rules) if (ruleMatches(rule.path, path)) return rule.allow;
-  return true;
-}
-var cache = /* @__PURE__ */ new Map();
-async function fetchRobots(url) {
-  if (envFlag("NO_ROBOTS")) return EMPTY;
-  let origin;
-  try {
-    origin = new URL(url).origin;
-  } catch {
-    return EMPTY;
-  }
-  let p = cache.get(origin);
-  if (!p) {
-    p = (async () => {
-      const r = await httpGet(`${origin}/robots.txt`, { accept: "text/plain", timeoutMs: 5e3, maxBytes: 512 * 1024 });
-      if (!r.ok || !r.body.trim()) return EMPTY;
-      return parseRobots(r.body, env("ROBOTS_UA") ?? brand().name);
-    })();
-    cache.set(origin, p);
-  }
-  return p;
-}
-
-// src/feed.ts
-function tagText(block, ...names) {
-  for (const name of names) {
-    const m = new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)<\\/${name}>`, "i").exec(block);
-    if (!m) continue;
-    const raw = m[1];
-    const inner = /<!\[CDATA\[([\s\S]*?)\]\]>/.exec(raw)?.[1] ?? raw;
-    const text = decodeEntities(inner.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
-    if (text) return text;
-  }
-  return void 0;
-}
-function itemUrl(block) {
-  const link = /<link\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/i.exec(block);
-  if (link) {
-    const alts = [...block.matchAll(/<link\b([^>]*)>/gi)].map((m) => m[1]).filter((attrs) => !/\brel\s*=\s*["'](?:self|edit|replies|enclosure)["']/i.test(attrs));
-    for (const attrs of alts) {
-      const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1];
-      if (href) return decodeEntities(href).trim();
-    }
-    return decodeEntities(link[1]).trim();
-  }
-  return tagText(block, "link", "guid");
-}
-function parseFeed(xml) {
-  const isAtom = /<feed\b[^>]*xmlns\s*=\s*["'][^"']*www\.w3\.org\/2005\/Atom/i.test(xml) || /<entry\b/i.test(xml);
-  const isRss = /<rss\b/i.test(xml) || /<channel\b/i.test(xml);
-  if (!isAtom && !isRss) return void 0;
-  const kind = isAtom && !isRss ? "atom" : "rss";
-  const itemRe = kind === "atom" ? /<entry\b[\s\S]*?<\/entry>/gi : /<item\b[\s\S]*?<\/item>/gi;
-  const items = [];
-  for (const m of xml.matchAll(itemRe)) {
-    const block = m[0];
-    const it = {};
-    const title2 = tagText(block, "title");
-    if (title2) it.title = title2;
-    const url = itemUrl(block);
-    if (url) it.url = url;
-    const published = tagText(block, "pubDate", "published", "updated", "dc:date");
-    if (published) it.published = published;
-    const summary = tagText(block, "description", "summary");
-    if (summary) it.summary = summary;
-    const id = tagText(block, "guid", "id");
-    if (id) it.id = id;
-    if (it.title || it.url) items.push(it);
-  }
-  const head = xml.replace(itemRe, "");
-  const title = tagText(head, "title");
-  return { kind, items, ...title ? { title } : {} };
-}
-function discoverFeeds(html, baseUrl) {
-  const out = [];
-  for (const m of html.matchAll(/<link\b([^>]*)>/gi)) {
-    const attrs = m[1];
-    if (!/\brel\s*=\s*["']?alternate\b/i.test(attrs)) continue;
-    if (!/\btype\s*=\s*["'](?:application\/(?:rss|atom)\+xml|application\/feed\+json)["']/i.test(attrs)) continue;
-    const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1];
-    if (!href) continue;
-    try {
-      const abs = new URL(decodeEntities(href).trim(), baseUrl).href;
-      if (!out.includes(abs)) out.push(abs);
-    } catch {
-    }
-  }
-  return out;
-}
-function parseSitemap(xml) {
-  const out = { urls: [], sitemaps: [] };
-  const isIndex = /<sitemapindex\b/i.test(xml);
-  for (const m of xml.matchAll(/<(sitemap|url)\b[\s\S]*?<\/\1>/gi)) {
-    const block = m[0];
-    const loc = tagText(block, "loc");
-    if (!loc) continue;
-    if (isIndex || m[1].toLowerCase() === "sitemap") {
-      out.sitemaps.push(loc);
-    } else {
-      const lastmod = tagText(block, "lastmod");
-      out.urls.push({ loc, ...lastmod ? { lastmod } : {} });
-    }
-  }
-  return out;
-}
-async function fetchSitemap(url, opts = {}) {
-  const out = { urls: [], sitemaps: [] };
-  let origin;
-  try {
-    origin = new URL(url).origin;
-  } catch {
-    return out;
-  }
-  const queue = [...opts.sitemaps ?? [], `${origin}/sitemap.xml`];
-  const seen = /* @__PURE__ */ new Set();
-  let fetched = 0;
-  const max = Math.max(1, opts.max ?? 3);
-  while (queue.length && fetched < max) {
-    const next = queue.shift();
-    if (seen.has(next)) continue;
-    seen.add(next);
-    const r = await httpGet(next, { accept: "application/xml,text/xml,*/*", timeoutMs: 1e4 });
-    fetched++;
-    if (!r.ok || !r.body.trim()) continue;
-    const parsed = parseSitemap(r.body);
-    out.urls.push(...parsed.urls);
-    for (const s of parsed.sitemaps) {
-      if (!out.sitemaps.includes(s)) out.sitemaps.push(s);
-      queue.push(s);
-    }
-  }
-  return out;
-}
-async function fetchFeed(url) {
-  const r = await httpGet(url, { accept: "application/atom+xml,application/rss+xml,application/xml,*/*", timeoutMs: 1e4 });
-  if (!r.ok || !r.body.trim()) return void 0;
-  return parseFeed(r.body);
 }
 
 // src/structured.ts
@@ -4169,6 +4524,11 @@ USAGE
   webindex semantic  up|down|status
   webindex stack     up|down|status|path
   webindex cache     status|clean [--all] [--json]
+  webindex crawl <url> --max <n> [--depth <n>] [--cross-origin] [--json]
+  webindex tables <url> [--markdown] [--json]
+  webindex embed <text> [--json]
+  webindex hybrid --query <q> [--docs <file.json|->] [--limit <n>] [--json]
+  webindex changed <url> [--etag <v>] [--hash <sha256>] [--json]
   webindex skill     check|bundle|copy|doctor [--root <dir>] [--json]
   webindex skill     vendor [--engine <name>] --ref <tag> | --check
   webindex skill     init <name> [--root <dir>]
@@ -4212,6 +4572,23 @@ COMMANDS
              written. The stack is EMBEDDED in this binary \u2014 no checkout needed.
   cache      What the on-disk fetch cache holds, and how to evict it. 'clean'
              drops stale entries, '--all' drops every one.
+  crawl      Walk a site from a seed, breadth-first, honouring robots.txt at
+             every hop. --max is REQUIRED: following one citation is not
+             crawling and needs no permission, but enumerating a site is, and
+             an unbounded walk is the one thing here that can inconvenience
+             somebody else's server.
+  tables     The tables on a page as headers and rows, with colspan and rowspan
+             resolved. Plain extraction flattens a table into prose in which
+             every figure has lost its row and column.
+  embed      Vectors for a text, from the local Ollama. No key, and nothing
+             leaves the machine. Needs \`webindex semantic up\`.
+  hybrid     Rank documents against a question with BOTH retrievers, fused by
+             RRF: BM25F cannot find a page that never uses your words, and a
+             dense index cannot match an exact identifier. Degrades to the
+             lexical half, with a note, when no embedding server answers.
+  changed    Whether a URL changed since a fingerprint you already hold. A 304
+             costs one round trip and no body; the answer says how it was
+             decided, because etag and content-hash are different evidence.
   skill      The packaging toolchain for a repository built ON this engine,
              driven by its skill.json. 'vendor' pins an engine by tag and
              sha256 (--check re-verifies offline, and fails a pin older than
@@ -4241,6 +4618,9 @@ var VALUE_FLAGS = [
   "root",
   "ref",
   "engine",
+  "depth",
+  "etag",
+  "hash",
   "limit",
   "pages",
   "lang",
@@ -4257,7 +4637,7 @@ var VALUE_FLAGS = [
   "terms",
   "max"
 ];
-var BOOL_FLAGS = ["json", "allow-remote", "all", "check"];
+var BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin"];
 var COMMANDS = [
   "search",
   "fetch",
@@ -4276,6 +4656,11 @@ var COMMANDS = [
   "cache",
   "doctor",
   "skill",
+  "crawl",
+  "tables",
+  "embed",
+  "hybrid",
+  "changed",
   ...STACK_SERVICES.filter((s) => s !== "all"),
   "stack"
 ];
@@ -4481,6 +4866,43 @@ function webindexAdapter() {
         title: "A site's RSS or Atom feed",
         description: "Parse a feed URL, or discover and parse the feeds a page advertises. Returns dated, ordered entries \u2014 the site telling you what it published and when, instead of a web search guessing.",
         inputSchema: { type: "object", properties: { url: { type: "string", description: "A feed URL, or a page that links to one." } }, required: ["url"] }
+      },
+      {
+        name: "webindex_tables",
+        title: "The tables on a page, as data",
+        description: "Extract every <table> as headers and rows, with colspan and rowspan resolved. Plain extraction flattens a table into a run of cell text, which reads plausibly while every figure has lost the row and column it belonged to \u2014 use this whenever the answer is IN a table.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string", description: "The page holding the table(s)." },
+            markdown: { type: "boolean", description: "Render as markdown instead of JSON rows." }
+          },
+          required: ["url"]
+        }
+      },
+      {
+        name: "webindex_embed",
+        title: "Embed text with the local model",
+        description: "Turn text into vectors with the local Ollama, which needs no key and sends nothing off the machine. Returns one vector per input, in input order. Answers with a note rather than an error when the service is not running.",
+        inputSchema: {
+          type: "object",
+          properties: { texts: { type: "array", items: { type: "string" }, description: "The texts to embed." } },
+          required: ["texts"]
+        }
+      },
+      {
+        name: "webindex_crawl",
+        title: "Walk a site, within a budget",
+        description: "Follow links from a seed page, breadth-first, honouring robots.txt at EVERY hop and staying on the seed's origin. `max` pages is required \u2014 enumerating someone else's site is the one operation here that can inconvenience them, so the budget is not optional. Returns each page's URL, title and text.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string", description: "The seed page." },
+            max: { type: "number", description: "Hard ceiling on pages fetched. Required." },
+            depth: { type: "number", description: "How many links deep to follow (default 2)." }
+          },
+          required: ["url", "max"]
+        }
       }
     ],
     capAdvice: {
@@ -4495,7 +4917,10 @@ function webindexAdapter() {
       webindex_feed: "the feed is very large; fetch it and read the file instead of inlining it",
       webindex_fetch: "the page is very large; fetch it and read the file instead of inlining it",
       webindex_extract: "the document is very large; read it in pieces",
-      webindex_rank: "lower `limit`, or send shorter `text` per document \u2014 the ranking only needs enough to score"
+      webindex_rank: "lower `limit`, or send shorter `text` per document \u2014 the ranking only needs enough to score",
+      webindex_tables: "this page's tables are enormous; fetch it and read the file instead of inlining them",
+      webindex_embed: "send fewer `texts` \u2014 a vector per input is large, and they are rarely worth reading inline",
+      webindex_crawl: "lower `max`, or `depth` \u2014 a crawl's whole output is the sum of its pages"
     },
     async callTool(name, args) {
       if (name === "webindex_fetch") {
@@ -4604,6 +5029,43 @@ extractor: ${r.extractor}` };
         }
         if (!feeds.length) throw new ToolError(`${url} advertises ${found.length} feed(s), none of which parsed.`);
         return { text: JSON.stringify(feeds, null, 2) };
+      }
+      if (name === "webindex_tables") {
+        const url = String(args.url ?? "");
+        if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
+        const page = await httpGet(url, { accept: "text/html,*/*" });
+        if (!page.ok) throw new ToolError(`could not fetch ${url} (status ${page.status})`);
+        const tables = extractTables(page.body);
+        if (!tables.length) throw new ToolError(`${url} has no tables \u2014 use webindex_fetch for its text.`);
+        return { text: args.markdown ? tables.map(tableToMarkdown).join("\n\n") : JSON.stringify(tables, null, 2) };
+      }
+      if (name === "webindex_embed") {
+        const texts = Array.isArray(args.texts) ? args.texts.map(String) : [];
+        if (!texts.length) throw new ToolError("`texts` must be a non-empty array of strings.");
+        const r = await embed(texts);
+        if (!r.vectors.length) throw new ToolError(r.note ?? "the embedding server returned nothing.");
+        return { text: JSON.stringify({ model: r.model, dimensions: r.vectors[0]?.length ?? 0, vectors: r.vectors }, null, 2) };
+      }
+      if (name === "webindex_crawl") {
+        const url = String(args.url ?? "");
+        if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
+        const max = Number(args.max);
+        if (!Number.isInteger(max) || max < 1)
+          throw new ToolError("`max` is required and must be a positive whole number \u2014 a crawl without a budget is not one.");
+        const r = await crawlSite(url, { maxPages: max, ...args.depth !== void 0 ? { maxDepth: Number(args.depth) } : {} });
+        if (!r.pages.length) throw new ToolError(`nothing readable from ${url}${r.notes.length ? ` \u2014 ${r.notes[0]}` : ""}`);
+        return {
+          text: JSON.stringify(
+            {
+              pages: r.pages.map((p) => ({ url: p.url, depth: p.depth, title: p.title, text: p.text })),
+              disallowed: r.disallowed,
+              pending: r.pending.length,
+              notes: r.notes
+            },
+            null,
+            2
+          )
+        };
       }
       throw new ToolError(`unknown tool: ${name}`);
     }
@@ -4905,6 +5367,113 @@ async function dispatch(argv) {
         ...s.oldest ? [`  oldest   ${s.oldest}`, `  newest   ${s.newest}`] : []
       ].join("\n") + "\n"
     );
+    return;
+  }
+  if (cmd === "crawl") {
+    const seed = positionalText(args);
+    if (!seed) fail("usage: webindex crawl <url> --max <n>");
+    if (!/^https?:\/\//i.test(seed)) fail("crawl needs an http(s) URL");
+    const max = argInt(args, "max");
+    if (max === void 0) fail("crawl needs --max <n> \u2014 an unbounded walk of somebody else's site is not something to do by accident");
+    const r = await crawlSite(seed, {
+      maxPages: max,
+      ...argInt(args, "depth") !== void 0 ? { maxDepth: argInt(args, "depth") } : {},
+      crossOrigin: argBool(args, "cross-origin")
+    });
+    if (argBool(args, "json")) {
+      process.stdout.write(jsonLine(r));
+    } else {
+      for (const p of r.pages) process.stdout.write(`${p.url}${p.title ? `
+  ${p.title}` : ""}
+`);
+      for (const d of r.disallowed) process.stderr.write(`  disallowed: ${d}
+`);
+      for (const n of r.notes) process.stderr.write(`  ${n}
+`);
+    }
+    if (!r.pages.length) process.exit(EXIT_FAILURE);
+    return;
+  }
+  if (cmd === "tables") {
+    const url = positionalText(args);
+    if (!url) fail("usage: webindex tables <url>");
+    if (!/^https?:\/\//i.test(url)) fail("tables needs an http(s) URL");
+    const page = await httpGet(url, { accept: "text/html,*/*" });
+    if (!page.ok) fail(`could not fetch ${url} (status ${page.status})`);
+    const tables = extractTables(page.body);
+    if (!tables.length) fail(`no tables on ${url}`);
+    process.stdout.write(argBool(args, "json") ? jsonLine(tables) : `${tables.map(tableToMarkdown).join("\n\n")}
+`);
+    return;
+  }
+  if (cmd === "embed") {
+    const text = positionalText(args);
+    if (!text) fail("usage: webindex embed <text>");
+    const r = await embed([text]);
+    if (!r.vectors.length) fail(r.note ?? "the embedding server returned nothing");
+    process.stdout.write(
+      argBool(args, "json") ? jsonLine({ model: r.model, dimensions: r.vectors[0]?.length ?? 0, vector: r.vectors[0] }) : `${(r.vectors[0] ?? []).join(" ")}
+`
+    );
+    return;
+  }
+  if (cmd === "hybrid") {
+    const question = argValue(args, "query");
+    if (!question) fail("usage: webindex hybrid --query <question> --docs <file.json|->");
+    const src = argValue(args, "docs") ?? "-";
+    let payload;
+    try {
+      payload = src === "-" ? readFileSync9(0, "utf8") : readFileSync9(src, "utf8");
+    } catch (e) {
+      fail(`cannot read ${src === "-" ? "stdin" : src}: ${e.message}`);
+    }
+    let docs;
+    try {
+      docs = parseRankDocs(payload, "--docs");
+    } catch (e) {
+      fail(e.message);
+    }
+    const r = await hybridSearch(
+      question,
+      docs.map((d, i) => ({ id: d.url ?? String(i), title: d.title ?? "", headings: "", body: d.text ?? "" })),
+      { ...argInt(args, "limit") !== void 0 ? { limit: argInt(args, "limit") } : {} }
+    );
+    if (argBool(args, "json")) {
+      process.stdout.write(jsonLine(r));
+      return;
+    }
+    process.stdout.write(
+      `${r.hits.map((h, i) => `${i + 1}. [${h.score.toFixed(4)}] ${h.doc.title || h.doc.id}
+   ${h.doc.id}   lexical#${h.lexicalRank ?? "-"} dense#${h.denseRank ?? "-"}`).join("\n")}
+`
+    );
+    if (r.note) process.stderr.write(`  ${r.note}
+`);
+    return;
+  }
+  if (cmd === "changed") {
+    const url = positionalText(args);
+    if (!url) fail("usage: webindex changed <url> [--etag <v>] [--hash <sha256>]");
+    if (!/^https?:\/\//i.test(url)) fail("changed needs an http(s) URL");
+    const etag = argValue(args, "etag");
+    const hash = argValue(args, "hash");
+    if (!etag && !hash) {
+      const f = await fingerprint(url);
+      process.stdout.write(argBool(args, "json") ? jsonLine(f) : `etag ${f.etag ?? "-"}
+hash ${f.contentHash ?? "-"}
+`);
+      return;
+    }
+    const v = await hasChanged(url, { ...etag ? { etag } : {}, ...hash ? { contentHash: hash } : {} });
+    if (argBool(args, "json")) {
+      process.stdout.write(jsonLine(v));
+    } else {
+      process.stdout.write(`${v.changed === void 0 ? "unknown" : v.changed ? "changed" : "unchanged"} (via ${v.via})
+`);
+      if (v.note) process.stderr.write(`  ${v.note}
+`);
+    }
+    if (v.changed === void 0) process.exit(EXIT_FAILURE);
     return;
   }
   if (cmd === "skill") {

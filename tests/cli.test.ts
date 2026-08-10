@@ -10,6 +10,7 @@ import { LATEST_PROTOCOL } from "../src/mcp/protocol.js";
 import { STACK_SERVICES } from "../src/stack.js";
 import { installFetchMock } from "./fetchmock.js";
 import { envName } from "../src/brand.js";
+import { resetOllamaProbe } from "../src/embed.js";
 
 // Every stack service the engine knows, except `all` — the CLI spells that one
 // `stack`. Derived rather than typed out, because a hand-written list is exactly
@@ -299,6 +300,13 @@ describe("the MCP tools", () => {
       "webindex_robots",
       "webindex_sitemap",
       "webindex_feed",
+      // Primitives only: one input, one output, no product decision. The
+      // pipeline-shaped surfaces — hybrid ranking, orchestration, the skill
+      // toolchain — stay CLI-only, so the engine never reads to an agent as
+      // "do the whole job for me". tests/skill-md.test.ts pins that triage.
+      "webindex_tables",
+      "webindex_embed",
+      "webindex_crawl",
     ]);
     for (const t of tools) {
       expect(t.inputSchema.required.length, t.name).toBeGreaterThan(0);
@@ -833,5 +841,103 @@ describe("webindex skill", () => {
     skillJson();
     expect(await run(["skill", "frobnicate", "--root", repo])).toBe(1);
     expect(stderr()).toMatch(/usage: webindex skill check\|bundle\|vendor\|copy\|doctor\|init/);
+  });
+});
+
+// The layers added after the extraction, at the surface a user touches.
+describe("the new commands", () => {
+  const page = (body: string) => ({ status: 200, body: `<html><body>${body}</body></html>`, contentType: "text/html" });
+
+  it("reads a page's tables as data, and as markdown", async () => {
+    installFetchMock(() => page("<table><tr><th>a</th><th>b</th></tr><tr><td>1</td><td>2</td></tr></table>"));
+    expect(await run(["tables", "https://t.test/", "--json"])).toBe(0);
+    expect(JSON.parse(stdout())[0]).toEqual({ headers: ["a", "b"], rows: [["1", "2"]] });
+
+    out = [];
+    await run(["tables", "https://t.test/"]);
+    expect(stdout()).toContain("| --- | --- |");
+  });
+
+  it("says so when a page has no tables, rather than printing nothing", async () => {
+    installFetchMock(() => page("<p>prose</p>"));
+    expect(await run(["tables", "https://t.test/"])).toBe(1);
+    expect(stderr()).toMatch(/no tables/);
+  });
+
+  it("refuses to crawl without a budget", async () => {
+    // Enumerating someone else's site is the one operation here that can
+    // inconvenience them, so the ceiling is the caller's decision.
+    expect(await run(["crawl", "https://s.test/"])).toBe(1);
+    expect(stderr()).toMatch(/needs --max/);
+  });
+
+  it("walks a site within its budget and reports what it was refused", async () => {
+    installFetchMock((url) => {
+      if (url.includes("robots.txt")) return { status: 200, body: "User-agent: *\nDisallow: /private", contentType: "text/plain" };
+      if (url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+      if (url === "https://s.test/") return page('<a href="/a">a</a><a href="/private">p</a>');
+      return page("<p>ok</p>");
+    });
+    process.env[envName("POLITE_DELAY_MS")] = "0";
+    expect(await run(["crawl", "https://s.test/", "--max", "5", "--json"])).toBe(0);
+    const r = JSON.parse(stdout());
+    expect(r.pages.map((p: { url: string }) => p.url)).toEqual(["https://s.test/", "https://s.test/a"]);
+    expect(r.disallowed).toEqual(["https://s.test/private"]);
+  });
+
+  it("embeds a text, and says which command to run when nothing answers", async () => {
+    installFetchMock((url) =>
+      url.includes("/api/tags")
+        ? { status: 200, body: "{}", contentType: "application/json" }
+        : { status: 200, body: JSON.stringify({ embeddings: [[0.1, 0.2]] }), contentType: "application/json" },
+    );
+    process.env[envName("OLLAMA")] = "http://ol.test";
+    expect(await run(["embed", "hello", "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ dimensions: 2, vector: [0.1, 0.2] });
+
+    out = [];
+    err = [];
+    resetOllamaProbe();
+    installFetchMock(() => ({ status: 502, body: "", contentType: "text/plain" }));
+    expect(await run(["embed", "hello"])).toBe(1);
+    expect(stderr()).toMatch(/semantic up/);
+  });
+
+  it("ranks hybridly, and keeps the degradation note off stdout", async () => {
+    // The reason a run ranked lexically must be visible without landing in the
+    // middle of the ranking — the same rule `search` follows.
+    resetOllamaProbe();
+    installFetchMock(() => ({ status: 502, body: "", contentType: "text/plain" }));
+    process.env[envName("OLLAMA")] = "http://ol.test";
+    const docs = join(dir, "docs.json");
+    writeFileSync(
+      docs,
+      JSON.stringify([
+        { url: "https://a.test", title: "Token bucket", text: "smooths bursts" },
+        { url: "https://b.test", title: "Braising", text: "a slow method" },
+      ]),
+    );
+    expect(await run(["hybrid", "--query", "token bucket", "--docs", docs])).toBe(0);
+    expect(stdout()).toContain("https://a.test");
+    expect(stdout()).not.toMatch(/semantic up/);
+    expect(stderr()).toMatch(/semantic up/);
+  });
+
+  it("fingerprints a URL, then answers whether it changed", async () => {
+    installFetchMock(() => ({ status: 200, body: "v1", contentType: "text/html", headers: { etag: '"a"' } }));
+    expect(await run(["changed", "https://c.test/", "--json"])).toBe(0);
+    expect(JSON.parse(stdout()).etag).toBe('"a"');
+
+    out = [];
+    installFetchMock(() => ({ status: 200, body: "v2", contentType: "text/html", headers: { etag: '"b"' } }));
+    expect(await run(["changed", "https://c.test/", "--etag", '"a"'])).toBe(0);
+    expect(stdout()).toMatch(/^changed \(via etag\)/);
+  });
+
+  it("exits non-zero when it could not tell whether a URL changed", async () => {
+    // A watcher script must never read an error as "nothing to do".
+    installFetchMock(() => ({ status: 500, body: "", contentType: "text/plain" }));
+    expect(await run(["changed", "https://c.test/", "--etag", '"a"'])).toBe(1);
+    expect(stdout()).toMatch(/unknown/);
   });
 });

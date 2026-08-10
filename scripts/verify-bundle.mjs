@@ -118,6 +118,12 @@ const ALLOWED_FOREIGN = new Set([
   "filter",
   "unshallow",
   "deepen",
+  // A CONSUMER's flags, quoted in references/orchestration.md's worked example.
+  // The document shows a skill declaring its own phases, so the commands it
+  // emits are that skill's, not this engine's.
+  "run-root",
+  "master",
+  "stdout",
 ]);
 // `--help` and `--version` are answered by the parser rather than declared as
 // flags, so they are legitimately documented and legitimately absent from the

@@ -12,6 +12,26 @@ directly.
 This document is served over MCP as `skill://SKILL.md`, alongside
 `skill://references/*.md` — so `webindex mcp` documents its own engine.
 
+## What this is not
+
+**It is not the tool that answers a research question.** It has no evidence
+model, no dossier, no citation gate and no report — deliberately, because those
+are the product decisions it exists to stay out of. An agent that reaches for
+`search` → `crawl` → `fetch` and writes a summary from what comes back has
+produced exactly the ungrounded answer the tools below exist to prevent.
+
+So it is also **not an installed skill**: no `Use when…` in the description
+above, and the `SKILL.md` deliberately sits at the repository root, which is the
+one layout the installer refuses to bundle whole. It is a library, a command and
+an MCP server. Route by what you actually want:
+
+| You want | Use |
+|---|---|
+| a cited recap of what the web says | `ultrasearch` |
+| a precise answer about a named open-source project | `ultradoc` |
+| an idea turned into a buildable spec | `construct` |
+| one URL turned into clean text, or a pool ranked | this, directly |
+
 ## The commands
 
 ```
@@ -22,8 +42,14 @@ webindex rank --query <q> --docs <f> # BM25F + near-dup collapse + MMR
 webindex repo|issues|prs|releases <ref>
 webindex package <name> [--registry npm|pypi|crates]
 webindex meta|robots|sitemap|feed <url>
+webindex crawl <url> --max <n>       # bounded site walk, robots at every hop
+webindex tables <url>                # tables as data, not flattened prose
+webindex embed <text>                # local vectors, no key
+webindex hybrid --query <q>          # BM25F + dense, fused by RRF
+webindex changed <url> [--etag <v>]  # a 304 costs one round trip
 webindex cache status|clean [--all]
 webindex searxng|firecrawl|semantic|stack up|down|status
+webindex skill check|bundle|vendor|copy|doctor|init
 webindex doctor
 ```
 
@@ -89,3 +115,6 @@ them off for sandboxes, test suites and air-gapped runs.
 - `references/web-discovery.md` — the discovery cascade, and what each rung costs.
 - `references/provider-apis.md` — forges and package registries, and their quotas.
 - `references/ranking.md` — how a candidate pool becomes a reading order.
+- `references/semantic.md` — embeddings, the vector store, and why the two lanes are fused rather than chosen between.
+- `references/orchestration.md` — declaring phases, and the two constraints the emitted workflow must obey.
+- `references/skill-kit.md` — `skill.json`, the packaging gates, and the two ways a vendored engine goes wrong.

@@ -13,7 +13,7 @@ brew install maxgfr/tap/webindex
 
 ## Everything it does
 
-Three surfaces over one engine: **287 library exports**, **21 CLI commands**, **12 MCP
+Three surfaces over one engine: **308 library exports**, **26 CLI commands**, **15 MCP
 tools**. Nothing below needs an API key, and every optional helper degrades to a note
 rather than an error.
 
@@ -29,6 +29,12 @@ rather than an error.
 | **What a site publishes** | JSON-LD, OpenGraph and meta tags (author, dates, type, canonical); **robots.txt** with a real prefix-matcher; **sitemaps**, index-following bounded by your budget; **RSS/Atom** feeds and their discovery. `meta` `robots` `sitemap` `feed` |
 | **Cache** | On-disk, keyed by canonical URL + locale + extractor, revalidating rather than re-downloading, with `stats` and eviction. `cache status\|clean` |
 | **The container stack** | SearXNG, Firecrawl and the semantic pair, **embedded in the binary** — no checkout needed. `searxng` `firecrawl` `semantic` `stack` |
+| **Semantic** | The other half of the stack this package already shipped. A local **Ollama** embedding client (no key, nothing leaves the machine), a **Qdrant** client, and `hybridSearch` — BM25F ⊕ dense, fused by RRF because the two fail in opposite directions and their scores share no scale. `embed` · `hybrid` · `webindex_embed` |
+| **Crawling** | A per-host token bucket that finally *applies* the `Crawl-delay` robots.txt has always been parsed for, and `crawlSite` — a bounded BFS honouring robots at **every hop**. Following one citation is not crawling; enumerating a site is. `crawl` · `webindex_crawl` |
+| **Change** | `fingerprint` and `hasChanged`: a 304 costs one round trip and no body, and the verdict says *how* it decided — etag and content-hash are different strengths of evidence. "Could not tell" is never reported as "unchanged". `changed` |
+| **Tables** | `<table>` as headers and rows with `colspan`/`rowspan` resolved. Plain extraction flattens a table into prose in which every figure has lost its row and column — invisibly, because the result still reads well. `tables` · `webindex_tables` |
+| **The harness** | What every skill built on this engine was rewriting: the run directory, a validating CLI parser with a real exit-code taxonomy, the multi-agent **fan-out emitter**, and the mechanics of reading citations out of a report. |
+| **Skill packaging** | `webindex skill vendor\|check\|bundle\|copy\|doctor\|init` — the ~600 lines of packaging scripts each skill repo used to carry, driven by one `skill.json`. Dev-time, so it needs no vendoring and serves a repo that does not vendor this engine at all. |
 | **MCP** | The whole protocol: version negotiation, cancellation, schema validation, an error taxonomy, and both stdio and HTTP transports. An oversized response is **withheld with advice**, never truncated. |
 
 ## The command line
@@ -39,13 +45,19 @@ rather than an error.
 | `webindex rank --query <q>` | Order candidate documents against a question — BM25F with title and heading weighting, a SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. Reads a JSON array of `{url,title,text}` from `--docs <file>` or stdin. Deterministic: no model, no network. |
 | `webindex fetch <url>` | Fetch a URL and print its readable text. Routes PDFs and office documents to their ladders, falls back through Firecrawl and the Wayback Machine when a page resists. `--json` adds the title, status, extractor and any note. `--lang fr-FR` sets Accept-Language, `--firecrawl <base>\|off` overrides the extractor. |
 | `webindex extract <file>` | The same extraction on a file already on disk — PDF, office document, HTML or plain text. `--json` as above. |
-| `webindex mcp` | Serve the two tools below to an agent. `--transport stdio` (default) or `http` with `--port`, `--bind`, `--allow-remote`. |
+| `webindex mcp` | Serve the tools below to an agent. `--transport stdio` (default) or `http` with `--port`, `--bind`, `--allow-remote`. |
 | `webindex searxng up\|down\|status` | Drive the keyless SearXNG container. |
 | `webindex semantic up\|down\|status` | Drive Qdrant and Ollama, and pull the embedding model once they answer. |
 | `webindex firecrawl up\|down\|status` | Drive Firecrawl, which cleans a page with a real headless browser. It delegates its own search to SearXNG, so this starts both. |
 | `webindex stack up\|down\|status\|path` | Everything at once. `path` prints where the compose file was written. |
 | `webindex cache status\|clean` | What the on-disk fetch cache holds — entries, size, how many are still fresh. `clean` drops the stale ones, `--all` drops every one. |
-| `webindex doctor` | Which optional helpers answer — SearXNG, Firecrawl, the extraction rungs, OCR — on this machine. |
+| `webindex crawl <url> --max <n>` | Walk a site from a seed, breadth-first, consulting robots.txt at **every hop**. `--max` is required: following one citation needs no permission, enumerating a site does, and an unbounded walk is the one thing here that can inconvenience somebody else's server. `--depth`, `--cross-origin`. |
+| `webindex tables <url>` | The page's tables as headers and rows, `colspan` and `rowspan` resolved. `--json` for the rows, otherwise markdown. |
+| `webindex embed <text>` | A vector from the local Ollama — no key, nothing leaves the machine. Needs `webindex semantic up`. |
+| `webindex hybrid --query <q>` | Rank documents with BM25F **and** a dense lane, fused by RRF. Each hit reports its rank in each lane. Degrades to the lexical half, with a note on stderr, when no embedding server answers. |
+| `webindex changed <url>` | Fingerprint a URL, or — given `--etag` / `--hash` — say whether it changed and how it was decided. Exits non-zero on "could not tell", so a watcher never reads an error as "nothing to do". |
+| `webindex skill <action>` | Packaging gates for a repo built on this engine, driven by its `skill.json`: `vendor` (pin by tag + sha256, `--check` for the offline drift/staleness gate), `check` (no module may re-declare an engine export), `bundle` (`skills add` would install a working skill), `copy`, `doctor`, `init`. |
+| `webindex doctor` | Which optional helpers answer — SearXNG, Firecrawl, Ollama, Qdrant, the extraction rungs, OCR — on this machine. |
 | `webindex version` | The engine version. |
 
 Nothing above needs an API key, and nothing is required: every optional helper
@@ -75,7 +87,7 @@ webindex stack path        # where the compose file landed, if you want to read 
 
 ## The MCP server
 
-`webindex mcp` exposes four tools. Point any MCP client at it:
+`webindex mcp` exposes fifteen tools — primitives only. Point any MCP client at it:
 
 ```bash
 claude mcp add webindex -- webindex mcp                    # stdio

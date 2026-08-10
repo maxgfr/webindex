@@ -1,0 +1,81 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+
+// The engine must not compete with the skills built on it.
+//
+// It is capable enough to LOOK like it answers a research question — it can
+// search, crawl, fetch and rank — while having, by design, no evidence model,
+// no citation gate and no report. If it ever entered the description-matching
+// pool it would sometimes win against ultrasearch or ultradoc and deliver a
+// worse answer: the ungrounded summary those tools exist to prevent.
+//
+// Nothing in the code can enforce that. These assertions can.
+
+const root = join(import.meta.dirname, "..");
+const skillMd = readFileSync(join(root, "SKILL.md"), "utf8");
+const frontmatter = (/^---\r?\n([\s\S]*?)\r?\n---/.exec(skillMd)?.[1] ?? "") as string;
+const description = /^description:\s*([\s\S]*?)(?=\n\w+:|$)/m.exec(frontmatter)?.[1]?.trim() ?? "";
+
+describe("the engine stays out of the skill-matching pool", () => {
+  it("has a frontmatter description at all", () => {
+    // A negative control: every assertion below is vacuous if this is empty.
+    expect(description.length).toBeGreaterThan(80);
+  });
+
+  it("describes itself without any trigger phrasing", () => {
+    // Every installed skill in this family opens with "Use when the user…" and
+    // carries a Triggers list. That shape is what makes a skill WIN a match.
+    // This one describes what it is; it never tells an agent when to reach for
+    // it, and that is the difference between a library and a competitor.
+    for (const trigger of [/\buse when\b/i, /\btriggers?\s*:/i, /\buse this (skill|when)\b/i, /\binvoke (this|when)\b/i, /\bwhenever the user\b/i]) {
+      expect(description, `description must not read as a trigger (${trigger})`).not.toMatch(trigger);
+    }
+  });
+
+  it("keeps SKILL.md at the repository root, which is the layout that cannot be installed whole", () => {
+    // The installer early-returns on a root SKILL.md and installs that file
+    // alone. For a real skill that is a packaging bug — the assertion
+    // `skill bundle` makes. Here it is the point: this document is MCP
+    // documentation, not an installable package.
+    expect(existsSync(join(root, "SKILL.md"))).toBe(true);
+    expect(existsSync(join(root, "skills"))).toBe(false);
+  });
+
+  it("says plainly what it is not, and routes elsewhere", () => {
+    // The document goes to every agent that connects to the MCP server, so it
+    // is the right place to say "I am not the tool for that" — and to name the
+    // one that is.
+    expect(skillMd).toMatch(/## What this is not/);
+    for (const skill of ["ultrasearch", "ultradoc", "construct"]) expect(skillMd).toContain(skill);
+  });
+
+  it("still fits the matching cap, in case it is ever read as one", () => {
+    expect(description.length).toBeLessThanOrEqual(1024);
+  });
+});
+
+describe("the MCP surface stays primitives, not pipelines", () => {
+  const cli = readFileSync(join(root, "src", "cli.ts"), "utf8");
+  const tools = [...cli.matchAll(/name: "(webindex_[a-z_]+)"/g)].map((m) => m[1] as string);
+
+  it("declares tools", () => {
+    expect(tools.length).toBeGreaterThan(10);
+  });
+
+  it("exposes no pipeline-shaped tool", () => {
+    // The tri: one input, one output, no product decision. `hybrid_search`,
+    // `orchestrate` and the `skill` toolchain are all reachable from the CLI
+    // and deliberately absent here — each of them reads to an agent as "do the
+    // whole job for me", which is how the engine would start eating the skills
+    // built on it.
+    for (const forbidden of ["webindex_hybrid_search", "webindex_hybrid", "webindex_orchestrate", "webindex_skill", "webindex_check"]) {
+      expect(tools, `${forbidden} is pipeline-shaped and must stay CLI-only`).not.toContain(forbidden);
+    }
+  });
+
+  it("keeps the crawl tool bounded, so enumerating a site is never accidental", () => {
+    const decl = /name: "webindex_crawl"[\s\S]*?required: \[([^\]]*)\]/.exec(cli)?.[1] ?? "";
+    expect(decl).toContain("max");
+  });
+});
