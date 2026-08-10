@@ -1738,6 +1738,241 @@ ${up.stderr}` : ""}`, code: 1 };
   return { message: [`${tag}: ${spec.summary}`, ...spec.postUp?.(file, run) ?? []].join("\n"), code: 0 };
 }
 
+// src/embed.ts
+function ollamaBase() {
+  return env("OLLAMA") ?? "http://localhost:11434";
+}
+var probed;
+async function probeOllama(base = ollamaBase()) {
+  if (base.toLowerCase() === "off") return false;
+  if (probed !== void 0) return probed;
+  const r = await httpJson("GET", `${base.replace(/\/+$/, "")}/api/tags`, void 0, { timeoutMs: 2e3, retries: 0 });
+  probed = r.ok;
+  return probed;
+}
+
+// src/url.ts
+var TRACKING_PARAMS = /^(utm_|fbclid$|gclid$|mc_|ref$|ref_src$|ref_url$|spm$|_hsenc$|_hsmi$|igshid$)/i;
+function canonicalizeUrl(raw) {
+  try {
+    const u = new URL(raw.trim());
+    const proto = u.protocol.toLowerCase();
+    const host = u.hostname.toLowerCase().replace(/^www\./, "");
+    let port = u.port;
+    if (proto === "http:" && port === "80" || proto === "https:" && port === "443") port = "";
+    const path = u.pathname.replace(/\/+$/, "");
+    const keep = [];
+    for (const [k, v] of u.searchParams) {
+      if (!TRACKING_PARAMS.test(k)) keep.push([k, v]);
+    }
+    keep.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+    const search2 = keep.length ? "?" + keep.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&") : "";
+    return `${proto}//${host}${port ? ":" + port : ""}${path}${search2}`.replace(/\/$/, "");
+  } catch {
+    return raw.trim().replace(/#.*$/, "").replace(/\/$/, "");
+  }
+}
+var FNV_OFFSET = 0xcbf29ce484222325n;
+var FNV_PRIME = 0x100000001b3n;
+var MASK64 = (1n << 64n) - 1n;
+function fnv1a64(s) {
+  let h = FNV_OFFSET;
+  for (let i = 0; i < s.length; i++) {
+    h ^= BigInt(s.charCodeAt(i));
+    h = h * FNV_PRIME & MASK64;
+  }
+  return h;
+}
+
+// src/rank.ts
+function bm25Tokenize(text) {
+  if (!text) return [];
+  const out = [];
+  for (const raw of text.split(/[^\p{L}\p{N}_]+/u)) {
+    if (raw.length < 2) continue;
+    if (isStopword(raw)) continue;
+    const t = foldTerm(raw);
+    if (t.length >= 2) out.push(t);
+  }
+  return out;
+}
+function docTokens(doc, titleWeight, headingWeight) {
+  const out = bm25Tokenize(doc.body);
+  const headings = bm25Tokenize(doc.headings);
+  for (let r = 0; r < headingWeight; r++) out.push(...headings);
+  const title = bm25Tokenize(doc.title);
+  for (let r = 0; r < titleWeight; r++) out.push(...title);
+  return out;
+}
+function proximityBonus(tokens, queryTerms, window = 6, cap = 0.1) {
+  if (queryTerms.length < 2) return 0;
+  const q = new Set(queryTerms);
+  const hits = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (q.has(tok)) hits.push({ pos: i, term: tok });
+  }
+  if (hits.length < 2) return 0;
+  let close = 0;
+  for (let i = 1; i < hits.length; i++) {
+    if (hits[i].term !== hits[i - 1].term && hits[i].pos - hits[i - 1].pos <= window) close++;
+  }
+  return Math.min(cap, cap * (close / Math.max(1, queryTerms.length - 1)));
+}
+function buildBm25Index(question, docs, opts = {}) {
+  const k1 = opts.k1 ?? 1.2;
+  const b = opts.b ?? 0.75;
+  const titleWeight = 3;
+  const headingWeight = 2;
+  const queryTerms = [...new Set(bm25Tokenize(question))];
+  const N = docs.length;
+  const df = /* @__PURE__ */ new Map();
+  let totalLen = 0;
+  for (const doc of docs) {
+    const toks = docTokens(doc, titleWeight, headingWeight);
+    totalLen += toks.length;
+    for (const t of new Set(toks)) df.set(t, (df.get(t) ?? 0) + 1);
+  }
+  const avgdl = N ? totalLen / N : 0;
+  const idf = /* @__PURE__ */ new Map();
+  for (const t of queryTerms) {
+    if (N < 3) {
+      idf.set(t, 1);
+      continue;
+    }
+    const dfi = df.get(t) ?? 0;
+    idf.set(t, Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5)));
+  }
+  return { idf, avgdl, N, queryTerms, k1, b, titleWeight, headingWeight };
+}
+function bm25Score(index, doc) {
+  if (!index.queryTerms.length) return 0;
+  const toks = docTokens(doc, index.titleWeight, index.headingWeight);
+  const dl = toks.length;
+  if (!dl) return 0;
+  const tf = /* @__PURE__ */ new Map();
+  for (const t of toks) tf.set(t, (tf.get(t) ?? 0) + 1);
+  const { k1, b, avgdl } = index;
+  const lenNorm = 1 - b + b * (avgdl ? dl / avgdl : 1);
+  let score = 0;
+  for (const term of index.queryTerms) {
+    const f = tf.get(term);
+    if (!f) continue;
+    const idf = index.idf.get(term) ?? 0;
+    score += idf * (f * (k1 + 1)) / (f + k1 * lenNorm);
+  }
+  return score * (1 + proximityBonus(toks, index.queryTerms));
+}
+function bm25MatchedTerms(index, doc) {
+  if (!index.queryTerms.length) return [];
+  const present = new Set(docTokens(doc, index.titleWeight, index.headingWeight));
+  return index.queryTerms.filter((t) => present.has(t));
+}
+function simhash(text) {
+  const toks = bm25Tokenize(text);
+  const shingles = [];
+  if (toks.length < 3) shingles.push(...toks);
+  else for (let i = 0; i + 3 <= toks.length; i++) shingles.push(`${toks[i]} ${toks[i + 1]} ${toks[i + 2]}`);
+  if (!shingles.length) return 0n;
+  const v = new Array(64).fill(0);
+  for (const sh2 of shingles) {
+    const h = fnv1a64(sh2);
+    for (let b = 0; b < 64; b++) v[b] += (h >> BigInt(b) & 1n) === 1n ? 1 : -1;
+  }
+  let out = 0n;
+  for (let b = 0; b < 64; b++) if (v[b] > 0) out |= 1n << BigInt(b);
+  return out;
+}
+function hammingDistance(a, b) {
+  let x = a ^ b;
+  let count = 0;
+  while (x) {
+    x &= x - 1n;
+    count++;
+  }
+  return count;
+}
+function dedupeNearDuplicates(items, opts = {}) {
+  const maxBits = opts.maxBits ?? 3;
+  const minChars = opts.minChars ?? 500;
+  const better = (a, b) => a.score !== b.score ? a.score > b.score : a.url.localeCompare(b.url) < 0;
+  const kept = [];
+  let dropped = 0;
+  for (const it of items) {
+    const text = it.text || "";
+    const hash = text.length >= minChars ? simhash(text) : null;
+    if (hash !== null) {
+      const dup = kept.find((k) => k.hash !== null && hammingDistance(k.hash, hash) <= maxBits);
+      if (dup) {
+        dropped++;
+        if (better(it, dup.it)) {
+          dup.it = it;
+          dup.hash = hash;
+        }
+        continue;
+      }
+    }
+    kept.push({ it, hash });
+  }
+  return { items: kept.map((k) => k.it), dropped };
+}
+function diversify(items, tokensOf, lambda = 0.75) {
+  if (items.length <= 2) return [...items];
+  const toks = new Map(items.map((it) => [it, tokensOf(it)]));
+  const max = Math.max(...items.map((it) => it.score), 1e-9);
+  const rel = (it) => it.score / max;
+  const jaccard = (a, b) => {
+    if (!a.size || !b.size) return 0;
+    const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+    let inter = 0;
+    for (const t of small) if (large.has(t)) inter++;
+    return inter / (a.size + b.size - inter);
+  };
+  let simMax = 0;
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      const v = jaccard(toks.get(items[i]), toks.get(items[j]));
+      if (v > simMax) simMax = v;
+    }
+  }
+  const sim = (a, b) => simMax > 0 ? jaccard(toks.get(a), toks.get(b)) / simMax : 0;
+  const remaining = [...items];
+  const out = [];
+  remaining.sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
+  out.push(remaining.shift());
+  const maxSim = new Map(remaining.map((it) => [it, sim(it, out[0])]));
+  while (remaining.length) {
+    let bestIdx = 0;
+    let bestVal = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < remaining.length; i++) {
+      const it = remaining[i];
+      const val = lambda * rel(it) - (1 - lambda) * (maxSim.get(it) ?? 0);
+      if (val > bestVal || val === bestVal && it.url.localeCompare(remaining[bestIdx].url) < 0) {
+        bestVal = val;
+        bestIdx = i;
+      }
+    }
+    const picked = remaining.splice(bestIdx, 1)[0];
+    out.push(picked);
+    for (const it of remaining) maxSim.set(it, Math.max(maxSim.get(it) ?? 0, sim(it, picked)));
+  }
+  return out;
+}
+
+// src/vector.ts
+function qdrantBase() {
+  return env("QDRANT") ?? "http://localhost:6333";
+}
+var clean = (base) => base.replace(/\/+$/, "");
+var probed2;
+async function probeQdrant(base = qdrantBase()) {
+  if (base.toLowerCase() === "off") return false;
+  if (probed2 !== void 0) return probed2;
+  const r = await httpJson("GET", `${clean(base)}/collections`, void 0, { timeoutMs: 2e3, retries: 0 });
+  probed2 = r.ok;
+  return probed2;
+}
+
 // src/locale.ts
 var LANG_COUNTRY = {
   en: "us",
@@ -1781,39 +2016,6 @@ function acceptLanguageHeader(lang, region) {
   const R = resolveRegion(lang, region).toUpperCase();
   if (l === "en") return `${l}-${R},${l};q=0.9`;
   return `${l}-${R},${l};q=0.9,en;q=0.5`;
-}
-
-// src/url.ts
-var TRACKING_PARAMS = /^(utm_|fbclid$|gclid$|mc_|ref$|ref_src$|ref_url$|spm$|_hsenc$|_hsmi$|igshid$)/i;
-function canonicalizeUrl(raw) {
-  try {
-    const u = new URL(raw.trim());
-    const proto = u.protocol.toLowerCase();
-    const host = u.hostname.toLowerCase().replace(/^www\./, "");
-    let port = u.port;
-    if (proto === "http:" && port === "80" || proto === "https:" && port === "443") port = "";
-    const path = u.pathname.replace(/\/+$/, "");
-    const keep = [];
-    for (const [k, v] of u.searchParams) {
-      if (!TRACKING_PARAMS.test(k)) keep.push([k, v]);
-    }
-    keep.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-    const search2 = keep.length ? "?" + keep.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&") : "";
-    return `${proto}//${host}${port ? ":" + port : ""}${path}${search2}`.replace(/\/$/, "");
-  } catch {
-    return raw.trim().replace(/#.*$/, "").replace(/\/$/, "");
-  }
-}
-var FNV_OFFSET = 0xcbf29ce484222325n;
-var FNV_PRIME = 0x100000001b3n;
-var MASK64 = (1n << 64n) - 1n;
-function fnv1a64(s) {
-  let h = FNV_OFFSET;
-  for (let i = 0; i < s.length; i++) {
-    h ^= BigInt(s.charCodeAt(i));
-    h = h * FNV_PRIME & MASK64;
-  }
-  return h;
 }
 
 // src/engines.ts
@@ -2818,181 +3020,6 @@ async function resolvePackage(name, opts = {}) {
   return void 0;
 }
 
-// src/rank.ts
-function bm25Tokenize(text) {
-  if (!text) return [];
-  const out = [];
-  for (const raw of text.split(/[^\p{L}\p{N}_]+/u)) {
-    if (raw.length < 2) continue;
-    if (isStopword(raw)) continue;
-    const t = foldTerm(raw);
-    if (t.length >= 2) out.push(t);
-  }
-  return out;
-}
-function docTokens(doc, titleWeight, headingWeight) {
-  const out = bm25Tokenize(doc.body);
-  const headings = bm25Tokenize(doc.headings);
-  for (let r = 0; r < headingWeight; r++) out.push(...headings);
-  const title = bm25Tokenize(doc.title);
-  for (let r = 0; r < titleWeight; r++) out.push(...title);
-  return out;
-}
-function proximityBonus(tokens, queryTerms, window = 6, cap = 0.1) {
-  if (queryTerms.length < 2) return 0;
-  const q = new Set(queryTerms);
-  const hits = [];
-  for (let i = 0; i < tokens.length; i++) {
-    const tok = tokens[i];
-    if (q.has(tok)) hits.push({ pos: i, term: tok });
-  }
-  if (hits.length < 2) return 0;
-  let close = 0;
-  for (let i = 1; i < hits.length; i++) {
-    if (hits[i].term !== hits[i - 1].term && hits[i].pos - hits[i - 1].pos <= window) close++;
-  }
-  return Math.min(cap, cap * (close / Math.max(1, queryTerms.length - 1)));
-}
-function buildBm25Index(question, docs, opts = {}) {
-  const k1 = opts.k1 ?? 1.2;
-  const b = opts.b ?? 0.75;
-  const titleWeight = 3;
-  const headingWeight = 2;
-  const queryTerms = [...new Set(bm25Tokenize(question))];
-  const N = docs.length;
-  const df = /* @__PURE__ */ new Map();
-  let totalLen = 0;
-  for (const doc of docs) {
-    const toks = docTokens(doc, titleWeight, headingWeight);
-    totalLen += toks.length;
-    for (const t of new Set(toks)) df.set(t, (df.get(t) ?? 0) + 1);
-  }
-  const avgdl = N ? totalLen / N : 0;
-  const idf = /* @__PURE__ */ new Map();
-  for (const t of queryTerms) {
-    if (N < 3) {
-      idf.set(t, 1);
-      continue;
-    }
-    const dfi = df.get(t) ?? 0;
-    idf.set(t, Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5)));
-  }
-  return { idf, avgdl, N, queryTerms, k1, b, titleWeight, headingWeight };
-}
-function bm25Score(index, doc) {
-  if (!index.queryTerms.length) return 0;
-  const toks = docTokens(doc, index.titleWeight, index.headingWeight);
-  const dl = toks.length;
-  if (!dl) return 0;
-  const tf = /* @__PURE__ */ new Map();
-  for (const t of toks) tf.set(t, (tf.get(t) ?? 0) + 1);
-  const { k1, b, avgdl } = index;
-  const lenNorm = 1 - b + b * (avgdl ? dl / avgdl : 1);
-  let score = 0;
-  for (const term of index.queryTerms) {
-    const f = tf.get(term);
-    if (!f) continue;
-    const idf = index.idf.get(term) ?? 0;
-    score += idf * (f * (k1 + 1)) / (f + k1 * lenNorm);
-  }
-  return score * (1 + proximityBonus(toks, index.queryTerms));
-}
-function bm25MatchedTerms(index, doc) {
-  if (!index.queryTerms.length) return [];
-  const present = new Set(docTokens(doc, index.titleWeight, index.headingWeight));
-  return index.queryTerms.filter((t) => present.has(t));
-}
-function simhash(text) {
-  const toks = bm25Tokenize(text);
-  const shingles = [];
-  if (toks.length < 3) shingles.push(...toks);
-  else for (let i = 0; i + 3 <= toks.length; i++) shingles.push(`${toks[i]} ${toks[i + 1]} ${toks[i + 2]}`);
-  if (!shingles.length) return 0n;
-  const v = new Array(64).fill(0);
-  for (const sh2 of shingles) {
-    const h = fnv1a64(sh2);
-    for (let b = 0; b < 64; b++) v[b] += (h >> BigInt(b) & 1n) === 1n ? 1 : -1;
-  }
-  let out = 0n;
-  for (let b = 0; b < 64; b++) if (v[b] > 0) out |= 1n << BigInt(b);
-  return out;
-}
-function hammingDistance(a, b) {
-  let x = a ^ b;
-  let count = 0;
-  while (x) {
-    x &= x - 1n;
-    count++;
-  }
-  return count;
-}
-function dedupeNearDuplicates(items, opts = {}) {
-  const maxBits = opts.maxBits ?? 3;
-  const minChars = opts.minChars ?? 500;
-  const better = (a, b) => a.score !== b.score ? a.score > b.score : a.url.localeCompare(b.url) < 0;
-  const kept = [];
-  let dropped = 0;
-  for (const it of items) {
-    const text = it.text || "";
-    const hash = text.length >= minChars ? simhash(text) : null;
-    if (hash !== null) {
-      const dup = kept.find((k) => k.hash !== null && hammingDistance(k.hash, hash) <= maxBits);
-      if (dup) {
-        dropped++;
-        if (better(it, dup.it)) {
-          dup.it = it;
-          dup.hash = hash;
-        }
-        continue;
-      }
-    }
-    kept.push({ it, hash });
-  }
-  return { items: kept.map((k) => k.it), dropped };
-}
-function diversify(items, tokensOf, lambda = 0.75) {
-  if (items.length <= 2) return [...items];
-  const toks = new Map(items.map((it) => [it, tokensOf(it)]));
-  const max = Math.max(...items.map((it) => it.score), 1e-9);
-  const rel = (it) => it.score / max;
-  const jaccard = (a, b) => {
-    if (!a.size || !b.size) return 0;
-    const [small, large] = a.size <= b.size ? [a, b] : [b, a];
-    let inter = 0;
-    for (const t of small) if (large.has(t)) inter++;
-    return inter / (a.size + b.size - inter);
-  };
-  let simMax = 0;
-  for (let i = 0; i < items.length; i++) {
-    for (let j = i + 1; j < items.length; j++) {
-      const v = jaccard(toks.get(items[i]), toks.get(items[j]));
-      if (v > simMax) simMax = v;
-    }
-  }
-  const sim = (a, b) => simMax > 0 ? jaccard(toks.get(a), toks.get(b)) / simMax : 0;
-  const remaining = [...items];
-  const out = [];
-  remaining.sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
-  out.push(remaining.shift());
-  const maxSim = new Map(remaining.map((it) => [it, sim(it, out[0])]));
-  while (remaining.length) {
-    let bestIdx = 0;
-    let bestVal = Number.NEGATIVE_INFINITY;
-    for (let i = 0; i < remaining.length; i++) {
-      const it = remaining[i];
-      const val = lambda * rel(it) - (1 - lambda) * (maxSim.get(it) ?? 0);
-      if (val > bestVal || val === bestVal && it.url.localeCompare(remaining[bestIdx].url) < 0) {
-        bestVal = val;
-        bestIdx = i;
-      }
-    }
-    const picked = remaining.splice(bestIdx, 1)[0];
-    out.push(picked);
-    for (const it of remaining) maxSim.set(it, Math.max(maxSim.get(it) ?? 0, sim(it, picked)));
-  }
-  return out;
-}
-
 // src/cli-kit.ts
 import { basename as basename2 } from "path";
 var EXIT_FAILURE = 1;
@@ -3712,6 +3739,9 @@ ENVIRONMENT
   WEBINDEX_NO_NPX        skip the rungs that would install through npx
   WEBINDEX_OCR_MAX       documents this process may OCR (default 3)
   WEBINDEX_ENGINES       keyless engines to try: a comma list, or "off"  (default all)
+  WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
+  WEBINDEX_QDRANT        vector store base URL, or "off"      (default http://localhost:6333)
+  WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
   WEBINDEX_CACHE_DIR     where the fetch cache lives
   WEBINDEX_UA            override the browser User-Agent
 
@@ -4385,12 +4415,17 @@ async function dispatch(argv) {
   if (cmd === "doctor") {
     const base = firecrawlBase();
     const sx = searxngBase();
-    const [fc, sxUp] = await Promise.all([base ? probeFirecrawl(base) : false, sx ? probeSearxng(sx) : false]);
+    const ol = ollamaBase();
+    const qd = qdrantBase();
+    const [fc, sxUp, olUp, qdUp] = await Promise.all([base ? probeFirecrawl(base) : false, sx ? probeSearxng(sx) : false, probeOllama(ol), probeQdrant(qd)]);
+    const off = (s) => s.toLowerCase() === "off";
     const ocr = await ocrTools();
     const lines = [
       `webindex ${ENGINE_VERSION}`,
       `  searxng     ${sx ? sxUp ? `answering at ${sx}` : `not reachable at ${sx} \u2014 \`webindex searxng up\` starts it` : "disabled"}`,
       `  firecrawl   ${base ? fc ? `answering at ${base}` : `not reachable at ${base} \u2014 the built-in extractor is used instead` : "disabled"}`,
+      `  ollama      ${off(ol) ? "disabled" : olUp ? `answering at ${ol} (model ${embedModel()})` : `not reachable at ${ol} \u2014 \`webindex semantic up\` starts it`}`,
+      `  qdrant      ${off(qd) ? "disabled" : qdUp ? `answering at ${qd}` : `not reachable at ${qd} \u2014 \`webindex semantic up\` starts it`}`,
       `  pdf rungs   ${enabledExtractors().join(", ")}`,
       `  doc rungs   ${enabledDocExtractors().join(", ") || "none (disabled)"}`,
       `  ocr         ${ocr.copyablePdf && ocr.tesseract ? "available" : `unavailable (copyable-pdf: ${ocr.copyablePdf ? "yes" : "no"}, tesseract: ${ocr.tesseract ? "yes" : "no"})`}`,

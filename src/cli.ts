@@ -19,7 +19,9 @@ import { docFormatForUrl, extractDocument, enabledDocExtractors } from "./doc.js
 import { enabledExtractors, extractPdf, ocrTools } from "./pdf.js";
 import { fetchAndExtract, htmlToText, httpGet, looksLikePdfUrl } from "./fetch.js";
 import { firecrawlBase, probeFirecrawl } from "./firecrawl.js";
-import { ensureComposeMaterialized, STACK_SERVICES, stackControl } from "./stack.js";
+import { embedModel, ensureComposeMaterialized, STACK_SERVICES, stackControl } from "./stack.js";
+import { ollamaBase, probeOllama } from "./embed.js";
+import { probeQdrant, qdrantBase } from "./vector.js";
 import { isKeylessEngine, KEYLESS_ENGINES, type KeylessEngine } from "./engines.js";
 import { probeSearxng, search, searxngBase } from "./search.js";
 import { cacheClean, cacheDir, cacheStats } from "./cache.js";
@@ -126,6 +128,9 @@ ENVIRONMENT
   WEBINDEX_NO_NPX        skip the rungs that would install through npx
   WEBINDEX_OCR_MAX       documents this process may OCR (default 3)
   WEBINDEX_ENGINES       keyless engines to try: a comma list, or "off"  (default all)
+  WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
+  WEBINDEX_QDRANT        vector store base URL, or "off"      (default http://localhost:6333)
+  WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
   WEBINDEX_CACHE_DIR     where the fetch cache lives
   WEBINDEX_UA            override the browser User-Agent
 
@@ -907,12 +912,17 @@ async function dispatch(argv: string[]): Promise<void> {
   if (cmd === "doctor") {
     const base = firecrawlBase();
     const sx = searxngBase();
-    const [fc, sxUp] = await Promise.all([base ? probeFirecrawl(base) : false, sx ? probeSearxng(sx) : false]);
+    const ol = ollamaBase();
+    const qd = qdrantBase();
+    const [fc, sxUp, olUp, qdUp] = await Promise.all([base ? probeFirecrawl(base) : false, sx ? probeSearxng(sx) : false, probeOllama(ol), probeQdrant(qd)]);
+    const off = (s: string) => s.toLowerCase() === "off";
     const ocr = await ocrTools();
     const lines = [
       `webindex ${ENGINE_VERSION}`,
       `  searxng     ${sx ? (sxUp ? `answering at ${sx}` : `not reachable at ${sx} — \`webindex searxng up\` starts it`) : "disabled"}`,
       `  firecrawl   ${base ? (fc ? `answering at ${base}` : `not reachable at ${base} — the built-in extractor is used instead`) : "disabled"}`,
+      `  ollama      ${off(ol) ? "disabled" : olUp ? `answering at ${ol} (model ${embedModel()})` : `not reachable at ${ol} — \`webindex semantic up\` starts it`}`,
+      `  qdrant      ${off(qd) ? "disabled" : qdUp ? `answering at ${qd}` : `not reachable at ${qd} — \`webindex semantic up\` starts it`}`,
       `  pdf rungs   ${enabledExtractors().join(", ")}`,
       `  doc rungs   ${enabledDocExtractors().join(", ") || "none (disabled)"}`,
       `  ocr         ${ocr.copyablePdf && ocr.tesseract ? "available" : `unavailable (copyable-pdf: ${ocr.copyablePdf ? "yes" : "no"}, tesseract: ${ocr.tesseract ? "yes" : "no"})`}`,

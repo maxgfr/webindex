@@ -177,6 +177,14 @@ export { type Artifact, ensureDir, isNoWrite, resetNoWrite, setNoWrite, takeArti
 // directory holds JSON, not what the JSON means.
 export * from "./run.js";
 
+// ── Embeddings and vectors ──────────────────────────────────────────────────
+// The other half of the container stack this package already ships. `semantic
+// up` has started Ollama and Qdrant and pulled the model since v1.11, and until
+// now nothing here could call either. Optional like every service: absent means
+// a note and a lexical-only ranking, never an exception.
+export * from "./embed.js";
+export * from "./vector.js";
+
 // ── Reading citations out of a report ───────────────────────────────────────
 // The MECHANICS only: which bracketed tokens are citations, what a claim unit
 // is, and which regions of a document cannot ground one. Nothing here returns

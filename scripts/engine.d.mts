@@ -1836,6 +1836,163 @@ declare function readManifest<T>(dir: string, file?: string): T | undefined;
  */
 declare function writeManifest(dir: string, value: unknown, file?: string): string;
 
+/** Where the local Ollama answers. `off` disables the layer entirely. */
+declare function ollamaBase(): string;
+/** Whether the caller has turned embeddings off outright. */
+declare function embeddingsDisabled(): boolean;
+interface EmbedResult {
+    /** One vector per input, in input order. Empty when the service did not answer. */
+    vectors: number[][];
+    /** The model that produced them, for a caller that stores vectors alongside their model. */
+    model: string;
+    /** Why the result is empty, when it is. Never thrown — the layer is optional. */
+    note?: string;
+}
+/** Test seam, and the escape hatch for a server that came up mid-run. */
+declare function resetOllamaProbe(): void;
+/**
+ * Whether the local embedding server answers.
+ *
+ * Cached for the process: a probe per call would double the request count of
+ * every batch, and a server that goes away mid-run shows up as a failed embed
+ * anyway.
+ */
+declare function probeOllama(base?: string): Promise<boolean>;
+/**
+ * Embed a batch of texts.
+ *
+ * Order is preserved and matters: callers index their documents by position,
+ * and a race-ordered result would attach every vector to the wrong text —
+ * silently, since a vector carries no identity of its own. `mapLimit` gives that
+ * guarantee.
+ *
+ * An empty input returns immediately without probing, so a caller need not
+ * special-case it.
+ */
+declare function embed(texts: readonly string[], opts?: {
+    base?: string;
+    model?: string;
+    concurrency?: number;
+}): Promise<EmbedResult>;
+/** Embed one text. Convenience over `embed`, same degradation. */
+declare function embedOne(text: string, opts?: {
+    base?: string;
+    model?: string;
+}): Promise<number[] | undefined>;
+/**
+ * Cosine similarity, in [-1, 1].
+ *
+ * Returns 0 for a zero-magnitude vector rather than NaN. NaN propagates through
+ * every comparison as false, so a single degenerate embedding would silently
+ * sort to the bottom of one ranking and the top of another depending on how the
+ * comparator was written.
+ */
+declare function cosine(a: readonly number[], b: readonly number[]): number;
+/** A unit-length copy. A zero vector is returned unchanged, for the reason above. */
+declare function normalize(v: readonly number[]): number[];
+
+/** Where the local Qdrant answers. `off` disables the store. */
+declare function qdrantBase(): string;
+/** Test seam, and the escape hatch for a store that came up mid-run. */
+declare function resetQdrantProbe(): void;
+/** Whether the local vector store answers. Cached for the process, like the Ollama probe. */
+declare function probeQdrant(base?: string): Promise<boolean>;
+interface VectorPoint {
+    /** Qdrant accepts an unsigned integer or a UUID. A caller keying by URL should hash it. */
+    id: string | number;
+    vector: number[];
+    /** Whatever the caller needs back with a hit. The engine never reads it. */
+    payload?: Record<string, unknown>;
+}
+interface VectorHit {
+    id: string | number;
+    score: number;
+    payload?: Record<string, unknown>;
+}
+/**
+ * Create a collection if it is not already there.
+ *
+ * `size` must match the embedding model's dimension, and getting it wrong is
+ * not a soft failure — Qdrant rejects every later upsert. Callers derive it from
+ * a real embedding rather than hardcoding a number that changes with the model.
+ *
+ * Distance defaults to cosine because that is what `nomic-embed-text` is trained
+ * for and what `cosine()` here computes; a caller using a dot-product model says
+ * so explicitly.
+ */
+declare function ensureCollection(name: string, size: number, opts?: {
+    base?: string;
+    distance?: "Cosine" | "Dot" | "Euclid";
+}): Promise<{
+    ok: boolean;
+    note?: string;
+}>;
+/** Insert or replace points. Waits for the write, so a search right after sees them. */
+declare function upsert(name: string, points: readonly VectorPoint[], opts?: {
+    base?: string;
+}): Promise<{
+    ok: boolean;
+    note?: string;
+}>;
+/** Nearest neighbours of a vector. Empty with a note when the store is absent. */
+declare function searchVectors(name: string, vector: readonly number[], opts?: {
+    base?: string;
+    limit?: number;
+    filter?: unknown;
+}): Promise<{
+    hits: VectorHit[];
+    note?: string;
+}>;
+/** Drop a collection. Used by a caller that re-indexes from scratch. */
+declare function deleteCollection(name: string, opts?: {
+    base?: string;
+}): Promise<{
+    ok: boolean;
+    note?: string;
+}>;
+/**
+ * A document both lanes can read. Deliberately `Bm25Doc` itself rather than a
+ * new shape: it already carries the identity (`id`) the fusion keys on and the
+ * three fields the lexical lane weights, and inventing a parallel type would
+ * make every caller map between two descriptions of one document.
+ */
+type HybridDoc = Bm25Doc;
+interface HybridHit<D extends HybridDoc> {
+    doc: D;
+    /** The fused score. Comparable WITHIN one call and meaningless across calls. */
+    score: number;
+    /** 1-based rank in each lane, when that lane returned the document at all. */
+    lexicalRank?: number;
+    denseRank?: number;
+}
+/**
+ * Rank documents against a question with both retrievers, fused.
+ *
+ * The dense lane needs no vector store: it embeds the question and the
+ * documents in one batch and sorts by cosine. That keeps the common case — a
+ * pool of candidates already in memory, which is what a research run has —
+ * free of any indexing step. A caller with a corpus too large to embed per
+ * query indexes it in Qdrant and calls `searchVectors` directly.
+ *
+ * RRF rather than a weighted sum of scores: a cosine and a BM25 score share no
+ * scale, and any normalisation between them is a constant someone has to tune
+ * per corpus and will get wrong on the next one. Fusing by RANK needs no such
+ * constant, which is why it is the standard answer.
+ *
+ * With the embedding server absent, this degrades to exactly the lexical
+ * ranking the caller would have got from `bm25Score` alone, plus a note. It
+ * never throws and never returns fewer documents than it was given.
+ */
+declare function hybridSearch<D extends HybridDoc>(question: string, docs: readonly D[], opts?: {
+    limit?: number;
+    base?: string;
+    model?: string;
+    k?: number;
+}): Promise<{
+    hits: HybridHit<D>[];
+    note?: string;
+}>;
+
 /**
  * A bracketed token that is not a markdown link.
  *
@@ -2482,4 +2639,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type ToolDecl, ToolError, type ToolOutcome, UsageError, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, dedupeByUrl, dedupeNearDuplicates, defaultUa, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embedModel, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, have, headCommit, helpCoversFlag, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, listPhases, listReleases, listResources, listTags, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeSearxng, pubmedAbstractUrl, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, cosine, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, have, headCommit, helpCoversFlag, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, listPhases, listReleases, listResources, listTags, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetNoWrite, resetOcrBudget, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };

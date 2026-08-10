@@ -3789,6 +3789,163 @@ function writeManifest(dir, value, file = "manifest.json") {
 `);
 }
 
+// src/embed.ts
+function ollamaBase() {
+  return env("OLLAMA") ?? "http://localhost:11434";
+}
+function embeddingsDisabled() {
+  return ollamaBase().toLowerCase() === "off";
+}
+function embedConcurrency() {
+  return Math.max(1, envInt("EMBED_CONCURRENCY", 4));
+}
+function embedBatch() {
+  return Math.max(1, envInt("EMBED_BATCH", 16));
+}
+var probed;
+function resetOllamaProbe() {
+  probed = void 0;
+}
+async function probeOllama(base = ollamaBase()) {
+  if (base.toLowerCase() === "off") return false;
+  if (probed !== void 0) return probed;
+  const r = await httpJson("GET", `${base.replace(/\/+$/, "")}/api/tags`, void 0, { timeoutMs: 2e3, retries: 0 });
+  probed = r.ok;
+  return probed;
+}
+async function embed(texts, opts = {}) {
+  const model = opts.model ?? embedModel();
+  if (texts.length === 0) return { vectors: [], model };
+  const base = (opts.base ?? ollamaBase()).replace(/\/+$/, "");
+  if (base.toLowerCase() === "off") return { vectors: [], model, note: "embeddings are disabled (OLLAMA=off)." };
+  if (!await probeOllama(base)) {
+    return { vectors: [], model, note: `no embedding server at ${base} \u2014 \`${brand().cli} semantic up\` starts Ollama and pulls ${model}.` };
+  }
+  const batches = [];
+  const width = embedBatch();
+  for (let i = 0; i < texts.length; i += width) batches.push(texts.slice(i, i + width));
+  let note;
+  const results = await mapLimit(batches, opts.concurrency ?? embedConcurrency(), async (batch) => {
+    const r = await httpJson("POST", `${base}/api/embed`, { model, input: batch }, { timeoutMs: 6e4 });
+    const got = r.ok ? r.data?.embeddings : void 0;
+    if (!got || got.length !== batch.length) {
+      note ??= `embedding failed at ${base} (${r.error ?? `status ${r.status}`}) \u2014 is \`${model}\` pulled? \`${brand().cli} semantic up\` pulls it.`;
+      return void 0;
+    }
+    return got;
+  });
+  if (results.some((r) => r === void 0)) return { vectors: [], model, ...note ? { note } : {} };
+  return { vectors: results.flat(), model };
+}
+async function embedOne(text, opts = {}) {
+  const r = await embed([text], opts);
+  return r.vectors[0];
+}
+function cosine(a, b) {
+  const n = Math.min(a.length, b.length);
+  let dot = 0;
+  let ma = 0;
+  let mb = 0;
+  for (let i = 0; i < n; i++) {
+    const x = a[i];
+    const y = b[i];
+    dot += x * y;
+    ma += x * x;
+    mb += y * y;
+  }
+  if (ma === 0 || mb === 0) return 0;
+  return dot / (Math.sqrt(ma) * Math.sqrt(mb));
+}
+function normalize(v) {
+  let m = 0;
+  for (const x of v) m += x * x;
+  if (m === 0) return [...v];
+  const len = Math.sqrt(m);
+  return v.map((x) => x / len);
+}
+
+// src/vector.ts
+function qdrantBase() {
+  return env("QDRANT") ?? "http://localhost:6333";
+}
+var clean = (base) => base.replace(/\/+$/, "");
+var probed2;
+function resetQdrantProbe() {
+  probed2 = void 0;
+}
+async function probeQdrant(base = qdrantBase()) {
+  if (base.toLowerCase() === "off") return false;
+  if (probed2 !== void 0) return probed2;
+  const r = await httpJson("GET", `${clean(base)}/collections`, void 0, { timeoutMs: 2e3, retries: 0 });
+  probed2 = r.ok;
+  return probed2;
+}
+async function ensureCollection(name, size, opts = {}) {
+  const base = clean(opts.base ?? qdrantBase());
+  if (base.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
+  if (!await probeQdrant(base)) return { ok: false, note: unreachable(base) };
+  const existing = await httpJson("GET", `${base}/collections/${encodeURIComponent(name)}`, void 0, { retries: 0 });
+  if (existing.ok) return { ok: true };
+  const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}`, { vectors: { size, distance: opts.distance ?? "Cosine" } });
+  return r.ok ? { ok: true } : { ok: false, note: `could not create collection "${name}" at ${base}: ${r.error ?? `status ${r.status}`}` };
+}
+async function upsert(name, points, opts = {}) {
+  if (points.length === 0) return { ok: true };
+  const base = clean(opts.base ?? qdrantBase());
+  if (base.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
+  if (!await probeQdrant(base)) return { ok: false, note: unreachable(base) };
+  const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}/points?wait=true`, { points });
+  return r.ok ? { ok: true } : { ok: false, note: `upsert into "${name}" failed: ${r.error ?? `status ${r.status}`}` };
+}
+async function searchVectors(name, vector, opts = {}) {
+  const base = clean(opts.base ?? qdrantBase());
+  if (base.toLowerCase() === "off") return { hits: [], note: "the vector store is disabled (QDRANT=off)." };
+  if (!await probeQdrant(base)) return { hits: [], note: unreachable(base) };
+  const body = { vector: [...vector], limit: opts.limit ?? 10, with_payload: true, ...opts.filter ? { filter: opts.filter } : {} };
+  const r = await httpJson("POST", `${base}/collections/${encodeURIComponent(name)}/points/search`, body);
+  if (!r.ok) return { hits: [], note: `search in "${name}" failed: ${r.error ?? `status ${r.status}`}` };
+  const raw = r.data?.result ?? [];
+  return { hits: raw.map((h) => ({ id: h.id, score: h.score, ...h.payload ? { payload: h.payload } : {} })) };
+}
+async function deleteCollection(name, opts = {}) {
+  const base = clean(opts.base ?? qdrantBase());
+  if (base.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
+  const r = await httpJson("DELETE", `${base}/collections/${encodeURIComponent(name)}`, void 0, { retries: 0 });
+  return r.ok ? { ok: true } : { ok: false, note: `could not delete "${name}": ${r.error ?? `status ${r.status}`}` };
+}
+function unreachable(base) {
+  return `no vector store at ${base} \u2014 \`${brand().cli} semantic up\` starts Qdrant.`;
+}
+async function hybridSearch(question, docs, opts = {}) {
+  if (docs.length === 0) return { hits: [] };
+  const index = buildBm25Index(question, docs);
+  const lexical = [...docs].sort((a, b) => bm25Score(index, b) - bm25Score(index, a));
+  const embedded = await embed([question, ...docs.map((d) => [d.title, d.headings, d.body].filter(Boolean).join("\n"))], {
+    ...opts.base !== void 0 ? { base: opts.base } : {},
+    ...opts.model !== void 0 ? { model: opts.model } : {}
+  });
+  let dense = [];
+  let note = embedded.note;
+  if (embedded.vectors.length === docs.length + 1) {
+    const q = embedded.vectors[0];
+    const scored = docs.map((doc, i) => ({ doc, sim: cosine(q, embedded.vectors[i + 1]) }));
+    dense = scored.sort((a, b) => b.sim - a.sim).map((s) => s.doc);
+  } else if (!note) {
+    note = "the dense lane returned an unexpected number of vectors \u2014 ranking lexically only.";
+  }
+  const lists = dense.length ? [lexical, dense] : [lexical];
+  const fused = rrf(lists, (d) => d.id, opts.k ?? envInt("RRF_K", 60));
+  const lexRank = new Map(lexical.map((d, i) => [d.id, i + 1]));
+  const denseRank = new Map(dense.map((d, i) => [d.id, i + 1]));
+  const hits = [...docs].map((doc) => ({
+    doc,
+    score: fused.get(doc.id) ?? 0,
+    ...lexRank.has(doc.id) ? { lexicalRank: lexRank.get(doc.id) } : {},
+    ...denseRank.has(doc.id) ? { denseRank: denseRank.get(doc.id) } : {}
+  })).sort((a, b) => b.score - a.score);
+  return { hits: opts.limit ? hits.slice(0, opts.limit) : hits, ...note ? { note } : {} };
+}
+
 // src/cite.ts
 var TOKEN_RE2 = /\[([^\]\n]+)\](?!\()/g;
 var SOURCE_TOKEN = /^S\d+$/;
@@ -4976,6 +5133,7 @@ export {
   configure,
   contactUa,
   contentCoverage,
+  cosine,
   createServer,
   danglingTokens,
   ddgRedirectTarget,
@@ -4986,6 +5144,7 @@ export {
   dedupeByUrl,
   dedupeNearDuplicates,
   defaultUa,
+  deleteCollection,
   deriveCitableUrl,
   detectRateLimited,
   discoverFeeds,
@@ -4996,11 +5155,15 @@ export {
   documentedFlags,
   doiFromUrl,
   domainOf,
+  embed,
   embedModel,
+  embedOne,
+  embeddingsDisabled,
   emitWorkflowScript,
   enabledDocExtractors,
   enabledExtractors,
   ensureClone,
+  ensureCollection,
   ensureComposeMaterialized,
   ensureDir,
   ensureHistoryDepth,
@@ -5039,6 +5202,7 @@ export {
   htmlToText,
   httpGet,
   httpJson,
+  hybridSearch,
   isAllowed,
   isApiEndpoint,
   isCacheFresh,
@@ -5071,12 +5235,14 @@ export {
   missingFromHelp,
   nearestHeading,
   negotiateProtocol,
+  normalize,
   normalizeDoi,
   normalizeNumeralText,
   normalizeRepoUrl,
   ocrBudgetLeft,
   ocrPdf,
   ocrTools,
+  ollamaBase,
   oneWriterFooter,
   orMasks,
   orchestrateRun,
@@ -5097,8 +5263,11 @@ export {
   politeDelayMs,
   positionalText,
   probeFirecrawl,
+  probeOllama,
+  probeQdrant,
   probeSearxng,
   pubmedAbstractUrl,
+  qdrantBase,
   rankedKeywords,
   readCapped,
   readCappedBytes,
@@ -5119,7 +5288,9 @@ export {
   resetHistoryDepthCache,
   resetNoWrite,
   resetOcrBudget,
+  resetOllamaProbe,
   resetPdfLadderCache,
+  resetQdrantProbe,
   resetRobotsCache,
   resetRunLocks,
   resetSearxngProbeCache,
@@ -5138,6 +5309,7 @@ export {
   scrapeViaFirecrawl,
   search,
   searchIssues,
+  searchVectors,
   searchViaFirecrawl,
   searchViaKeyless,
   searchViaSearxng,
@@ -5165,6 +5337,7 @@ export {
   toBatches,
   uncitedIds,
   unitTexts,
+  upsert,
   urlDeclaresIdentity,
   validateArgs,
   withRunLock,
