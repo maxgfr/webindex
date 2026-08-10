@@ -1851,6 +1851,84 @@ declare function readManifest<T>(dir: string, file?: string): T | undefined;
  */
 declare function writeManifest(dir: string, value: unknown, file?: string): string;
 
+interface Fingerprint {
+    /** The URL as asked for. Not canonicalised: a caller comparing must compare like with like. */
+    url: string;
+    /** The strong validator, when the server sent one. */
+    etag?: string;
+    lastModified?: string;
+    /** SHA-256 of the body, when one was read. */
+    contentHash?: string;
+    /** Bytes read. 0 on a 304, which is the whole point of a 304. */
+    bytes: number;
+    status: number;
+    /** ISO timestamp of the observation, so a caller can age its own record. */
+    fetchedAt: string;
+}
+/** SHA-256 of a body, hex. Exported because a caller holding bytes from elsewhere wants the same digest. */
+declare function contentHash(body: string | Buffer): string;
+/**
+ * Observe a URL: its validators, its hash, and when it was seen.
+ *
+ * Always reads the body, because that is what makes the hash available for the
+ * many servers that send neither an ETag nor a Last-Modified. Use `hasChanged`
+ * when a validator is already in hand — that is the path that costs nothing.
+ */
+declare function fingerprint(url: string, opts?: {
+    timeoutMs?: number;
+    maxBytes?: number;
+}): Promise<Fingerprint>;
+interface ChangeVerdict {
+    /** Undefined when the request failed — "I could not tell" is not "unchanged". */
+    changed?: boolean;
+    /** How it was decided, so a caller can weigh the evidence. */
+    via: "not-modified" | "etag" | "last-modified" | "hash" | "unknown";
+    /** The fresh observation, so a caller can store it without a second request. */
+    fingerprint: Fingerprint;
+    note?: string;
+}
+/**
+ * Whether a URL has changed since a previous observation.
+ *
+ * Sends the conditional headers when `previous` carries validators. A 304 is
+ * the ideal answer: definitive, and no body crossed the wire.
+ *
+ * `changed` is deliberately OPTIONAL rather than defaulting to false. A network
+ * error, a 500 or a redirect to an error page all mean "I could not tell", and
+ * a caller that treats those as "unchanged" silently stops watching the page it
+ * asked to watch — which is the failure this shape exists to make impossible to
+ * write by accident.
+ */
+declare function hasChanged(url: string, previous?: Pick<Fingerprint, "etag" | "lastModified" | "contentHash">, opts?: {
+    timeoutMs?: number;
+    maxBytes?: number;
+}): Promise<ChangeVerdict>;
+
+interface Table {
+    /** The `<caption>`, when there is one. */
+    caption?: string;
+    /** Header cells, from `<thead>` or the first row of `<th>`. Empty when the table declares none. */
+    headers: string[];
+    /** Body rows, each padded to the widest row so a column index means one thing. */
+    rows: string[][];
+}
+/**
+ * Every table in a document, as rows and columns.
+ *
+ * A table with no data rows is dropped: a layout table used for positioning is
+ * still common on older sites, and returning it as data is a false positive a
+ * caller has no way to filter.
+ */
+declare function extractTables(html: string): Table[];
+/**
+ * A table as markdown, for folding back into extracted text.
+ *
+ * Pipes inside a cell are escaped, because an unescaped one silently splits the
+ * cell and shifts the rest of the row — the same failure the span handling above
+ * exists to prevent, reintroduced at the last step.
+ */
+declare function tableToMarkdown(table: Table): string;
+
 /** Test seam. Never call this from product code — in-flight waiters would bunch up. */
 declare function resetHostSchedule(): void;
 /**
@@ -2738,4 +2816,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, awaitHostSlot, backOffHost, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, cosine, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ChangeVerdict, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type Fingerprint, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type Table, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, awaitHostSlot, backOffHost, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, contentHash, cosine, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, extractTables, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, fingerprint, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, hasChanged, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, tableToMarkdown, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };

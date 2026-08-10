@@ -177,6 +177,18 @@ export { type Artifact, ensureDir, isNoWrite, resetNoWrite, setNoWrite, takeArti
 // directory holds JSON, not what the JSON means.
 export * from "./run.js";
 
+// ── Has this page changed? ──────────────────────────────────────────────────
+// The conditional GET was already here; the ANSWER was not. A 304 costs one
+// round trip and no body, and the verdict says how it was decided — "unchanged
+// by etag" and "unchanged by hash" are different strengths of evidence.
+export * from "./changed.js";
+
+// ── Tables, read as tables ──────────────────────────────────────────────────
+// htmlToText flattens a <table> into a run of cell text, which for prose is
+// right and for data is destructive: every figure loses the row and column it
+// belonged to, invisibly, because the result still reads plausibly.
+export * from "./tables.js";
+
 // ── Politeness, and walking a site on purpose ───────────────────────────────
 // A per-host token bucket that finally APPLIES the Crawl-delay robots.ts has
 // always parsed, and the bounded BFS that is the one caller robots.txt was

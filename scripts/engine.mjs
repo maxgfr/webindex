@@ -3799,6 +3799,139 @@ function writeManifest(dir, value, file = "manifest.json") {
 `);
 }
 
+// src/changed.ts
+import { createHash } from "crypto";
+function contentHash(body) {
+  return createHash("sha256").update(body).digest("hex");
+}
+async function fingerprint(url, opts = {}) {
+  const res = await httpGet(url, opts);
+  return {
+    url,
+    ...res.etag ? { etag: res.etag } : {},
+    ...res.lastModified ? { lastModified: res.lastModified } : {},
+    ...res.ok ? { contentHash: contentHash(res.body) } : {},
+    bytes: res.body.length,
+    status: res.status,
+    fetchedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+async function hasChanged(url, previous, opts = {}) {
+  const headers = {};
+  if (previous?.etag) headers["if-none-match"] = previous.etag;
+  if (previous?.lastModified) headers["if-modified-since"] = previous.lastModified;
+  const res = await httpGet(url, { ...opts, ...Object.keys(headers).length ? { headers } : {} });
+  const observed = {
+    url,
+    ...res.etag ? { etag: res.etag } : {},
+    ...res.lastModified ? { lastModified: res.lastModified } : {},
+    ...res.ok && res.body ? { contentHash: contentHash(res.body) } : {},
+    bytes: res.body.length,
+    status: res.status,
+    fetchedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (res.status === 304) return { changed: false, via: "not-modified", fingerprint: { ...observed, ...previous, status: 304, bytes: 0 } };
+  if (!res.ok) {
+    return { via: "unknown", fingerprint: observed, note: `could not read ${url}: ${res.error ?? `status ${res.status}`}` };
+  }
+  if (!previous || !previous.etag && !previous.lastModified && !previous.contentHash) {
+    return { changed: false, via: "unknown", fingerprint: observed, note: "no previous observation \u2014 this is the baseline." };
+  }
+  if (previous.etag && observed.etag) return { changed: previous.etag !== observed.etag, via: "etag", fingerprint: observed };
+  if (previous.lastModified && observed.lastModified) {
+    return { changed: previous.lastModified !== observed.lastModified, via: "last-modified", fingerprint: observed };
+  }
+  if (previous.contentHash && observed.contentHash) {
+    return { changed: previous.contentHash !== observed.contentHash, via: "hash", fingerprint: observed };
+  }
+  return { via: "unknown", fingerprint: observed, note: "nothing comparable between the two observations \u2014 store contentHash to make this answerable." };
+}
+
+// src/tables.ts
+function decodeEntities2(s) {
+  return s.replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(Number.parseInt(h, 16))).replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d))).replace(/&nbsp;/gi, " ").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&amp;/gi, "&");
+}
+function cellText(html) {
+  return decodeEntities2(
+    html.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]*>/g, "").replace(/\s+/g, " ")
+  ).trim();
+}
+function intAttr(tag, name) {
+  const m = new RegExp(`\\b${name}\\s*=\\s*["']?(\\d+)`, "i").exec(tag);
+  const n = m ? Number(m[1]) : 1;
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, 100) : 1;
+}
+function parseRow(rowHtml) {
+  const cells = [];
+  for (const m of rowHtml.matchAll(/<(t[hd])\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi)) {
+    cells.push({
+      text: cellText(m[3]),
+      colspan: intAttr(m[2], "colspan"),
+      rowspan: intAttr(m[2], "rowspan"),
+      header: m[1].toLowerCase() === "th"
+    });
+  }
+  return cells;
+}
+function expand(rows) {
+  const grid = [];
+  const carried = /* @__PURE__ */ new Map();
+  rows.forEach((cells, r) => {
+    const out = [];
+    let c = 0;
+    const skipCarried = () => {
+      while (carried.has(`${r}:${c}`)) {
+        out[c] = carried.get(`${r}:${c}`);
+        c++;
+      }
+      return c;
+    };
+    for (const cell of cells) {
+      const startCol = skipCarried();
+      for (let i = 0; i < cell.colspan; i++) {
+        out[startCol + i] = cell.text;
+        for (let j = 1; j < cell.rowspan; j++) carried.set(`${r + j}:${startCol + i}`, cell.text);
+      }
+      c = startCol + cell.colspan;
+    }
+    skipCarried();
+    grid.push(out);
+  });
+  const width = grid.reduce((w, row) => Math.max(w, row.length), 0);
+  return grid.map((row) => Array.from({ length: width }, (_, i) => row[i] ?? ""));
+}
+function extractTables(html) {
+  const tables = [];
+  for (const m of html.matchAll(/<table\b[^>]*>([\s\S]*?)<\/table\s*>/gi)) {
+    const inner = m[1];
+    const caption = /<caption\b[^>]*>([\s\S]*?)<\/caption\s*>/i.exec(inner);
+    const rawRows = [];
+    for (const r of inner.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr\s*>/gi)) {
+      const cells = parseRow(r[1]);
+      if (cells.length) rawRows.push(cells);
+    }
+    if (!rawRows.length) continue;
+    const grid = expand(rawRows);
+    const headerIndex = rawRows.findIndex((cells) => cells.every((c) => c.header));
+    const headers = headerIndex === 0 ? grid[0] : [];
+    const rows = headerIndex === 0 ? grid.slice(1) : grid;
+    if (!rows.length) continue;
+    tables.push({ ...caption ? { caption: cellText(caption[1]) } : {}, headers, rows });
+  }
+  return tables;
+}
+function tableToMarkdown(table) {
+  const width = Math.max(table.headers.length, ...table.rows.map((r) => r.length), 1);
+  const esc = (s) => s.replace(/\|/g, "\\|");
+  const line = (cells) => `| ${Array.from({ length: width }, (_, i) => esc(cells[i] ?? "")).join(" | ")} |`;
+  const out = [];
+  if (table.caption) out.push(`**${table.caption}**`, "");
+  out.push(line(table.headers.length ? table.headers : Array.from({ length: width }, () => "")));
+  out.push(`|${" --- |".repeat(width)}`);
+  for (const row of table.rows) out.push(line(row));
+  return out.join("\n");
+}
+
 // src/crawl.ts
 var nextFree = /* @__PURE__ */ new Map();
 function resetHostSchedule() {
@@ -5270,6 +5403,7 @@ export {
   configure,
   contactUa,
   contentCoverage,
+  contentHash,
   cosine,
   crawlSite,
   createServer,
@@ -5320,10 +5454,12 @@ export {
   extractMetaTags,
   extractNumerals,
   extractPdf,
+  extractTables,
   fetchAndExtract,
   fetchFeed,
   fetchRobots,
   fetchSitemap,
+  fingerprint,
   firecrawlBase,
   firecrawlIsExplicit,
   fnv1a64,
@@ -5332,6 +5468,7 @@ export {
   forgeAuthHeaders,
   forgeKind,
   hammingDistance,
+  hasChanged,
   have,
   headCommit,
   helpCoversFlag,
@@ -5473,6 +5610,7 @@ export {
   stripTags,
   structuredContentFor,
   subtokens,
+  tableToMarkdown,
   takeArtifacts,
   throttleReason,
   toBatches,
