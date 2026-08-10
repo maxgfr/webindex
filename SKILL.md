@@ -38,10 +38,30 @@ PDF and office ladders, Wayback rescue, a revalidating cache), text (keyword
 matching, URL identity), ranking (RRF, BM25F, SimHash, MMR), forges and package
 registries, and the whole MCP protocol.
 
-**Out of scope, deliberately.** Evidence models, document layouts and citation
-gates. How a tool numbers its sources, where it writes them and what it counts as
-grounded are product decisions — baking one choice in here would dictate
-behaviour rather than share plumbing.
+Plus the harness every skill built on this engine was rewriting: the run
+directory, a validating command-line parser, the multi-agent fan-out emitter,
+and the mechanics of reading citations out of a report.
+
+**Out of scope, deliberately — and the line runs through the middle.** The
+distinction is **mechanics versus policy**, not subject matter.
+
+Reading a report is mechanics: which bracketed tokens are citations and which
+are markdown links, that a `[S1]` inside backticks or a code fence or a
+"## Sources" appendix grounds nothing, what a claim unit is. Six skills had
+their own regex for that, and the subtle cases are exactly where independent
+copies disagree.
+
+The verdict is policy, and stays with the tool. Nothing in `src/cite.ts` returns
+a pass or a fail — there is no `runCheck`, no `ok: boolean`, no threshold and no
+severity, and a test asserts there never will be. What counts as grounded, what
+coverage is sufficient, whether an uncited claim is an error or a warning, how
+sources are numbered and where they are written: those are the sentences a
+tool's users argue about, and answering them here would dictate behaviour rather
+than share plumbing.
+
+The same line runs through orchestration. The engine owns the emission, the
+batching and the harness constraints; the skill owns the phase table, the
+contract prose and the schemas its subagents must satisfy.
 
 ## Three rules that constrain every change
 

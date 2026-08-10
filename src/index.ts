@@ -177,6 +177,13 @@ export { type Artifact, ensureDir, isNoWrite, resetNoWrite, setNoWrite, takeArti
 // directory holds JSON, not what the JSON means.
 export * from "./run.js";
 
+// ── Reading citations out of a report ───────────────────────────────────────
+// The MECHANICS only: which bracketed tokens are citations, what a claim unit
+// is, and which regions of a document cannot ground one. Nothing here returns
+// a pass or a fail — what counts as grounded stays with the consumer, because
+// that is the sentence its users argue about.
+export * from "./cite.js";
+
 // ── The multi-agent fan-out ─────────────────────────────────────────────────
 // Worklists → one Workflow script per phase, the dispatch contracts it
 // references, and a sequential runbook. The skill declares its phases and

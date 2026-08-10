@@ -1837,6 +1837,188 @@ declare function readManifest<T>(dir: string, file?: string): T | undefined;
 declare function writeManifest(dir: string, value: unknown, file?: string): string;
 
 /**
+ * A bracketed token that is not a markdown link.
+ *
+ * The negative lookahead is the whole subtlety: `[see the spec](https://…)` is
+ * a link whose text happens to be bracketed, and counting it as a citation
+ * makes every linked phrase look grounded.
+ *
+ * Global, so callers must reset `lastIndex` or use `matchAll`. The helpers
+ * below do; a caller reaching for the constant directly should too.
+ */
+declare const TOKEN_RE: RegExp;
+/** `[S1]` — the numbered-source shape. */
+declare const SOURCE_TOKEN: RegExp;
+/** `[E1]` — the numbered-evidence shape. */
+declare const EVIDENCE_TOKEN: RegExp;
+/** `[src/foo.ts:12]` or `[src/foo.ts:12-40]` — the file-and-line shape. */
+declare const FILE_LINE_TOKEN: RegExp;
+/** A `[path:line]` or `[path:start-end]` citation, parsed. Undefined when the token is not one. */
+declare function parseFileLine(token: string): {
+    path: string;
+    start: number;
+    end: number;
+} | undefined;
+/**
+ * Blank HTML comments, preserving line breaks so every later mask still lines
+ * up with the original numbering.
+ *
+ * A citation inside `<!-- [S1] -->` is invisible to the reader, so it must not
+ * ground the sentence beside it.
+ */
+declare function stripHtmlComments(text: string): string;
+/** Remove inline-code spans, so a `` `[S1]` `` shown as an EXAMPLE is not a citation. */
+declare function stripInlineCode(line: string): string;
+/**
+ * Lines inside ``` or ~~~ fences, plus the fence lines themselves.
+ *
+ * A report that documents its own citation format has `[S1]` in a code block;
+ * that is a sample, not a source.
+ */
+declare function codeMask(lines: readonly string[]): boolean[];
+/**
+ * Lines belonging to a marked blockquote region: a maximal run of consecutive
+ * `>` lines in which any line carries `marker`.
+ *
+ * The marker is the caller's, because what it MEANS is the caller's. One skill
+ * uses `[model-hint]` to flag a passage it knows is unsourced; the engine only
+ * needs to know which lines to set aside.
+ */
+declare function markedQuoteMask(lines: readonly string[], marker: RegExp): {
+    mask: boolean[];
+    regions: number;
+};
+/**
+ * Lines belonging to a trailing "## Sources" / "## References" section — from
+ * its heading through to the next heading of the same or shallower level.
+ *
+ * That section is the rendered listing of what was cited, not a place where
+ * citing happens. Counting its `[S#]` entries marks every source as cited and
+ * pads any coverage number computed downstream, which is the failure mode this
+ * exists for.
+ */
+declare function appendixMask(lines: readonly string[]): boolean[];
+/** OR a set of per-line masks together. Length is taken from the first. */
+declare function orMasks(...masks: readonly boolean[][]): boolean[];
+/**
+ * A unit of assertion: one block of prose or one table row, or a list read as a
+ * group. Lists stay grouped because an item is often only a claim in the
+ * context of its lead-in.
+ *
+ * `section` is whatever the caller's `sectionTag` returned for the heading this
+ * unit sits under — a hook for "this part of the document plays by different
+ * rules" without the engine having to know which rules.
+ */
+type ClaimUnit = ({
+    kind: "text";
+    text: string;
+} | {
+    kind: "list";
+    items: string[];
+}) & {
+    section?: string;
+};
+interface ClaimUnitOptions {
+    /**
+     * Extra lines to set aside, on top of code fences and HTML comments — a
+     * marked-quote mask, an appendix mask, or both through `orMasks`.
+     */
+    exclude?(lines: readonly string[]): boolean[];
+    /**
+     * A blockquote is its own unit ("unit", the default) or folds into the
+     * surrounding prose ("prose").
+     *
+     * "unit" is the safer reading and the reason it is the default: folding a
+     * quotation into the preceding paragraph lets it inherit that paragraph's
+     * citation, so a fabricated quote passes on someone else's source.
+     */
+    blockquotes?: "unit" | "prose";
+    /**
+     * Drop the header row of a table — the row immediately above the `|---|`
+     * separator. It is structure, not an assertion. Default true.
+     */
+    skipTableHeader?: boolean;
+    /**
+     * Keep inline-code spans in the STORED text. Structure detection always runs
+     * on the stripped form, so a pipe or a bracket inside backticks is never read
+     * as a table or a citation either way; this only decides whether a warning
+     * that echoes the claim can quote it verbatim. Default false.
+     */
+    keepInlineCode?: boolean;
+    /** Given a heading line's text, the tag to carry on units beneath it. */
+    sectionTag?(heading: string): string | undefined;
+}
+/**
+ * Split a markdown document into claim units.
+ *
+ * Headings, horizontal rules, code fences, HTML comments and table separators
+ * are structure and never become units. What remains is what a reader would
+ * call an assertion.
+ *
+ * This is a parser, not a judge: it says what the document asserts, never
+ * whether the assertions are grounded.
+ */
+declare function extractClaimUnits(text: string, opts?: ClaimUnitOptions): ClaimUnit[];
+/** The text a unit asserts: one string for prose, one per item for a list. */
+declare function unitTexts(unit: ClaimUnit): string[];
+/**
+ * The distinct citation tokens in a piece of text, in order of first
+ * appearance.
+ *
+ * `isCitation` is the caller's, and deliberately has no default: `[S1]`,
+ * `[E12]`, `[issue#45]` and `[src/foo.ts:12]` are all citations to the skill
+ * that uses them and prose to every other one. The engine will not guess.
+ */
+declare function citationTokensIn(text: string, isCitation: (token: string) => boolean): string[];
+/**
+ * Every bracketed token in the text, whether or not it is a citation.
+ *
+ * The counterpart to the function above: a caller that wants to report
+ * "3 bracketed tokens I did not recognise" needs the ones the predicate
+ * rejected, and re-scanning with an inverted predicate would miss that a token
+ * can look like two things at once.
+ */
+declare function bracketedTokensIn(text: string): string[];
+/**
+ * The citation tokens a document uses to ground its claims, and the ones that
+ * appear ONLY where they cannot.
+ *
+ * The second list is the useful half: a token that exists solely inside a code
+ * fence, an HTML comment or an excluded section looks like grounding to a
+ * reader skimming the file and grounds nothing. What to do about it — warn,
+ * fail, ignore — is the caller's.
+ */
+declare function collectCitations(text: string, isCitation: (token: string) => boolean, opts?: ClaimUnitOptions): {
+    grounding: string[];
+    inertOnly: string[];
+};
+/**
+ * Cited tokens that resolve to nothing known — a set difference, and nothing
+ * more. Whether a dangling citation is fatal is the caller's to decide.
+ */
+declare function danglingTokens(cited: Iterable<string>, known: Iterable<string>): string[];
+/** Known ids that no claim cites. The inverse of the above, same disclaimer. */
+declare function uncitedIds(cited: Iterable<string>, known: Iterable<string>): string[];
+/**
+ * Strip digit-group separators — comma, NBSP, narrow NBSP, apostrophe, plain
+ * space — so "10,000", "10 000" and "1'000" all read as one number.
+ *
+ * Applied to both sides of any containment test, which is the point: a report
+ * writing "10,000" and a source writing "10 000" are stating the same figure,
+ * and a comparison that says otherwise generates a false accusation.
+ */
+declare function normalizeNumeralText(text: string): string;
+/**
+ * The specific figures a claim asserts, normalised.
+ *
+ * Digits inside citation tokens, inline code and markdown-link URLs never
+ * count — `[S3]` and `/v2/users` are not claims about quantity. A bare single
+ * digit is dropped as too weak a signal to check anything with; "two parts" and
+ * "3 ways" are prose. Capped at 8, deduped, in order.
+ */
+declare function extractNumerals(text: string, max?: number): string[];
+
+/**
  * The three calls that throw inside the workflow harness.
  *
  * `new Date()` with arguments is fine — it is the ARGLESS form that reads the
@@ -2300,4 +2482,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type CliSpec, type CommandArgs, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, type ToolDecl, ToolError, type ToolOutcome, UsageError, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, cleanInline, configure, contactUa, contentCoverage, createServer, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, dedupeByUrl, dedupeNearDuplicates, defaultUa, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embedModel, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractPdf, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, have, headCommit, helpCoversFlag, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, listPhases, listReleases, listResources, listTags, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalizeDoi, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, oneWriterFooter, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeSearxng, pubmedAbstractUrl, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripTags, structuredContentFor, subtokens, takeArtifacts, throttleReason, toBatches, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type ToolDecl, ToolError, type ToolOutcome, UsageError, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, dedupeByUrl, dedupeNearDuplicates, defaultUa, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embedModel, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, have, headCommit, helpCoversFlag, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, listPhases, listReleases, listResources, listTags, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeSearxng, pubmedAbstractUrl, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };

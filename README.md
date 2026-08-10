@@ -122,9 +122,23 @@ it. The engine decides reading order; it never sees an evidence model.
 
 ## What is deliberately out of scope
 
-Evidence models, document layouts and citation gates. Those are product decisions: how a
-tool numbers its sources, where it writes them and what it considers grounded is the tool's
-business, and baking one choice in here would dictate behaviour rather than share plumbing.
+The line is **mechanics versus policy**, not subject matter — and it runs through the middle
+of citation gates rather than around them.
+
+Reading a report is mechanics, and the engine owns it: which bracketed tokens are citations
+and which are markdown links, that a `[S1]` inside backticks or a code fence or a
+`## Sources` appendix grounds nothing, what a claim unit is, which figures a claim asserts.
+Six skills had their own regex for that, and the subtle cases are exactly where independent
+copies disagree.
+
+The verdict is policy, and stays with the tool. Nothing in `src/cite.ts` returns a pass or a
+fail — no `runCheck`, no `ok: boolean`, no threshold, no severity, and a test asserts there
+never will be one. What counts as grounded, what coverage is sufficient, whether an uncited
+claim is an error or a warning, how sources are numbered and where they are written: those
+are the sentences a tool's users argue about, and answering them here would dictate behaviour
+rather than share plumbing.
+
+Evidence models and document layouts stay out entirely, for the same reason.
 
 ## The vendoring contract
 

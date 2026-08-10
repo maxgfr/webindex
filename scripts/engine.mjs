@@ -3789,6 +3789,229 @@ function writeManifest(dir, value, file = "manifest.json") {
 `);
 }
 
+// src/cite.ts
+var TOKEN_RE2 = /\[([^\]\n]+)\](?!\()/g;
+var SOURCE_TOKEN = /^S\d+$/;
+var EVIDENCE_TOKEN = /^E\d+$/;
+var FILE_LINE_TOKEN = /^(.+?):(\d+)(?:-(\d+))?$/;
+function parseFileLine(token) {
+  const m = FILE_LINE_TOKEN.exec(token.trim());
+  if (!m) return void 0;
+  const start = Number(m[2]);
+  const end = m[3] === void 0 ? start : Number(m[3]);
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) return void 0;
+  return { path: m[1], start, end };
+}
+function stripHtmlComments(text) {
+  return text.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, " "));
+}
+function stripInlineCode(line) {
+  return line.replace(/`[^`\n]*`/g, " ");
+}
+function codeMask(lines) {
+  const mask = new Array(lines.length).fill(false);
+  let inFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*(```|~~~)/.test(lines[i])) {
+      mask[i] = true;
+      inFence = !inFence;
+      continue;
+    }
+    mask[i] = inFence;
+  }
+  return mask;
+}
+function markedQuoteMask(lines, marker) {
+  const mask = new Array(lines.length).fill(false);
+  let regions = 0;
+  let i = 0;
+  while (i < lines.length) {
+    if (!/^\s*>/.test(lines[i])) {
+      i++;
+      continue;
+    }
+    let j = i;
+    let marked = false;
+    while (j < lines.length && /^\s*>/.test(lines[j])) {
+      if (marker.test(lines[j])) marked = true;
+      j++;
+    }
+    if (marked) {
+      regions++;
+      for (let k = i; k < j; k++) mask[k] = true;
+    }
+    i = j;
+  }
+  return { mask, regions };
+}
+var APPENDIX_HEADING = /^\s*(#{2,6})\s+(sources|references|bibliography)\b/i;
+function appendixMask(lines) {
+  const mask = new Array(lines.length).fill(false);
+  let level = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const h = /^\s*(#{1,6})\s/.exec(lines[i]);
+    if (level && h && h[1].length <= level) level = 0;
+    if (!level) {
+      const a = APPENDIX_HEADING.exec(lines[i]);
+      if (a) level = a[1].length;
+    }
+    mask[i] = level > 0;
+  }
+  return mask;
+}
+function orMasks(...masks) {
+  const first = masks[0] ?? [];
+  return first.map((_, i) => masks.some((m) => m[i] === true));
+}
+var isHeadingOrRule = (t) => /^#{1,6}\s/.test(t) || /^([-*_])\1{2,}$/.test(t);
+var isTableSeparator = (line) => /\|/.test(line) && /^[\s:|-]+$/.test(line.trim()) && /-/.test(line);
+var isTableRow = (line) => /\|/.test(line.trim()) && !isTableSeparator(line);
+var isListItem = (line) => /^\s*([-*+]|\d+\.)\s+\S/.test(line);
+function tableCells(line) {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim()).join(" ");
+}
+function extractClaimUnits(text, opts = {}) {
+  const lines = stripHtmlComments(text).split("\n");
+  const code = codeMask(lines);
+  const extra = opts.exclude ? opts.exclude(lines) : [];
+  const skip = (i2) => code[i2] === true || extra[i2] === true;
+  const quoteMode = opts.blockquotes ?? "unit";
+  const skipHeader = opts.skipTableHeader !== false;
+  const stored = (raw) => opts.keepInlineCode ? raw : stripInlineCode(raw);
+  const units = [];
+  let prose = [];
+  let section;
+  const tag = (u) => section === void 0 ? u : { ...u, section };
+  const flush = () => {
+    if (prose.length) units.push(tag({ kind: "text", text: prose.join(" ") }));
+    prose = [];
+  };
+  let i = 0;
+  while (i < lines.length) {
+    if (skip(i)) {
+      flush();
+      i++;
+      continue;
+    }
+    const raw = lines[i];
+    const line = stripInlineCode(raw);
+    const t = line.trim();
+    if (t === "" || isHeadingOrRule(t) || isTableSeparator(line)) {
+      flush();
+      if (/^#{1,6}\s/.test(t)) section = opts.sectionTag?.(t);
+      i++;
+      continue;
+    }
+    if (isTableRow(line)) {
+      flush();
+      const next = i + 1 < lines.length && !skip(i + 1) ? stripInlineCode(lines[i + 1]) : "";
+      if (!(skipHeader && isTableSeparator(next))) units.push(tag({ kind: "text", text: tableCells(stored(raw)) }));
+      i++;
+      continue;
+    }
+    if (/^\s*>/.test(line)) {
+      if (quoteMode === "prose") {
+        const dequoted = stored(raw).replace(/^\s*>\s?/, "").trim();
+        if (dequoted) prose.push(dequoted);
+        i++;
+        continue;
+      }
+      flush();
+      const quoted = [];
+      while (i < lines.length && !skip(i)) {
+        if (!/^\s*>/.test(stripInlineCode(lines[i]))) break;
+        const dq = stored(lines[i]).replace(/^\s*>\s?/, "").trim();
+        if (dq) quoted.push(dq);
+        i++;
+      }
+      if (quoted.length) units.push(tag({ kind: "text", text: quoted.join(" ") }));
+      continue;
+    }
+    if (isListItem(line)) {
+      flush();
+      const items = [];
+      while (i < lines.length && !skip(i)) {
+        const rawL = lines[i];
+        const l = stripInlineCode(rawL);
+        const tt = l.trim();
+        if (tt === "" || isHeadingOrRule(tt) || isTableSeparator(l) || isTableRow(l)) break;
+        if (isListItem(l))
+          items.push(
+            stored(rawL).replace(/^\s*([-*+]|\d+\.)\s+/, "").trim()
+          );
+        else if (items.length) items[items.length - 1] += ` ${stored(rawL).trim()}`;
+        else items.push(stored(rawL).trim());
+        i++;
+      }
+      units.push(tag({ kind: "list", items }));
+      continue;
+    }
+    prose.push(stored(raw));
+    i++;
+  }
+  flush();
+  return units;
+}
+function unitTexts(unit) {
+  return unit.kind === "text" ? [unit.text] : unit.items;
+}
+function citationTokensIn(text, isCitation) {
+  const masked = stripInlineCode(text);
+  const out = [];
+  for (const m of masked.matchAll(TOKEN_RE2)) {
+    const tok = m[1].trim();
+    if (isCitation(tok) && !out.includes(tok)) out.push(tok);
+  }
+  return out;
+}
+function bracketedTokensIn(text) {
+  const masked = stripInlineCode(text);
+  const out = [];
+  for (const m of masked.matchAll(TOKEN_RE2)) {
+    const tok = m[1].trim();
+    if (!out.includes(tok)) out.push(tok);
+  }
+  return out;
+}
+function collectCitations(text, isCitation, opts = {}) {
+  const grounding = [];
+  for (const unit of extractClaimUnits(text, opts)) {
+    for (const part of unitTexts(unit)) {
+      for (const tok of citationTokensIn(part, isCitation)) if (!grounding.includes(tok)) grounding.push(tok);
+    }
+  }
+  const all = [];
+  for (const m of text.matchAll(TOKEN_RE2)) {
+    const tok = m[1].trim();
+    if (isCitation(tok) && !all.includes(tok)) all.push(tok);
+  }
+  return { grounding, inertOnly: all.filter((t) => !grounding.includes(t)) };
+}
+function danglingTokens(cited, known) {
+  const have2 = new Set(known);
+  const out = [];
+  for (const t of cited) if (!have2.has(t) && !out.includes(t)) out.push(t);
+  return out;
+}
+function uncitedIds(cited, known) {
+  const used = new Set(cited);
+  return [...new Set(known)].filter((id) => !used.has(id));
+}
+function normalizeNumeralText(text) {
+  return text.replace(/(\d)[,\u00A0\u202F' ](?=\d)/g, "$1");
+}
+function extractNumerals(text, max = 8) {
+  const cleaned = stripInlineCode(text).replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/\[[^\]\n]+\](?!\()/g, " ");
+  const out = [];
+  for (const m of cleaned.matchAll(/\d[\d,\u00A0\u202F']*(?:\.\d+)?%?/g)) {
+    const numeric = normalizeNumeralText(m[0]).replace(/[,\u00A0\u202F'%]/g, "");
+    if (numeric.replace(/\D/g, "").length < 2 && !numeric.includes(".")) continue;
+    if (!out.includes(numeric)) out.push(numeric);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 // src/orchestrate.ts
 import { join as join7, resolve as resolve2 } from "path";
 
@@ -4681,9 +4904,11 @@ export {
   ERR_INVALID_PARAMS,
   ERR_INVALID_REQUEST,
   ERR_METHOD_NOT_FOUND,
+  EVIDENCE_TOKEN,
   EXIT_FAILURE,
   EXIT_OK,
   EXIT_USAGE,
+  FILE_LINE_TOKEN,
   FIRECRAWL_DEFAULT_BASE,
   FIRECRAWL_ENV,
   KEYLESS_ENGINES,
@@ -4700,7 +4925,9 @@ export {
   SEARXNG_SETTINGS_YAML,
   SERVICE_PROFILES,
   SMALL_WORKLIST,
+  SOURCE_TOKEN,
   STACK_SERVICES,
+  TOKEN_RE2 as TOKEN_RE,
   ToolError,
   UsageError,
   WORKFLOW_FORBIDDEN,
@@ -4709,6 +4936,7 @@ export {
   addressedIdCount,
   apiBase,
   apiPrefix,
+  appendixMask,
   applyRelevanceFloor,
   argBool,
   argInt,
@@ -4723,6 +4951,7 @@ export {
   bm25MatchedTerms,
   bm25Score,
   bm25Tokenize,
+  bracketedTokensIn,
   brand,
   browserUa,
   buildBm25Index,
@@ -4740,11 +4969,15 @@ export {
   capResponse,
   charsetFromContentType,
   charsetFromHtml,
+  citationTokensIn,
   cleanInline,
+  codeMask,
+  collectCitations,
   configure,
   contactUa,
   contentCoverage,
   createServer,
+  danglingTokens,
   ddgRedirectTarget,
   ddgRegion,
   deaccent,
@@ -4779,10 +5012,12 @@ export {
   excerptWindows,
   expandTokens,
   externalHosts,
+  extractClaimUnits,
   extractDocument,
   extractJsonLd,
   extractMainHtml,
   extractMetaTags,
+  extractNumerals,
   extractPdf,
   fetchAndExtract,
   fetchFeed,
@@ -4830,17 +5065,20 @@ export {
   mapScrapeResponse,
   mapSearchResponse,
   markFirecrawlDown,
+  markedQuoteMask,
   matcherFromTokens,
   metaDescriptionOf,
   missingFromHelp,
   nearestHeading,
   negotiateProtocol,
   normalizeDoi,
+  normalizeNumeralText,
   normalizeRepoUrl,
   ocrBudgetLeft,
   ocrPdf,
   ocrTools,
   oneWriterFooter,
+  orMasks,
   orchestrateRun,
   originUrl,
   pageDelayMs,
@@ -4849,6 +5087,7 @@ export {
   parseDdgHtml,
   parseDdgLite,
   parseFeed,
+  parseFileLine,
   parseMojeek,
   parseRetryAfter,
   parseRobots,
@@ -4916,12 +5155,16 @@ export {
   stackControl,
   startHttpServer,
   stripConsentBoilerplate,
+  stripHtmlComments,
+  stripInlineCode,
   stripTags,
   structuredContentFor,
   subtokens,
   takeArtifacts,
   throttleReason,
   toBatches,
+  uncitedIds,
+  unitTexts,
   urlDeclaresIdentity,
   validateArgs,
   withRunLock,
