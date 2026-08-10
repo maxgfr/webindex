@@ -1309,7 +1309,17 @@ async function fetchAndExtract(url, opts = {}) {
   const title = isHtml ? htmlTitle(res.body) : void 0;
   const canonical = isHtml ? htmlCanonicalUrl(res.body) : void 0;
   const metaDescription = isHtml ? metaDescriptionOf(res.body) : void 0;
-  return { text, title, canonical, metaDescription, finalUrl: res.url, status: res.status, note: firecrawlNote, ...validators };
+  return {
+    text,
+    title,
+    canonical,
+    metaDescription,
+    ...opts.keepHtml && isHtml ? { html: res.body } : {},
+    finalUrl: res.url,
+    status: res.status,
+    note: firecrawlNote,
+    ...validators
+  };
 }
 var CONSENT_PATTERNS = [
   /\bcookies?\b/i,

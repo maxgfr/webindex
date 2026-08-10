@@ -1483,7 +1483,17 @@ async function fetchAndExtract(url, opts = {}) {
   const title = isHtml ? htmlTitle(res.body) : void 0;
   const canonical = isHtml ? htmlCanonicalUrl(res.body) : void 0;
   const metaDescription = isHtml ? metaDescriptionOf(res.body) : void 0;
-  return { text, title, canonical, metaDescription, finalUrl: res.url, status: res.status, note: firecrawlNote, ...validators };
+  return {
+    text,
+    title,
+    canonical,
+    metaDescription,
+    ...opts.keepHtml && isHtml ? { html: res.body } : {},
+    finalUrl: res.url,
+    status: res.status,
+    note: firecrawlNote,
+    ...validators
+  };
 }
 var DEAD_LINK_STATUS = /* @__PURE__ */ new Set([404, 410, 451, 403]);
 async function rescueViaWayback(url, opts = {}) {
@@ -3789,6 +3799,131 @@ function writeManifest(dir, value, file = "manifest.json") {
 `);
 }
 
+// src/crawl.ts
+var nextFree = /* @__PURE__ */ new Map();
+function resetHostSchedule() {
+  nextFree.clear();
+}
+function hostDelayMs() {
+  return envInt("POLITE_DELAY_MS", 400, 0, 5e3);
+}
+function hostOf(url) {
+  try {
+    return new URL(url).host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+async function awaitHostSlot(url, delayMs = hostDelayMs(), now = Date.now()) {
+  const host = hostOf(url);
+  if (!host || delayMs <= 0) return 0;
+  const free = nextFree.get(host) ?? 0;
+  const waited = Math.max(0, free - now);
+  nextFree.set(host, Math.max(free, now) + delayMs);
+  if (waited > 0) await sleep(waited);
+  return waited;
+}
+function backOffHost(url, ms, now = Date.now()) {
+  const host = hostOf(url);
+  if (!host || ms <= 0) return;
+  nextFree.set(host, Math.max(nextFree.get(host) ?? 0, now + ms));
+}
+function linksFrom(html, baseUrl) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const m of html.matchAll(/<a\b[^>]*?\bhref\s*=\s*["']([^"'#]+)["']/gi)) {
+    const raw = m[1].trim();
+    if (/^(mailto|tel|javascript|data):/i.test(raw)) continue;
+    try {
+      const abs = new URL(raw, baseUrl);
+      if (abs.protocol !== "http:" && abs.protocol !== "https:") continue;
+      abs.hash = "";
+      const canon = canonicalizeUrl(abs.href);
+      if (!seen.has(canon)) {
+        seen.add(canon);
+        out.push(abs.href);
+      }
+    } catch {
+    }
+  }
+  return out;
+}
+function sameOrigin(a, b) {
+  try {
+    const x = new URL(a);
+    const y = new URL(b);
+    return x.protocol === y.protocol && x.host === y.host;
+  } catch {
+    return false;
+  }
+}
+async function crawlSite(seed, opts = {}) {
+  const maxPages = Math.max(1, opts.maxPages ?? 20);
+  const maxDepth = Math.max(0, opts.maxDepth ?? 2);
+  const notes = [];
+  const disallowed = [];
+  const pages = [];
+  let robots = { rules: [], sitemaps: [], absent: true };
+  if (!opts.ignoreRobots) {
+    robots = await fetchRobots(seed);
+    if (robots.absent) notes.push("no robots.txt \u2014 nothing was refused, but nothing was granted either.");
+  } else {
+    notes.push("robots.txt was not consulted (ignoreRobots) \u2014 only correct on a site you own.");
+  }
+  const delay = opts.delayMs ?? robots.crawlDelayMs ?? hostDelayMs();
+  if (robots.crawlDelayMs && opts.delayMs === void 0) notes.push(`honouring the declared Crawl-delay of ${robots.crawlDelayMs}ms.`);
+  const seen = /* @__PURE__ */ new Set([canonicalizeUrl(seed)]);
+  const queue = [{ url: seed, depth: 0 }];
+  if (opts.useSitemap !== false && maxDepth > 0) {
+    const sm = await fetchSitemap(seed, { sitemaps: robots.sitemaps });
+    let added = 0;
+    for (const entry of sm.urls) {
+      const canon = canonicalizeUrl(entry.loc);
+      if (seen.has(canon)) continue;
+      if (!opts.crossOrigin && !sameOrigin(entry.loc, seed)) continue;
+      seen.add(canon);
+      queue.push({ url: entry.loc, depth: 1 });
+      added++;
+    }
+    if (added) notes.push(`seeded ${added} URL(s) from the sitemap.`);
+  }
+  while (queue.length && pages.length < maxPages) {
+    const next = queue.shift();
+    if (!next) break;
+    if (!opts.ignoreRobots && !isAllowed(robots, next.url)) {
+      disallowed.push(next.url);
+      continue;
+    }
+    await awaitHostSlot(next.url, delay);
+    const r = await fetchAndExtract(next.url, { keepHtml: next.depth < maxDepth });
+    if (!r.text) {
+      notes.push(`${next.url}: ${r.note ?? "nothing readable"}`);
+      continue;
+    }
+    const links = r.html ? linksFrom(r.html, next.url) : [];
+    const page = {
+      url: next.url,
+      depth: next.depth,
+      ...r.title ? { title: r.title } : {},
+      text: r.text,
+      extractor: r.extractor ?? "native",
+      links
+    };
+    pages.push(page);
+    opts.onPage?.(page);
+    if (next.depth >= maxDepth) continue;
+    for (const link of links) {
+      const canon = canonicalizeUrl(link);
+      if (seen.has(canon)) continue;
+      if (!opts.crossOrigin && !sameOrigin(link, seed)) continue;
+      seen.add(canon);
+      queue.push({ url: link, depth: next.depth + 1 });
+    }
+  }
+  if (queue.length) notes.push(`stopped at the ${maxPages}-page budget with ${queue.length} URL(s) still queued.`);
+  return { pages, pending: queue.map((q) => q.url), disallowed, notes };
+}
+
 // src/embed.ts
 function ollamaBase() {
   return env("OLLAMA") ?? "http://localhost:11434";
@@ -5103,6 +5238,8 @@ export {
   arxivIdFromUrl,
   assessExtractedText,
   assessPdfText,
+  awaitHostSlot,
+  backOffHost,
   baseLang,
   bestExcerpt,
   bm25MatchedTerms,
@@ -5134,6 +5271,7 @@ export {
   contactUa,
   contentCoverage,
   cosine,
+  crawlSite,
   createServer,
   danglingTokens,
   ddgRedirectTarget,
@@ -5197,6 +5335,7 @@ export {
   have,
   headCommit,
   helpCoversFlag,
+  hostDelayMs,
   htmlCanonicalUrl,
   htmlTitle,
   htmlToText,
@@ -5216,6 +5355,7 @@ export {
   jsonLine,
   keylessEngines,
   keywords,
+  linksFrom,
   listPhases,
   listReleases,
   listResources,
@@ -5286,6 +5426,7 @@ export {
   resetFirecrawlProbeCache,
   resetHaveCache,
   resetHistoryDepthCache,
+  resetHostSchedule,
   resetNoWrite,
   resetOcrBudget,
   resetOllamaProbe,

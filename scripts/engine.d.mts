@@ -460,6 +460,16 @@ interface ExtractResult {
      * itself. Only ever set on the HTML path.
      */
     metaDescription?: string;
+    /**
+     * The raw HTML, only when the caller asked for it with `keepHtml` and only on
+     * the built-in HTML path.
+     *
+     * Opt-in because it doubles what a page costs in memory, and almost every
+     * caller wants the text and nothing else. The one that does not is a caller
+     * following LINKS — `crawlSite` — and the alternative for it is a second
+     * request for bytes this function already had in hand.
+     */
+    html?: string;
     etag?: string;
     lastModified?: string;
 }
@@ -479,6 +489,11 @@ declare function fetchAndExtract(url: string, opts?: {
      * documenting HTTP cookies it would eat the article.
      */
     stripConsent?: boolean;
+    /**
+     * Carry the raw HTML up in `html`. For a caller that follows links out of
+     * the page it just read; see ExtractResult.html for why it is opt-in.
+     */
+    keepHtml?: boolean;
 }): Promise<ExtractResult>;
 declare const DEAD_LINK_STATUS: Set<number>;
 declare function rescueViaWayback(url: string, opts?: {
@@ -1836,6 +1851,90 @@ declare function readManifest<T>(dir: string, file?: string): T | undefined;
  */
 declare function writeManifest(dir: string, value: unknown, file?: string): string;
 
+/** Test seam. Never call this from product code — in-flight waiters would bunch up. */
+declare function resetHostSchedule(): void;
+/**
+ * The floor between two requests to the SAME host, when robots.txt declares no
+ * `Crawl-delay` of its own.
+ *
+ * Deliberately the same knob `httpGet` already used for its inter-request
+ * pause, so a consumer that had tuned politeness keeps one number to tune.
+ */
+declare function hostDelayMs(): number;
+/**
+ * Wait until this host is willing to hear from us again, then claim the slot.
+ *
+ * The claim happens BEFORE the await returns, so two concurrent callers for one
+ * host serialise instead of both reading the same free time and departing
+ * together — which is the bug a naive "sleep if too soon" has, and the one that
+ * makes a rate limiter look like it works right up until the pool widens.
+ *
+ * Different hosts never wait on each other: the whole point is to keep
+ * concurrency high across a candidate list while staying single-file per site.
+ */
+declare function awaitHostSlot(url: string, delayMs?: number, now?: number): Promise<number>;
+/**
+ * Push a host's next departure out by `ms` — what a `Retry-After` means.
+ *
+ * `httpGet` already honours Retry-After for the request that received it; this
+ * is how that answer applies to every OTHER request queued for the same host,
+ * which is the difference between backing off and backing off once.
+ */
+declare function backOffHost(url: string, ms: number, now?: number): void;
+interface CrawlOptions {
+    /** Hard ceiling on pages fetched. Required in spirit; defaulted low on purpose. */
+    maxPages?: number;
+    /** How many links deep to follow. The seed is depth 0. */
+    maxDepth?: number;
+    /** Leave the seed's origin. Off by default — a crawl that wanders is not a site walk. */
+    crossOrigin?: boolean;
+    /** Seed the frontier from the site's sitemap as well as the seed page. Default true. */
+    useSitemap?: boolean;
+    /** Ignore robots.txt. For a site you own, and named so it cannot happen by accident. */
+    ignoreRobots?: boolean;
+    /** Per-host delay override. Otherwise robots' own Crawl-delay, else hostDelayMs(). */
+    delayMs?: number;
+    /** Called as each page lands, so a caller can stream rather than wait for the whole walk. */
+    onPage?(page: CrawledPage): void;
+}
+interface CrawledPage {
+    url: string;
+    depth: number;
+    title?: string;
+    text: string;
+    extractor: string;
+    /** Links found on this page, already absolute and canonicalised. */
+    links: string[];
+}
+interface CrawlResult {
+    pages: CrawledPage[];
+    /** URLs that were in scope but never fetched — the budget ran out. */
+    pending: string[];
+    /** URLs robots.txt refused. Reported rather than hidden: a silent skip reads as "not there". */
+    disallowed: string[];
+    notes: string[];
+}
+/** Absolute, canonical links out of a page's HTML. */
+declare function linksFrom(html: string, baseUrl: string): string[];
+/**
+ * Walk a site from a seed, breadth-first.
+ *
+ * Bounded three independent ways — pages, depth, and origin — because any one
+ * of them alone leaves a hole: a depth limit still admits a combinatorial
+ * frontier, a page limit alone will spend the whole budget on a paginated
+ * archive, and neither stops a link out to an unrelated host.
+ *
+ * robots.txt is consulted at EVERY hop, not once for the seed. That is the
+ * difference between this and `fetch`, and it is deliberate: `fetch` follows a
+ * URL the caller was handed, which is not crawling; this enumerates, which is.
+ * A refused URL is reported in `disallowed` rather than dropped, because a
+ * silent skip is indistinguishable from a page that does not exist.
+ *
+ * Breadth-first, so a shallow budget returns the pages nearest the seed — the
+ * ones a reader would have reached first — rather than one deep spur.
+ */
+declare function crawlSite(seed: string, opts?: CrawlOptions): Promise<CrawlResult>;
+
 /** Where the local Ollama answers. `off` disables the layer entirely. */
 declare function ollamaBase(): string;
 /** Whether the caller has turned embeddings off outright. */
@@ -2639,4 +2738,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, cosine, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, have, headCommit, helpCoversFlag, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, listPhases, listReleases, listResources, listTags, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetNoWrite, resetOcrBudget, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, awaitHostSlot, backOffHost, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, cosine, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };

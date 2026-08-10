@@ -653,6 +653,16 @@ export interface ExtractResult {
    * itself. Only ever set on the HTML path.
    */
   metaDescription?: string;
+  /**
+   * The raw HTML, only when the caller asked for it with `keepHtml` and only on
+   * the built-in HTML path.
+   *
+   * Opt-in because it doubles what a page costs in memory, and almost every
+   * caller wants the text and nothing else. The one that does not is a caller
+   * following LINKS — `crawlSite` — and the alternative for it is a second
+   * request for bytes this function already had in hand.
+   */
+  html?: string;
   // Carried up from the response so a cache can store them and revalidate later.
   // Absent on the Firecrawl path, which does its own fetching and reports no
   // origin validators — an entry written there simply re-downloads when stale.
@@ -689,6 +699,11 @@ export async function fetchAndExtract(
      * documenting HTTP cookies it would eat the article.
      */
     stripConsent?: boolean;
+    /**
+     * Carry the raw HTML up in `html`. For a caller that follows links out of
+     * the page it just read; see ExtractResult.html for why it is opt-in.
+     */
+    keepHtml?: boolean;
   } = {},
 ): Promise<ExtractResult> {
   const wantsPdf = looksLikePdfUrl(url);
@@ -803,7 +818,17 @@ export async function fetchAndExtract(
   const title = isHtml ? htmlTitle(res.body) : undefined;
   const canonical = isHtml ? htmlCanonicalUrl(res.body) : undefined;
   const metaDescription = isHtml ? metaDescriptionOf(res.body) : undefined;
-  return { text, title, canonical, metaDescription, finalUrl: res.url, status: res.status, note: firecrawlNote, ...validators };
+  return {
+    text,
+    title,
+    canonical,
+    metaDescription,
+    ...(opts.keepHtml && isHtml ? { html: res.body } : {}),
+    finalUrl: res.url,
+    status: res.status,
+    note: firecrawlNote,
+    ...validators,
+  };
 }
 
 // Statuses where the origin is gone/blocked and a live re-fetch will never

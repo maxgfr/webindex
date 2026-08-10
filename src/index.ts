@@ -177,6 +177,13 @@ export { type Artifact, ensureDir, isNoWrite, resetNoWrite, setNoWrite, takeArti
 // directory holds JSON, not what the JSON means.
 export * from "./run.js";
 
+// ── Politeness, and walking a site on purpose ───────────────────────────────
+// A per-host token bucket that finally APPLIES the Crawl-delay robots.ts has
+// always parsed, and the bounded BFS that is the one caller robots.txt was
+// written for. `fetch` follows a URL it was handed and does not ask; this
+// enumerates, so it asks at every hop.
+export * from "./crawl.js";
+
 // ── Embeddings and vectors ──────────────────────────────────────────────────
 // The other half of the container stack this package already ships. `semantic
 // up` has started Ollama and Qdrant and pulled the model since v1.11, and until
