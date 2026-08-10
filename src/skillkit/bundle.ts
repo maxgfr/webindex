@@ -153,9 +153,18 @@ export function auditSkillBundle(root: string, config: SkillConfig, cli?: CliSur
 
   // 6. And every command, for the same reason: one stayed invisible for four
   // releases because HELP and the dispatch table were never compared.
+  //
+  // The test is that the command is NAMED somewhere in --help, not that it owns
+  // a `<cli> <cmd>` usage line. An earlier version demanded the latter and so
+  // encoded this package's own help layout as a rule for everyone: a consumer
+  // that documents an alias inline ("fetch … (alias: add-source)") or pairs two
+  // commands on one row ("searxng | firecrawl   Manage the optional container")
+  // failed three times over while documenting all of them. A command absent
+  // from --help entirely is the regression worth catching, and a word-boundary
+  // match still catches exactly that.
   for (const cmd of cli.commands ?? []) {
-    const named = new RegExp(`^\\s+${name} ${cmd}\\b`, "m").test(cli.help);
-    check(named, named ? `--help documents \`${name} ${cmd}\`` : `--help never names the \`${cmd}\` command`);
+    const named = new RegExp(`(^|[^\\w-])${cmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^\\w-]|$)`, "m").test(cli.help);
+    check(named, named ? `--help names \`${cmd}\`` : `--help never names the \`${cmd}\` command`);
   }
 
   return out;

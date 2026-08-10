@@ -118,13 +118,13 @@ describe("help and version", () => {
 
   it("routes every service the engine declares, not a hand-written subset", async () => {
     // The inverse of the assertion above, and the one that was missing: HELP
-    // could stay honest while the dispatch quietly knew fewer commands. An
-    // unrouted name falls through to the unknown-command branch, which exits 1
-    // WITHOUT the `usage:` line the stack branch prints.
+    // could stay honest while the dispatch quietly knew fewer commands. Both
+    // branches exit 2 now, so the `usage:` line is what tells them apart: an
+    // unrouted name falls through to unknown-command, which does not print it.
     for (const cmd of SERVICE_ROUTES) {
       out = [];
       err = [];
-      expect(await run([cmd, "restart"]), cmd).toBe(1);
+      expect(await run([cmd, "restart"]), cmd).toBe(2);
       expect(stderr(), cmd).toMatch(/usage: webindex/);
     }
   });
@@ -173,7 +173,7 @@ describe("search", () => {
   });
 
   it("asks for a query rather than searching for nothing", async () => {
-    expect(await run(["search"])).toBe(1);
+    expect(await run(["search"])).toBe(2);
     expect(stderr()).toContain("usage: webindex search");
   });
 });
@@ -210,7 +210,7 @@ describe("extract", () => {
   });
 
   it("needs a path", async () => {
-    expect(await run(["extract"])).toBe(1);
+    expect(await run(["extract"])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex extract/);
   });
 });
@@ -222,12 +222,12 @@ describe("fetch argument handling", () => {
   });
 
   it("needs a url", async () => {
-    expect(await run(["fetch"])).toBe(1);
+    expect(await run(["fetch"])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex fetch/);
   });
 
   it("does not mistake a flag for the url", async () => {
-    expect(await run(["fetch", "--json"])).toBe(1);
+    expect(await run(["fetch", "--json"])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex fetch/);
   });
 });
@@ -248,6 +248,12 @@ describe("unknown input", () => {
   // Exit 2, not 1. A caller scripting this engine has to tell "your query had
   // no results" (1) from "you spelled it wrong" (2); collapsing both onto 1
   // makes a typo look like an empty web.
+  //
+  // The same line runs through a MISSING required argument, which is equally a
+  // wrong invocation. Those printed the word "usage:" and exited 1 until the
+  // taxonomy was applied to them too — see the boundary case at the end of this
+  // block, which pins the other side: a command that ran and got a negative
+  // answer stays on 1.
   it("names the unknown command and points at help", async () => {
     expect(await run(["frobnicate"])).toBe(2);
     expect(stderr()).toMatch(/unknown command "frobnicate"/);
@@ -269,6 +275,15 @@ describe("unknown input", () => {
   it("rejects a non-numeric budget rather than reading it as no budget", async () => {
     expect(await run(["search", "x", "--limit", "abc"])).toBe(2);
     expect(stderr()).toMatch(/whole number/);
+  });
+
+  // The boundary the taxonomy turns on. `robots` is the README's composable
+  // idiom (`webindex robots <url> && fetch it`): the site saying no is an
+  // ANSWER, so it stays on 1 while everything above moved to 2.
+  it("keeps a ran-and-refused answer on 1, distinct from a bad invocation", async () => {
+    installFetchMock(() => ({ body: "User-agent: *\nDisallow: /private\n" }));
+    expect(await run(["robots", "https://r.test/private/x"])).toBe(1);
+    expect(await run(["robots", "https://r.test/public/x"])).toBe(0);
   });
 
   it("rejects an unknown mcp transport", async () => {
@@ -377,13 +392,13 @@ describe("the container stack", () => {
     for (const cmd of [...SERVICE_ROUTES, "stack"]) {
       out = [];
       err = [];
-      expect(await run([cmd, "restart"]), cmd).toBe(1);
+      expect(await run([cmd, "restart"]), cmd).toBe(2);
       expect(stderr(), cmd).toMatch(/usage: webindex/);
     }
   });
 
   it("offers `path` only on stack, since the other two drive one service", async () => {
-    expect(await run(["searxng", "path"])).toBe(1);
+    expect(await run(["searxng", "path"])).toBe(2);
     expect(stderr()).toMatch(/up\|down\|status$/m);
   });
 });
@@ -410,7 +425,7 @@ describe("the fetch cache", () => {
   });
 
   it("rejects an action it does not have", async () => {
-    expect(await run(["cache", "purge"])).toBe(1);
+    expect(await run(["cache", "purge"])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex cache status\|clean/);
   });
 });
@@ -460,7 +475,7 @@ describe("rank", () => {
   });
 
   it("asks for a question rather than ranking against nothing", async () => {
-    expect(await run(["rank", "--docs", withDocs(DOCS)])).toBe(1);
+    expect(await run(["rank", "--docs", withDocs(DOCS)])).toBe(2);
     expect(stderr()).toContain("usage: webindex rank");
   });
 
@@ -640,7 +655,7 @@ describe("the empty and JSON shapes of the lookup commands", () => {
   it("asks for a target rather than looking nothing up", async () => {
     for (const cmd of ["repo", "package", "meta", "robots", "sitemap", "feed"]) {
       err = [];
-      expect(await run([cmd]), cmd).toBe(1);
+      expect(await run([cmd]), cmd).toBe(2);
       expect(stderr(), cmd).toMatch(/usage: webindex/);
     }
   });
@@ -733,7 +748,7 @@ describe("webindex skill", () => {
   });
 
   it("asks for a name rather than scaffolding an unnamed skill", async () => {
-    expect(await run(["skill", "init", "--root", repo])).toBe(1);
+    expect(await run(["skill", "init", "--root", repo])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex skill init/);
   });
 
@@ -803,15 +818,21 @@ describe("webindex skill", () => {
 
   it("asks for a ref when told to vendor without one", async () => {
     skillJson();
-    expect(await run(["skill", "vendor", "--root", repo])).toBe(1);
+    expect(await run(["skill", "vendor", "--root", repo])).toBe(2);
     expect(stderr()).toMatch(/--ref <tag>/);
   });
+
+  // A well-shaped package now includes EXPORTING the flag surface: without it
+  // the docs↔CLI half of the gate cannot run, and a gate that cannot check must
+  // not certify. `SURFACE` is the smallest bundle that satisfies it.
+  const SURFACE =
+    'export const HELP = "  reader go\\n  --limit <n>\\n";\nexport const VALUE_FLAGS = new Set(["limit"]);\nexport const BOOL_FLAGS = new Set([]);\nexport const COMMANDS = new Set(["go"]);\n';
 
   it("passes a well-shaped package and fails a root SKILL.md", async () => {
     skillJson();
     writeIn("skills/reader/SKILL.md", "---\nname: reader\ndescription: Use it.\n---\n");
-    writeIn("scripts/reader.mjs", "// built");
-    writeIn("skills/reader/scripts/reader.mjs", "// built");
+    writeIn("scripts/reader.mjs", SURFACE);
+    writeIn("skills/reader/scripts/reader.mjs", SURFACE);
     expect(await run(["skill", "bundle", "--root", repo])).toBe(0);
     expect(stdout()).toMatch(/installs as a complete skill/);
 
@@ -820,6 +841,28 @@ describe("webindex skill", () => {
     err = [];
     expect(await run(["skill", "bundle", "--root", repo])).toBe(1);
     expect(stderr()).toMatch(/would install it alone, dropping the engine/);
+  });
+
+  // The regression this rule exists for: a flag table is a Set in the consuming
+  // skills and an array here, and `Array.isArray` refused the Set — so the
+  // drift half went quiet against exactly the repos it polices, printed a note
+  // on stderr, and still reported "installs as a complete skill".
+  it("reads a flag surface exported as a Set, not only as an array", async () => {
+    skillJson();
+    writeIn("skills/reader/SKILL.md", "---\nname: reader\ndescription: Use it.\n---\nRun `reader go --nope`.\n");
+    writeIn("scripts/reader.mjs", SURFACE);
+    writeIn("skills/reader/scripts/reader.mjs", SURFACE);
+    expect(await run(["skill", "bundle", "--root", repo])).toBe(1);
+    expect(stderr()).toMatch(/documents unknown flag --nope/);
+  });
+
+  it("refuses to certify when it cannot read the surface at all", async () => {
+    skillJson();
+    writeIn("skills/reader/SKILL.md", "---\nname: reader\ndescription: Use it.\n---\n");
+    writeIn("scripts/reader.mjs", "// built, exports nothing");
+    writeIn("skills/reader/scripts/reader.mjs", "// built, exports nothing");
+    expect(await run(["skill", "bundle", "--root", repo])).toBe(1);
+    expect(stderr()).toMatch(/exports no usable HELP\/VALUE_FLAGS\/BOOL_FLAGS/);
   });
 
   it("embeds the built engine in the package", async () => {
@@ -839,7 +882,7 @@ describe("webindex skill", () => {
 
   it("names the actions it knows when given one it does not", async () => {
     skillJson();
-    expect(await run(["skill", "frobnicate", "--root", repo])).toBe(1);
+    expect(await run(["skill", "frobnicate", "--root", repo])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex skill check\|bundle\|vendor\|copy\|doctor\|init/);
   });
 });
@@ -867,7 +910,7 @@ describe("the new commands", () => {
   it("refuses to crawl without a budget", async () => {
     // Enumerating someone else's site is the one operation here that can
     // inconvenience them, so the ceiling is the caller's decision.
-    expect(await run(["crawl", "https://s.test/"])).toBe(1);
+    expect(await run(["crawl", "https://s.test/"])).toBe(2);
     expect(stderr()).toMatch(/needs --max/);
   });
 

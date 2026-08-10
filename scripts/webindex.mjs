@@ -2992,8 +2992,8 @@ function auditSkillBundle(root, config, cli) {
   const missing = [...cli.valueFlags, ...cli.boolFlags].filter((f) => !helpCoversFlag(cli.help, f));
   check(missing.length === 0, missing.length === 0 ? "--help covers the whole flag surface" : `--help omits: ${missing.map((f) => `--${f}`).join(", ")}`);
   for (const cmd of cli.commands ?? []) {
-    const named = new RegExp(`^\\s+${name} ${cmd}\\b`, "m").test(cli.help);
-    check(named, named ? `--help documents \`${name} ${cmd}\`` : `--help never names the \`${cmd}\` command`);
+    const named = new RegExp(`(^|[^\\w-])${cmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^\\w-]|$)`, "m").test(cli.help);
+    check(named, named ? `--help names \`${cmd}\`` : `--help never names the \`${cmd}\` command`);
   }
   return out;
 }
@@ -4671,6 +4671,11 @@ function fail(msg) {
 `);
   process.exit(EXIT_FAILURE);
 }
+function usage(msg) {
+  process.stderr.write(`webindex: ${msg}
+`);
+  process.exit(EXIT_USAGE);
+}
 async function extractLocal(path) {
   let bytes;
   try {
@@ -5096,7 +5101,7 @@ async function dispatch(argv) {
   const cmd = args.command;
   if (cmd === "search") {
     const q = positionalText(args);
-    if (!q) fail("usage: webindex search <query>");
+    if (!q) usage("usage: webindex search <query>");
     const engine = argValue(args, "engine");
     if (engine && engine !== "off" && !isKeylessEngine(engine)) fail(`unknown --engine "${engine}" \u2014 expected one of ${KEYLESS_ENGINES.join(", ")}, or off`);
     const r = await search(q, {
@@ -5125,7 +5130,7 @@ async function dispatch(argv) {
   }
   if (cmd === "fetch") {
     const url = args.positional[0];
-    if (!url) fail("usage: webindex fetch <url>");
+    if (!url) usage("usage: webindex fetch <url>");
     if (!/^https?:\/\//i.test(url)) fail("fetch needs an http(s) URL");
     const r = await fetchAndExtract(url, { acceptLanguage: argValue(args, "lang"), firecrawl: argValue(args, "firecrawl") });
     if (argBool(args, "json")) {
@@ -5140,7 +5145,7 @@ async function dispatch(argv) {
   }
   if (cmd === "extract") {
     const path = args.positional[0];
-    if (!path) fail("usage: webindex extract <file>");
+    if (!path) usage("usage: webindex extract <file>");
     const r = await extractLocal(path);
     if (argBool(args, "json")) {
       process.stdout.write(
@@ -5180,7 +5185,7 @@ async function dispatch(argv) {
       return;
     }
     const valid = cmd === "stack" ? ["up", "down", "status", "path"] : ["up", "down", "status"];
-    if (!valid.includes(action)) fail(`usage: webindex ${cmd} ${valid.join("|")}`);
+    if (!valid.includes(action)) usage(`usage: webindex ${cmd} ${valid.join("|")}`);
     const r = stackControl(cmd === "stack" ? "all" : cmd, action);
     (r.code === 0 ? process.stdout : process.stderr).write(r.message + "\n");
     if (r.code !== 0) process.exit(r.code);
@@ -5188,7 +5193,7 @@ async function dispatch(argv) {
   }
   if (cmd === "rank") {
     const question = argValue(args, "query");
-    if (!question) fail("usage: webindex rank --query <question> --docs <file.json|-> [--limit <n>] [--json]");
+    if (!question) usage("usage: webindex rank --query <question> --docs <file.json|-> [--limit <n>] [--json]");
     const src = argValue(args, "docs") ?? "-";
     let payload;
     try {
@@ -5223,7 +5228,7 @@ async function dispatch(argv) {
   }
   if (cmd === "repo" || cmd === "issues" || cmd === "prs" || cmd === "releases" || cmd === "package") {
     const target = positionalText(args);
-    if (!target) fail(`usage: webindex ${cmd} <${cmd === "package" ? "name" : "repo"}> [--json]`);
+    if (!target) usage(`usage: webindex ${cmd} <${cmd === "package" ? "name" : "repo"}> [--json]`);
     const asJson = argBool(args, "json");
     const limit = argInt(args, "limit");
     const emit = (obj, human) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}
@@ -5277,7 +5282,7 @@ async function dispatch(argv) {
   }
   if (cmd === "meta" || cmd === "robots" || cmd === "sitemap" || cmd === "feed") {
     const target = positionalText(args);
-    if (!target) fail(`usage: webindex ${cmd} <url>`);
+    if (!target) usage(`usage: webindex ${cmd} <url>`);
     if (!/^https?:\/\//i.test(target)) fail("expected an http(s) URL");
     const asJson = argBool(args, "json");
     const emit = (obj, human) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}
@@ -5345,7 +5350,7 @@ async function dispatch(argv) {
   }
   if (cmd === "cache") {
     const action = args.positional[0] ?? "status";
-    if (action !== "status" && action !== "clean") fail("usage: webindex cache status|clean [--all]");
+    if (action !== "status" && action !== "clean") usage("usage: webindex cache status|clean [--all]");
     if (action === "clean") {
       const all = argBool(args, "all");
       const removed = cacheClean(all);
@@ -5372,10 +5377,10 @@ async function dispatch(argv) {
   }
   if (cmd === "crawl") {
     const seed = positionalText(args);
-    if (!seed) fail("usage: webindex crawl <url> --max <n>");
+    if (!seed) usage("usage: webindex crawl <url> --max <n>");
     if (!/^https?:\/\//i.test(seed)) fail("crawl needs an http(s) URL");
     const max = argInt(args, "max");
-    if (max === void 0) fail("crawl needs --max <n> \u2014 an unbounded walk of somebody else's site is not something to do by accident");
+    if (max === void 0) usage("crawl needs --max <n> \u2014 an unbounded walk of somebody else's site is not something to do by accident");
     const r = await crawlSite(seed, {
       maxPages: max,
       ...argInt(args, "depth") !== void 0 ? { maxDepth: argInt(args, "depth") } : {},
@@ -5397,7 +5402,7 @@ async function dispatch(argv) {
   }
   if (cmd === "tables") {
     const url = positionalText(args);
-    if (!url) fail("usage: webindex tables <url>");
+    if (!url) usage("usage: webindex tables <url>");
     if (!/^https?:\/\//i.test(url)) fail("tables needs an http(s) URL");
     const page = await httpGet(url, { accept: "text/html,*/*" });
     if (!page.ok) fail(`could not fetch ${url} (status ${page.status})`);
@@ -5409,7 +5414,7 @@ async function dispatch(argv) {
   }
   if (cmd === "embed") {
     const text = positionalText(args);
-    if (!text) fail("usage: webindex embed <text>");
+    if (!text) usage("usage: webindex embed <text>");
     const r = await embed([text]);
     if (!r.vectors.length) fail(r.note ?? "the embedding server returned nothing");
     process.stdout.write(
@@ -5420,7 +5425,7 @@ async function dispatch(argv) {
   }
   if (cmd === "hybrid") {
     const question = argValue(args, "query");
-    if (!question) fail("usage: webindex hybrid --query <question> --docs <file.json|->");
+    if (!question) usage("usage: webindex hybrid --query <question> --docs <file.json|->");
     const src = argValue(args, "docs") ?? "-";
     let payload;
     try {
@@ -5454,7 +5459,7 @@ async function dispatch(argv) {
   }
   if (cmd === "changed") {
     const url = positionalText(args);
-    if (!url) fail("usage: webindex changed <url> [--etag <v>] [--hash <sha256>]");
+    if (!url) usage("usage: webindex changed <url> [--etag <v>] [--hash <sha256>]");
     if (!/^https?:\/\//i.test(url)) fail("changed needs an http(s) URL");
     const etag = argValue(args, "etag");
     const hash = argValue(args, "hash");
@@ -5483,7 +5488,7 @@ hash ${f.contentHash ?? "-"}
     const asJson = argBool(args, "json");
     if (action === "init") {
       const name = args.positional[1];
-      if (!name) fail("usage: webindex skill init <name> [--root <dir>]");
+      if (!name) usage("usage: webindex skill init <name> [--root <dir>]");
       const r = scaffoldSkill(root, name, { exists: existsSync7 });
       for (const e of r.errors) process.stderr.write(`  ${e}
 `);
@@ -5513,7 +5518,7 @@ hash ${f.contentHash ?? "-"}
         return;
       }
       const ref = argValue(args, "ref");
-      if (!ref) fail("usage: webindex skill vendor [--engine <name>] --ref <tag>   |   webindex skill vendor --check");
+      if (!ref) usage("usage: webindex skill vendor [--engine <name>] --ref <tag>   |   webindex skill vendor --check");
       const only = argValue(args, "engine");
       const names = only ? [only] : Object.keys(config.engines);
       const fetchFile = async (url) => {
@@ -5574,25 +5579,25 @@ hash ${f.contentHash ?? "-"}
     if (action === "bundle") {
       const built = join12(root, "scripts", `${config.name}.mjs`);
       let surface;
+      let surfaceProblem;
+      const flagList = (v) => v == null || typeof v === "string" || typeof v[Symbol.iterator] !== "function" ? void 0 : [...v];
       if (existsSync7(built)) {
         try {
           const mod = await import(pathToFileURL(built).href);
-          if (typeof mod.HELP === "string" && Array.isArray(mod.VALUE_FLAGS) && Array.isArray(mod.BOOL_FLAGS)) {
-            surface = {
-              help: mod.HELP,
-              valueFlags: mod.VALUE_FLAGS,
-              boolFlags: mod.BOOL_FLAGS,
-              ...Array.isArray(mod.COMMANDS) ? { commands: mod.COMMANDS } : {}
-            };
+          const valueFlags = flagList(mod.VALUE_FLAGS);
+          const boolFlags = flagList(mod.BOOL_FLAGS);
+          const commands = flagList(mod.COMMANDS);
+          if (typeof mod.HELP === "string" && valueFlags && boolFlags) {
+            surface = { help: mod.HELP, valueFlags, boolFlags, ...commands ? { commands } : {} };
           } else {
-            process.stderr.write("  note the built CLI exports no HELP/VALUE_FLAGS/BOOL_FLAGS \u2014 the docs\u2194CLI half of this gate is skipped.\n");
+            surfaceProblem = "the built CLI exports no usable HELP/VALUE_FLAGS/BOOL_FLAGS \u2014 export them from the CLI entry so the docs\u2194CLI drift gate can read the real surface";
           }
         } catch (e) {
-          process.stderr.write(`  note could not import ${relative2(root, built)} for the drift gate: ${e.message}
-`);
+          surfaceProblem = `could not import ${relative2(root, built)} for the drift gate: ${e.message}`;
         }
       }
       const checks = auditSkillBundle(root, config, surface);
+      if (surfaceProblem) checks.push({ ok: false, message: surfaceProblem });
       if (asJson) process.stdout.write(jsonLine(checks));
       else for (const c of checks) (c.ok ? process.stdout : process.stderr).write(`  ${c.ok ? "ok  " : "FAIL"} ${c.message}
 `);
@@ -5638,7 +5643,7 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
       }
       return;
     }
-    fail("usage: webindex skill check|bundle|vendor|copy|doctor|init");
+    usage("usage: webindex skill check|bundle|vendor|copy|doctor|init");
   }
   if (cmd === "doctor") {
     const base = firecrawlBase();

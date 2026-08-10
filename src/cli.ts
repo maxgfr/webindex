@@ -243,6 +243,22 @@ function fail(msg: string): never {
   process.exit(EXIT_FAILURE);
 }
 
+/**
+ * The invocation itself was wrong — a missing required argument, or an action
+ * that is not one of the listed ones.
+ *
+ * Distinct from fail() because cli-kit.ts's taxonomy promises it is: 1 is "ran,
+ * and the answer is a failure: nothing found, a gate refused", 2 is "the
+ * invocation itself was wrong". Every one of these used to exit 1 while printing
+ * the word "usage:", so a script branching on the code read "you called me
+ * wrong" as "there is nothing there" — and the README's own composable idiom
+ * (`webindex robots <url> && fetch it`) is exactly such a script.
+ */
+function usage(msg: string): never {
+  process.stderr.write(`webindex: ${msg}\n`);
+  process.exit(EXIT_USAGE);
+}
+
 /** Extraction over bytes already in hand — the shared half of `extract`. */
 async function extractLocal(path: string): Promise<{ text: string; extractor: string; reason?: string }> {
   let bytes: Buffer;
@@ -743,7 +759,7 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "search") {
     const q = positionalText(args);
-    if (!q) fail("usage: webindex search <query>");
+    if (!q) usage("usage: webindex search <query>");
     const engine = argValue(args, "engine");
     if (engine && engine !== "off" && !isKeylessEngine(engine)) fail(`unknown --engine "${engine}" — expected one of ${KEYLESS_ENGINES.join(", ")}, or off`);
     const r = await search(q, {
@@ -770,7 +786,7 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "fetch") {
     const url = args.positional[0];
-    if (!url) fail("usage: webindex fetch <url>");
+    if (!url) usage("usage: webindex fetch <url>");
     if (!/^https?:\/\//i.test(url)) fail("fetch needs an http(s) URL");
     const r = await fetchAndExtract(url, { acceptLanguage: argValue(args, "lang"), firecrawl: argValue(args, "firecrawl") });
     if (argBool(args, "json")) {
@@ -786,7 +802,7 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "extract") {
     const path = args.positional[0];
-    if (!path) fail("usage: webindex extract <file>");
+    if (!path) usage("usage: webindex extract <file>");
     const r = await extractLocal(path);
     if (argBool(args, "json")) {
       process.stdout.write(
@@ -838,7 +854,7 @@ async function dispatch(argv: string[]): Promise<void> {
     // The engine guards this too, for library callers. Doing it here as well is
     // what lets the message name `path`, which only `stack` accepts.
     const valid = cmd === "stack" ? ["up", "down", "status", "path"] : ["up", "down", "status"];
-    if (!valid.includes(action)) fail(`usage: webindex ${cmd} ${valid.join("|")}`);
+    if (!valid.includes(action)) usage(`usage: webindex ${cmd} ${valid.join("|")}`);
 
     const r = stackControl(cmd === "stack" ? "all" : cmd, action);
     // stdout for the report, so `webindex stack status` is pipeable; the engine
@@ -850,7 +866,7 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "rank") {
     const question = argValue(args, "query");
-    if (!question) fail("usage: webindex rank --query <question> --docs <file.json|-> [--limit <n>] [--json]");
+    if (!question) usage("usage: webindex rank --query <question> --docs <file.json|-> [--limit <n>] [--json]");
     const src = argValue(args, "docs") ?? "-";
     let payload: string;
     try {
@@ -889,7 +905,7 @@ async function dispatch(argv: string[]): Promise<void> {
   // keyless, and answering from the record rather than from a README.
   if (cmd === "repo" || cmd === "issues" || cmd === "prs" || cmd === "releases" || cmd === "package") {
     const target = positionalText(args);
-    if (!target) fail(`usage: webindex ${cmd} <${cmd === "package" ? "name" : "repo"}> [--json]`);
+    if (!target) usage(`usage: webindex ${cmd} <${cmd === "package" ? "name" : "repo"}> [--json]`);
     const asJson = argBool(args, "json");
     const limit = argInt(args, "limit");
     const emit = (obj: unknown, human: string[]) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}\n`);
@@ -951,7 +967,7 @@ async function dispatch(argv: string[]): Promise<void> {
   // a full extraction.
   if (cmd === "meta" || cmd === "robots" || cmd === "sitemap" || cmd === "feed") {
     const target = positionalText(args);
-    if (!target) fail(`usage: webindex ${cmd} <url>`);
+    if (!target) usage(`usage: webindex ${cmd} <url>`);
     if (!/^https?:\/\//i.test(target)) fail("expected an http(s) URL");
     const asJson = argBool(args, "json");
     const emit = (obj: unknown, human: string[]) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}\n`);
@@ -1018,7 +1034,7 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "cache") {
     const action = args.positional[0] ?? "status";
-    if (action !== "status" && action !== "clean") fail("usage: webindex cache status|clean [--all]");
+    if (action !== "status" && action !== "clean") usage("usage: webindex cache status|clean [--all]");
     if (action === "clean") {
       const all = argBool(args, "all");
       const removed = cacheClean(all);
@@ -1045,13 +1061,13 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "crawl") {
     const seed = positionalText(args);
-    if (!seed) fail("usage: webindex crawl <url> --max <n>");
+    if (!seed) usage("usage: webindex crawl <url> --max <n>");
     if (!/^https?:\/\//i.test(seed)) fail("crawl needs an http(s) URL");
     const max = argInt(args, "max");
     // Required, not defaulted. Enumerating someone else's site is the one
     // operation here that can inconvenience them, so the budget is a decision
     // the caller makes rather than one this command makes for them.
-    if (max === undefined) fail("crawl needs --max <n> — an unbounded walk of somebody else's site is not something to do by accident");
+    if (max === undefined) usage("crawl needs --max <n> — an unbounded walk of somebody else's site is not something to do by accident");
     const r = await crawlSite(seed, {
       maxPages: max,
       ...(argInt(args, "depth") !== undefined ? { maxDepth: argInt(args, "depth") as number } : {}),
@@ -1070,7 +1086,7 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "tables") {
     const url = positionalText(args);
-    if (!url) fail("usage: webindex tables <url>");
+    if (!url) usage("usage: webindex tables <url>");
     if (!/^https?:\/\//i.test(url)) fail("tables needs an http(s) URL");
     const page = await httpGet(url, { accept: "text/html,*/*" });
     if (!page.ok) fail(`could not fetch ${url} (status ${page.status})`);
@@ -1082,7 +1098,7 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "embed") {
     const text = positionalText(args);
-    if (!text) fail("usage: webindex embed <text>");
+    if (!text) usage("usage: webindex embed <text>");
     const r = await embed([text]);
     if (!r.vectors.length) fail(r.note ?? "the embedding server returned nothing");
     process.stdout.write(
@@ -1093,7 +1109,7 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "hybrid") {
     const question = argValue(args, "query");
-    if (!question) fail("usage: webindex hybrid --query <question> --docs <file.json|->");
+    if (!question) usage("usage: webindex hybrid --query <question> --docs <file.json|->");
     const src = argValue(args, "docs") ?? "-";
     let payload: string;
     try {
@@ -1127,7 +1143,7 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "changed") {
     const url = positionalText(args);
-    if (!url) fail("usage: webindex changed <url> [--etag <v>] [--hash <sha256>]");
+    if (!url) usage("usage: webindex changed <url> [--etag <v>] [--hash <sha256>]");
     if (!/^https?:\/\//i.test(url)) fail("changed needs an http(s) URL");
     const etag = argValue(args, "etag");
     const hash = argValue(args, "hash");
@@ -1159,7 +1175,7 @@ async function dispatch(argv: string[]): Promise<void> {
 
     if (action === "init") {
       const name = args.positional[1];
-      if (!name) fail("usage: webindex skill init <name> [--root <dir>]");
+      if (!name) usage("usage: webindex skill init <name> [--root <dir>]");
       const r = scaffoldSkill(root, name, { exists: existsSync });
       for (const e of r.errors) process.stderr.write(`  ${e}\n`);
       process.stdout.write(asJson ? jsonLine(r) : `${r.written.map((p) => `  wrote ${relative(root, p)}`).join("\n")}\n`);
@@ -1188,7 +1204,7 @@ async function dispatch(argv: string[]): Promise<void> {
         return;
       }
       const ref = argValue(args, "ref");
-      if (!ref) fail("usage: webindex skill vendor [--engine <name>] --ref <tag>   |   webindex skill vendor --check");
+      if (!ref) usage("usage: webindex skill vendor [--engine <name>] --ref <tag>   |   webindex skill vendor --check");
       const only = argValue(args, "engine");
       const names = only ? [only] : Object.keys(config.engines);
       const fetchFile = async (url: string) => {
@@ -1247,24 +1263,34 @@ async function dispatch(argv: string[]): Promise<void> {
       // firing, so reading it is not running it.
       const built = join(root, "scripts", `${config.name}.mjs`);
       let surface: CliSurface | undefined;
+      let surfaceProblem: string | undefined;
+      // A flag table is a Set in the consuming skills and an array in this one.
+      // `Array.isArray` refused the Set, so the drift half went quiet against
+      // exactly the repos it exists to police. Take any iterable.
+      const flagList = (v: unknown): string[] | undefined =>
+        v == null || typeof v === "string" || typeof (v as Iterable<string>)[Symbol.iterator] !== "function" ? undefined : [...(v as Iterable<string>)];
       if (existsSync(built)) {
         try {
           const mod = (await import(pathToFileURL(built).href)) as Record<string, unknown>;
-          if (typeof mod.HELP === "string" && Array.isArray(mod.VALUE_FLAGS) && Array.isArray(mod.BOOL_FLAGS)) {
-            surface = {
-              help: mod.HELP,
-              valueFlags: mod.VALUE_FLAGS as string[],
-              boolFlags: mod.BOOL_FLAGS as string[],
-              ...(Array.isArray(mod.COMMANDS) ? { commands: mod.COMMANDS as string[] } : {}),
-            };
+          const valueFlags = flagList(mod.VALUE_FLAGS);
+          const boolFlags = flagList(mod.BOOL_FLAGS);
+          const commands = flagList(mod.COMMANDS);
+          if (typeof mod.HELP === "string" && valueFlags && boolFlags) {
+            surface = { help: mod.HELP, valueFlags, boolFlags, ...(commands ? { commands } : {}) };
           } else {
-            process.stderr.write("  note the built CLI exports no HELP/VALUE_FLAGS/BOOL_FLAGS — the docs↔CLI half of this gate is skipped.\n");
+            surfaceProblem =
+              "the built CLI exports no usable HELP/VALUE_FLAGS/BOOL_FLAGS — export them from the CLI entry so the docs↔CLI drift gate can read the real surface";
           }
         } catch (e) {
-          process.stderr.write(`  note could not import ${relative(root, built)} for the drift gate: ${(e as Error).message}\n`);
+          surfaceProblem = `could not import ${relative(root, built)} for the drift gate: ${(e as Error).message}`;
         }
       }
       const checks = auditSkillBundle(root, config, surface);
+      // A gate that cannot do half its job must not certify the other half.
+      // Reporting this as a note on stderr let a skill documenting a flag the
+      // engine rejects pass green — the same silent-disarm that `usageFloor`
+      // is refused rather than defaulted to zero to prevent.
+      if (surfaceProblem) checks.push({ ok: false, message: surfaceProblem });
       if (asJson) process.stdout.write(jsonLine(checks));
       else for (const c of checks) (c.ok ? process.stdout : process.stderr).write(`  ${c.ok ? "ok  " : "FAIL"} ${c.message}\n`);
       const bad = checks.filter((c) => !c.ok).length;
@@ -1304,7 +1330,7 @@ async function dispatch(argv: string[]): Promise<void> {
       return;
     }
 
-    fail("usage: webindex skill check|bundle|vendor|copy|doctor|init");
+    usage("usage: webindex skill check|bundle|vendor|copy|doctor|init");
   }
 
   if (cmd === "doctor") {
