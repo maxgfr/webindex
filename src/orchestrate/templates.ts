@@ -48,6 +48,20 @@ export interface PhaseEmission {
   description(items: number): string;
   /** The orchestrator's fold step, rendered as comment lines in the script and in the runbook. */
   applyHint(run: string, engineAbs: string, phase: PhaseInfo): string[];
+  /**
+   * Extra options spliced into this phase's `agent(…)` call, as literal source.
+   *
+   * The case it exists for is worktree isolation: a phase whose subagents WRITE
+   * — a builder running a task — needs `isolation: 'worktree'` or they collide
+   * in one checkout. That is a property of the phase, not of the engine, and
+   * without a hook such a phase has to keep its own emitter.
+   *
+   * Source rather than a value because these are harness options, not data: the
+   * caller writes exactly what the harness expects. It is spliced into the
+   * emitted file, so it goes through the same safety assertion as everything
+   * else — a `Date.now()` in here is refused.
+   */
+  agentOpts?: string;
 }
 
 /**
@@ -166,7 +180,7 @@ export function emitWorkflowScript<T>(
     `    label: ${JSON.stringify(`${phase.name}:`)} + (i + 1),`,
     `    phase: ${JSON.stringify(emission.title)},`,
     `    agentType: 'general-purpose',`,
-    `    schema: SCHEMA,`,
+    `    schema: SCHEMA,${emission.agentOpts ?? ""}`,
     `  }))`,
     ``,
     `// One-writer rule: this workflow only COLLECTS the subagents' fragments.`,

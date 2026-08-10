@@ -4518,7 +4518,7 @@ function emitWorkflowScript(phase, emission, runAbs, engineAbs, smallWorklist, c
     `    label: ${JSON.stringify(`${phase.name}:`)} + (i + 1),`,
     `    phase: ${JSON.stringify(emission.title)},`,
     `    agentType: 'general-purpose',`,
-    `    schema: SCHEMA,`,
+    `    schema: SCHEMA,${emission.agentOpts ?? ""}`,
     `  }))`,
     ``,
     `// One-writer rule: this workflow only COLLECTS the subagents' fragments.`,

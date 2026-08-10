@@ -281,6 +281,21 @@ describe("the emitted workflow script", () => {
     expect(() => orchestrateRun(run, ENGINE, DEFS, contracts, { constants: { STAMP: "built at Date.now()" } })).toThrow(/Date\.now/);
   });
 
+  it("splices a phase's own agent options into the dispatch", () => {
+    // Worktree isolation is the case: a phase whose subagents WRITE would
+    // otherwise have them collide in one checkout.
+    todo(20);
+    const ph = listPhases(run, ENGINE, [VERIFY] as never)[0] as never;
+    const script = emitWorkflowScript(ph, { ...VERIFY, agentOpts: " isolation: 'worktree'," }, run, ENGINE, 3);
+    expect(script).toContain("schema: SCHEMA, isolation: 'worktree',");
+  });
+
+  it("still refuses a forbidden call arriving through agent options", () => {
+    todo(20);
+    const ph = listPhases(run, ENGINE, [VERIFY] as never)[0] as never;
+    expect(() => emitWorkflowScript(ph, { ...VERIFY, agentOpts: " label: Date.now()," }, run, ENGINE, 3)).toThrow(/Date\.now/);
+  });
+
   it("carries the fold as comments, because the workflow must not run it", () => {
     expect(emit(20)).toContain(`//   node ${ENGINE} verify --apply ${run}`);
   });
