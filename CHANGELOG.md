@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.18.1](https://github.com/maxgfr/webindex/compare/v1.18.0...v1.18.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* **cite:** read a decimal comma as a decimal point, not a group separator ([fe88e60](https://github.com/maxgfr/webindex/commit/fe88e608f2bab6960dfbb7a1121efbb97ba259c9))
+* **cli:** exit 2 on a missing required argument, and let the skill gate read a Set ([19d5703](https://github.com/maxgfr/webindex/commit/19d5703b367ef04eedc18840a02260e2010755a8))
+
 # [1.18.0](https://github.com/maxgfr/webindex/compare/v1.17.0...v1.18.0) (2026-08-10)
 
 
