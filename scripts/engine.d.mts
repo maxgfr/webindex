@@ -2411,7 +2411,7 @@ declare function toBatches(ids: readonly string[], batchSize: number): string[][
  * at emit time, so a worklist that changes needs a re-emit before launching.
  * Saying so in the file itself is cheaper than the confusion of a stale run.
  */
-declare function emitWorkflowScript<T>(phase: PhaseInfo<T>, emission: PhaseEmission, runAbs: string, engineAbs: string, smallWorklist: number): string;
+declare function emitWorkflowScript<T>(phase: PhaseInfo<T>, emission: PhaseEmission, runAbs: string, engineAbs: string, smallWorklist: number, constants?: Record<string, unknown>): string;
 /**
  * The sequential fallback.
  *
@@ -2486,6 +2486,15 @@ interface OrchestrateOptions {
     smallWorklist?: number;
     /** Lines the skill wants at the top of RUNBOOK.md, above the phase list. */
     runbookPreamble?: string[];
+    /**
+     * Extra `const NAME = <json>` lines in every emitted workflow.
+     *
+     * For run-specific data a subagent must receive rather than fetch: a judge
+     * handed the decision and its evidence verbatim never has to open the run
+     * folder it is judging. Values are JSON-serialised, so the harness's
+     * pure-literal rule still holds.
+     */
+    constants?: Record<string, unknown>;
 }
 interface OrchestrateResult {
     exitCode: number;

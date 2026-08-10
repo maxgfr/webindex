@@ -109,7 +109,14 @@ function assertWorkflowSafe(script: string, phaseName: string): void {
  * at emit time, so a worklist that changes needs a re-emit before launching.
  * Saying so in the file itself is cheaper than the confusion of a stale run.
  */
-export function emitWorkflowScript<T>(phase: PhaseInfo<T>, emission: PhaseEmission, runAbs: string, engineAbs: string, smallWorklist: number): string {
+export function emitWorkflowScript<T>(
+  phase: PhaseInfo<T>,
+  emission: PhaseEmission,
+  runAbs: string,
+  engineAbs: string,
+  smallWorklist: number,
+  constants: Record<string, unknown> = {},
+): string {
   const cli = brand().cli;
   const scriptPath = join(runAbs, "orchestration", `${phase.name}.workflow.mjs`);
   const meta = { name: `${cli}-${phase.name}`, description: emission.description(phase.items), phases: [{ title: emission.title }] };
@@ -138,6 +145,11 @@ export function emitWorkflowScript<T>(phase: PhaseInfo<T>, emission: PhaseEmissi
     `const AGENTS = RUN + '/orchestration/agents'`,
     `const BATCHES = ${JSON.stringify(batches)}`,
     `const SCHEMA = ${JSON.stringify(emission.schema)}`,
+    // Run-specific data the caller wants pasted INTO the script rather than
+    // read from disk by the subagent. A judge panel is the case that needs it:
+    // each judge is handed the decision and its cited evidence verbatim,
+    // precisely so it never has to open the run folder it is judging.
+    ...Object.entries(constants).map(([name, value]) => `const ${name} = ${JSON.stringify(value)}`),
     ``,
     `function contract(role, extra) {`,
     `  return 'Read and follow the dispatch contract at ' + AGENTS + '/' + role + '.md VERBATIM.\\n'`,

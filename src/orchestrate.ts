@@ -101,6 +101,15 @@ export interface OrchestrateOptions {
   smallWorklist?: number;
   /** Lines the skill wants at the top of RUNBOOK.md, above the phase list. */
   runbookPreamble?: string[];
+  /**
+   * Extra `const NAME = <json>` lines in every emitted workflow.
+   *
+   * For run-specific data a subagent must receive rather than fetch: a judge
+   * handed the decision and its evidence verbatim never has to open the run
+   * folder it is judging. Values are JSON-serialised, so the harness's
+   * pure-literal rule still holds.
+   */
+  constants?: Record<string, unknown>;
 }
 
 export interface OrchestrateResult {
@@ -220,7 +229,7 @@ export function orchestrateRun<T>(
       if (ph.items <= floor) {
         notices.push(`phase "${ph.name}": only ${ph.items} item(s) — the sequential --eco path is equivalent and cheaper.`);
       }
-      written.push(writeArtifact(join(orchDir, `${ph.name}.workflow.mjs`), emitWorkflowScript(ph, def, run, engineAbs, small)));
+      written.push(writeArtifact(join(orchDir, `${ph.name}.workflow.mjs`), emitWorkflowScript(ph, def, run, engineAbs, small, opts.constants)));
     }
   }
 

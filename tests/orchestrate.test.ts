@@ -263,6 +263,24 @@ describe("the emitted workflow script", () => {
     expect(batches).toEqual([["Q1"], ["Q2"]]);
   });
 
+  it("pastes caller constants into the script, so a subagent need not open the run", () => {
+    // The judge-panel case: each judge is handed the decision and its cited
+    // evidence verbatim, precisely so it never reads the folder it is judging.
+    todo(20);
+    const r = orchestrateRun(run, ENGINE, DEFS, contracts, { constants: { ADR: { id: "ADR-1" }, EVIDENCE: ["E1"] } });
+    expect(r.exitCode).toBe(0);
+    const script = readFileSync(join(run, "orchestration", "verify.workflow.mjs"), "utf8");
+    expect(script).toContain('const ADR = {"id":"ADR-1"}');
+    expect(script).toContain('const EVIDENCE = ["E1"]');
+  });
+
+  it("refuses a constant that would break the harness", () => {
+    // The safety assertion still runs over the finished text, so a constant is
+    // not a way around it.
+    todo(20);
+    expect(() => orchestrateRun(run, ENGINE, DEFS, contracts, { constants: { STAMP: "built at Date.now()" } })).toThrow(/Date\.now/);
+  });
+
   it("carries the fold as comments, because the workflow must not run it", () => {
     expect(emit(20)).toContain(`//   node ${ENGINE} verify --apply ${run}`);
   });
