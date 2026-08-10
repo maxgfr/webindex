@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.15.0](https://github.com/maxgfr/webindex/compare/v1.14.0...v1.15.0) (2026-08-10)
+
+
+### Bug Fixes
+
+* **skillkit:** keep the dev-time toolchain out of the vendored bundle ([2d16118](https://github.com/maxgfr/webindex/commit/2d161189f01f69ea3138685c9690b0e8756e06a4))
+
+
+### Features
+
+* **changed,tables:** answer "did this change", and stop flattening tables ([fa207d9](https://github.com/maxgfr/webindex/commit/fa207d9445ba5d00dd25cfaaa9de90a83d8b7864))
+* **cite:** the mechanics of reading citations, never the verdict ([9605ff9](https://github.com/maxgfr/webindex/commit/9605ff942c14454e9b6955d793aef84d11f69612)), closes [issue#45](https://github.com/issue/issues/45)
+* **cli,mcp:** surface the new layers, and keep the engine out of the pool ([76efb3d](https://github.com/maxgfr/webindex/commit/76efb3d358894368d7c1be8c5603949f6a559e05))
+* **crawl:** apply the Crawl-delay, and walk a site on purpose ([660aec4](https://github.com/maxgfr/webindex/commit/660aec4986f0e3214de98d8026708bcaa82a989c))
+* **embed,vector:** reach the semantic stack this package already ships ([7ae4152](https://github.com/maxgfr/webindex/commit/7ae4152f3c43179f3f3f482053bcdea3c435e827))
+* **orchestrate:** one emitter for the fan-out eight skills each rewrote ([a6f02e0](https://github.com/maxgfr/webindex/commit/a6f02e09d6bea891c6552c215daaabe4ead582c9))
+* **run,cli:** a run directory and a validating command-line harness ([b9a6b79](https://github.com/maxgfr/webindex/commit/b9a6b79c9157133964ac18634b478fdd721c17f4))
+* **skill:** the packaging toolchain, as commands instead of copied scripts ([3a35bde](https://github.com/maxgfr/webindex/commit/3a35bdea6aeef22c67f1f8b3388093d1d402e3df))
+
 # [1.14.0](https://github.com/maxgfr/webindex/compare/v1.13.1...v1.14.0) (2026-08-09)
 
 

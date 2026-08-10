@@ -57,7 +57,7 @@ function envInt(suffix, def, min = 0, max = Number.MAX_SAFE_INTEGER) {
 }
 
 // src/version.ts
-var ENGINE_VERSION = "1.14.0";
+var ENGINE_VERSION = "1.15.0";
 
 // src/doc/formats.ts
 var BINARY = { textFallback: false };
