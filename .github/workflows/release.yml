@@ -18,6 +18,10 @@ name: Release
 on:
   push:
     branches: [main]
+  # Runnable by hand, for a release that needs re-driving after a transient
+  # failure. Safe to repeat: semantic-release analyses the commits since the
+  # last tag and publishes nothing when none of them warrant a release.
+  workflow_dispatch:
 
 permissions:
   contents: write # push the bump commit + tag, create the release

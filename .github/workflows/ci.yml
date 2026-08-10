@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Runnable by hand. The release commit carries `[skip ci]` — necessary, or
+  # semantic-release would trigger itself forever — which means the tree that
+  # actually ships is the one commit CI never sees. This is how you ask it to.
+  workflow_dispatch:
 
 jobs:
   build-test:
