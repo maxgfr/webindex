@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.16.0](https://github.com/maxgfr/webindex/compare/v1.15.2...v1.16.0) (2026-08-10)
+
+
+### Features
+
+* **orchestrate:** a phase's ids get the run, not only the worklist ([af23403](https://github.com/maxgfr/webindex/commit/af23403ac2422b00016596caee09905db8c63f9b))
+
 ## [1.15.2](https://github.com/maxgfr/webindex/compare/v1.15.1...v1.15.2) (2026-08-10)
 
 
