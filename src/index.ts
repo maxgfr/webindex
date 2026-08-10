@@ -177,6 +177,13 @@ export { type Artifact, ensureDir, isNoWrite, resetNoWrite, setNoWrite, takeArti
 // directory holds JSON, not what the JSON means.
 export * from "./run.js";
 
+// ── The multi-agent fan-out ─────────────────────────────────────────────────
+// Worklists → one Workflow script per phase, the dispatch contracts it
+// references, and a sequential runbook. The skill declares its phases and
+// writes its contracts; the engine owns the emission, the batching, the
+// one-writer footer and the harness constraints the emitted script must obey.
+export * from "./orchestrate.js";
+
 // ── The command-line harness ────────────────────────────────────────────────
 // A validating argv parser driven by the caller's own flag tables, the exit-code
 // taxonomy, and the matchers a docs↔CLI drift gate reads. Used BY command lines;

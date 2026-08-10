@@ -1836,6 +1836,160 @@ declare function readManifest<T>(dir: string, file?: string): T | undefined;
  */
 declare function writeManifest(dir: string, value: unknown, file?: string): string;
 
+/**
+ * The three calls that throw inside the workflow harness.
+ *
+ * `new Date()` with arguments is fine — it is the ARGLESS form that reads the
+ * clock — but the emitter refuses both, because distinguishing them by regex
+ * invites exactly the mistake the rule exists to stop. A workflow that needs a
+ * timestamp takes one as an injected constant.
+ */
+declare const WORKFLOW_FORBIDDEN: readonly ["Date.now(", "Math.random(", "new Date("];
+/** The half of a phase that describes how it is EMITTED, as the skill declares it. */
+interface PhaseEmission {
+    /** Contract filename under `orchestration/agents/<role>.md`, and the agent's role. */
+    role: string;
+    /** Progress-group title in the emitted workflow. */
+    title: string;
+    /** JSON Schema handed to `agent(…, { schema })`, so a fragment is validated on return. */
+    schema: unknown;
+    /** One agent per batch of at most this many items. */
+    batchSize: number;
+    /** Collapse to a single batch at or under this count. Defaults to the caller's floor. */
+    collapseFloor?(smallWorklist: number): number;
+    /** `meta.description` of the emitted workflow. */
+    description(items: number): string;
+    /** The orchestrator's fold step, rendered as comment lines in the script and in the runbook. */
+    applyHint(run: string, engineAbs: string, phase: PhaseInfo): string[];
+}
+/**
+ * The family-standard footer for a dispatch contract: subagents return
+ * fragments, the orchestrator is the sole writer.
+ *
+ * One writer, many readers — no races and no clobbered evidence. Every skill
+ * here had a copy; they differed only in whether a role gets a sanctioned
+ * write of its own, so that is the parameter.
+ *
+ * @param runAbs      the run directory, for the oversized-prose escape hatch
+ * @param sanctioned  the ONE write this role may perform, if any
+ * @param writingCommands  engine commands the subagent must not run
+ */
+declare function oneWriterFooter(runAbs: string, opts?: {
+    sanctioned?: string;
+    writingCommands?: readonly string[];
+}): string;
+/** Chunk ids into batches, one subagent per batch. Order-preserving and deterministic. */
+declare function toBatches(ids: readonly string[], batchSize: number): string[][];
+/**
+ * The launchable Workflow script for one ready phase.
+ *
+ * The worklist is the source of truth: the batches are frozen into the script
+ * at emit time, so a worklist that changes needs a re-emit before launching.
+ * Saying so in the file itself is cheaper than the confusion of a stale run.
+ */
+declare function emitWorkflowScript<T>(phase: PhaseInfo<T>, emission: PhaseEmission, runAbs: string, engineAbs: string, smallWorklist: number): string;
+/**
+ * The sequential fallback.
+ *
+ * Not a lesser path — it is the correct one for a small worklist, and the only
+ * one when no subagent-capable harness is present. It lists every phase,
+ * whether it is ready, and the exact command that makes it ready, so a reader
+ * can walk the whole run by hand.
+ */
+declare function runbookMd<T>(phases: readonly PhaseInfo<T>[], defs: readonly PhaseEmission[], runAbs: string, engineAbs: string, cli: string, preamble?: readonly string[]): string;
+
+/**
+ * Below this many items a fan-out does not pay for itself, and `orchestrate`
+ * says so rather than emitting a workflow nobody should launch.
+ *
+ * A default, not a rule: each phase overrides it through `collapseFloor`,
+ * because the units differ in weight. One heavy per-sub-question gather is
+ * worth its own agent at any count above one; one cheap claim↔source judgment
+ * is not.
+ */
+declare const SMALL_WORKLIST = 3;
+/** One agent per batch of at most this many items, unless a phase says otherwise. */
+declare const BATCH_SIZE = 8;
+/**
+ * A phase, as the SKILL declares it.
+ *
+ * `T` is whatever that phase's worklist file parses to — the skill's own type.
+ * This module reads it only through the two callbacks below, so it never has to
+ * know the shape.
+ */
+interface PhaseDefinition<T = unknown> extends PhaseEmission {
+    /** Phase name, used for `--phase`, the script filename and the progress group. */
+    name: string;
+    /** The worklist filename, relative to the run directory. */
+    worklist: string;
+    /**
+     * The fan-out ids in a parsed worklist, or undefined when it is not usable.
+     *
+     * Returning undefined is how a file that exists but is half-written stays
+     * "not ready" instead of producing a workflow over garbage — which is why
+     * every consumer's version of this tested `Array.isArray(...)` before
+     * trusting the parse.
+     */
+    ids(parsed: T): string[] | undefined;
+    /** The engine command that produces this worklist. Shown when it is missing. */
+    prerequisite(run: string, engineAbs: string, parsed?: T): string;
+}
+/** A phase, as this module resolved it against a run directory. */
+interface PhaseInfo<T = unknown> {
+    name: string;
+    ready: boolean;
+    /** Absolute path of the worklist this phase fans out over. */
+    worklist: string;
+    items: number;
+    ids: string[];
+    /** The command that produces the worklist when it is missing. */
+    prerequisite: string;
+    /** The parsed worklist, when ready — a phase's own emitters may need it. */
+    parsed?: T;
+}
+interface OrchestrateOptions {
+    /** Emit only this phase. Exit code 2 when its worklist does not exist yet. */
+    phase?: string;
+    /** Emit only the RUNBOOK and the contracts — the explicit low-token path. */
+    eco?: boolean;
+    /** Override the default collapse floor. */
+    smallWorklist?: number;
+    /** Lines the skill wants at the top of RUNBOOK.md, above the phase list. */
+    runbookPreamble?: string[];
+}
+interface OrchestrateResult {
+    exitCode: number;
+    written: string[];
+    notices: string[];
+    errors: string[];
+    phases: PhaseInfo[];
+}
+/**
+ * Resolve every declared phase against a run directory.
+ *
+ * Reading is tolerant by design (see readJsonSafe): absent, unreadable and
+ * malformed all mean "not ready", because the prerequisite command can simply
+ * regenerate the file and failing hard would strand the run instead.
+ */
+declare function listPhases<T>(runDir: string, engineAbs: string, defs: readonly PhaseDefinition<T>[]): PhaseInfo<T>[];
+/**
+ * Emit the run's orchestration from its current worklists.
+ *
+ * Writes, in `<run>/orchestration/`:
+ *   agents/<role>.md      the dispatch contracts, every role, every call
+ *   <phase>.workflow.mjs  one launchable Workflow script per ready phase
+ *   RUNBOOK.md            the sequential fallback
+ *
+ * The contracts are rewritten on every call, including under `--eco`: they
+ * double as the RUNBOOK's self-pass checklists, so the sequential path needs
+ * them just as much as the fan-out does.
+ *
+ * Every write goes through `writeArtifact`, so `--stdout` leaves the filesystem
+ * exactly as it found it. That is not a refinement — one consuming skill wrote
+ * these files with a bare writeFileSync and silently escaped its own gate.
+ */
+declare function orchestrateRun<T>(runDir: string, engineAbs: string, defs: readonly PhaseDefinition<T>[], contracts: (run: string, engineAbs: string, phases: PhaseInfo<T>[]) => Record<string, string>, opts?: OrchestrateOptions): OrchestrateResult;
+
 /** The command did what it was asked. */
 declare const EXIT_OK = 0;
 /** The command ran and the answer is a failure: nothing found, a gate refused. */
@@ -2146,4 +2300,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type CliSpec, type CommandArgs, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, type ToolDecl, ToolError, type ToolOutcome, UsageError, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, cleanInline, configure, contactUa, contentCoverage, createServer, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, dedupeByUrl, dedupeNearDuplicates, defaultUa, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embedModel, enabledDocExtractors, enabledExtractors, ensureClone, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractPdf, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, have, headCommit, helpCoversFlag, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, listReleases, listResources, listTags, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalizeDoi, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeSearxng, pubmedAbstractUrl, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripTags, structuredContentFor, subtokens, takeArtifacts, throttleReason, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type CliSpec, type CommandArgs, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, type ToolDecl, ToolError, type ToolOutcome, UsageError, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, cleanInline, configure, contactUa, contentCoverage, createServer, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, dedupeByUrl, dedupeNearDuplicates, defaultUa, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embedModel, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractPdf, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, firecrawlBase, firecrawlIsExplicit, fnv1a64, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, have, headCommit, helpCoversFlag, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, listPhases, listReleases, listResources, listTags, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalizeDoi, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, oneWriterFooter, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeSearxng, pubmedAbstractUrl, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetNoWrite, resetOcrBudget, resetPdfLadderCache, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripTags, structuredContentFor, subtokens, takeArtifacts, throttleReason, toBatches, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };

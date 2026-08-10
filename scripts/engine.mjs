@@ -208,12 +208,12 @@ function binaryName(name) {
   return process.platform === "win32" && name === "npx" ? "npx.cmd" : name;
 }
 function runWithInput(cmd, args, input, timeoutMs) {
-  return new Promise((resolve3) => {
+  return new Promise((resolve4) => {
     let child;
     try {
       child = spawn(binaryName(cmd), args, { stdio: ["pipe", "pipe", "pipe"] });
     } catch (e) {
-      resolve3({ ok: false, stdout: "", error: e.message });
+      resolve4({ ok: false, stdout: "", error: e.message });
       return;
     }
     const chunks = [];
@@ -223,7 +223,7 @@ function runWithInput(cmd, args, input, timeoutMs) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve3(r);
+      resolve4(r);
     };
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
@@ -2090,13 +2090,13 @@ function sh(cmd, args, opts = {}) {
 }
 function shAsync(cmd, args, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
-  return new Promise((resolve3) => {
+  return new Promise((resolve4) => {
     let settled = false;
     const done = (r) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve3(r);
+      resolve4(r);
     };
     const child = spawn2(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
@@ -3789,6 +3789,209 @@ function writeManifest(dir, value, file = "manifest.json") {
 `);
 }
 
+// src/orchestrate.ts
+import { join as join7, resolve as resolve2 } from "path";
+
+// src/orchestrate/templates.ts
+import { join as join6 } from "path";
+var WORKFLOW_FORBIDDEN = ["Date.now(", "Math.random(", "new Date("];
+function oneWriterFooter(runAbs, opts = {}) {
+  const forbidden = opts.writingCommands?.length ? ` Do not run any engine command that writes (${opts.writingCommands.map((c) => `\`${c}\``).join(", ")}).` : "";
+  return `
+## Return, don't write (the one-writer rule)
+
+Return ONLY the structured output specified above. Do NOT write, edit, or delete any file in the run folder.${forbidden} The orchestrator is the sole writer: it folds your returned fragments in serially and runs the gates itself.${opts.sanctioned ? `
+
+One sanctioned exception: ${opts.sanctioned}` : ""}
+
+Exception for oversized prose: if a note is too large to return, write ONLY to \`${join6(runAbs, "orchestration", "out")}/<role>-<batch>.md\` \u2014 a file namespaced to you alone \u2014 and return its path.
+`;
+}
+function toBatches(ids, batchSize) {
+  const width = Math.max(1, Math.floor(batchSize));
+  const out = [];
+  for (let i = 0; i < ids.length; i += width) out.push(ids.slice(i, i + width));
+  return out;
+}
+function assertWorkflowSafe(script, phaseName) {
+  for (const bad of WORKFLOW_FORBIDDEN) {
+    if (script.includes(bad)) {
+      throw new Error(
+        `orchestrate: the emitted workflow for phase "${phaseName}" contains ${bad}) \u2014 it throws in the workflow harness, which must stay resumable. Inject the value as a constant at emit time instead.`
+      );
+    }
+  }
+}
+function emitWorkflowScript(phase, emission, runAbs, engineAbs, smallWorklist) {
+  const cli = brand().cli;
+  const scriptPath = join6(runAbs, "orchestration", `${phase.name}.workflow.mjs`);
+  const meta = { name: `${cli}-${phase.name}`, description: emission.description(phase.items), phases: [{ title: emission.title }] };
+  const floor = emission.collapseFloor ? emission.collapseFloor(smallWorklist) : smallWorklist;
+  const batches = phase.items <= floor ? [phase.ids] : toBatches(phase.ids, emission.batchSize);
+  const hint = emission.applyHint(runAbs, engineAbs, phase);
+  const script = [
+    `export const meta = ${JSON.stringify(meta)}`,
+    ``,
+    `// NOT a plain Node script: launch it with the Workflow tool \u2014`,
+    `// Workflow({ scriptPath: ${JSON.stringify(scriptPath)} }).`,
+    `//`,
+    `// Emitted by \`${cli} orchestrate\` from the CURRENT worklist. The worklist is the`,
+    `// source of truth: if it changes, re-run \`${cli} orchestrate --phase ${phase.name}\``,
+    `// before launching this.`,
+    ``,
+    `// Constants for THIS run, injected at emit time \u2014 the harness forbids reading`,
+    `// the clock or a random source, so nothing here may compute them.`,
+    `const RUN = ${JSON.stringify(runAbs)}`,
+    `const ENGINE = ${JSON.stringify(engineAbs)}`,
+    `const WORKLIST = ${JSON.stringify(phase.worklist)}`,
+    `const AGENTS = RUN + '/orchestration/agents'`,
+    `const BATCHES = ${JSON.stringify(batches)}`,
+    `const SCHEMA = ${JSON.stringify(emission.schema)}`,
+    ``,
+    `function contract(role, extra) {`,
+    `  return 'Read and follow the dispatch contract at ' + AGENTS + '/' + role + '.md VERBATIM.\\n'`,
+    `    + 'Constants: RUN=' + RUN + '  ENGINE=' + ENGINE + '  WORKLIST=' + WORKLIST + '.\\n'`,
+    `    + 'Invoke the engine only by its ABSOLUTE path: node ' + ENGINE + ' <cmd> \u2014 and stay within the contract write rules.'`,
+    `    + (extra ? '\\n' + extra : '')`,
+    `}`,
+    ``,
+    `log(${JSON.stringify(`${cli} ${phase.name}: ${phase.items} item(s) across `)} + BATCHES.length + ' agent(s)')`,
+    ``,
+    `phase(${JSON.stringify(emission.title)})`,
+    `const results = await pipeline(BATCHES, (batch, _item, i) =>`,
+    `  agent(contract(${JSON.stringify(emission.role)}, 'ITEMS=' + batch.join(',')), {`,
+    `    label: ${JSON.stringify(`${phase.name}:`)} + (i + 1),`,
+    `    phase: ${JSON.stringify(emission.title)},`,
+    `    agentType: 'general-purpose',`,
+    `    schema: SCHEMA,`,
+    `  }))`,
+    ``,
+    `// One-writer rule: this workflow only COLLECTS the subagents' fragments.`,
+    `// The main agent runs the fold itself:`,
+    ...hint.map((l) => `//   ${l}`),
+    `return { phase: ${JSON.stringify(phase.name)}, worklist: WORKLIST, results: results.filter(Boolean) }`,
+    ``
+  ].join("\n");
+  assertWorkflowSafe(script, phase.name);
+  return script;
+}
+function runbookMd(phases, defs, runAbs, engineAbs, cli, preamble = []) {
+  const lines = [`# ${cli} \u2014 orchestration runbook`, ``, `Run: \`${runAbs}\``, ``];
+  if (preamble.length) lines.push(...preamble, ``);
+  lines.push(
+    `The subagents return fragments; **you** are the sole writer. Each phase below`,
+    `either fans out through its \`*.workflow.mjs\` or runs sequentially here \u2014 the`,
+    `fold at the end of a phase is yours either way.`,
+    ``
+  );
+  phases.forEach((ph, i) => {
+    const emission = defs[i];
+    lines.push(`## ${ph.name}`, ``);
+    if (!ph.ready) {
+      lines.push(`Not ready \u2014 \`${ph.worklist}\` does not exist yet. Produce it first:`, ``, `    ${ph.prerequisite}`, ``);
+      return;
+    }
+    lines.push(`${ph.items} item(s) in \`${ph.worklist}\`.`, ``);
+    if (ph.items === 0) {
+      lines.push(`Nothing to do for this phase.`, ``);
+      return;
+    }
+    if (emission) {
+      const batches = toBatches(ph.ids, emission.batchSize);
+      lines.push(
+        `Fan out: \`Workflow({ scriptPath: "${join6(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
+        `(${batches.length} agent(s) of at most ${emission.batchSize} item(s), contract \`agents/${emission.role}.md\`).`,
+        ``,
+        `Sequentially instead: play \`agents/${emission.role}.md\` yourself over ${shq(ph.ids.join(","))}.`,
+        ``,
+        `Then fold, as the sole writer:`,
+        ``,
+        ...emission.applyHint(runAbs, engineAbs, ph).map((l) => `    ${l}`),
+        ``
+      );
+    }
+  });
+  return `${lines.join("\n")}
+`;
+}
+
+// src/orchestrate.ts
+var SMALL_WORKLIST = 3;
+var BATCH_SIZE = 8;
+function listPhases(runDir, engineAbs, defs) {
+  const run = resolve2(runDir);
+  return defs.map((def) => {
+    const worklist = join7(run, def.worklist);
+    const parsed = readJsonSafe(worklist);
+    const ids = parsed === void 0 ? void 0 : def.ids(parsed);
+    const ready = ids !== void 0;
+    return {
+      name: def.name,
+      ready,
+      worklist,
+      items: ids?.length ?? 0,
+      ids: ids ?? [],
+      prerequisite: def.prerequisite(run, engineAbs, parsed),
+      ...ready ? { parsed } : {}
+    };
+  });
+}
+function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
+  const run = resolve2(runDir);
+  const phases = listPhases(run, engineAbs, defs);
+  const byName = new Map(defs.map((d) => [d.name, d]));
+  const small = opts.smallWorklist ?? SMALL_WORKLIST;
+  let selected = phases.filter((p) => p.ready);
+  if (opts.phase !== void 0) {
+    const ph = phases.find((p) => p.name === opts.phase);
+    if (!ph) {
+      return {
+        exitCode: 2,
+        written: [],
+        notices: [],
+        errors: [`unknown phase "${opts.phase}" \u2014 expected one of: ${defs.map((d) => d.name).join(", ")}.`],
+        phases
+      };
+    }
+    if (!ph.ready) {
+      return {
+        exitCode: 2,
+        written: [],
+        notices: [],
+        errors: [`phase "${ph.name}" is not ready \u2014 its worklist ${ph.worklist} does not exist yet. Produce it first: ${ph.prerequisite}`],
+        phases
+      };
+    }
+    selected = [ph];
+  }
+  const orchDir = join7(run, "orchestration");
+  const agentsDir = join7(orchDir, "agents");
+  ensureDir(join7(orchDir, "out"));
+  ensureDir(agentsDir);
+  const written = [];
+  const notices = [];
+  for (const [name, content] of Object.entries(contracts(run, engineAbs, phases))) {
+    written.push(writeArtifact(join7(agentsDir, `${name}.md`), content));
+  }
+  if (!opts.eco) {
+    for (const ph of selected) {
+      const def = byName.get(ph.name);
+      if (!def) continue;
+      if (ph.items === 0) {
+        notices.push(`phase "${ph.name}": worklist is empty \u2014 nothing to orchestrate.`);
+        continue;
+      }
+      const floor = def.collapseFloor ? def.collapseFloor(small) : small;
+      if (ph.items <= floor) {
+        notices.push(`phase "${ph.name}": only ${ph.items} item(s) \u2014 the sequential --eco path is equivalent and cheaper.`);
+      }
+      written.push(writeArtifact(join7(orchDir, `${ph.name}.workflow.mjs`), emitWorkflowScript(ph, def, run, engineAbs, small)));
+    }
+  }
+  written.push(writeArtifact(join7(orchDir, "RUNBOOK.md"), runbookMd(phases, defs, run, engineAbs, brand().cli, opts.runbookPreamble)));
+  return { exitCode: 0, written, notices, errors: [], phases };
+}
+
 // src/cli-kit.ts
 import { basename as basename2 } from "path";
 var EXIT_OK = 0;
@@ -3999,25 +4202,25 @@ function isOriginAllowed(origin, allowed = []) {
 
 // src/mcp/resources.ts
 import { existsSync as existsSync5, readdirSync as readdirSync3, readFileSync as readFileSync5, realpathSync, statSync as statSync3 } from "fs";
-import { basename as basename3, dirname as dirname2, join as join6, resolve as resolve2, sep } from "path";
+import { basename as basename3, dirname as dirname2, join as join8, resolve as resolve3, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
 function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname2(fileURLToPath(import.meta.url));
   const name = brand().name;
-  const candidates = [resolve2(here, ".."), resolve2(here, "..", "skills", name), resolve2(here, "..", "..", "skills", name)];
-  return candidates.find((dir) => existsSync5(join6(dir, "SKILL.md")));
+  const candidates = [resolve3(here, ".."), resolve3(here, "..", "skills", name), resolve3(here, "..", "..", "skills", name)];
+  return candidates.find((dir) => existsSync5(join8(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
-  const refDir = join6(root, "references");
+  const refDir = join8(root, "references");
   if (!existsSync5(refDir)) return out;
   for (const file of readdirSync3(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join6("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
+    out.push(describe(root, join8("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
   }
   return out;
 }
@@ -4029,7 +4232,7 @@ function readResource(uri, moduleDir) {
   if (!root) throw new ResourceError("no skill payload found next to this build \u2014 nothing to read");
   const rel = uri.slice(URI_SCHEME.length);
   if (!rel) throw new ResourceError("empty resource path");
-  const target = resolve2(root, rel);
+  const target = resolve3(root, rel);
   const rootReal = realpathSync(root);
   let targetReal;
   try {
@@ -4052,7 +4255,7 @@ function describe(root, rel, fallbackTitle) {
     title: fallbackTitle,
     mimeType: "text/markdown"
   };
-  const summary = firstProse(join6(root, rel));
+  const summary = firstProse(join8(root, rel));
   if (summary) decl.description = summary;
   return decl;
 }
@@ -4317,14 +4520,14 @@ function startHttpServer(adapter, opts = {}) {
   server.requestTimeout = 0;
   server.headersTimeout = 6e4;
   server.keepAliveTimeout = 12e4;
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     server.once("error", reject);
     server.listen(opts.port ?? 0, bind, () => {
       server.removeListener("error", reject);
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : opts.port ?? 0;
       const host = bind.includes(":") ? `[${bind}]` : bind;
-      resolve3({
+      resolve4({
         server,
         port,
         url: `http://${host}:${port}${MCP_PATH}`,
@@ -4433,7 +4636,7 @@ function sendJson(res, status, body, origin, extra = {}) {
 }
 var DRAIN_LIMIT = MAX_BODY_BYTES * 8;
 function readBody(req) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const chunks = [];
     let size = 0;
     let over = false;
@@ -4457,7 +4660,7 @@ function readBody(req) {
     });
     req.on("end", () => {
       if (over) reject(new Error("too large"));
-      else resolve3(Buffer.concat(chunks).toString("utf8"));
+      else resolve4(Buffer.concat(chunks).toString("utf8"));
     });
     req.on("error", reject);
     req.on("aborted", () => reject(new Error("client aborted the request")));
@@ -4467,6 +4670,7 @@ export {
   ANNOTATIONS_SINCE,
   ANYDOC_SPEC,
   ASSUMED_HTTP_PROTOCOL,
+  BATCH_SIZE,
   COMPOSE_YAML,
   DEAD_LINK_STATUS,
   DEFAULT_MAX_RESPONSE_BYTES,
@@ -4495,9 +4699,11 @@ export {
   SEARXNG_DEFAULT_BASE,
   SEARXNG_SETTINGS_YAML,
   SERVICE_PROFILES,
+  SMALL_WORKLIST,
   STACK_SERVICES,
   ToolError,
   UsageError,
+  WORKFLOW_FORBIDDEN,
   accentPattern,
   acceptLanguageHeader,
   addressedIdCount,
@@ -4558,6 +4764,7 @@ export {
   doiFromUrl,
   domainOf,
   embedModel,
+  emitWorkflowScript,
   enabledDocExtractors,
   enabledExtractors,
   ensureClone,
@@ -4610,6 +4817,7 @@ export {
   jsonLine,
   keylessEngines,
   keywords,
+  listPhases,
   listReleases,
   listResources,
   listTags,
@@ -4632,6 +4840,8 @@ export {
   ocrBudgetLeft,
   ocrPdf,
   ocrTools,
+  oneWriterFooter,
+  orchestrateRun,
   originUrl,
   pageDelayMs,
   pageMetadata,
@@ -4684,6 +4894,7 @@ export {
   runId,
   runStdioServer,
   runWithInput,
+  runbookMd,
   sameCommit,
   scrapeViaFirecrawl,
   search,
@@ -4710,6 +4921,7 @@ export {
   subtokens,
   takeArtifacts,
   throttleReason,
+  toBatches,
   urlDeclaresIdentity,
   validateArgs,
   withRunLock,
