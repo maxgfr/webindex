@@ -6,8 +6,12 @@
 // scripts to one line and the ~600 lines of packaging code per repo — copied
 // eight times and already divergent — stop existing.
 //
-// Exported from the library too, because a skill that wants to fold one of
-// these checks into its own suite should not have to shell out to do it.
+// Deliberately NOT re-exported from src/index.ts, so it stays out of the
+// vendored bundle. The same triage the MCP surface gets: these are dev-time
+// gates, and inlining them into eight skills' runtime artifacts would be dead
+// weight in every one. A skill that wants a packaging assertion inside its own
+// test suite shells out to `webindex skill check --json`, which is what its CI
+// runs anyway.
 
 export { compareTags, DEFAULT_FILES, readSkillConfig, SKILL_CONFIG, type ConfigResult, type EnginePin, type SkillConfig } from "./config.js";
 export { auditEngineUsage, engineExports, walkSources, type UsageReport } from "./usage.js";

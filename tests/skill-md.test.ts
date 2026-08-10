@@ -16,6 +16,7 @@ const root = join(import.meta.dirname, "..");
 const skillMd = readFileSync(join(root, "SKILL.md"), "utf8");
 const frontmatter = (/^---\r?\n([\s\S]*?)\r?\n---/.exec(skillMd)?.[1] ?? "") as string;
 const description = /^description:\s*([\s\S]*?)(?=\n\w+:|$)/m.exec(frontmatter)?.[1]?.trim() ?? "";
+const cli = readFileSync(join(root, "src", "cli.ts"), "utf8");
 
 describe("the engine stays out of the skill-matching pool", () => {
   it("has a frontmatter description at all", () => {
@@ -56,7 +57,6 @@ describe("the engine stays out of the skill-matching pool", () => {
 });
 
 describe("the MCP surface stays primitives, not pipelines", () => {
-  const cli = readFileSync(join(root, "src", "cli.ts"), "utf8");
   const tools = [...cli.matchAll(/name: "(webindex_[a-z_]+)"/g)].map((m) => m[1] as string);
 
   it("declares tools", () => {
@@ -77,5 +77,23 @@ describe("the MCP surface stays primitives, not pipelines", () => {
   it("keeps the crawl tool bounded, so enumerating a site is never accidental", () => {
     const decl = /name: "webindex_crawl"[\s\S]*?required: \[([^\]]*)\]/.exec(cli)?.[1] ?? "";
     expect(decl).toContain("max");
+  });
+});
+
+describe("the vendored surface carries no dev-time tooling", () => {
+  const index = readFileSync(join(root, "src", "index.ts"), "utf8");
+
+  it("keeps the skill toolchain out of the library", () => {
+    // Same triage as the MCP surface, for the same reason. `webindex skill …`
+    // gates a repository from the outside; inlining it into eight skills'
+    // runtime artifacts would be dead weight in every one of them. A skill that
+    // wants the assertion inside its own suite shells out to
+    // `webindex skill check --json`, which its CI runs anyway.
+    expect(index).not.toMatch(/skillkit/);
+  });
+
+  it("still reaches it from the command line", () => {
+    // The other half: absent from the library must not mean absent altogether.
+    expect(cli).toMatch(/from "\.\/skillkit\/index\.js"/);
   });
 });
