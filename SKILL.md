@@ -1,6 +1,6 @@
 ---
 name: webindex
-description: "Use when something on the web has to become text you can quote — read a URL, extract a PDF or an office document, search without an API key, or ask a forge or package registry about a project. Triggers: 'read this page', 'what does this PDF say', 'extract the text from this URL', 'search the web without a key', 'get the README of this package', 'scrape this article', 'OCR this scanned PDF'. The web-side engine: finds pages with a local keyless stack, turns a URL or a file into clean citable text (HTML, PDFs through a six-rung ladder ending in OCR, office documents), ranks a candidate pool, and reads what a site publishes about itself. Zero dependencies, no API key."
+description: The web-side engine — find pages with a local keyless stack or the keyless engines, turn a URL or a file into clean citable text (HTML, PDFs through a six-rung ladder ending in OCR, office documents), rank a candidate pool, ask a forge or a package registry about a project, and read what a site publishes about itself. Zero dependencies, no API key.
 ---
 
 # webindex
