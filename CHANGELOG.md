@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.18.3](https://github.com/maxgfr/webindex/compare/v1.18.2...v1.18.3) (2026-08-21)
+
+
+### Bug Fixes
+
+* **engines:** results decide — never call a page blocked when it parsed hits ([861dcbb](https://github.com/maxgfr/webindex/commit/861dcbb509112cbc23af2fe0ee3567418ca6e846))
+
 ## [1.18.2](https://github.com/maxgfr/webindex/compare/v1.18.1...v1.18.2) (2026-08-21)
 
 
