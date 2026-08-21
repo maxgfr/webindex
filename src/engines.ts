@@ -128,10 +128,11 @@ export function throttleReason(status: number): { throttled: boolean; why: strin
  * engine reports "returned no results" — a refusal wearing the clothes of an
  * empty web.
  *
- * Deliberately narrow. It only fires on a body that is BOTH short — a challenge
- * page carries no results, so it is a fraction of a result page — and carrying
- * one of these engines' own challenge markers. A results page that merely
- * mentions the word captcha must not trip it, which is why length comes first.
+ * Deliberately narrow, and never the first word. It only fires on a body that is
+ * BOTH short — a challenge page carries no results, so it is a fraction of a
+ * result page — and carrying one of these engines' own challenge markers. And
+ * `searchViaKeyless` only consults it once parsing has produced NOTHING, so a
+ * page with results can never be called blocked however its markup reads.
  */
 export function looksLikeChallenge(body: string): boolean {
   if (body.length > 40_000) return false;
@@ -284,11 +285,21 @@ export async function searchViaKeyless(
       const { throttled, why } = throttleReason(r.status);
       return { hits: [], note: `${spec.label} ${why}.`, throttled, ...(r.status === 403 ? { blocked: true } : {}) };
     }
-    // A success status is not the same as an answer. Both endpoints serve their
-    // anti-bot challenge with a 2xx, so this has to be read out of the body —
-    // and it has to be read BEFORE parsing, or a challenge page becomes "no
-    // results" and the caller reports an empty web.
-    if (looksLikeChallenge(r.body)) {
+    const before = hits.length;
+    const parsed = spec.parse(r.body, limit * 2);
+
+    // A success status is not the same as an answer: both endpoints serve their
+    // anti-bot challenge with a 2xx, so a challenge can only be told from a
+    // result page by its body.
+    //
+    // RESULTS DECIDE, and they decide first. The markers below are read only
+    // when nothing parsed, so a page that yielded hits can never be reported as
+    // blocked no matter what else its markup contains. That ordering is the
+    // whole safety property: the markers are somebody else's HTML and could
+    // appear on a working page tomorrow, and calling a page full of results
+    // "blocked" would throw away answers we actually got — a worse bug than the
+    // one this detects.
+    if (parsed.length === 0 && looksLikeChallenge(r.body)) {
       if (p > 0) break;
       return {
         hits: [],
@@ -297,8 +308,8 @@ export async function searchViaKeyless(
         blocked: true,
       };
     }
-    const before = hits.length;
-    for (const f of spec.parse(r.body, limit * 2)) {
+
+    for (const f of parsed) {
       const key = canonicalizeUrl(f.url);
       if (seen.has(key)) continue;
       seen.add(key);

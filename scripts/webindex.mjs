@@ -3295,7 +3295,9 @@ async function searchViaKeyless(engine, query, opts = {}) {
       const { throttled, why } = throttleReason(r.status);
       return { hits: [], note: `${spec.label} ${why}.`, throttled, ...r.status === 403 ? { blocked: true } : {} };
     }
-    if (looksLikeChallenge(r.body)) {
+    const before = hits.length;
+    const parsed = spec.parse(r.body, limit * 2);
+    if (parsed.length === 0 && looksLikeChallenge(r.body)) {
       if (p > 0) break;
       return {
         hits: [],
@@ -3304,8 +3306,7 @@ async function searchViaKeyless(engine, query, opts = {}) {
         blocked: true
       };
     }
-    const before = hits.length;
-    for (const f of spec.parse(r.body, limit * 2)) {
+    for (const f of parsed) {
       const key = canonicalizeUrl(f.url);
       if (seen.has(key)) continue;
       seen.add(key);

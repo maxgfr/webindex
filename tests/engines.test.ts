@@ -235,6 +235,24 @@ describe("an engine that refuses to answer says so, rather than reporting an emp
     expect(r.note).not.toMatch(/unreachable/);
   });
 
+  it("never calls a page BLOCKED when it parsed results out of it", async () => {
+    // The detector reads markers out of the body, and I cannot prove by
+    // observation that a normal DuckDuckGo results page never carries one —
+    // both endpoints were serving challenges throughout the session this was
+    // written in, so no genuine result body was available to check against.
+    //
+    // So it is made structurally impossible instead of assumed: results decide.
+    // A page that yielded hits is a page that answered, whatever else is in its
+    // markup. Reporting "blocked" over a page full of results would be a worse
+    // bug than the one this detector fixes, because it would throw away answers
+    // we actually got.
+    installFetchMock(() => ({ status: 202, body: `${DDG_LITE}<form action="//duckduckgo.com/anomaly.js?sv=html"></form>` }));
+    const r = await searchViaKeyless("ddglite", "token bucket");
+    expect(r.hits.map((h) => h.url)).toEqual(["https://a.test/one", "https://b.test/two"]);
+    expect(r.blocked).toBeFalsy();
+    expect(r.note).toBeUndefined();
+  });
+
   it("still calls a genuinely empty result page empty", async () => {
     // The distinction has to hold in both directions, or the fix trades one lie
     // for another: a query nobody has an answer for is not a block.
