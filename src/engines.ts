@@ -1,6 +1,6 @@
 import { env } from "./brand.js";
 import { decodeEntities, httpGet, pageDelayMs, sleep } from "./fetch.js";
-import { acceptLanguageHeader, ddgRegion } from "./locale.js";
+import { acceptLanguageHeader, baseLang, ddgRegion, resolveRegion } from "./locale.js";
 import { canonicalizeUrl } from "./url.js";
 
 // Keyless web engines: the HTML endpoints that answer without a key, a container
@@ -61,6 +61,16 @@ export interface EngineResult {
   note?: string;
   /** The engine refused for load reasons — worth trying again later, unlike a 404. */
   throttled?: boolean;
+  /**
+   * The engine turned the request away as automated traffic.
+   *
+   * Separate from `throttled` because it answers a different question for the
+   * caller. `throttled` says "come back later"; `blocked` says "we learned
+   * nothing about the web here" — and a caller that reports zero results
+   * WITHOUT knowing this tells its user the web is empty when in fact nobody
+   * was asked. Blocked implies throttled: it is worth retrying later too.
+   */
+  blocked?: boolean;
 }
 
 /** Tags out, entities decoded, whitespace collapsed. */
@@ -97,7 +107,42 @@ export function ddgRedirectTarget(href: string): string {
  */
 export function throttleReason(status: number): { throttled: boolean; why: string } {
   if (status === 429 || status === 503) return { throttled: true, why: `rate-limited (HTTP ${status})` };
+  // A 403 from a SEARCH engine is a bot policy, not a broken host. Both of these
+  // endpoints answer it after a few dozen queries — DuckDuckGo with a stub
+  // carrying an anonymised error code, Mojeek in words ("your network appears to
+  // be sending automated queries"). Reporting it as unreachable states the wrong
+  // fact, and the cascade then drops the note because it only keeps notes from
+  // engines it considers throttled.
+  if (status === 403) return { throttled: true, why: "blocked this client as automated traffic (HTTP 403)" };
   return { throttled: false, why: `unreachable (status ${status})` };
+}
+
+/**
+ * Is this body a challenge page rather than a result page?
+ *
+ * The hard case, and the reason this cannot be done on status alone: BOTH of
+ * these engines serve their challenge with a SUCCESS status. Captured
+ * 2026-08-21 — DuckDuckGo answers 202 with an `anomaly-modal` ("Unfortunately,
+ * bots use DuckDuckGo too"), Mojeek answers 200 with `<title>Captcha</title>`.
+ * `res.ok` is true, the parser finds no result blocks, and without this the
+ * engine reports "returned no results" — a refusal wearing the clothes of an
+ * empty web.
+ *
+ * Deliberately narrow. It only fires on a body that is BOTH short — a challenge
+ * page carries no results, so it is a fraction of a result page — and carrying
+ * one of these engines' own challenge markers. A results page that merely
+ * mentions the word captcha must not trip it, which is why length comes first.
+ */
+export function looksLikeChallenge(body: string): boolean {
+  if (body.length > 40_000) return false;
+  const head = body.slice(0, 4_000).toLowerCase();
+  return (
+    /<title>[^<]*captcha/.test(head) ||
+    head.includes("anomaly-modal") ||
+    head.includes("/anomaly.js") ||
+    head.includes("captcha-wrap") ||
+    head.includes("sending automated queries")
+  );
 }
 
 // Shared block-parser: `anchorAttrs` matches the result anchor's attributes,
@@ -157,9 +202,27 @@ export function parseMojeek(body: string, limit = 50): EngineHit[] {
 
 interface EngineSpec {
   label: string;
-  /** Build the URL for page `p` (0-based). */
-  url: (query: string, p: number, kl: string) => string;
+  /** Build the URL for page `p` (0-based). `locale` is undefined when the caller asked for no particular one. */
+  url: (query: string, p: number, kl: string, locale?: { lang: string; region: string }) => string;
   parse: (body: string, limit: number) => EngineHit[];
+}
+
+/**
+ * Mojeek's own way of saying "answer in this language, from this region".
+ *
+ * The DuckDuckGo family takes one `kl` pair; Mojeek takes four parameters and
+ * calls them something else, which is how it came to be the one engine in this
+ * module that ignored the locale entirely.
+ *
+ * PREFERENCES (`lb`/`rb` with their boosts) rather than the restrictions Mojeek
+ * also offers (`lr`, `reg`). A preference an endpoint ignores costs nothing; a
+ * restriction that lands wrong returns an empty page, which is precisely the
+ * shape of failure this file exists to stop reporting as an empty web. The boost
+ * weights are the ones Mojeek's own documentation recommends.
+ */
+function mojeekLocaleParams(locale?: { lang: string; region: string }): string {
+  if (!locale) return "";
+  return `&lb=${encodeURIComponent(locale.lang)}&lbb=100&rb=${encodeURIComponent(locale.region)}&rbb=10`;
 }
 
 const SPECS: Record<KeylessEngine, EngineSpec> = {
@@ -179,7 +242,7 @@ const SPECS: Record<KeylessEngine, EngineSpec> = {
   // worth asking at all: it surfaces pages the DDG family does not have.
   mojeek: {
     label: "Mojeek",
-    url: (q, p) => `https://www.mojeek.com/search?q=${encodeURIComponent(q)}${p > 0 ? `&s=${p * 10 + 1}` : ""}`,
+    url: (q, p, _kl, locale) => `https://www.mojeek.com/search?q=${encodeURIComponent(q)}${p > 0 ? `&s=${p * 10 + 1}` : ""}${mojeekLocaleParams(locale)}`,
     parse: parseMojeek,
   },
 };
@@ -204,17 +267,35 @@ export async function searchViaKeyless(
   const limit = Math.max(1, opts.limit ?? 10);
   const kl = ddgRegion(opts.lang, opts.region);
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
+  // Only pass a locale on when the caller actually asked for one. `ddgRegion`
+  // has a default to fall back on; a search-time preference does not need one,
+  // and inventing "us-en" for a caller who said nothing would bias every
+  // unlocalised query toward American pages.
+  const locale = opts.lang || opts.region ? { lang: baseLang(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : undefined;
 
   const seen = new Set<string>();
   const hits: EngineHit[] = [];
 
   for (let p = 0; p < pages && hits.length < limit; p++) {
-    const r = await httpGet(spec.url(q, p, kl), { accept: "text/html", acceptLanguage, timeoutMs: opts.timeoutMs ?? 12000 });
+    const r = await httpGet(spec.url(q, p, kl, locale), { accept: "text/html", acceptLanguage, timeoutMs: opts.timeoutMs ?? 12000 });
     if (!r.ok || !r.body) {
       // A later page failing is not a failure — page one's results stand.
       if (p > 0) break;
       const { throttled, why } = throttleReason(r.status);
-      return { hits: [], note: `${spec.label} ${why}.`, throttled };
+      return { hits: [], note: `${spec.label} ${why}.`, throttled, ...(r.status === 403 ? { blocked: true } : {}) };
+    }
+    // A success status is not the same as an answer. Both endpoints serve their
+    // anti-bot challenge with a 2xx, so this has to be read out of the body —
+    // and it has to be read BEFORE parsing, or a challenge page becomes "no
+    // results" and the caller reports an empty web.
+    if (looksLikeChallenge(r.body)) {
+      if (p > 0) break;
+      return {
+        hits: [],
+        note: `${spec.label} served an anti-bot challenge (HTTP ${r.status}) instead of results — blocked, not empty.`,
+        throttled: true,
+        blocked: true,
+      };
     }
     const before = hits.length;
     for (const f of spec.parse(r.body, limit * 2)) {

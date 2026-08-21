@@ -21,6 +21,8 @@ const LANG_COUNTRY: Record<string, string> = {
   da: "dk",
   cs: "cz",
   el: "gr",
+  nb: "no", // Bokmål → Norway
+  nn: "no", // Nynorsk → Norway
   uk: "ua", // Ukrainian language → Ukraine
   ar: "xa", // DuckDuckGo's "Arabia" region
   he: "il",
@@ -31,6 +33,21 @@ const LANG_COUNTRY: Record<string, string> = {
 const REGION_ALIASES: Record<string, string> = {
   gb: "uk",
   en: "us",
+};
+
+// Language aliases for DuckDuckGo's `kl`, which is its OWN vocabulary and spells
+// two languages differently from BCP-47. Checked against duckduckgo.com's
+// published parameter list: Norway is `no-no` and Japan is `jp-jp`, so a caller
+// asking in `nb-NO` or `ja-JP` was producing `no-nb` and `jp-ja`.
+//
+// The damage is quiet, which is why it lasted: DuckDuckGo IGNORES a `kl` it does
+// not recognise rather than rejecting it, so the run simply comes back
+// unlocalised, with nothing anywhere saying so. This table only applies to `kl`
+// — the Accept-Language header must keep the real tag.
+const DDG_LANG_ALIASES: Record<string, string> = {
+  nb: "no", // Bokmål
+  nn: "no", // Nynorsk
+  ja: "jp",
 };
 
 // Base language subtag, lowercased: "de-DE" → "de", "EN" → "en".
@@ -54,7 +71,7 @@ export function resolveRegion(lang: string | undefined, region?: string): string
 // country. `wt-wt` is DDG's "no region", which we never emit (we always have a
 // language) — callers can pass --region wt to opt out.
 export function ddgRegion(lang: string | undefined, region?: string): string {
-  const l = baseLang(lang);
+  const l = DDG_LANG_ALIASES[baseLang(lang)] ?? baseLang(lang);
   let r = resolveRegion(lang, region);
   r = REGION_ALIASES[r] ?? r;
   return `${r}-${l}`;

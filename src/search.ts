@@ -221,11 +221,16 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
   // The keyless rung. Each engine is tried in turn and the FIRST one with hits
   // wins — this is a fallback chain, not a fan-out: pooling several engines and
   // fusing them is a ranking decision, and ranking belongs to the caller.
-  for (const engine of keylessEngines(opts)) {
+  const keyless = keylessEngines(opts);
+  let asked = 0;
+  let blocked = 0;
+  for (const engine of keyless) {
     const r = await searchViaKeyless(engine, q, { limit: opts.limit, pages: opts.pages, lang: opts.lang, region: opts.region });
     if (r.hits.length) {
       return { hits: r.hits.map((h) => ({ ...h, via: engine })), notes };
     }
+    asked++;
+    if (r.blocked) blocked++;
     // Only a throttle is worth reporting. "Returned no results" from every
     // engine in turn would bury the one note that matters under three that say
     // the same thing.
@@ -237,6 +242,17 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
   const fc = await searchViaFirecrawl(q, opts.limit ?? 10, opts);
   const hits: SearchHit[] = (fc.hits ?? []).map((h) => ({ url: h.url, title: h.title, snippet: h.description, via: "firecrawl" as const }));
   if (fc.why) notes.push(fc.why);
-  if (!hits.length) notes.push(`No results from any engine. \`${brand().cli} stack up\` starts SearXNG and Firecrawl locally.`);
+  if (!hits.length) {
+    // The closing note is the sentence a caller shows its user, so it must not
+    // say something the run did not establish. When every keyless engine turned
+    // us away, NOTHING was learned about the web for this query — reporting that
+    // as "no results" converts a refusal into a finding about the world, and the
+    // caller has no way to tell the two apart afterwards.
+    notes.push(
+      asked > 0 && blocked === asked
+        ? `Every keyless engine blocked this client (${keyless.join(", ")}) — nothing was searched, which is not the same as nothing being there. Try again later, or run \`${brand().cli} stack up\` for a local SearXNG.`
+        : `No results from any engine. \`${brand().cli} stack up\` starts SearXNG and Firecrawl locally.`,
+    );
+  }
   return { hits, notes };
 }

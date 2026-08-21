@@ -44,6 +44,37 @@ const MOJEEK = `
       <p class="s">Should become https.</p></li>
 </ul>`;
 
+// The two challenge pages these engines actually serve, captured on 2026-08-21
+// from html.duckduckgo.com and www.mojeek.com after a few dozen queries in a
+// row. Both were trimmed to the markers that identify them, and neither is an
+// error page: DuckDuckGo answered 202 and Mojeek 200, so `res.ok` was TRUE and
+// the parsers simply found no result blocks.
+const DDG_CHALLENGE = `<!DOCTYPE html><html lang="en"><head><title>
+        DuckDuckGo
+    </title></head><body>
+  <form id="challenge-form" action="//duckduckgo.com/anomaly.js?sv=html&cc=botnet" method="POST">
+    <div class="anomaly-modal__mask"><div class="anomaly-modal__modal" data-testid="anomaly-modal">
+      <div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>
+      <div class="anomaly-modal__description">Please complete the following challenge to confirm this search was made by a human.</div>
+      <div class="anomaly-modal__instructions">Select all squares containing a duck:</div>
+    </div></div>
+  </form>
+</body></html>`;
+
+const MOJEEK_CAPTCHA = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Captcha</title></head>
+<body data-theme="light" class="home">
+<div class="captcha-wrap"><p>JavaScript is required to complete this challenge. Please enable it and reload the page.</p></div>
+<script async src="/js/page_specific/challenge.js?v=1.264"></script>
+</body></html>`;
+
+// The 403 shapes, from the same session. Mojeek says what it means in words;
+// DuckDuckGo sends a two-line stub with an anonymised error code.
+const DDG_403 = `If this persists, please <a href="mailto:error-lite+9318@duckduckgo.com?subject=Error getting results">email us</a>.<br />
+Our support email address includes an anonymized error code that helps us understand the context of your search.`;
+
+const MOJEEK_403 = `<!DOCTYPE html><html><head><title>403 - Forbidden</title></head><body><h1>403 - Forbidden</h1>
+<h2>Sorry your network appears to be sending automated queries so we can't process your search at this time.</h2></body></html>`;
+
 describe("stripTags", () => {
   it("removes markup, decodes entities and collapses whitespace", () => {
     expect(stripTags("<b>RFC 6585</b> &amp;\n  friends")).toBe("RFC 6585 & friends");
@@ -159,6 +190,113 @@ describe("searchViaKeyless", () => {
     const spy = installFetchMock(() => ({ body: DDG_LITE }));
     expect((await searchViaKeyless("ddg", "   ")).note).toBe("Empty query.");
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("an engine that refuses to answer says so, rather than reporting an empty web", () => {
+  // The failure this guards against is the one nobody downstream can detect.
+  //
+  // A caller asked for a company's website, every engine turned it away, and the
+  // only thing that came back was "No results from any engine" — which reads as
+  // a company with no web presence. Measured on a real prospecting run: 12
+  // French companies searched, 0 results, and every one of them was blocked
+  // rather than absent. The whole point of a keyless cascade is that it degrades
+  // honestly.
+  it("recognises a CAPTCHA served with a 2xx status", async () => {
+    // DuckDuckGo answers 202 and Mojeek 200, so `res.ok` is true and the parser
+    // just finds nothing. Status alone cannot tell these from a genuinely empty
+    // result page — only the body can.
+    installFetchMock(() => ({ status: 202, body: DDG_CHALLENGE }));
+    const ddg = await searchViaKeyless("ddg", "boulangerie Vincennes");
+    expect(ddg.hits).toHaveLength(0);
+    expect(ddg.blocked).toBe(true);
+    expect(ddg.throttled).toBe(true);
+    expect(ddg.note).toMatch(/DuckDuckGo/);
+    expect(ddg.note).toMatch(/challenge|captcha/i);
+    expect(ddg.note).not.toMatch(/returned no results/);
+
+    installFetchMock(() => ({ status: 200, body: MOJEEK_CAPTCHA }));
+    const mojeek = await searchViaKeyless("mojeek", "boulangerie Vincennes");
+    expect(mojeek.blocked).toBe(true);
+    expect(mojeek.note).toMatch(/Mojeek/);
+    expect(mojeek.note).toMatch(/challenge|captcha/i);
+  });
+
+  it("treats a 403 from a search engine as a block, not as an unreachable host", async () => {
+    // "Unreachable (status 403)" is the wrong fact and it was being discarded on
+    // top: the cascade only kept notes from engines it considered throttled, so
+    // a 403 vanished entirely.
+    installFetchMock(() => ({ status: 403, body: MOJEEK_403 }));
+    const r = await searchViaKeyless("mojeek", "x");
+    expect(r.hits).toHaveLength(0);
+    expect(r.blocked).toBe(true);
+    expect(r.throttled).toBe(true);
+    expect(r.note).toMatch(/blocked|refus/i);
+    expect(r.note).not.toMatch(/unreachable/);
+  });
+
+  it("still calls a genuinely empty result page empty", async () => {
+    // The distinction has to hold in both directions, or the fix trades one lie
+    // for another: a query nobody has an answer for is not a block.
+    installFetchMock(() => ({ status: 200, body: "<html><body><h1>No results found</h1></body></html>" }));
+    const r = await searchViaKeyless("ddg", "asdkjhasdkjhasd");
+    expect(r.blocked).toBeFalsy();
+    expect(r.throttled).toBeFalsy();
+    expect(r.note).toMatch(/returned no results/);
+  });
+
+  it("still calls a 404 unreachable — that one really is the host, not the bot policy", async () => {
+    installFetchMock(() => ({ status: 404, body: "" }));
+    const r = await searchViaKeyless("ddg", "x");
+    expect(r.blocked).toBeFalsy();
+    expect(r.note).toMatch(/unreachable/);
+  });
+
+  it("tells the caller every engine was blocked instead of that the web was empty", async () => {
+    // The cascade's closing note is what a caller shows its user. "No results
+    // from any engine" over three blocked engines is the sentence that turns a
+    // refusal into a finding about the world.
+    installFetchMock((url) => (url.includes("mojeek") ? { status: 403, body: MOJEEK_403 } : { status: 202, body: DDG_CHALLENGE }));
+    const r = await search("SORARE SAINT-MANDE", { engines: ["ddg", "ddglite", "mojeek"] });
+    expect(r.hits).toHaveLength(0);
+    expect(r.notes.filter((n) => /blocked|challenge|captcha/i.test(n)).length).toBeGreaterThanOrEqual(3);
+    expect(r.notes.at(-1)).toMatch(/every keyless engine|all .* blocked/i);
+    expect(r.notes.at(-1)).not.toMatch(/^No results from any engine/);
+  });
+
+  it("still says 'no results from any engine' when they answered and found nothing", async () => {
+    installFetchMock(() => ({ body: "<html>nothing</html>" }));
+    const r = await search("asdkjhasdkjhasd", { engines: ["ddg", "ddglite", "mojeek"] });
+    expect(r.notes.at(-1)).toMatch(/No results from any engine/);
+  });
+});
+
+describe("Mojeek is asked in the territory's language", () => {
+  it("carries the locale into the query, like the DuckDuckGo endpoints do", async () => {
+    // `search()` promises its callers that a run over a French territory asks in
+    // French. Two of the three engines were given `kl`; Mojeek's URL builder
+    // dropped it on the floor, so the one engine with its own independent index
+    // answered a French prospecting run in whatever it felt like.
+    // `lb` (prefer this language) and `rb` (prefer this region) are Mojeek's own
+    // documented parameter names, with `lbb`/`rbb` as their boost weights. They
+    // are PREFERENCES rather than the `lr`/`reg` restrictions, on purpose: an
+    // endpoint that ignores a preference loses nothing, while a restriction that
+    // lands wrong empties the result page — which is the failure this whole file
+    // is about.
+    const spy = installFetchMock(() => ({ body: MOJEEK }));
+    await searchViaKeyless("mojeek", "boulangerie Vincennes", { lang: "fr-FR" });
+    const url = String(spy.mock.calls[0]![0]);
+    expect(url).toContain("mojeek.com");
+    expect(url).toMatch(/[?&]lb=fr\b/);
+    expect(url).toMatch(/[?&]rb=FR\b/);
+  });
+
+  it("asks for nothing in particular when no locale was given", async () => {
+    const spy = installFetchMock(() => ({ body: MOJEEK }));
+    await searchViaKeyless("mojeek", "x");
+    const url = String(spy.mock.calls[0]![0]);
+    expect(url).not.toMatch(/[?&]lb=/);
+    expect(url).not.toMatch(/[?&]rb=/);
   });
 });
 
