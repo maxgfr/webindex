@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.18.4](https://github.com/maxgfr/webindex/compare/v1.18.3...v1.18.4) (2026-08-25)
+
+
+### Bug Fixes
+
+* make webindex compatible with Codex ([66d5cd8](https://github.com/maxgfr/webindex/commit/66d5cd85e1ddfefe93538eb6009ed70d05648653))
+
 ## [1.18.3](https://github.com/maxgfr/webindex/compare/v1.18.2...v1.18.3) (2026-08-21)
 
 
