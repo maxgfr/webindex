@@ -34,13 +34,19 @@ describe("the engine stays out of the skill-matching pool", () => {
     }
   });
 
-  it("keeps SKILL.md at the repository root, which is the layout that cannot be installed whole", () => {
-    // The installer early-returns on a root SKILL.md and installs that file
-    // alone. For a real skill that is a packaging bug — the assertion
-    // `skill bundle` makes. Here it is the point: this document is MCP
-    // documentation, not an installable package.
+  it("keeps the root source canonical and exposes a complete Codex package", () => {
+    // MCP continues serving the root document. Codex discovers a versioned
+    // package made only of links to that source, its engine and references.
     expect(existsSync(join(root, "SKILL.md"))).toBe(true);
-    expect(existsSync(join(root, "skills"))).toBe(false);
+    expect(existsSync(join(root, "skills", "webindex", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(root, "skills", "webindex", "scripts", "webindex.mjs"))).toBe(true);
+    expect(existsSync(join(root, "skills", "webindex", "references"))).toBe(true);
+    expect(existsSync(join(root, ".agents", "skills", "webindex", "SKILL.md"))).toBe(true);
+  });
+
+  it("declares explicit-only invocation through supported Codex metadata", () => {
+    const metadata = readFileSync(join(root, "agents", "openai.yaml"), "utf8");
+    expect(metadata).toMatch(/allow_implicit_invocation:\s*false/);
   });
 
   it("says plainly what it is not, and routes elsewhere", () => {

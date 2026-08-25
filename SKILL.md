@@ -1,6 +1,6 @@
 ---
 name: webindex
-description: The web-side engine — find pages with a local keyless stack or the keyless engines, turn a URL or a file into clean citable text (HTML, PDFs through a six-rung ladder ending in OCR, office documents), rank a candidate pool, ask a forge or a package registry about a project, and read what a site publishes about itself. Zero dependencies, no API key.
+description: Extract, rank, and inspect web or local documents with a keyless CLI/MCP engine. Use explicitly for fetching one URL or file, ranking a pool, or querying forge, package, or site metadata; use ultrasearch for a cited research report.
 ---
 
 # webindex
@@ -20,16 +20,16 @@ are the product decisions it exists to stay out of. An agent that reaches for
 `search` → `crawl` → `fetch` and writes a summary from what comes back has
 produced exactly the ungrounded answer the tools below exist to prevent.
 
-So it is also **not meant to be an installed skill**: there is no `Use when…` in
-the description above, which is what keeps it from matching in a pool. It is a
-library, a command and an MCP server.
+So it is also **not meant to compete for implicit skill selection**. The
+`agents/openai.yaml` policy disables implicit invocation while keeping explicit
+`$webindex` use available. It is a library, a command and an MCP server.
 
 > The root `SKILL.md` used to be the second half of that argument — the
 > installer was said to early-return on it and install that file alone. That is
-> no longer true: `skills add maxgfr/webindex` (CLI v1.5.22) installs the
-> repository whole, `scripts/` and `references/` included, and from a local path
-> it copies `node_modules` too. The description is the only thing still keeping
-> this out of a skill pool, so treat it as load-bearing.
+> no longer true: `skills add maxgfr/webindex` installs the repository whole,
+> `scripts/` and `references/` included. The versioned package links under
+> `skills/webindex` and `.agents/skills/webindex` expose the same canonical files
+> to Codex without editable copies.
 
 Route by what you actually want:
 
