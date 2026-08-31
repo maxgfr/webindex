@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.18.6](https://github.com/maxgfr/webindex/compare/v1.18.5...v1.18.6) (2026-08-31)
+
+
+### Bug Fixes
+
+* cache service probes per endpoint ([43eb56c](https://github.com/maxgfr/webindex/commit/43eb56cfd8dee06a9926d9fda1521ae8ffcd0d05))
+
 ## [1.18.5](https://github.com/maxgfr/webindex/compare/v1.18.4...v1.18.5) (2026-08-31)
 
 
