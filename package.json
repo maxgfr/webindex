@@ -1,6 +1,6 @@
 {
   "name": "webindex",
-  "version": "1.18.4",
+  "version": "1.18.5",
   "description": "Zero-dependency web engine: find pages with a local keyless search stack, turn a URL or a file into clean, citable text \u2014 HTML, PDFs through a six-rung ladder ending in OCR, office documents \u2014 and serve it over MCP. One vendorable engine.mjs, CLI + MCP server included. The web-side companion to codeindex.",
   "type": "module",
   "packageManager": "pnpm@11.24.0",

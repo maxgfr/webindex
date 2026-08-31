@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.18.5](https://github.com/maxgfr/webindex/compare/v1.18.4...v1.18.5) (2026-08-31)
+
+
+### Bug Fixes
+
+* harden feed parsing and refresh toolchain ([1d34b49](https://github.com/maxgfr/webindex/commit/1d34b49760087ce0a1c9fdd295c84f196ef11ee7))
+
 ## [1.18.4](https://github.com/maxgfr/webindex/compare/v1.18.3...v1.18.4) (2026-08-25)
 
 
