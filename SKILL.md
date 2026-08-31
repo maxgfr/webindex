@@ -102,8 +102,9 @@ contract prose and the schemas its subagents must satisfy.
 - **No runtime dependencies, ever.** Consumers vendor `scripts/engine.mjs` and
   inline it; a bare specifier cannot resolve there. CI fails on any non-builtin
   import.
-- **Node 18 is the floor.** A dedicated job runs the committed bundle on 18 with
-  no install, because the dev toolchain needs ≥20.19 and so cannot prove it.
+- **Node 18 is the runtime floor.** A dedicated job runs the committed bundle on 18
+  with no install. Development uses Node ≥22.22.2 and pnpm 11 because the release
+  toolchain requires it.
 - **No module-scope environment reads.** The engine is imported before a consumer
   can call `configure()`, so a `const X = envInt(…)` would freeze webindex's own
   prefix and never see theirs. Every tunable is behind a function.

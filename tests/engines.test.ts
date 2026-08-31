@@ -67,8 +67,6 @@ const MOJEEK_CAPTCHA = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 <script async src="/js/page_specific/challenge.js?v=1.264"></script>
 </body></html>`;
 
-// The 403 shapes, from the same session. Mojeek says what it means in words;
-// DuckDuckGo sends a two-line stub with an anonymised error code.
 const DDG_403 = `If this persists, please <a href="mailto:error-lite+9318@duckduckgo.com?subject=Error getting results">email us</a>.<br />
 Our support email address includes an anonymized error code that helps us understand the context of your search.`;
 
@@ -222,12 +220,15 @@ describe("an engine that refuses to answer says so, rather than reporting an emp
     expect(mojeek.note).toMatch(/challenge|captcha/i);
   });
 
-  it("treats a 403 from a search engine as a block, not as an unreachable host", async () => {
+  it.each([
+    ["ddg" as const, DDG_403],
+    ["mojeek" as const, MOJEEK_403],
+  ])("treats a 403 from %s as a block, not as an unreachable host", async (engine, body) => {
     // "Unreachable (status 403)" is the wrong fact and it was being discarded on
     // top: the cascade only kept notes from engines it considered throttled, so
     // a 403 vanished entirely.
-    installFetchMock(() => ({ status: 403, body: MOJEEK_403 }));
-    const r = await searchViaKeyless("mojeek", "x");
+    installFetchMock(() => ({ status: 403, body }));
+    const r = await searchViaKeyless(engine, "x");
     expect(r.hits).toHaveLength(0);
     expect(r.blocked).toBe(true);
     expect(r.throttled).toBe(true);

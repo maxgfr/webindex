@@ -3,7 +3,7 @@
   "version": "1.18.4",
   "description": "Zero-dependency web engine: find pages with a local keyless search stack, turn a URL or a file into clean, citable text \u2014 HTML, PDFs through a six-rung ladder ending in OCR, office documents \u2014 and serve it over MCP. One vendorable engine.mjs, CLI + MCP server included. The web-side companion to codeindex.",
   "type": "module",
-  "packageManager": "pnpm@10.33.0",
+  "packageManager": "pnpm@11.24.0",
   "main": "scripts/engine.mjs",
   "types": "scripts/engine.d.mts",
   "exports": {
@@ -29,7 +29,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "lint": "biome ci .",
+    "lint": "biome ci --error-on-warnings .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "check:build": "tsup && node scripts/postbuild.mjs && node scripts/check-vendorable.mjs && node scripts/consumer-smoke.mjs && node scripts/verify-bundle.mjs && git diff --exit-code -- scripts/engine.mjs scripts/engine.d.mts scripts/webindex.mjs",
@@ -56,21 +56,16 @@
     "url": "https://github.com/maxgfr/webindex"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.1",
-    "@semantic-release/changelog": "^6.0.3",
-    "@semantic-release/exec": "^6.0.3",
-    "@semantic-release/git": "^10.0.1",
-    "@types/node": "^20.14.0",
-    "@vitest/coverage-v8": "^4.1.10",
-    "semantic-release": "^24.2.0",
-    "tsup": "^8.3.0",
-    "typescript": "^5.5.0",
-    "vitest": "^4.1.10"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild"
-    ]
+    "@biomejs/biome": "^2.5.11",
+    "@semantic-release/changelog": "^7.0.0",
+    "@semantic-release/exec": "^7.1.0",
+    "@semantic-release/git": "^11.0.1",
+    "@types/node": "^20.19.43",
+    "@vitest/coverage-v8": "^4.1.11",
+    "semantic-release": "^25.0.9",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
   },
   "bin": {
     "webindex": "scripts/webindex.mjs"

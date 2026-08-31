@@ -148,6 +148,18 @@ export interface Bm25Index {
   headingWeight: number;
 }
 
+// Building an index, scoring its documents and reporting their matched terms
+// are normally one pipeline. Keep the weighted token stream beside the index
+// without exposing mutable cache state on the public Bm25Index shape.
+interface CachedDocTokens {
+  title: string;
+  headings: string;
+  body: string;
+  tokens: string[];
+}
+
+const indexTokenCache = new WeakMap<Bm25Index, WeakMap<Bm25Doc, CachedDocTokens>>();
+
 /**
  * Tokenise into canonical terms WITH repetition, so term frequency survives.
  *
@@ -212,9 +224,11 @@ export function buildBm25Index(question: string, docs: readonly Bm25Doc[], opts:
   const queryTerms = [...new Set(bm25Tokenize(question))];
   const N = docs.length;
   const df = new Map<string, number>();
+  const tokenCache = new WeakMap<Bm25Doc, CachedDocTokens>();
   let totalLen = 0;
   for (const doc of docs) {
     const toks = docTokens(doc, titleWeight, headingWeight);
+    tokenCache.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens: toks });
     totalLen += toks.length;
     for (const t of new Set(toks)) df.set(t, (df.get(t) ?? 0) + 1);
   }
@@ -228,13 +242,24 @@ export function buildBm25Index(question: string, docs: readonly Bm25Doc[], opts:
     const dfi = df.get(t) ?? 0;
     idf.set(t, Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5)));
   }
-  return { idf, avgdl, N, queryTerms, k1, b, titleWeight, headingWeight };
+  const index = { idf, avgdl, N, queryTerms, k1, b, titleWeight, headingWeight };
+  indexTokenCache.set(index, tokenCache);
+  return index;
+}
+
+function indexedDocTokens(index: Bm25Index, doc: Bm25Doc): string[] {
+  const cache = indexTokenCache.get(index);
+  const cached = cache?.get(doc);
+  if (cached && cached.title === doc.title && cached.headings === doc.headings && cached.body === doc.body) return cached.tokens;
+  const tokens = docTokens(doc, index.titleWeight, index.headingWeight);
+  cache?.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens });
+  return tokens;
 }
 
 /** BM25F score of one document against the index (raw, ≥0). */
 export function bm25Score(index: Bm25Index, doc: Bm25Doc): number {
   if (!index.queryTerms.length) return 0;
-  const toks = docTokens(doc, index.titleWeight, index.headingWeight);
+  const toks = indexedDocTokens(index, doc);
   const dl = toks.length;
   if (!dl) return 0;
   const tf = new Map<string, number>();
@@ -254,7 +279,7 @@ export function bm25Score(index: Bm25Index, doc: Bm25Doc): number {
 /** Which distinct query terms actually occur in a document. */
 export function bm25MatchedTerms(index: Bm25Index, doc: Bm25Doc): string[] {
   if (!index.queryTerms.length) return [];
-  const present = new Set(docTokens(doc, index.titleWeight, index.headingWeight));
+  const present = new Set(indexedDocTokens(index, doc));
   return index.queryTerms.filter((t) => present.has(t));
 }
 

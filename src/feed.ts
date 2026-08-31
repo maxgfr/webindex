@@ -30,6 +30,18 @@ export interface Feed {
   items: FeedItem[];
 }
 
+// HTML and Atom both permit unquoted attribute values. Keeping the tiny
+// attribute reader here avoids treating a valid `<link href=/feed.xml>` as if
+// the page advertised no feed, without pretending this module is an HTML/XML
+// parser. Malformed attributes simply do not match.
+function attributeValue(attrs: string, name: string): string | undefined {
+  for (const match of attrs.matchAll(/([^\s"'=<>`/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
+    if (match[2] === undefined && match[3] === undefined && match[4] === undefined) continue;
+    if (match[1]?.toLowerCase() === name.toLowerCase()) return match[2] ?? match[3] ?? match[4] ?? "";
+  }
+  return undefined;
+}
+
 function tagText(block: string, ...names: string[]): string | undefined {
   for (const name of names) {
     const m = new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)<\\/${name}>`, "i").exec(block);
@@ -47,17 +59,19 @@ function tagText(block: string, ...names: string[]): string | undefined {
 
 /** Atom puts the URL in an attribute, RSS in element text. */
 function itemUrl(block: string): string | undefined {
-  const link = /<link\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/i.exec(block);
-  if (link) {
+  const links = [...block.matchAll(/<link\b([^>]*)>/gi)].map((match) => match[1]!);
+  const firstHref = links.map((attrs) => attributeValue(attrs, "href")).find(Boolean);
+  if (firstHref) {
     // Prefer rel="alternate" (the human page) over rel="self"/"enclosure".
-    const alts = [...block.matchAll(/<link\b([^>]*)>/gi)]
-      .map((m) => m[1]!)
-      .filter((attrs) => !/\brel\s*=\s*["'](?:self|edit|replies|enclosure)["']/i.test(attrs));
+    const alts = links.filter((attrs) => {
+      const rels = attributeValue(attrs, "rel")?.toLowerCase().split(/\s+/) ?? [];
+      return !rels.some((rel) => ["self", "edit", "replies", "enclosure"].includes(rel));
+    });
     for (const attrs of alts) {
-      const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1];
+      const href = attributeValue(attrs, "href");
       if (href) return decodeEntities(href).trim();
     }
-    return decodeEntities(link[1]!).trim();
+    return decodeEntities(firstHref).trim();
   }
   return tagText(block, "link", "guid");
 }
@@ -107,9 +121,11 @@ export function discoverFeeds(html: string, baseUrl: string): string[] {
   const out: string[] = [];
   for (const m of html.matchAll(/<link\b([^>]*)>/gi)) {
     const attrs = m[1]!;
-    if (!/\brel\s*=\s*["']?alternate\b/i.test(attrs)) continue;
-    if (!/\btype\s*=\s*["'](?:application\/(?:rss|atom)\+xml|application\/feed\+json)["']/i.test(attrs)) continue;
-    const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1];
+    const rels = attributeValue(attrs, "rel")?.toLowerCase().split(/\s+/) ?? [];
+    if (!rels.includes("alternate")) continue;
+    const type = attributeValue(attrs, "type")?.toLowerCase();
+    if (type !== "application/rss+xml" && type !== "application/atom+xml") continue;
+    const href = attributeValue(attrs, "href");
     if (!href) continue;
     try {
       const abs = new URL(decodeEntities(href).trim(), baseUrl).href;

@@ -33,8 +33,14 @@ let dir: string;
 beforeEach(() => {
   out = [];
   err = [];
-  vi.spyOn(process.stdout, "write").mockImplementation((c: any) => (out.push(String(c)), true));
-  vi.spyOn(process.stderr, "write").mockImplementation((c: any) => (err.push(String(c)), true));
+  vi.spyOn(process.stdout, "write").mockImplementation((c: any) => {
+    out.push(String(c));
+    return true;
+  });
+  vi.spyOn(process.stderr, "write").mockImplementation((c: any) => {
+    err.push(String(c));
+    return true;
+  });
   dir = mkdtempSync(join(tmpdir(), "webindex-cli-"));
 });
 afterEach(() => {

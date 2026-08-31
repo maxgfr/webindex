@@ -151,6 +151,15 @@ describe("BM25F", () => {
     expect(matched).not.toContain("window");
   });
 
+  it("re-tokenizes a document that changed after the index was built", () => {
+    const changing = doc("a", "Unrelated", "", "nothing useful");
+    const idx = buildBm25Index("token bucket", [changing, doc("b", "", "", "x"), doc("c", "", "", "y")]);
+    expect(bm25MatchedTerms(idx, changing)).toEqual([]);
+    changing.body = "token bucket";
+    expect(bm25MatchedTerms(idx, changing)).toEqual(["token", "bucket"]);
+    expect(bm25Score(idx, changing)).toBeGreaterThan(0);
+  });
+
   it("scores zero for an empty query or an empty document", () => {
     const d = doc("a", "", "", "some prose");
     expect(bm25Score(buildBm25Index("", [d]), d)).toBe(0);

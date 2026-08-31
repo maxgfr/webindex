@@ -1697,6 +1697,7 @@ function dedupeByUrl(items) {
   }
   return { items: order.map((k) => best.get(k)), dropped };
 }
+var indexTokenCache = /* @__PURE__ */ new WeakMap();
 function bm25Tokenize(text) {
   if (!text) return [];
   const out = [];
@@ -1739,9 +1740,11 @@ function buildBm25Index(question, docs, opts = {}) {
   const queryTerms = [...new Set(bm25Tokenize(question))];
   const N = docs.length;
   const df = /* @__PURE__ */ new Map();
+  const tokenCache = /* @__PURE__ */ new WeakMap();
   let totalLen = 0;
   for (const doc of docs) {
     const toks = docTokens(doc, titleWeight, headingWeight);
+    tokenCache.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens: toks });
     totalLen += toks.length;
     for (const t of new Set(toks)) df.set(t, (df.get(t) ?? 0) + 1);
   }
@@ -1755,11 +1758,21 @@ function buildBm25Index(question, docs, opts = {}) {
     const dfi = df.get(t) ?? 0;
     idf.set(t, Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5)));
   }
-  return { idf, avgdl, N, queryTerms, k1, b, titleWeight, headingWeight };
+  const index = { idf, avgdl, N, queryTerms, k1, b, titleWeight, headingWeight };
+  indexTokenCache.set(index, tokenCache);
+  return index;
+}
+function indexedDocTokens(index, doc) {
+  const cache2 = indexTokenCache.get(index);
+  const cached = cache2?.get(doc);
+  if (cached && cached.title === doc.title && cached.headings === doc.headings && cached.body === doc.body) return cached.tokens;
+  const tokens = docTokens(doc, index.titleWeight, index.headingWeight);
+  cache2?.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens });
+  return tokens;
 }
 function bm25Score(index, doc) {
   if (!index.queryTerms.length) return 0;
-  const toks = docTokens(doc, index.titleWeight, index.headingWeight);
+  const toks = indexedDocTokens(index, doc);
   const dl = toks.length;
   if (!dl) return 0;
   const tf = /* @__PURE__ */ new Map();
@@ -1777,7 +1790,7 @@ function bm25Score(index, doc) {
 }
 function bm25MatchedTerms(index, doc) {
   if (!index.queryTerms.length) return [];
-  const present = new Set(docTokens(doc, index.titleWeight, index.headingWeight));
+  const present = new Set(indexedDocTokens(index, doc));
   return index.queryTerms.filter((t) => present.has(t));
 }
 function applyRelevanceFloor(ranked, matchedOf, queryTerms, floor) {
@@ -2762,6 +2775,13 @@ function pageMetadata(html) {
 }
 
 // src/feed.ts
+function attributeValue(attrs, name) {
+  for (const match of attrs.matchAll(/([^\s"'=<>`/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
+    if (match[2] === void 0 && match[3] === void 0 && match[4] === void 0) continue;
+    if (match[1]?.toLowerCase() === name.toLowerCase()) return match[2] ?? match[3] ?? match[4] ?? "";
+  }
+  return void 0;
+}
 function tagText(block, ...names) {
   for (const name of names) {
     const m = new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)<\\/${name}>`, "i").exec(block);
@@ -2774,14 +2794,18 @@ function tagText(block, ...names) {
   return void 0;
 }
 function itemUrl(block) {
-  const link = /<link\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/i.exec(block);
-  if (link) {
-    const alts = [...block.matchAll(/<link\b([^>]*)>/gi)].map((m) => m[1]).filter((attrs) => !/\brel\s*=\s*["'](?:self|edit|replies|enclosure)["']/i.test(attrs));
+  const links = [...block.matchAll(/<link\b([^>]*)>/gi)].map((match) => match[1]);
+  const firstHref = links.map((attrs) => attributeValue(attrs, "href")).find(Boolean);
+  if (firstHref) {
+    const alts = links.filter((attrs) => {
+      const rels = attributeValue(attrs, "rel")?.toLowerCase().split(/\s+/) ?? [];
+      return !rels.some((rel) => ["self", "edit", "replies", "enclosure"].includes(rel));
+    });
     for (const attrs of alts) {
-      const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1];
+      const href = attributeValue(attrs, "href");
       if (href) return decodeEntities(href).trim();
     }
-    return decodeEntities(link[1]).trim();
+    return decodeEntities(firstHref).trim();
   }
   return tagText(block, "link", "guid");
 }
@@ -2815,9 +2839,11 @@ function discoverFeeds(html, baseUrl) {
   const out = [];
   for (const m of html.matchAll(/<link\b([^>]*)>/gi)) {
     const attrs = m[1];
-    if (!/\brel\s*=\s*["']?alternate\b/i.test(attrs)) continue;
-    if (!/\btype\s*=\s*["'](?:application\/(?:rss|atom)\+xml|application\/feed\+json)["']/i.test(attrs)) continue;
-    const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1];
+    const rels = attributeValue(attrs, "rel")?.toLowerCase().split(/\s+/) ?? [];
+    if (!rels.includes("alternate")) continue;
+    const type = attributeValue(attrs, "type")?.toLowerCase();
+    if (type !== "application/rss+xml" && type !== "application/atom+xml") continue;
+    const href = attributeValue(attrs, "href");
     if (!href) continue;
     try {
       const abs = new URL(decodeEntities(href).trim(), baseUrl).href;

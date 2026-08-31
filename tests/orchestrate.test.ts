@@ -45,7 +45,6 @@ const VERIFY: PhaseDefinition<Todo> = {
   applyHint: (run, engine) => [`node ${engine} verify --apply ${run}`],
 };
 
-// biome-ignore lint/suspicious/noExplicitAny: two differently-typed phase tables in one run, which is the real shape
 const DEFS = [GATHER, VERIFY] as any;
 const ENGINE = "/opt/skill/scripts/skill.mjs";
 const contracts = () => ({ gatherer: "# gatherer\n", skeptic: "# skeptic\n" });

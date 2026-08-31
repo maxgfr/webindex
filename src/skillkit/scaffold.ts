@@ -59,7 +59,7 @@ configure({
 export * from "./vendor/webindex-engine.mjs";
 `;
 
-const ci = (name: string) => `name: CI
+const ci = () => `name: CI
 
 on:
   push:
@@ -130,7 +130,7 @@ export function scaffoldSkill(
     [join("src", "engine.ts")]: engineShim(name, prefix),
     [join("skills", name, "SKILL.md")]:
       `---\nname: ${name}\ndescription: TODO — one sentence saying WHEN to use this skill, under 1000 characters.\n---\n\n# ${name}\n\nTODO\n`,
-    [join(".github", "workflows", "ci.yml")]: ci(name),
+    [join(".github", "workflows", "ci.yml")]: ci(),
     ".gitignore": gitignore,
   };
 

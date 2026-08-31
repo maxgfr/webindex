@@ -218,6 +218,11 @@ describe("feeds", () => {
     expect(f.items[0]).toMatchObject({ title: "Entry one", url: "https://ex.test/a", published: "2024-03-01T00:00:00Z" });
   });
 
+  it("reads valid unquoted attributes on Atom links", () => {
+    const f = parseFeed("<feed><entry><title>Entry</title><link rel=alternate href=https://ex.test/a></entry></feed>")!;
+    expect(f.items[0]?.url).toBe("https://ex.test/a");
+  });
+
   it("names the channel, not its first entry", () => {
     expect(parseFeed(RSS)!.title).toBe("Example blog");
     expect(parseFeed(ATOM)!.title).toBe("Atom blog");
@@ -233,6 +238,22 @@ describe("feeds", () => {
       <link rel="alternate" type="application/atom+xml" href="https://cdn.test/atom">
       <link rel="alternate" type="text/html" href="/other-language">`;
     expect(discoverFeeds(html, "https://ex.test/blog/")).toEqual(["https://ex.test/feed.xml", "https://cdn.test/atom"]);
+  });
+
+  it("accepts valid unquoted feed-link attributes", () => {
+    expect(discoverFeeds("<link rel=alternate type=application/rss+xml href=/feed.xml>", "https://ex.test/blog/")).toEqual(["https://ex.test/feed.xml"]);
+  });
+
+  it("does not advertise JSON Feed, which parseFeed does not support", () => {
+    expect(discoverFeeds('<link rel="alternate" type="application/feed+json" href="/feed.json">', "https://ex.test/")).toEqual([]);
+  });
+
+  it("scans long valueless attribute runs in linear time", () => {
+    const hostile = "a-".repeat(20_000);
+    const started = performance.now();
+    expect(discoverFeeds(`<link ${hostile}>`, "https://ex.test/")).toEqual([]);
+    expect(parseFeed(`<feed><entry><title>T</title><link ${hostile}></entry></feed>`)?.items[0]?.title).toBe("T");
+    expect(performance.now() - started).toBeLessThan(200);
   });
 });
 

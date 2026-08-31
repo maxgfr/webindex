@@ -171,8 +171,9 @@ Three consequences constrain every change here:
 
 - **No runtime dependencies, ever.** A vendored file cannot resolve bare specifiers. CI
   fails the build if any import is not a `node:` builtin.
-- **Node 18 is the floor.** A dedicated CI job runs the committed bundle on Node 18 with
-  no install, because the dev toolchain needs ≥20.19 and so cannot prove it.
+- **Node 18 is the runtime floor.** A dedicated CI job runs the committed bundle on Node 18
+  with no install. Development uses Node ≥22.22.2 and pnpm 11 because the release toolchain
+  requires it.
 - **No module-scope environment reads.** See below.
 
 ## Brand injection

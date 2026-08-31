@@ -15,9 +15,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 20 is the dev-toolchain floor (vitest 4 needs >=20.19); 24 is current.
+        # 22 is the dev-toolchain floor (release plugins need >=22.22.2); 24 is current.
         # The published bundle's Node 18 floor is covered by runtime-node-floor.
-        node-version: [20, 24]
+        node-version: [22, 24]
     name: build-test (node ${{ matrix.node-version }})
     steps:
       - uses: actions/checkout@v6
@@ -55,8 +55,8 @@ jobs:
   # This job proves the two properties that makes it depend on —
   #   1. it is genuinely dependency-free and parses/runs standalone,
   #   2. it holds the engines.node ">=18" promise,
-  # neither of which build-test can show, since the dev toolchain needs >=20.19.
-  # A Node 20+ API sneaking into src/ would build green on 24 and break real
+  # neither of which build-test can show, since the dev toolchain needs >=22.22.2.
+  # A Node 22+ API sneaking into src/ would build green there and break real
   # users on 18; this catches that.
   runtime-node-floor:
     runs-on: ubuntu-latest
