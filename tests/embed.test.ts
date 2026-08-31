@@ -121,6 +121,12 @@ describe("embed", () => {
     ollamaUp();
     expect(await probeOllama(OLLAMA)).toBe(true);
   });
+
+  it("does not let a failed base mask a healthy Ollama base", async () => {
+    installFetchMock((url) => (url.startsWith("http://dead.test") ? { status: 503, body: "down" } : json({ models: [] })));
+    expect(await probeOllama("http://dead.test")).toBe(false);
+    expect(await probeOllama(OLLAMA)).toBe(true);
+  });
 });
 
 describe("vector arithmetic", () => {
@@ -211,6 +217,12 @@ describe("the vector store", () => {
 
   it("reports a store that is up", async () => {
     qdrantUp();
+    expect(await probeQdrant(QDRANT)).toBe(true);
+  });
+
+  it("does not let a failed base mask a healthy Qdrant base", async () => {
+    installFetchMock((url) => (url.startsWith("http://dead.test") ? { status: 503, body: "down" } : json({ result: { collections: [] } })));
+    expect(await probeQdrant("http://dead.test")).toBe(false);
     expect(await probeQdrant(QDRANT)).toBe(true);
   });
 

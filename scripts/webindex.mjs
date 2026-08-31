@@ -1782,13 +1782,15 @@ function embedConcurrency() {
 function embedBatch() {
   return Math.max(1, envInt("EMBED_BATCH", 16));
 }
-var probed;
+var probed = /* @__PURE__ */ new Map();
 async function probeOllama(base = ollamaBase()) {
-  if (base.toLowerCase() === "off") return false;
-  if (probed !== void 0) return probed;
-  const r = await httpJson("GET", `${base.replace(/\/+$/, "")}/api/tags`, void 0, { timeoutMs: 2e3, retries: 0 });
-  probed = r.ok;
-  return probed;
+  const key = base.replace(/\/+$/, "");
+  if (key.toLowerCase() === "off") return false;
+  const cached = probed.get(key);
+  if (cached !== void 0) return cached;
+  const r = await httpJson("GET", `${key}/api/tags`, void 0, { timeoutMs: 2e3, retries: 0 });
+  probed.set(key, r.ok);
+  return r.ok;
 }
 async function embed(texts, opts = {}) {
   const model = opts.model ?? embedModel();
@@ -2067,13 +2069,15 @@ function qdrantBase() {
   return env("QDRANT") ?? "http://localhost:6333";
 }
 var clean = (base) => base.replace(/\/+$/, "");
-var probed2;
+var probed2 = /* @__PURE__ */ new Map();
 async function probeQdrant(base = qdrantBase()) {
-  if (base.toLowerCase() === "off") return false;
-  if (probed2 !== void 0) return probed2;
-  const r = await httpJson("GET", `${clean(base)}/collections`, void 0, { timeoutMs: 2e3, retries: 0 });
-  probed2 = r.ok;
-  return probed2;
+  const key = clean(base);
+  if (key.toLowerCase() === "off") return false;
+  const cached = probed2.get(key);
+  if (cached !== void 0) return cached;
+  const r = await httpJson("GET", `${key}/collections`, void 0, { timeoutMs: 2e3, retries: 0 });
+  probed2.set(key, r.ok);
+  return r.ok;
 }
 async function hybridSearch(question, docs, opts = {}) {
   if (docs.length === 0) return { hits: [] };

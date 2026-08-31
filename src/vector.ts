@@ -29,20 +29,22 @@ export function qdrantBase(): string {
 
 const clean = (base: string) => base.replace(/\/+$/, "");
 
-let probed: boolean | undefined;
+const probed = new Map<string, boolean>();
 
 /** Test seam, and the escape hatch for a store that came up mid-run. */
 export function resetQdrantProbe(): void {
-  probed = undefined;
+  probed.clear();
 }
 
-/** Whether the local vector store answers. Cached for the process, like the Ollama probe. */
+/** Whether the local vector store answers. Cached per base for the process, like the Ollama probe. */
 export async function probeQdrant(base: string = qdrantBase()): Promise<boolean> {
-  if (base.toLowerCase() === "off") return false;
-  if (probed !== undefined) return probed;
-  const r = await httpJson("GET", `${clean(base)}/collections`, undefined, { timeoutMs: 2_000, retries: 0 });
-  probed = r.ok;
-  return probed;
+  const key = clean(base);
+  if (key.toLowerCase() === "off") return false;
+  const cached = probed.get(key);
+  if (cached !== undefined) return cached;
+  const r = await httpJson("GET", `${key}/collections`, undefined, { timeoutMs: 2_000, retries: 0 });
+  probed.set(key, r.ok);
+  return r.ok;
 }
 
 export interface VectorPoint {

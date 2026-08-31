@@ -50,26 +50,28 @@ export interface EmbedResult {
   note?: string;
 }
 
-let probed: boolean | undefined;
+const probed = new Map<string, boolean>();
 
 /** Test seam, and the escape hatch for a server that came up mid-run. */
 export function resetOllamaProbe(): void {
-  probed = undefined;
+  probed.clear();
 }
 
 /**
  * Whether the local embedding server answers.
  *
- * Cached for the process: a probe per call would double the request count of
+ * Cached per base for the process: a probe per call would double the request count of
  * every batch, and a server that goes away mid-run shows up as a failed embed
  * anyway.
  */
 export async function probeOllama(base: string = ollamaBase()): Promise<boolean> {
-  if (base.toLowerCase() === "off") return false;
-  if (probed !== undefined) return probed;
-  const r = await httpJson("GET", `${base.replace(/\/+$/, "")}/api/tags`, undefined, { timeoutMs: 2_000, retries: 0 });
-  probed = r.ok;
-  return probed;
+  const key = base.replace(/\/+$/, "");
+  if (key.toLowerCase() === "off") return false;
+  const cached = probed.get(key);
+  if (cached !== undefined) return cached;
+  const r = await httpJson("GET", `${key}/api/tags`, undefined, { timeoutMs: 2_000, retries: 0 });
+  probed.set(key, r.ok);
+  return r.ok;
 }
 
 /**

@@ -2058,7 +2058,7 @@ declare function resetOllamaProbe(): void;
 /**
  * Whether the local embedding server answers.
  *
- * Cached for the process: a probe per call would double the request count of
+ * Cached per base for the process: a probe per call would double the request count of
  * every batch, and a server that goes away mid-run shows up as a failed embed
  * anyway.
  */
@@ -2108,7 +2108,7 @@ declare function normalize(v: readonly number[]): number[];
 declare function qdrantBase(): string;
 /** Test seam, and the escape hatch for a store that came up mid-run. */
 declare function resetQdrantProbe(): void;
-/** Whether the local vector store answers. Cached for the process, like the Ollama probe. */
+/** Whether the local vector store answers. Cached per base for the process, like the Ollama probe. */
 declare function probeQdrant(base?: string): Promise<boolean>;
 interface VectorPoint {
     /** Qdrant accepts an unsigned integer or a UUID. A caller keying by URL should hash it. */
