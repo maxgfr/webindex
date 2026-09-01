@@ -21,6 +21,27 @@ describe("character encoding", () => {
   // handle encodings" and "we handle accents".
   const latin1 = Buffer.concat([Buffer.from("Une réponse déjà validée ", "latin1"), Buffer.from([0x97]), Buffer.from(" coûts", "latin1")]);
 
+  it("maps every byte of the Windows-1252 table, C1 range included", () => {
+    // Pinned on the byte-wise reference decoder: the 32 C1 bytes take their
+    // cp1252 meaning (or stay as the raw control for the five unassigned ones),
+    // everything else is identity.
+    const every = Buffer.from(Array.from({ length: 256 }, (_, i) => i));
+    const out = decodeBody(every, "text/html; charset=windows-1252");
+    expect(out.length).toBe(256);
+    expect(out.slice(0x80, 0xa0)).toBe("€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ");
+    for (let i = 0; i < 0x80; i++) expect(out.charCodeAt(i)).toBe(i);
+    for (let i = 0xa0; i < 256; i++) expect(out.charCodeAt(i)).toBe(i);
+  });
+
+  it("decodes a 4 MB Windows-1252 body in a single pass", () => {
+    const chunk = Buffer.concat([Buffer.from("Une réponse déjà validée ", "latin1"), Buffer.from([0x97, 0x85, 0x80])]);
+    const big = Buffer.concat(Array.from({ length: Math.ceil(4_000_000 / chunk.length) }, () => chunk));
+    const started = performance.now();
+    const out = decodeBody(big, "text/html; charset=windows-1252");
+    expect(performance.now() - started).toBeLessThan(100);
+    expect(out.slice(0, chunk.length)).toBe("Une réponse déjà validée —…€");
+  });
+
   it("decodes a Windows-1252 body declared in the Content-Type", () => {
     expect(decodeBody(latin1, "text/html; charset=windows-1252")).toBe("Une réponse déjà validée — coûts");
   });

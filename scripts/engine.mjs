@@ -520,10 +520,10 @@ var CP1252_LABELS = /* @__PURE__ */ new Set([
   "us-ascii",
   "ascii"
 ]);
+var CP1252_C1_RANGE = /[\x80-\x9f]/g;
+var cp1252C1 = (c) => String.fromCharCode(CP1252_C1[c.charCodeAt(0) - 128]);
 function decodeCp1252(bytes) {
-  let out = "";
-  for (const b of bytes) out += String.fromCharCode(b >= 128 && b <= 159 ? CP1252_C1[b - 128] : b);
-  return out;
+  return bytes.toString("latin1").replace(CP1252_C1_RANGE, cp1252C1);
 }
 function decodeWith(bytes, encoding) {
   if (CP1252_LABELS.has(encoding)) return decodeCp1252(bytes);
