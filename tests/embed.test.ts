@@ -335,4 +335,21 @@ describe("hybridSearch", () => {
     expect(await hybridSearch("q", [], { base: OLLAMA })).toEqual({ hits: [] });
     expect(spy).not.toHaveBeenCalled();
   });
+
+  it("ranks a large pool of lexically tied documents in input order, and quickly", async () => {
+    // Every document scores the same, so the lexical rank must be the input
+    // order (stable sort), and 300 documents must not cost 2·n·log n scorings.
+    installFetchMock(() => ({ status: 502, body: "down", contentType: "text/plain" }));
+    const pool = Array.from({ length: 300 }, (_, i) => ({
+      id: `d${i}`,
+      title: "Token bucket",
+      headings: "",
+      body: `A token bucket smooths bursts. ${"Filler words about traffic shaping and request budgets. ".repeat(40)}`,
+    }));
+    const started = performance.now();
+    const r = await hybridSearch("token bucket", pool, { base: OLLAMA });
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(r.hits.map((h) => h.doc.id)).toEqual(pool.map((d) => d.id));
+    expect(r.hits.map((h) => h.lexicalRank)).toEqual(pool.map((_, i) => i + 1));
+  });
 });

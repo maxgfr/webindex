@@ -4307,12 +4307,13 @@ function unreachable(base) {
 }
 async function hybridSearch(question, docs, opts = {}) {
   if (docs.length === 0) return { hits: [] };
-  const index = buildBm25Index(question, docs);
-  const lexical = [...docs].sort((a, b) => bm25Score(index, b) - bm25Score(index, a));
-  const embedded = await embed([question, ...docs.map((d) => [d.title, d.headings, d.body].filter(Boolean).join("\n"))], {
+  const embedding = embed([question, ...docs.map((d) => [d.title, d.headings, d.body].filter(Boolean).join("\n"))], {
     ...opts.base !== void 0 ? { base: opts.base } : {},
     ...opts.model !== void 0 ? { model: opts.model } : {}
   });
+  const index = buildBm25Index(question, docs);
+  const lexical = docs.map((doc) => ({ doc, score: bm25Score(index, doc) })).sort((a, b) => b.score - a.score).map((s) => s.doc);
+  const embedded = await embedding;
   let dense = [];
   let note = embedded.note;
   if (embedded.vectors.length === docs.length + 1) {

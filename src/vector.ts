@@ -174,13 +174,25 @@ export async function hybridSearch<D extends HybridDoc>(
 ): Promise<{ hits: HybridHit<D>[]; note?: string }> {
   if (docs.length === 0) return { hits: [] };
 
-  const index = buildBm25Index(question, docs);
-  const lexical = [...docs].sort((a, b) => bm25Score(index, b) - bm25Score(index, a));
-
-  const embedded = await embed([question, ...docs.map((d) => [d.title, d.headings, d.body].filter(Boolean).join("\n"))], {
+  // The dense lane is a network round trip (up to a minute against a cold
+  // model); start it first so the lexical scoring below overlaps it instead of
+  // preceding it.
+  const embedding = embed([question, ...docs.map((d) => [d.title, d.headings, d.body].filter(Boolean).join("\n"))], {
     ...(opts.base !== undefined ? { base: opts.base } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
   });
+
+  // Score each document ONCE, then sort. Scoring inside the comparator
+  // re-tokenised both sides on every comparison — 2·n·log n scorings for a
+  // ranking that needs n. Stable sort keeps input order between equal scores,
+  // so the order is deterministic without a further tiebreak.
+  const index = buildBm25Index(question, docs);
+  const lexical = docs
+    .map((doc) => ({ doc, score: bm25Score(index, doc) }))
+    .sort((a, b) => b.score - a.score)
+    .map((s) => s.doc);
+
+  const embedded = await embedding;
 
   let dense: D[] = [];
   let note = embedded.note;
