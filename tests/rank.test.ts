@@ -250,6 +250,29 @@ describe("simhash near-duplicate detection", () => {
     expect(simhash("")).toBe(0n);
   });
 
+  it("is frozen bit-for-bit — a faster implementation must not move a single bit", () => {
+    // Values pinned on the reference implementation (BigInt per shingle). A
+    // hash that drifts would make `maxBits` mean something different between
+    // two versions of the engine.
+    expect(simhash(article)).toBe(0xf687b8f62c241fdcn);
+    expect(simhash("alpha beta")).toBe(0x0206219b85442023n);
+    expect(simhash("alpha beta gamma")).toBe(0x29496d94f8235e1en);
+  });
+
+  it("counts differing bits across the full 64-bit width", () => {
+    expect(hammingDistance(0n, (1n << 64n) - 1n)).toBe(64);
+    expect(hammingDistance(1n << 63n, 0n)).toBe(1);
+    expect(hammingDistance(0x8000000080000000n, 0x0000000100000001n)).toBe(4);
+  });
+
+  it("hashes 200 KB of prose well under a tenth of a second", () => {
+    const big = article.repeat(200);
+    expect(big.length).toBeGreaterThan(200_000);
+    const started = performance.now();
+    simhash(big);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
   it("collapses syndicated copies, keeping the best-scored one", () => {
     const items = [
       src("https://origin.test/a", 0.9, article),

@@ -1,5 +1,5 @@
 import { foldTerm, isStopword, type KeywordMatcher } from "./text.js";
-import { canonicalizeUrl, domainOf, fnv1a64, normalizeDoi } from "./url.js";
+import { canonicalizeUrl, domainOf, fnv1a64Words, normalizeDoi } from "./url.js";
 
 // Ranking: turning a pool of candidates into a reading order.
 //
@@ -173,10 +173,26 @@ export function bm25Tokenize(text: string): string[] {
   for (const raw of text.split(/[^\p{L}\p{N}_]+/u)) {
     if (raw.length < 2) continue;
     if (isStopword(raw)) continue;
-    const t = foldTerm(raw);
+    const t = foldCached(raw);
     if (t.length >= 2) out.push(t);
   }
   return out;
+}
+
+// foldTerm is pure and vocabularies repeat: a 300-document pool folds the same
+// few thousand surface forms tens of thousands of times. Bounded so a hostile
+// corpus cannot grow it without limit — clearing is cheaper than eviction and
+// the miss cost is just one fold.
+const FOLD_CACHE_MAX = 50_000;
+const foldCache = new Map<string, string>();
+
+function foldCached(raw: string): string {
+  const hit = foldCache.get(raw);
+  if (hit !== undefined) return hit;
+  const t = foldTerm(raw);
+  if (foldCache.size >= FOLD_CACHE_MAX) foldCache.clear();
+  foldCache.set(raw, t);
+  return t;
 }
 
 // Field-weighted token stream: body once, headings ×headingWeight, title
@@ -353,29 +369,54 @@ export function recencyScore(meta: { year?: number } | undefined, minYear: numbe
  */
 export function simhash(text: string): bigint {
   const toks = bm25Tokenize(text);
-  const shingles: string[] = [];
-  if (toks.length < 3) shingles.push(...toks);
-  else for (let i = 0; i + 3 <= toks.length; i++) shingles.push(`${toks[i]} ${toks[i + 1]} ${toks[i + 2]}`);
-  if (!shingles.length) return 0n;
-  const v = new Array<number>(64).fill(0);
-  for (const sh of shingles) {
-    const h = fnv1a64(sh);
-    for (let b = 0; b < 64; b++) v[b]! += ((h >> BigInt(b)) & 1n) === 1n ? 1 : -1;
+  if (!toks.length) return 0n;
+  // Each shingle is hashed as `${a} ${b} ${c}` — fed to FNV piecewise, which is
+  // the same bytes without building the string. The 64 counters are read off
+  // two 32-bit words: no BigInt until the very end. Bit-exact with the BigInt
+  // reference (pinned in tests); on a 2 MB page this is the difference between
+  // 300 ms and a few ms.
+  const v = new Int32Array(64);
+  const words = new Uint32Array(2);
+  const pieces: string[] = toks.length < 3 ? [""] : ["", " ", "", " ", ""];
+  const n = toks.length < 3 ? toks.length : toks.length - 2;
+  for (let i = 0; i < n; i++) {
+    if (toks.length < 3) pieces[0] = toks[i]!;
+    else {
+      pieces[0] = toks[i]!;
+      pieces[2] = toks[i + 1]!;
+      pieces[4] = toks[i + 2]!;
+    }
+    fnv1a64Words(pieces, words);
+    const hi = words[0]!;
+    const lo = words[1]!;
+    // Counting ones is enough: the reference's ±1 tally is positive exactly
+    // when more than half the shingles set the bit.
+    for (let b = 0; b < 32; b++) {
+      v[b] = v[b]! + ((lo >>> b) & 1);
+      v[b + 32] = v[b + 32]! + ((hi >>> b) & 1);
+    }
   }
-  let out = 0n;
-  for (let b = 0; b < 64; b++) if (v[b]! > 0) out |= 1n << BigInt(b);
-  return out;
+  let lo = 0;
+  let hi = 0;
+  for (let b = 0; b < 32; b++) {
+    if (2 * v[b]! > n) lo |= 1 << b;
+    if (2 * v[b + 32]! > n) hi |= 1 << b;
+  }
+  return (BigInt(hi >>> 0) << 32n) | BigInt(lo >>> 0);
+}
+
+const MASK32 = 0xffffffffn;
+
+function popcount32(n: number): number {
+  let x = n - ((n >>> 1) & 0x55555555);
+  x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+  return Math.imul((x + (x >>> 4)) & 0x0f0f0f0f, 0x01010101) >>> 24;
 }
 
 /** How many bits two SimHashes differ by. */
 export function hammingDistance(a: bigint, b: bigint): number {
-  let x = a ^ b;
-  let count = 0;
-  while (x) {
-    x &= x - 1n;
-    count++;
-  }
-  return count;
+  const x = a ^ b;
+  return popcount32(Number(x & MASK32)) + popcount32(Number((x >> 32n) & MASK32));
 }
 
 /**

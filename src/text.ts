@@ -252,7 +252,14 @@ function baseChar(ch: string): string {
   return stripped.length === 1 ? stripped : ch;
 }
 
+// ASCII is a fixed point of baseChar (the class tables map each base letter to
+// itself, NFD leaves the rest alone), and the overwhelming majority of tokens
+// are ASCII. Skip the per-character walk for them: same output, an order of
+// magnitude cheaper on the tokenising hot path.
+const NON_ASCII = /[\u0080-\uffff]/;
+
 export function deaccent(s: string): string {
+  if (!NON_ASCII.test(s)) return s;
   let out = "";
   for (const ch of s) out += baseChar(ch);
   return out;

@@ -73,6 +73,24 @@ describe("fnv1a64", () => {
   it("stays inside 64 bits", () => {
     expect(fnv1a64("x")).toBeLessThan(1n << 64n);
   });
+
+  it("matches the official FNV-1a 64-bit test vectors", () => {
+    // Cache keys on disk and run ids are derived from this hash: any drift in
+    // the output silently invalidates every consumer's cache. These are the
+    // reference vectors from the FNV specification, plus a non-ASCII case pinned
+    // on the current implementation (UTF-16 code units, not UTF-8 bytes).
+    expect(fnv1a64("")).toBe(0xcbf29ce484222325n);
+    expect(fnv1a64("a")).toBe(0xaf63dc4c8601ec8cn);
+    expect(fnv1a64("foobar")).toBe(0x85944171f73967e8n);
+    expect(fnv1a64("héllo — 日本")).toBe(0xffd65f0326cc8740n);
+  });
+
+  it("hashes a long string in linear time without BigInt per character", () => {
+    const long = "https://x.test/".repeat(20_000);
+    const started = performance.now();
+    expect(fnv1a64(long)).toBeLessThan(1n << 64n);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
 });
 
 describe("keywords", () => {

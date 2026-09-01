@@ -752,7 +752,9 @@ function baseChar(ch) {
   const stripped = ch.normalize("NFD").replace(new RegExp("\\p{M}+", "gu"), "");
   return stripped.length === 1 ? stripped : ch;
 }
+var NON_ASCII = /[\u0080-\uffff]/;
 function deaccent(s) {
+  if (!NON_ASCII.test(s)) return s;
   let out = "";
   for (const ch of s) out += baseChar(ch);
   return out;
@@ -1622,16 +1624,37 @@ function domainOf(raw) {
   }
 }
 var LOCAL_FILE_DOMAIN = "local file";
-var FNV_OFFSET = 0xcbf29ce484222325n;
-var FNV_PRIME = 0x100000001b3n;
-var MASK64 = (1n << 64n) - 1n;
-function fnv1a64(s) {
-  let h = FNV_OFFSET;
+var FNV_OFFSET_HI = 3421674724;
+var FNV_OFFSET_LO = 2216829733;
+var FNV_PRIME_LOW = 435;
+var laneHi = 0;
+var laneLo = 0;
+function fnvMix(s) {
+  let hi = laneHi;
+  let lo = laneLo;
   for (let i = 0; i < s.length; i++) {
-    h ^= BigInt(s.charCodeAt(i));
-    h = h * FNV_PRIME & MASK64;
+    lo = (lo ^ s.charCodeAt(i)) >>> 0;
+    const bP = (lo & 65535) * FNV_PRIME_LOW;
+    const aP = (lo >>> 16) * FNV_PRIME_LOW + (bP >>> 16);
+    const carry = aP >>> 16;
+    hi = carry + Math.imul(hi, FNV_PRIME_LOW) + (lo << 8) >>> 0;
+    lo = ((aP & 65535) << 16 | bP & 65535) >>> 0;
   }
-  return h;
+  laneHi = hi;
+  laneLo = lo;
+}
+function fnv1a64(s) {
+  laneHi = FNV_OFFSET_HI;
+  laneLo = FNV_OFFSET_LO;
+  fnvMix(s);
+  return BigInt(laneHi) << 32n | BigInt(laneLo);
+}
+function fnv1a64Words(pieces, out) {
+  laneHi = FNV_OFFSET_HI;
+  laneLo = FNV_OFFSET_LO;
+  for (const p of pieces) fnvMix(p);
+  out[0] = laneHi;
+  out[1] = laneLo;
 }
 
 // src/rank.ts
@@ -1704,10 +1727,20 @@ function bm25Tokenize(text) {
   for (const raw of text.split(/[^\p{L}\p{N}_]+/u)) {
     if (raw.length < 2) continue;
     if (isStopword(raw)) continue;
-    const t = foldTerm(raw);
+    const t = foldCached(raw);
     if (t.length >= 2) out.push(t);
   }
   return out;
+}
+var FOLD_CACHE_MAX = 5e4;
+var foldCache = /* @__PURE__ */ new Map();
+function foldCached(raw) {
+  const hit = foldCache.get(raw);
+  if (hit !== void 0) return hit;
+  const t = foldTerm(raw);
+  if (foldCache.size >= FOLD_CACHE_MAX) foldCache.clear();
+  foldCache.set(raw, t);
+  return t;
 }
 function docTokens(doc, titleWeight, headingWeight) {
   const out = bm25Tokenize(doc.body);
@@ -1824,27 +1857,43 @@ function recencyScore(meta, minYear, maxYear) {
 }
 function simhash(text) {
   const toks = bm25Tokenize(text);
-  const shingles = [];
-  if (toks.length < 3) shingles.push(...toks);
-  else for (let i = 0; i + 3 <= toks.length; i++) shingles.push(`${toks[i]} ${toks[i + 1]} ${toks[i + 2]}`);
-  if (!shingles.length) return 0n;
-  const v = new Array(64).fill(0);
-  for (const sh2 of shingles) {
-    const h = fnv1a64(sh2);
-    for (let b = 0; b < 64; b++) v[b] += (h >> BigInt(b) & 1n) === 1n ? 1 : -1;
+  if (!toks.length) return 0n;
+  const v = new Int32Array(64);
+  const words = new Uint32Array(2);
+  const pieces = toks.length < 3 ? [""] : ["", " ", "", " ", ""];
+  const n = toks.length < 3 ? toks.length : toks.length - 2;
+  for (let i = 0; i < n; i++) {
+    if (toks.length < 3) pieces[0] = toks[i];
+    else {
+      pieces[0] = toks[i];
+      pieces[2] = toks[i + 1];
+      pieces[4] = toks[i + 2];
+    }
+    fnv1a64Words(pieces, words);
+    const hi2 = words[0];
+    const lo2 = words[1];
+    for (let b = 0; b < 32; b++) {
+      v[b] = v[b] + (lo2 >>> b & 1);
+      v[b + 32] = v[b + 32] + (hi2 >>> b & 1);
+    }
   }
-  let out = 0n;
-  for (let b = 0; b < 64; b++) if (v[b] > 0) out |= 1n << BigInt(b);
-  return out;
+  let lo = 0;
+  let hi = 0;
+  for (let b = 0; b < 32; b++) {
+    if (2 * v[b] > n) lo |= 1 << b;
+    if (2 * v[b + 32] > n) hi |= 1 << b;
+  }
+  return BigInt(hi >>> 0) << 32n | BigInt(lo >>> 0);
+}
+var MASK32 = 0xffffffffn;
+function popcount32(n) {
+  let x = n - (n >>> 1 & 1431655765);
+  x = (x & 858993459) + (x >>> 2 & 858993459);
+  return Math.imul(x + (x >>> 4) & 252645135, 16843009) >>> 24;
 }
 function hammingDistance(a, b) {
-  let x = a ^ b;
-  let count = 0;
-  while (x) {
-    x &= x - 1n;
-    count++;
-  }
-  return count;
+  const x = a ^ b;
+  return popcount32(Number(x & MASK32)) + popcount32(Number(x >> 32n & MASK32));
 }
 function dedupeNearDuplicates(items, opts = {}) {
   const maxBits = opts.maxBits ?? 3;
@@ -5546,6 +5595,7 @@ export {
   firecrawlBase,
   firecrawlIsExplicit,
   fnv1a64,
+  fnv1a64Words,
   focusedSnippet,
   foldTerm,
   forgeAuthHeaders,

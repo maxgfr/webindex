@@ -65,15 +65,58 @@ export const LOCAL_FILE_DOMAIN = "local file";
 // mixer under near-duplicate detection.
 // ---------------------------------------------------------------------------
 
-const FNV_OFFSET = 0xcbf29ce484222325n;
-const FNV_PRIME = 0x100000001b3n;
-const MASK64 = (1n << 64n) - 1n;
+// Computed on two 32-bit lanes rather than a BigInt, because a BigInt multiply
+// per character is a heap allocation per character: on a 2 MB page that was
+// ~300 ms, 40× the rest of the ranking pipeline. The lanes are bit-exact with
+// the BigInt reference (the spec vectors are pinned in tests): the 64-bit FNV
+// prime is 2^40 + 0x1b3, so h·P = (h << 40) + h·0x1b3, and both terms are cheap
+// on split words. Disk cache keys and run ids depend on this exact output.
+
+const FNV_OFFSET_HI = 0xcbf29ce4;
+const FNV_OFFSET_LO = 0x84222325;
+const FNV_PRIME_LOW = 0x1b3;
+
+// Lane state shared by the two entry points below. Module-level rather than
+// returned because the hot caller (simhash) runs this once per shingle and must
+// not allocate. Synchronous and single-threaded, so never re-entered.
+let laneHi = 0;
+let laneLo = 0;
+
+function fnvMix(s: string): void {
+  let hi = laneHi;
+  let lo = laneLo;
+  for (let i = 0; i < s.length; i++) {
+    lo = (lo ^ s.charCodeAt(i)) >>> 0;
+    // lo · 0x1b3 on 16-bit halves, so the carry into the high lane is exact in
+    // 32-bit integer arithmetic: (a·2^16 + b)·P = a·P·2^16 + b·P, both < 2^25.
+    const bP = (lo & 0xffff) * FNV_PRIME_LOW;
+    const aP = (lo >>> 16) * FNV_PRIME_LOW + (bP >>> 16);
+    const carry = aP >>> 16;
+    // High lane: carry + hi·0x1b3 + (lo << 40 mod 2^64, i.e. lo << 8).
+    hi = (carry + Math.imul(hi, FNV_PRIME_LOW) + (lo << 8)) >>> 0;
+    lo = (((aP & 0xffff) << 16) | (bP & 0xffff)) >>> 0;
+  }
+  laneHi = hi;
+  laneLo = lo;
+}
 
 export function fnv1a64(s: string): bigint {
-  let h = FNV_OFFSET;
-  for (let i = 0; i < s.length; i++) {
-    h ^= BigInt(s.charCodeAt(i));
-    h = (h * FNV_PRIME) & MASK64;
-  }
-  return h;
+  laneHi = FNV_OFFSET_HI;
+  laneLo = FNV_OFFSET_LO;
+  fnvMix(s);
+  return (BigInt(laneHi) << 32n) | BigInt(laneLo);
+}
+
+/**
+ * FNV-1a 64 of the concatenation of `pieces`, as two 32-bit words written to
+ * `out[0]` (high) and `out[1]` (low). Same value as `fnv1a64(pieces.join(""))`
+ * without building the string or the BigInt — the form simhash needs, once per
+ * shingle.
+ */
+export function fnv1a64Words(pieces: readonly string[], out: Uint32Array): void {
+  laneHi = FNV_OFFSET_HI;
+  laneLo = FNV_OFFSET_LO;
+  for (const p of pieces) fnvMix(p);
+  out[0] = laneHi;
+  out[1] = laneLo;
 }
