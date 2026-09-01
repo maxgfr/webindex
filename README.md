@@ -204,6 +204,7 @@ documents this at length; it is the one invariant that makes vendoring possible 
 pnpm install
 pnpm run typecheck && pnpm run lint
 pnpm test
+pnpm run bench              # micro-benchmarks of the hot paths (bench/*.bench.ts), offline
 pnpm run build              # tsup + rename the declaration output to .d.mts
 pnpm run check:build        # the committed artifacts are reproducible
 pnpm run verify:vendorable  # nothing but Node builtins, declarations self-contained

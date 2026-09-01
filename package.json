@@ -28,6 +28,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "bench": "vitest bench --run",
     "typecheck": "tsc --noEmit",
     "lint": "biome ci --error-on-warnings .",
     "lint:fix": "biome check --write .",
