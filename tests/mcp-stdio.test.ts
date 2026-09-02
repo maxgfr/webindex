@@ -64,6 +64,45 @@ describe("concurrency", () => {
     expect(out).toHaveLength(6);
     expect(new Set(out.map((m) => (m as any).id))).toEqual(new Set([1, 2, 3, 4, 5, 6]));
   });
+
+  it("keeps a batch under the same in-flight ceiling as single frames", async () => {
+    // The batch array's length is the client's choice: running all of it at
+    // once was a way around the 4-in-flight ceiling that single frames obey.
+    let inFlight = 0;
+    let peak = 0;
+    const slow = testAdapter({
+      async callTool(name, args) {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return { text: `${name}:${String(args.text)}` };
+      },
+    });
+    const batch = JSON.stringify(
+      Array.from({ length: 20 }, (_, i) => ({
+        jsonrpc: "2.0",
+        id: i + 1,
+        method: "tools/call",
+        params: { name: "probe_echo", arguments: { text: String(i) } },
+      })),
+    );
+    const input = Readable.from([batch + "\n"]);
+    const chunks: string[] = [];
+    const output = new Writable({
+      write(chunk, _enc, cb) {
+        chunks.push(String(chunk));
+        cb();
+      },
+    });
+    await runStdioServer(slow, { input, output, captureStdout: true });
+    const frames = chunks.join("").split("\n").filter(Boolean);
+    expect(frames).toHaveLength(1); // one array answers the whole batch
+    const answers = JSON.parse(frames[0]!) as { id: number }[];
+    expect(new Set(answers.map((a) => a.id))).toEqual(new Set(Array.from({ length: 20 }, (_, i) => i + 1)));
+    expect(peak).toBeLessThanOrEqual(4);
+    expect(peak).toBeGreaterThan(1);
+  });
 });
 
 describe("stdout hygiene", () => {

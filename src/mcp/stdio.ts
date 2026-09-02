@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
+import { mapLimit } from "../pool.js";
 import { createServer, ERR_INVALID_REQUEST, type JsonRpcMessage, type McpAdapter, type ServerOptions } from "./server.js";
 
 // The stdio transport: one JSON-RPC message per line, in on stdin, out on
@@ -81,11 +82,13 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
       if (Array.isArray(parsed)) {
         // A batch answers as one array, so the client can match it to what it
         // sent. Notifications inside it contribute nothing, and a batch of only
-        // notifications produces no frame at all.
+        // notifications produces no frame at all. Its members run at most
+        // MAX_IN_FLIGHT at a time: the array's length is the client's choice,
+        // and a Promise.all over it was a way around the in-flight ceiling.
         track(
           (async () => {
             const out: JsonRpcMessage[] = [];
-            await Promise.all(parsed.map((m) => server.handle(m as JsonRpcMessage, (r) => void out.push(r))));
+            await mapLimit(parsed, MAX_IN_FLIGHT, (m) => server.handle(m as JsonRpcMessage, (r) => void out.push(r)));
             if (out.length) emit(JSON.stringify(out) + "\n");
           })().catch(reportInternal(send)),
         );

@@ -5275,7 +5275,7 @@ async function runStdioServer(adapter, opts = {}) {
         track(
           (async () => {
             const out = [];
-            await Promise.all(parsed.map((m) => server.handle(m, (r) => void out.push(r))));
+            await mapLimit(parsed, MAX_IN_FLIGHT, (m) => server.handle(m, (r) => void out.push(r)));
             if (out.length) emit(JSON.stringify(out) + "\n");
           })().catch(reportInternal(send))
         );
