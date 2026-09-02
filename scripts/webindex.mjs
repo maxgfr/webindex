@@ -2485,7 +2485,6 @@ async function crawlSite(seed, opts = {}) {
       extractor: got.extractor ?? "native",
       links: got.html ? linksFrom(got.html, item.url) : []
     };
-    opts.onPage?.(page);
     return page;
   };
   let wave = [{ url: seed, depth: 0 }];
@@ -2503,7 +2502,20 @@ async function crawlSite(seed, opts = {}) {
       cursor += slice.length;
     }
     const leftover = wave.slice(cursor);
-    const results = await mapLimit(batch, width, (a) => fetchOne(a.item, a.robots));
+    const settled = new Array(batch.length);
+    let streamed = 0;
+    const streamReady = () => {
+      while (streamed < settled.length && settled[streamed] !== void 0) {
+        const done = settled[streamed++];
+        if (typeof done !== "string") opts.onPage?.(done);
+      }
+    };
+    const results = await mapLimit(batch, width, async (a, i) => {
+      const got = await fetchOne(a.item, a.robots);
+      settled[i] = got;
+      streamReady();
+      return got;
+    });
     const next = [];
     if (sitemap) {
       const sm = await sitemap;

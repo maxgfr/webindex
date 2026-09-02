@@ -92,7 +92,14 @@ export function backOffHost(url: string, ms: number, now: number = Date.now()): 
 // ── Walking a site ──────────────────────────────────────────────────────────
 
 export interface CrawlOptions {
-  /** Hard ceiling on pages fetched. Required in spirit; defaulted low on purpose. */
+  /**
+   * Ceiling on pages RETURNED. Required in spirit; defaulted low on purpose.
+   *
+   * A URL that yields no readable text costs a request but no slot, so a site
+   * answering 500s can be asked for more URLs than this — the budget buys
+   * pages, not requests. That is what the sequential walk always did: stopping
+   * at the first dead link would hand back a fraction of the asked-for pages.
+   */
   maxPages?: number;
   /** How many links deep to follow. The seed is depth 0. */
   maxDepth?: number;
@@ -104,7 +111,11 @@ export interface CrawlOptions {
   ignoreRobots?: boolean;
   /** Per-host delay override. Otherwise robots' own Crawl-delay, else hostDelayMs(). */
   delayMs?: number;
-  /** Called as each page lands, so a caller can stream rather than wait for the whole walk. */
+  /**
+   * Called as each page lands, so a caller can stream rather than wait for the
+   * whole walk. Fires in frontier order — the same order as `pages` — however
+   * the fetches interleaved.
+   */
   onPage?(page: CrawledPage): void;
 }
 
@@ -244,8 +255,6 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
       extractor: got.extractor ?? "native",
       links: got.html ? linksFrom(got.html, item.url) : [],
     };
-    // Streamed as it lands — arrival order. `pages` below keeps frontier order.
-    opts.onPage?.(page);
     return page;
   };
 
@@ -280,7 +289,27 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
     // still nearer the seed than anything this batch finds, and it is what the
     // caller sees as pending if the budget ends here.
     const leftover = wave.slice(cursor);
-    const results = await mapLimit(batch, width, (a) => fetchOne(a.item, a.robots));
+
+    // `onPage` fires in FRONTIER order, not arrival order, even though the
+    // fetches overlap: a caller that numbers what it streams must get the same
+    // numbering on two runs over one site, and arrival order is whatever the
+    // network did that morning. Each page is handed over as soon as everything
+    // ahead of it has been, so this still streams rather than waiting for the
+    // wave — it just refuses to reorder it.
+    const settled = new Array<CrawledPage | string | undefined>(batch.length);
+    let streamed = 0;
+    const streamReady = (): void => {
+      while (streamed < settled.length && settled[streamed] !== undefined) {
+        const done = settled[streamed++];
+        if (typeof done !== "string") opts.onPage?.(done as CrawledPage);
+      }
+    };
+    const results = await mapLimit(batch, width, async (a, i) => {
+      const got = await fetchOne(a.item, a.robots);
+      settled[i] = got;
+      streamReady();
+      return got;
+    });
 
     const next: Frontier[] = [];
     if (sitemap) {

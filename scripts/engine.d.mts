@@ -2008,7 +2008,14 @@ declare function awaitHostSlot(url: string, delayMs?: number, now?: number): Pro
  */
 declare function backOffHost(url: string, ms: number, now?: number): void;
 interface CrawlOptions {
-    /** Hard ceiling on pages fetched. Required in spirit; defaulted low on purpose. */
+    /**
+     * Ceiling on pages RETURNED. Required in spirit; defaulted low on purpose.
+     *
+     * A URL that yields no readable text costs a request but no slot, so a site
+     * answering 500s can be asked for more URLs than this — the budget buys
+     * pages, not requests. That is what the sequential walk always did: stopping
+     * at the first dead link would hand back a fraction of the asked-for pages.
+     */
     maxPages?: number;
     /** How many links deep to follow. The seed is depth 0. */
     maxDepth?: number;
@@ -2020,7 +2027,11 @@ interface CrawlOptions {
     ignoreRobots?: boolean;
     /** Per-host delay override. Otherwise robots' own Crawl-delay, else hostDelayMs(). */
     delayMs?: number;
-    /** Called as each page lands, so a caller can stream rather than wait for the whole walk. */
+    /**
+     * Called as each page lands, so a caller can stream rather than wait for the
+     * whole walk. Fires in frontier order — the same order as `pages` — however
+     * the fetches interleaved.
+     */
     onPage?(page: CrawledPage): void;
 }
 interface CrawledPage {

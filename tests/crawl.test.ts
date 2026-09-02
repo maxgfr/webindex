@@ -260,18 +260,41 @@ describe("crawlSite concurrency", () => {
     expect(s.peak()).toBe(1);
   });
 
-  it("lists pages in frontier order whatever order the answers arrived in", async () => {
+  it("lists pages, and streams them, in frontier order whatever order the answers arrived in", async () => {
     // The first link is the slowest, so arrival order is the reverse of link
-    // order. Consumers number their sources from `pages`: two runs over one
-    // site must agree, so the network's timing cannot be allowed to leak in.
+    // order. Consumers number their sources from what they are handed: two runs
+    // over one site must agree, so the network's timing cannot leak into either
+    // the result or the callback. onPage fired in arrival order until a diff
+    // against the sequential implementation caught it.
     wideSite((i) => (LEAVES - i) * 3);
     const arrived: string[] = [];
     const r = await crawlSite("https://s.test/", { maxPages: 20, maxDepth: 1, useSitemap: false, delayMs: 0, onPage: (p) => arrived.push(p.url) });
     const expected = ["https://s.test/", ...Array.from({ length: LEAVES }, (_, i) => `https://s.test/p${i}`)];
     expect(r.pages.map((p) => p.url)).toEqual(expected);
-    // …while the stream saw them as they landed, which is a different order.
-    expect(arrived).not.toEqual(expected);
-    expect([...arrived].sort()).toEqual([...expected].sort());
+    expect(arrived).toEqual(expected);
+  });
+
+  it("streams a page as soon as everything ahead of it has been streamed", async () => {
+    // Ordering the callback must not turn it into "wait for the whole wave":
+    // the fast leaves behind a slow one are held, but everything before the
+    // slow one goes out while it is still in flight.
+    const seenWhileSlowInFlight: string[] = [];
+    let slowResolved = false;
+    // p3 answers last by a wide margin; p0..p2 answer immediately.
+    wideSite((i) => (i === 3 ? 200 : 1));
+    await crawlSite("https://s.test/", {
+      maxPages: 20,
+      maxDepth: 1,
+      useSitemap: false,
+      delayMs: 0,
+      onPage: (p) => {
+        if (p.url.endsWith("/p3")) slowResolved = true;
+        if (!slowResolved) seenWhileSlowInFlight.push(p.url);
+      },
+    });
+    // The seed and the three leaves before the slow one were all handed over
+    // before it landed — the callback streams, it does not batch.
+    expect(seenWhileSlowInFlight).toEqual(["https://s.test/", "https://s.test/p0", "https://s.test/p1", "https://s.test/p2"]);
   });
 
   it("never fetches past the page budget, even with a wide wave", async () => {
