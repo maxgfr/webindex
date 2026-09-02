@@ -1,5 +1,5 @@
 // src/version.ts
-var ENGINE_VERSION = "1.18.7";
+var ENGINE_VERSION = "1.18.8";
 
 // src/brand.ts
 var DEFAULT_BRAND = {

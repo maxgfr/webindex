@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.18.8](https://github.com/maxgfr/webindex/compare/v1.18.7...v1.18.8) (2026-09-02)
+
+
+### Bug Fixes
+
+* **crawl:** do not judge or probe a URL the page budget will never reach ([7a4f45f](https://github.com/maxgfr/webindex/commit/7a4f45f4047bd107368c80d07e43cdd6d50365e6))
+* **crawl:** stream onPage in frontier order, and say what maxPages counts ([acf3a18](https://github.com/maxgfr/webindex/commit/acf3a184e8f2fb2cb417acd192ab97a99cee2150))
+* **fetch:** never hand on a truncated document, and let a body of exactly the cap through ([ba2b5bb](https://github.com/maxgfr/webindex/commit/ba2b5bb7ba3d7d5955759e3d9805cf50c6c38467))
+* **mcp:** make the in-flight ceiling hold across concurrent stdio batches ([fb80f71](https://github.com/maxgfr/webindex/commit/fb80f712024f7874deccc89fc4ad686afce8fd5f))
+* **rank:** stop hammingDistance silently dropping bits above 64 ([a200c19](https://github.com/maxgfr/webindex/commit/a200c1992af428f2400f15f64ae336bb7103e72f))
+
 ## [1.18.7](https://github.com/maxgfr/webindex/compare/v1.18.6...v1.18.7) (2026-09-02)
 
 
