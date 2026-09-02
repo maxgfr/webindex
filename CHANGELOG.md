@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.18.7](https://github.com/maxgfr/webindex/compare/v1.18.6...v1.18.7) (2026-09-02)
+
+
+### Bug Fixes
+
+* **cache:** write entries atomically, mkdir once per directory ([d2d3370](https://github.com/maxgfr/webindex/commit/d2d3370128d23b6e73760ff1067f946049c5f20a))
+* **crawl:** read robots.txt per origin, fetch each depth as a concurrent wave ([fe6a3d7](https://github.com/maxgfr/webindex/commit/fe6a3d72fafe97403b65c01387f5ed6dfa95b287))
+* **fetch:** cap httpJson responses like httpGet ([1105e5a](https://github.com/maxgfr/webindex/commit/1105e5ae26894f95345be59699a99a2724e4bcbf))
+* **fetch:** download a content-type-only PDF or document once, not twice ([d46b486](https://github.com/maxgfr/webindex/commit/d46b486a0c1cfb1a325a946e5a11af8f03513184))
+* **mcp:** keep a stdio batch under the in-flight ceiling ([38a78c6](https://github.com/maxgfr/webindex/commit/38a78c623a8c535c66f021e0d921116d4b2f251e))
+
+
+### Performance Improvements
+
+* **charset:** decode Windows-1252 in one native pass ([be4b8b6](https://github.com/maxgfr/webindex/commit/be4b8b66cd238f550ad4aef51a86333b519b5dd6))
+* **pdf:** probe the OCR binaries once per process ([19ccacd](https://github.com/maxgfr/webindex/commit/19ccacd4f14421f29b592d0ac0cc3efa668f5e66))
+* **rank:** hash simhash and fnv1a64 on 32-bit lanes, not BigInt ([d3d57f6](https://github.com/maxgfr/webindex/commit/d3d57f684419a9e1f3a8be836a45437946972776))
+* **vector:** score each document once in hybridSearch, overlap the embed call ([8a53ed5](https://github.com/maxgfr/webindex/commit/8a53ed5ceed2a531ed27d00f26b8c693c3f95eb6))
+
 ## [1.18.6](https://github.com/maxgfr/webindex/compare/v1.18.5...v1.18.6) (2026-08-31)
 
 
