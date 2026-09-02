@@ -2,7 +2,7 @@ import { env, envFlag, envName } from "../brand.js";
 import { runWithInput, ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./exec.js";
 import { assessPdfText } from "./quality.js";
 import { pdfToText } from "./native.js";
-import { ocrPdf, ocrBudgetLeft, resetOcrBudget } from "./ocr.js";
+import { ocrPdf, ocrBudgetLeft, resetOcrBudget, resetOcrTools } from "./ocr.js";
 
 // The PDF extractor ladder: try the strongest tool available, fall through when
 // it is missing or its output fails the quality gate, and refuse rather than
@@ -74,10 +74,11 @@ const PDFTOTEXT_TIMEOUT_MS = 60_000;
 // 90s discovery for every single PDF.
 const dead = new Set<PdfExtractorId>();
 
-/** Test seam: forget which rungs were found unavailable, and refill the OCR budget. */
+/** Test seam: forget which rungs and OCR binaries were found, and refill the OCR budget. */
 export function resetPdfLadderCache(): void {
   dead.clear();
   resetOcrBudget();
+  resetOcrTools();
 }
 
 /**

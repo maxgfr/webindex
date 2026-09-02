@@ -262,9 +262,18 @@ function ocrBudgetLeft() {
   return Math.max(0, envInt("OCR_MAX", DEFAULT_MAX_DOCS) - spent);
 }
 async function ocrTools() {
-  const probe = async (cmd, args) => (await runWithInput(cmd, args, Buffer.alloc(0), 2e4)).ok;
-  const [copyablePdf, tesseract] = await Promise.all([probe("copyable-pdf", ["--help"]), probe("tesseract", ["--version"])]);
-  return { copyablePdf, tesseract };
+  if (!toolsProbe) {
+    toolsProbe = (async () => {
+      const probe = async (cmd, args) => (await runWithInput(cmd, args, Buffer.alloc(0), 2e4)).ok;
+      const [copyablePdf, tesseract] = await Promise.all([probe("copyable-pdf", ["--help"]), probe("tesseract", ["--version"])]);
+      return { copyablePdf, tesseract };
+    })();
+  }
+  return toolsProbe;
+}
+var toolsProbe;
+function resetOcrTools() {
+  toolsProbe = void 0;
 }
 async function ocrPdf(bytes) {
   if (ocrBudgetLeft() <= 0) return void 0;
@@ -296,6 +305,7 @@ var dead = /* @__PURE__ */ new Set();
 function resetPdfLadderCache() {
   dead.clear();
   resetOcrBudget();
+  resetOcrTools();
 }
 function enabledExtractors(engines) {
   if (engines) return engines;
@@ -5717,6 +5727,7 @@ export {
   resetHostSchedule,
   resetNoWrite,
   resetOcrBudget,
+  resetOcrTools,
   resetOllamaProbe,
   resetPdfLadderCache,
   resetQdrantProbe,

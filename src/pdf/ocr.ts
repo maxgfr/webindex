@@ -53,9 +53,24 @@ export function ocrBudgetLeft(): number {
  * is missing, which "OCR unavailable" alone could not.
  */
 export async function ocrTools(): Promise<{ copyablePdf: boolean; tesseract: boolean }> {
-  const probe = async (cmd: string, args: string[]) => (await runWithInput(cmd, args, Buffer.alloc(0), 20_000)).ok;
-  const [copyablePdf, tesseract] = await Promise.all([probe("copyable-pdf", ["--help"]), probe("tesseract", ["--version"])]);
-  return { copyablePdf, tesseract };
+  // Memoised per process, like `have()` in src/exec.ts: two subprocesses with
+  // a 20 s ceiling each were spawned again for EVERY scanned PDF, when the
+  // answer cannot change during a run. Concurrent callers share one probe.
+  if (!toolsProbe) {
+    toolsProbe = (async () => {
+      const probe = async (cmd: string, args: string[]) => (await runWithInput(cmd, args, Buffer.alloc(0), 20_000)).ok;
+      const [copyablePdf, tesseract] = await Promise.all([probe("copyable-pdf", ["--help"]), probe("tesseract", ["--version"])]);
+      return { copyablePdf, tesseract };
+    })();
+  }
+  return toolsProbe;
+}
+
+let toolsProbe: Promise<{ copyablePdf: boolean; tesseract: boolean }> | undefined;
+
+/** Test seam: forget which OCR binaries were found. */
+export function resetOcrTools(): void {
+  toolsProbe = undefined;
 }
 
 /**

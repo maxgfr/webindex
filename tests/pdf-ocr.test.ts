@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 // Env names are resolved through the brand, exactly as the engine resolves them
 // — so these tests stay correct whichever prefix a consumer configures.
 import { envName } from "../src/brand.js";
-import { ocrPdf, ocrTools, ocrBudgetLeft, resetOcrBudget } from "../src/pdf/ocr.js";
+import { ocrPdf, ocrTools, ocrBudgetLeft, resetOcrBudget, resetOcrTools } from "../src/pdf/ocr.js";
 import { runWithInput } from "../src/pdf/exec.js";
 
 // OCR shells out to `copyable-pdf`, which shells out to tesseract and rasterises
@@ -44,6 +44,7 @@ beforeEach(() => vi.stubEnv(envName("OCR_MAX"), "3"));
 afterEach(() => {
   vi.unstubAllEnvs();
   resetOcrBudget();
+  resetOcrTools();
   runMock.mockReset();
   runMock.mockResolvedValue({ ok: false, stdout: "", error: "not installed" });
 });
@@ -52,6 +53,33 @@ describe("ocrTools", () => {
   it("reports each binary separately", async () => {
     runMock.mockImplementation(async (cmd) => ({ ok: cmd === "tesseract", stdout: "" }));
     expect(await ocrTools()).toEqual({ copyablePdf: false, tesseract: true });
+  });
+
+  it("probes the binaries once per process, not once per document", async () => {
+    // Two subprocesses with a 20 s ceiling each, spawned again for every scanned
+    // PDF in a run, when the answer cannot change mid-run.
+    toolsPresent();
+    await ocrPdf(PDF);
+    await ocrPdf(PDF);
+    await ocrTools();
+    const probes = runMock.mock.calls.filter((c) => !c[1].includes("-o"));
+    expect(probes).toHaveLength(2); // copyable-pdf --help, tesseract --version — once
+    expect(runMock.mock.calls.filter((c) => c[1].includes("-o"))).toHaveLength(2); // the real runs
+  });
+
+  it("shares one probe between concurrent callers", async () => {
+    runMock.mockImplementation(async () => ({ ok: true, stdout: "" }));
+    await Promise.all([ocrTools(), ocrTools(), ocrTools()]);
+    expect(runMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("forgets the answer through the test seam", async () => {
+    runMock.mockImplementation(async () => ({ ok: false, stdout: "" }));
+    expect((await ocrTools()).tesseract).toBe(false);
+    runMock.mockImplementation(async () => ({ ok: true, stdout: "" }));
+    expect((await ocrTools()).tesseract).toBe(false); // memoised
+    resetOcrTools();
+    expect((await ocrTools()).tesseract).toBe(true);
   });
 });
 
