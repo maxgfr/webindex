@@ -3683,7 +3683,7 @@ function resetRunLocks() {
 }
 
 // src/cache.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync3, readdirSync as readdirSync2, rmSync as rmSync3, statSync as statSync2, writeFileSync as writeFileSync4 } from "fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync3, readdirSync as readdirSync2, rmSync as rmSync3, statSync as statSync2 } from "fs";
 import { join as join4 } from "path";
 import { tmpdir as tmpdir4 } from "os";
 
@@ -3803,14 +3803,29 @@ function readCache(url, acceptLanguage = "", extractor = "native") {
 }
 function writeCache(url, res, now, acceptLanguage = "", extractor = "native") {
   if (isNoWrite()) return;
+  const dir = cacheDir();
+  const { meta, body } = entryPaths(url, acceptLanguage, extractor);
+  const { text, ...rest } = res;
+  const write = () => {
+    ensureDir2(dir);
+    writeFileAtomic(body, text ?? "");
+    writeFileAtomic(meta, JSON.stringify({ ...rest, cachedAt: now }));
+  };
   try {
-    mkdirSync4(cacheDir(), { recursive: true });
-    const { meta, body } = entryPaths(url, acceptLanguage, extractor);
-    const { text, ...rest } = res;
-    writeFileSync4(body, text ?? "");
-    writeFileSync4(meta, JSON.stringify({ ...rest, cachedAt: now }));
+    write();
   } catch {
+    ensured.delete(dir);
+    try {
+      write();
+    } catch {
+    }
   }
+}
+var ensured = /* @__PURE__ */ new Set();
+function ensureDir2(dir) {
+  if (ensured.has(dir)) return;
+  mkdirSync4(dir, { recursive: true });
+  ensured.add(dir);
 }
 function touchCache(url, entry, now, acceptLanguage = "", extractor = "native") {
   writeCache(url, entry, now, acceptLanguage, extractor);

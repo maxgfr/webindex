@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fetchAndExtract, looksLikePdfUrl, type ExtractorId } from "./fetch.js";
 import { docFormatForUrl } from "./doc.js";
 import { firecrawlBase, firecrawlIsExplicit, probeFirecrawl } from "./firecrawl.js";
 import { canonicalizeUrl, domainOf, fnv1a64 } from "./url.js";
-import { isNoWrite } from "./no-write.js";
+import { isNoWrite, writeFileAtomic } from "./no-write.js";
 import { brand, countFetch, env, envInt } from "./brand.js";
 
 // Opt-in on-disk fetch cache (--cache). The in-process hydrate cache only spans
@@ -220,19 +220,42 @@ function writeCache(url: string, res: Extract, now: number, acceptLanguage = "",
   // through writeArtifact — a cache entry is not an artifact anyone wants
   // streamed back to them.
   if (isNoWrite()) return;
-  try {
-    mkdirSync(cacheDir(), { recursive: true });
-    const { meta, body } = entryPaths(url, acceptLanguage, extractor);
-    const { text, ...rest } = res as CacheEntry;
+  const dir = cacheDir();
+  const { meta, body } = entryPaths(url, acceptLanguage, extractor);
+  const { text, ...rest } = res as CacheEntry;
+  const write = () => {
+    ensureDir(dir);
     // Body first: a reader that catches the pair mid-write sees either the old
     // metadata (pointing at a body that is at worst the new one for the same
     // URL) or no metadata at all. The reverse order can publish metadata for a
-    // body that is not there yet.
-    writeFileSync(body, text ?? "");
-    writeFileSync(meta, JSON.stringify({ ...rest, cachedAt: now }));
+    // body that is not there yet. Each file lands by rename, so a reader — the
+    // deep tier's sibling processes share this directory — never sees a
+    // half-written body either.
+    writeFileAtomic(body, text ?? "");
+    writeFileAtomic(meta, JSON.stringify({ ...rest, cachedAt: now }));
+  };
+  try {
+    write();
   } catch {
-    /* a cache write must never break a run */
+    // The directory may have been removed under us (`cache clean`, a tmp
+    // sweeper): forget that it existed and try once more before giving up.
+    ensured.delete(dir);
+    try {
+      write();
+    } catch {
+      /* a cache write must never break a run */
+    }
   }
+}
+
+// mkdir once per directory per process, not once per entry written. The set
+// is invalidated on a failed write, which is how a directory removed mid-run
+// gets recreated.
+const ensured = new Set<string>();
+function ensureDir(dir: string): void {
+  if (ensured.has(dir)) return;
+  mkdirSync(dir, { recursive: true });
+  ensured.add(dir);
 }
 
 /**

@@ -1,11 +1,43 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Env names resolve through the brand, exactly as the engine resolves them.
 import { envName } from "../src/brand.js";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { cacheClean, cacheStats, cachedFetchAndExtract, cachePath } from "../src/cache.js";
 import { installFetchMock } from "./fetchmock.js";
+
+describe("cache writes", () => {
+  const PAGE = { body: "<html><body><article><p>cached article body about token buckets and windows</p></article></body></html>" };
+  const URL = "https://ex.test/page";
+
+  it("leaves no temp file behind, and the entry it wrote reads back", async () => {
+    // Body and metadata land by rename: a sibling process — the deep tier
+    // shares one cache directory — never sees a half-written entry.
+    installFetchMock(() => PAGE);
+    const a = await cachedFetchAndExtract(URL, {}, true, 1000);
+    const names = readdirSync(dir);
+    expect(names.some((n) => n.endsWith(".tmp"))).toBe(false);
+    expect(names.some((n) => n.endsWith(".json"))).toBe(true);
+    expect(names.some((n) => n.endsWith(".body"))).toBe(true);
+    const b = await cachedFetchAndExtract(URL, {}, true, 1500);
+    expect(b.text).toBe(a.text);
+    expect(b.cached).toBe(true);
+  });
+
+  it("recreates a cache directory removed mid-run", async () => {
+    const spy = installFetchMock(() => PAGE);
+    await cachedFetchAndExtract(URL, {}, true, 1000);
+    rmSync(dir, { recursive: true, force: true });
+    // Miss (the entry is gone) → fetch → write into a directory that no longer
+    // exists. A memoised mkdir must notice rather than silently stop caching.
+    await cachedFetchAndExtract(URL, {}, true, 2000);
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(readdirSync(dir).some((n) => n.endsWith(".json"))).toBe(true);
+    await cachedFetchAndExtract(URL, {}, true, 2500);
+    expect(spy).toHaveBeenCalledTimes(2); // served from the rewritten entry
+  });
+});
 
 let dir: string;
 // tests/setup.ts pins <PREFIX>_CACHE_DIR to a per-run throwaway dir (the

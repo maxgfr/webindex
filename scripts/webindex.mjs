@@ -3544,7 +3544,7 @@ async function search(query, opts = {}) {
 }
 
 // src/cache.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync7, readdirSync as readdirSync3, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync4 } from "fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync7, readdirSync as readdirSync3, rmSync as rmSync2, statSync as statSync2 } from "fs";
 import { join as join9 } from "path";
 import { tmpdir as tmpdir3 } from "os";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
