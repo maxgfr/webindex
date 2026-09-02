@@ -404,6 +404,8 @@ declare function httpJson(method: string, url: string, body?: unknown, opts?: {
     userAgent?: string;
     headers?: Record<string, string>;
     retries?: number;
+    /** Response cap in bytes; over it the transfer is cancelled and the call fails. Default 4 MB. */
+    maxBytes?: number;
 }): Promise<{
     ok: boolean;
     status: number;

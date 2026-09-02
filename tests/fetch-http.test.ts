@@ -36,6 +36,29 @@ describe("Accept-Language header", () => {
   });
 });
 
+describe("httpJson response cap", () => {
+  it("cancels a JSON body over the cap instead of buffering it whole, and reports it", async () => {
+    // httpGet streams under a cap; httpJson used res.text(), which buffers
+    // whatever the endpoint sends. Firecrawl, Qdrant, Ollama and the Wayback
+    // API all come through here.
+    const big = JSON.stringify({ data: "x".repeat(200_000) });
+    let pulled = 0;
+    installFetchMock(() => ({ body: big, contentType: "application/json", chunkSize: 8_192, onPull: (n) => void (pulled += n) }));
+    const r = await httpJson("GET", "https://x.test/huge", undefined, { maxBytes: 32_768, retries: 0 });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/too large/);
+    expect(r.data).toBeUndefined();
+    expect(pulled).toBeLessThan(big.length / 2); // the transfer stopped near the cap
+  });
+
+  it("still parses a body under the cap", async () => {
+    installFetchMock(() => ({ body: JSON.stringify({ ok: 1 }), contentType: "application/json" }));
+    const r = await httpJson("GET", "https://x.test/small", undefined, { maxBytes: 32_768 });
+    expect(r.ok).toBe(true);
+    expect(r.data).toEqual({ ok: 1 });
+  });
+});
+
 describe("htmlToText", () => {
   it("strips script/style/nav and keeps heading + prose", () => {
     const html = `<html><head><title>T</title></head><body>

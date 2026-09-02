@@ -939,6 +939,7 @@ async function readCappedBytes(res, max) {
   }
   return Buffer.concat(chunks);
 }
+var DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 function isBinaryDocument(contentType) {
   return /application\/pdf/i.test(contentType) || docFormatForContentType(contentType) !== void 0;
 }
@@ -957,7 +958,7 @@ async function httpGet(url, opts = {}) {
         redirect: "follow",
         headers
       });
-      const max = opts.maxBytes ?? 4 * 1024 * 1024;
+      const max = opts.maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
       const meta = {
         contentType: res.headers.get("content-type") ?? "",
         url: res.url || url,
@@ -1019,8 +1020,14 @@ async function httpJson(method, url, body, opts = {}) {
         headers,
         body: body === void 0 ? void 0 : JSON.stringify(body)
       });
-      const text = await res.text();
-      countFetch(Buffer.byteLength(text), false);
+      const max = opts.maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+      const bytes = await readCappedBytes(res, max);
+      countFetch(bytes.length, false);
+      if (bytes.length >= max) {
+        ctrl.abort();
+        return { ok: false, status: res.status, data: void 0, error: `response too large: over the ${max}-byte cap` };
+      }
+      const text = bytes.toString("utf8");
       let data;
       try {
         data = text ? JSON.parse(text) : void 0;
@@ -4088,7 +4095,7 @@ var PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"]
 var LATEST_PROTOCOL = PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1];
 var ASSUMED_HTTP_PROTOCOL = "2025-03-26";
 var RICH_TOOLS_SINCE = "2025-06-18";
-var DEFAULT_MAX_RESPONSE_BYTES = 1e6;
+var DEFAULT_MAX_RESPONSE_BYTES2 = 1e6;
 function isProtocolVersion(v) {
   return typeof v === "string" && PROTOCOL_VERSIONS.includes(v);
 }
@@ -4253,7 +4260,7 @@ var ERR_INVALID_PARAMS = -32602;
 var ERR_INTERNAL = -32603;
 function createServer(adapter, opts = {}) {
   const serverInfo = { name: opts.serverName ?? brand().name, version: adapter.version };
-  const maxBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  const maxBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES2;
   let protocol = LATEST_PROTOCOL;
   const cancelled = /* @__PURE__ */ new Set();
   const CANCELLED_MAX = 1024;

@@ -185,6 +185,9 @@ export async function readCappedBytes(res: Response, max: number): Promise<Buffe
   return Buffer.concat(chunks);
 }
 
+/** The body cap for a text or JSON response. PDFs and office documents get their own, larger one. */
+const DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+
 /** A response whose content-type names a PDF or an office document — a body only an extractor can read. */
 function isBinaryDocument(contentType: string): boolean {
   return /application\/pdf/i.test(contentType) || docFormatForContentType(contentType) !== undefined;
@@ -225,7 +228,7 @@ export async function httpGet(
         redirect: "follow",
         headers,
       });
-      const max = opts.maxBytes ?? 4 * 1024 * 1024;
+      const max = opts.maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
       const meta = {
         contentType: res.headers.get("content-type") ?? "",
         url: res.url || url,
@@ -287,7 +290,16 @@ export async function httpJson(
   method: string,
   url: string,
   body?: unknown,
-  opts: { timeoutMs?: number; accept?: string; acceptLanguage?: string; userAgent?: string; headers?: Record<string, string>; retries?: number } = {},
+  opts: {
+    timeoutMs?: number;
+    accept?: string;
+    acceptLanguage?: string;
+    userAgent?: string;
+    headers?: Record<string, string>;
+    retries?: number;
+    /** Response cap in bytes; over it the transfer is cancelled and the call fails. Default 4 MB. */
+    maxBytes?: number;
+  } = {},
 ): Promise<{ ok: boolean; status: number; data: any; error?: string }> {
   const attempts = attemptsFor(opts.retries);
   let last: { ok: boolean; status: number; data: any; error?: string } = { ok: false, status: 0, data: undefined };
@@ -308,8 +320,18 @@ export async function httpJson(
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-      const text = await res.text();
-      countFetch(Buffer.byteLength(text), false);
+      // Streamed under the same cap as httpGet, and cancelled at it. `res.text()`
+      // buffered whatever the endpoint sent — Firecrawl, Qdrant, Ollama and the
+      // Wayback API all come through here, and a runaway answer from any of
+      // them was the one unbounded read left in this module.
+      const max = opts.maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+      const bytes = await readCappedBytes(res, max);
+      countFetch(bytes.length, false);
+      if (bytes.length >= max) {
+        ctrl.abort();
+        return { ok: false, status: res.status, data: undefined, error: `response too large: over the ${max}-byte cap` };
+      }
+      const text = bytes.toString("utf8");
       let data: any;
       try {
         data = text ? JSON.parse(text) : undefined;
