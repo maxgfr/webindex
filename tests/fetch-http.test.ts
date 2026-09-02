@@ -97,11 +97,34 @@ describe("fetchAndExtract", () => {
     expect(r.note).toMatch(/Could not fetch/);
   });
 
-  it("extracts a content-type-only PDF (no .pdf in the URL) by re-fetching the bytes", async () => {
+  it("extracts a content-type-only PDF (no .pdf in the URL) from the bytes it already has — one download, not two", async () => {
     const pdf = "%PDF-1.4\nstream\nBT (PdfBodyText) Tj ET\nendstream\n"; // all-ASCII → latin1==utf8
-    installFetchMock(routes([["x.test/paper", { body: pdf, contentType: "application/pdf" }]]));
+    const spy = installFetchMock(routes([["x.test/paper", { body: pdf, contentType: "application/pdf" }]]));
     const r = await fetchAndExtract("https://x.test/paper");
     expect(r.text).toContain("PdfBodyText");
+    // The URL said nothing, so the first request went out as a text fetch; the
+    // response's content-type said PDF, and the bytes were kept rather than
+    // pulled again. A 16 MB paper used to cost two transfers here.
+    expect(spy.mock.calls.filter((c) => String(c[0]) === "https://x.test/paper")).toHaveLength(1);
+  });
+
+  it("keeps the raw bytes of a content-type-only office document as well", async () => {
+    const spy = installFetchMock(
+      routes([
+        [
+          "x.test/deck",
+          { bytes: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0]), contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation" },
+        ],
+      ]),
+    );
+    const r = await httpGet("https://x.test/deck");
+    expect(r.bytes?.subarray(0, 2).toString("latin1")).toBe("PK");
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not carry bytes for an ordinary page — the decoded body is the payload", async () => {
+    installFetchMock(routes([["x.test/page", { body: "<p>hi</p>", contentType: "text/html" }]]));
+    expect((await httpGet("https://x.test/page")).bytes).toBeUndefined();
   });
 
   it("returns a note when a PDF yields no extractable text", async () => {

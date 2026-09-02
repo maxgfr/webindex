@@ -185,6 +185,11 @@ export async function readCappedBytes(res: Response, max: number): Promise<Buffe
   return Buffer.concat(chunks);
 }
 
+/** A response whose content-type names a PDF or an office document — a body only an extractor can read. */
+function isBinaryDocument(contentType: string): boolean {
+  return /application\/pdf/i.test(contentType) || docFormatForContentType(contentType) !== undefined;
+}
+
 // Minimal HTTP GET on Node's built-in fetch (Node ≥18) — no dependencies.
 // Times out, sends a UA, caps the body, never throws (errors come back as
 // { ok:false }), and retries ONCE on a transient status or network error.
@@ -242,6 +247,11 @@ export async function httpGet(
       // caller (the cache) wants the status, not an empty-body complaint.
       const bytes = res.status === 304 ? Buffer.alloc(0) : await readCappedBytes(res, max);
       countFetch(bytes.length, false);
+      // The raw bytes are kept when the caller asked for them, and ALSO when
+      // the origin says the body is a PDF or an office document that the URL
+      // did not announce: they are already in memory, and handing them over is
+      // what spares fetchAndExtract a second full download of the same file.
+      const keepBytes = opts.binary || isBinaryDocument(meta.contentType);
       const result: HttpResult = {
         ok: res.ok,
         status: res.status,
@@ -249,7 +259,7 @@ export async function httpGet(
         // Windows-1252 page used to come back with every accented character
         // replaced by U+FFFD, and nothing anywhere noticed.
         body: opts.binary ? "" : decodeBody(bytes, meta.contentType),
-        bytes: opts.binary ? bytes : undefined,
+        bytes: keepBytes ? bytes : undefined,
         ...meta,
       };
       if (RETRY_STATUS.has(res.status) && attempt < attempts - 1) {
@@ -754,8 +764,9 @@ export async function fetchAndExtract(
   // a validator-less server keeps exactly the shape it had before.
   const validators = res.etag || res.lastModified ? { etag: res.etag, lastModified: res.lastModified } : {};
   if (wantsPdf || /application\/pdf/i.test(res.contentType)) {
-    // A content-type-only PDF (no .pdf in the URL) was fetched as text — refetch
-    // the raw bytes so the extractor sees an intact binary.
+    // httpGet keeps the raw bytes of anything the origin labelled a PDF, so a
+    // content-type-only PDF (no .pdf in the URL) is not downloaded twice. The
+    // refetch is only for a response that somehow arrived without them.
     const bytes = res.bytes ?? (await httpGet(url, PDF_FETCH_OPTS)).bytes;
     // The ladder tries pdf-inspector, then an already-running Firecrawl, then
     // pdftotext, then the built-in reader — and refuses rather than hand back
@@ -786,8 +797,8 @@ export async function fetchAndExtract(
   // the source text — kilobytes of U+FFFD, cited, with no note saying so.
   const docFmt = wantsDoc ?? docFormatForContentType(res.contentType);
   if (docFmt) {
-    // Same re-fetch as the PDF path: a content-type-only document was fetched as
-    // text, so the bytes must be pulled again intact.
+    // Same as the PDF path: the bytes of a content-type-only document are
+    // already here; the refetch is the fallback, not the rule.
     const bytes = res.bytes ?? (await httpGet(url, DOC_FETCH_OPTS)).bytes;
     const got = bytes
       ? await extractDocument(bytes, docFmt, {

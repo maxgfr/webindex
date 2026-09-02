@@ -933,6 +933,9 @@ async function readCappedBytes(res, max) {
   }
   return Buffer.concat(chunks);
 }
+function isBinaryDocument(contentType) {
+  return /application\/pdf/i.test(contentType) || docFormatForContentType(contentType) !== void 0;
+}
 async function httpGet(url, opts = {}) {
   const attempts = attemptsFor(opts.retries);
   let last = { ok: false, status: 0, body: "", contentType: "", url };
@@ -964,6 +967,7 @@ async function httpGet(url, opts = {}) {
       }
       const bytes = res.status === 304 ? Buffer.alloc(0) : await readCappedBytes(res, max);
       countFetch(bytes.length, false);
+      const keepBytes = opts.binary || isBinaryDocument(meta.contentType);
       const result = {
         ok: res.ok,
         status: res.status,
@@ -971,7 +975,7 @@ async function httpGet(url, opts = {}) {
         // Windows-1252 page used to come back with every accented character
         // replaced by U+FFFD, and nothing anywhere noticed.
         body: opts.binary ? "" : decodeBody(bytes, meta.contentType),
-        bytes: opts.binary ? bytes : void 0,
+        bytes: keepBytes ? bytes : void 0,
         ...meta
       };
       if (RETRY_STATUS.has(res.status) && attempt < attempts - 1) {
