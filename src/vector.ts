@@ -174,9 +174,15 @@ export async function hybridSearch<D extends HybridDoc>(
 ): Promise<{ hits: HybridHit<D>[]; note?: string }> {
   if (docs.length === 0) return { hits: [] };
 
-  // The dense lane is a network round trip (up to a minute against a cold
-  // model); start it first so the lexical scoring below overlaps it instead of
-  // preceding it.
+  // Started before the lexical lane so what it does before its first await —
+  // building the input, and on a cold base the `/api/tags` probe — happens
+  // alongside the scoring rather than after it.
+  //
+  // Not more than that, and the earlier claim of overlapping the round trip was
+  // wrong: `embed` awaits its probe before POSTing, so the POST is queued as a
+  // microtask that cannot run until the synchronous scoring below yields. One
+  // thread, one turn. The ordering costs nothing and buys the probe; the real
+  // saving in this function is scoring each document once.
   const embedding = embed([question, ...docs.map((d) => [d.title, d.headings, d.body].filter(Boolean).join("\n"))], {
     ...(opts.base !== undefined ? { base: opts.base } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
