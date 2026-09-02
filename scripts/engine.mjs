@@ -5290,6 +5290,18 @@ async function runStdioServer(adapter, opts = {}) {
   const drainToLimit = async () => {
     while (inFlight.size >= MAX_IN_FLIGHT) await Promise.race(inFlight);
   };
+  let active = 0;
+  const waiting = [];
+  const runHandler = async (msg, send2) => {
+    while (active >= MAX_IN_FLIGHT) await new Promise((resolve4) => waiting.push(resolve4));
+    active++;
+    try {
+      await server.handle(msg, send2);
+    } finally {
+      active--;
+      waiting.shift()?.();
+    }
+  };
   const rl = createInterface({ input, terminal: false });
   try {
     for await (const line of rl) {
@@ -5307,7 +5319,7 @@ async function runStdioServer(adapter, opts = {}) {
         track(
           (async () => {
             const out = [];
-            await mapLimit(parsed, MAX_IN_FLIGHT, (m) => server.handle(m, (r) => void out.push(r)));
+            await mapLimit(parsed, MAX_IN_FLIGHT, (m) => runHandler(m, (r) => void out.push(r)));
             if (out.length) emit(JSON.stringify(out) + "\n");
           })().catch(reportInternal(send))
         );
@@ -5317,7 +5329,7 @@ async function runStdioServer(adapter, opts = {}) {
         send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: expected a JSON-RPC object" } });
         continue;
       }
-      track(server.handle(parsed, send).catch(reportInternal(send)));
+      track(runHandler(parsed, send).catch(reportInternal(send)));
     }
     await Promise.all(inFlight);
   } finally {

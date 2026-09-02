@@ -103,6 +103,46 @@ describe("concurrency", () => {
     expect(peak).toBeLessThanOrEqual(4);
     expect(peak).toBeGreaterThan(1);
   });
+
+  it("holds the ceiling across several batches at once, not per batch", async () => {
+    // Bounding each batch on its own is not a ceiling: the in-flight set counts
+    // a whole batch as one entry, so four batch frames of four handlers each
+    // ran sixteen tool calls at once — four times the advertised limit, and
+    // reachable by a client that simply frames its requests differently.
+    let inFlight = 0;
+    let peak = 0;
+    const slow = testAdapter({
+      async callTool(name, args) {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 10));
+        inFlight--;
+        return { text: `${name}:${String(args.text)}` };
+      },
+    });
+    const batchFrame = (offset: number) =>
+      JSON.stringify(
+        Array.from({ length: 8 }, (_, i) => ({
+          jsonrpc: "2.0",
+          id: offset + i,
+          method: "tools/call",
+          params: { name: "probe_echo", arguments: { text: String(i) } },
+        })),
+      );
+    const input = Readable.from([0, 100, 200, 300].map((o) => batchFrame(o) + "\n"));
+    const chunks: string[] = [];
+    const output = new Writable({
+      write(chunk, _enc, cb) {
+        chunks.push(String(chunk));
+        cb();
+      },
+    });
+    await runStdioServer(slow, { input, output, captureStdout: true });
+    const frames = chunks.join("").split("\n").filter(Boolean);
+    expect(frames).toHaveLength(4); // one array per batch, all answered
+    expect(frames.flatMap((f) => JSON.parse(f) as unknown[])).toHaveLength(32);
+    expect(peak).toBeLessThanOrEqual(4);
+  });
 });
 
 describe("stdout hygiene", () => {

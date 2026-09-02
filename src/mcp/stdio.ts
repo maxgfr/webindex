@@ -63,6 +63,27 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
     while (inFlight.size >= MAX_IN_FLIGHT) await Promise.race(inFlight);
   };
 
+  // The in-flight SET is lifecycle: what must finish before stdin's close is
+  // allowed to end the session. It is not a budget, because one tracked promise
+  // can be a whole batch — four batch frames each running four handlers is
+  // sixteen tool calls at once, four times the ceiling this file advertises.
+  //
+  // The budget is this counter, and every handler passes through it: a batch
+  // member competes for the same slots as a single frame, so the ceiling holds
+  // however the client frames its requests.
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  const runHandler = async (msg: JsonRpcMessage, send: (out: JsonRpcMessage) => void): Promise<void> => {
+    while (active >= MAX_IN_FLIGHT) await new Promise<void>((resolve) => waiting.push(resolve));
+    active++;
+    try {
+      await server.handle(msg, send);
+    } finally {
+      active--;
+      waiting.shift()?.();
+    }
+  };
+
   const rl = createInterface({ input, terminal: false });
   try {
     for await (const line of rl) {
@@ -82,13 +103,14 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
       if (Array.isArray(parsed)) {
         // A batch answers as one array, so the client can match it to what it
         // sent. Notifications inside it contribute nothing, and a batch of only
-        // notifications produces no frame at all. Its members run at most
-        // MAX_IN_FLIGHT at a time: the array's length is the client's choice,
-        // and a Promise.all over it was a way around the in-flight ceiling.
+        // notifications produces no frame at all. The array's length is the
+        // client's choice, so its members are both queued (mapLimit) and made
+        // to draw on the shared budget (runHandler) — a Promise.all over it was
+        // a way around the ceiling entirely.
         track(
           (async () => {
             const out: JsonRpcMessage[] = [];
-            await mapLimit(parsed, MAX_IN_FLIGHT, (m) => server.handle(m as JsonRpcMessage, (r) => void out.push(r)));
+            await mapLimit(parsed, MAX_IN_FLIGHT, (m) => runHandler(m as JsonRpcMessage, (r) => void out.push(r)));
             if (out.length) emit(JSON.stringify(out) + "\n");
           })().catch(reportInternal(send)),
         );
@@ -102,7 +124,7 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
 
       // Deliberately not awaited: the loop goes back for the next frame while
       // this one works.
-      track(server.handle(parsed as JsonRpcMessage, send).catch(reportInternal(send)));
+      track(runHandler(parsed as JsonRpcMessage, send).catch(reportInternal(send)));
     }
 
     // stdin closed. Let whatever is still running finish and answer — calling
