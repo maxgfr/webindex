@@ -254,19 +254,32 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
   // pages in the same order whatever the network did.
   let wave: Frontier[] = [{ url: seed, depth: 0 }];
   while (wave.length && pages.length < maxPages) {
-    const files = await Promise.all(wave.map((it) => robotsFor(it.url)));
-    const allowed: { item: Frontier; robots: Awaited<ReturnType<typeof fetchRobots>> }[] = [];
-    wave.forEach((item, i) => {
-      const r = files[i]!;
-      if (!opts.ignoreRobots && !isAllowed(r, item.url)) disallowed.push(item.url);
-      else allowed.push({ item, robots: r });
-    });
+    // Read only as far into the wave as the budget can reach. A URL the budget
+    // will never get to must not cost its host a robots.txt request, and must
+    // be reported as pending rather than judged — asking about a page we were
+    // never going to fetch would both contact a host for nothing and turn
+    // "we ran out of budget" into "you may not read this".
+    //
+    // Refused URLs do not spend a slot, so the cursor keeps advancing until the
+    // batch is actually full: that is what the sequential loop did when it
+    // checked robots at dequeue time.
+    const batch: { item: Frontier; robots: Awaited<ReturnType<typeof fetchRobots>> }[] = [];
+    let cursor = 0;
+    while (cursor < wave.length && batch.length < maxPages - pages.length) {
+      const slice = wave.slice(cursor, cursor + (maxPages - pages.length - batch.length));
+      const files = await Promise.all(slice.map((it) => robotsFor(it.url)));
+      slice.forEach((item, i) => {
+        const r = files[i]!;
+        if (!opts.ignoreRobots && !isAllowed(r, item.url)) disallowed.push(item.url);
+        else batch.push({ item, robots: r });
+      });
+      cursor += slice.length;
+    }
 
-    // Only the budget's worth leaves. What is left of the wave goes back to the
-    // front of the next one: it is still nearer the seed than anything found by
-    // this batch, and it is what the caller sees as pending if the budget ends.
-    const batch = allowed.slice(0, maxPages - pages.length);
-    const leftover = allowed.slice(batch.length).map((a) => a.item);
+    // What is left of the wave goes back to the front of the next one: it is
+    // still nearer the seed than anything this batch finds, and it is what the
+    // caller sees as pending if the budget ends here.
+    const leftover = wave.slice(cursor);
     const results = await mapLimit(batch, width, (a) => fetchOne(a.item, a.robots));
 
     const next: Frontier[] = [];

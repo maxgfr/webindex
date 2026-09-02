@@ -284,6 +284,44 @@ describe("crawlSite concurrency", () => {
     expect(pageFetches).toHaveLength(5);
   });
 
+  it("leaves a URL the budget never reached pending, rather than judging it against robots", async () => {
+    // Found by diffing against the sequential implementation. Evaluating the
+    // whole wave up front moved a robots-refused URL out of `pending` and into
+    // `disallowed` even when the budget stopped long before it — which reads as
+    // "you may not have this page" instead of "we ran out of budget", and is
+    // the difference a caller acts on.
+    installFetchMock((url) => {
+      if (url.includes("robots.txt")) return { status: 200, body: "User-agent: *\nDisallow: /private", contentType: "text/plain" };
+      if (url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+      if (url === "https://s.test/") return html('<a href="/a">a</a><a href="/b">b</a><a href="/private">no</a>');
+      return html("<p>ok</p>");
+    });
+    const r = await crawlSite("https://s.test/", { maxPages: 2, maxDepth: 1, useSitemap: false, delayMs: 0 });
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/", "https://s.test/a"]);
+    expect(r.pending).toEqual(["https://s.test/b", "https://s.test/private"]);
+    expect(r.disallowed).toEqual([]);
+    // …and with room to reach it, it IS reported as refused.
+    resetRobotsCache();
+    const full = await crawlSite("https://s.test/", { maxPages: 10, maxDepth: 1, useSitemap: false, delayMs: 0 });
+    expect(full.disallowed).toEqual(["https://s.test/private"]);
+  });
+
+  it("does not ask a host for robots.txt when the budget will never reach it", async () => {
+    // The other half of the same defect: a cross-origin wave used to fetch
+    // every host's robots.txt up front, contacting hosts the crawl then never
+    // visited. A crawl that stops at 2 pages must not knock on 3 doors.
+    const spy = installFetchMock((url) => {
+      if (url.includes("robots.txt")) return { status: 404, body: "", contentType: "text/plain" };
+      if (url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+      if (url === "https://s.test/") return html('<a href="https://one.test/x">1</a><a href="https://two.test/x">2</a><a href="https://three.test/x">3</a>');
+      return html("<p>ok</p>");
+    });
+    const r = await crawlSite("https://s.test/", { maxPages: 2, maxDepth: 1, useSitemap: false, crossOrigin: true, delayMs: 0 });
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/", "https://one.test/x"]);
+    const hosts = spy.mock.calls.map((c) => String(c[0])).filter((u) => u.endsWith("/robots.txt"));
+    expect(hosts).toEqual(["https://s.test/robots.txt", "https://one.test/robots.txt"]);
+  });
+
   it("spends a budget slot lost to an unreadable page on the next URL in line", async () => {
     // With 3 pages allowed and /p0 broken, the walk must go on to /p2 rather
     // than stop with the budget unspent — the rest of the wave is still queued.

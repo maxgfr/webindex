@@ -2484,15 +2484,19 @@ async function crawlSite(seed, opts = {}) {
   };
   let wave = [{ url: seed, depth: 0 }];
   while (wave.length && pages.length < maxPages) {
-    const files = await Promise.all(wave.map((it) => robotsFor(it.url)));
-    const allowed = [];
-    wave.forEach((item, i) => {
-      const r = files[i];
-      if (!opts.ignoreRobots && !isAllowed(r, item.url)) disallowed.push(item.url);
-      else allowed.push({ item, robots: r });
-    });
-    const batch = allowed.slice(0, maxPages - pages.length);
-    const leftover = allowed.slice(batch.length).map((a) => a.item);
+    const batch = [];
+    let cursor = 0;
+    while (cursor < wave.length && batch.length < maxPages - pages.length) {
+      const slice = wave.slice(cursor, cursor + (maxPages - pages.length - batch.length));
+      const files = await Promise.all(slice.map((it) => robotsFor(it.url)));
+      slice.forEach((item, i) => {
+        const r = files[i];
+        if (!opts.ignoreRobots && !isAllowed(r, item.url)) disallowed.push(item.url);
+        else batch.push({ item, robots: r });
+      });
+      cursor += slice.length;
+    }
+    const leftover = wave.slice(cursor);
     const results = await mapLimit(batch, width, (a) => fetchOne(a.item, a.robots));
     const next = [];
     if (sitemap) {
