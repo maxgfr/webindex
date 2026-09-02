@@ -925,7 +925,16 @@ declare function recencyScore(meta: {
  * apart; unrelated ones sit around 32.
  */
 declare function simhash(text: string): bigint;
-/** How many bits two SimHashes differ by. */
+/**
+ * How many bits two SimHashes differ by.
+ *
+ * The 64 bits a SimHash actually has are counted with two 32-bit popcounts, and
+ * that is the whole answer for every value `simhash` produces. Anything above
+ * 64 bits then falls through to the bit-clearing loop rather than being
+ * silently dropped: this is an exported function, a caller may hold a wider
+ * bigint, and answering "0 differing bits" for two values that differ is worse
+ * than the 3 ns the guard costs.
+ */
 declare function hammingDistance(a: bigint, b: bigint): number;
 /**
  * Collapse near-duplicate items by SimHash over their text, keeping the

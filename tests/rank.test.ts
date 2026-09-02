@@ -265,6 +265,16 @@ describe("simhash near-duplicate detection", () => {
     expect(hammingDistance(0x8000000080000000n, 0x0000000100000001n)).toBe(4);
   });
 
+  it("does not silently drop bits above 64, however it was asked", () => {
+    // A SimHash never has them, but this is an exported function and a bigint
+    // has no width: the two-popcount fast path must not answer "identical" for
+    // two values that plainly differ.
+    expect(hammingDistance(1n << 64n, 0n)).toBe(1);
+    expect(hammingDistance(1n << 80n, 0n)).toBe(1);
+    expect(hammingDistance((1n << 100n) | 5n, 0n)).toBe(3);
+    expect(hammingDistance((1n << 200n) - 1n, 0n)).toBe(200);
+  });
+
   it("hashes 200 KB of prose well under a tenth of a second", () => {
     const big = article.repeat(200);
     expect(big.length).toBeGreaterThan(200_000);

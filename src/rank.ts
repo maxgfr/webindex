@@ -413,10 +413,25 @@ function popcount32(n: number): number {
   return Math.imul((x + (x >>> 4)) & 0x0f0f0f0f, 0x01010101) >>> 24;
 }
 
-/** How many bits two SimHashes differ by. */
+/**
+ * How many bits two SimHashes differ by.
+ *
+ * The 64 bits a SimHash actually has are counted with two 32-bit popcounts, and
+ * that is the whole answer for every value `simhash` produces. Anything above
+ * 64 bits then falls through to the bit-clearing loop rather than being
+ * silently dropped: this is an exported function, a caller may hold a wider
+ * bigint, and answering "0 differing bits" for two values that differ is worse
+ * than the 3 ns the guard costs.
+ */
 export function hammingDistance(a: bigint, b: bigint): number {
-  const x = a ^ b;
-  return popcount32(Number(x & MASK32)) + popcount32(Number((x >> 32n) & MASK32));
+  let x = a ^ b;
+  let count = popcount32(Number(x & MASK32)) + popcount32(Number((x >> 32n) & MASK32));
+  x >>= 64n;
+  while (x) {
+    x &= x - 1n;
+    count++;
+  }
+  return count;
 }
 
 /**

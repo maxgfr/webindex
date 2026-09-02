@@ -2054,8 +2054,14 @@ function popcount32(n) {
   return Math.imul(x + (x >>> 4) & 252645135, 16843009) >>> 24;
 }
 function hammingDistance(a, b) {
-  const x = a ^ b;
-  return popcount32(Number(x & MASK32)) + popcount32(Number(x >> 32n & MASK32));
+  let x = a ^ b;
+  let count = popcount32(Number(x & MASK32)) + popcount32(Number(x >> 32n & MASK32));
+  x >>= 64n;
+  while (x) {
+    x &= x - 1n;
+    count++;
+  }
+  return count;
 }
 function dedupeNearDuplicates(items, opts = {}) {
   const maxBits = opts.maxBits ?? 3;
