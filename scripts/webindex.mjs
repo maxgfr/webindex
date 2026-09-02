@@ -974,7 +974,7 @@ async function httpGet(url, opts = {}) {
       }
       const bytes = res.status === 304 ? Buffer.alloc(0) : await readCappedBytes(res, max);
       countFetch(bytes.length, false);
-      const keepBytes = opts.binary || isBinaryDocument(meta.contentType);
+      const keepBytes = opts.binary || isBinaryDocument(meta.contentType) && bytes.length < max;
       const result = {
         ok: res.ok,
         status: res.status,
@@ -1021,9 +1021,9 @@ async function httpJson(method, url, body, opts = {}) {
         body: body === void 0 ? void 0 : JSON.stringify(body)
       });
       const max = opts.maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
-      const bytes = await readCappedBytes(res, max);
+      const bytes = await readCappedBytes(res, max + 1);
       countFetch(bytes.length, false);
-      if (bytes.length >= max) {
+      if (bytes.length > max) {
         ctrl.abort();
         return { ok: false, status: res.status, data: void 0, error: `response too large: over the ${max}-byte cap` };
       }

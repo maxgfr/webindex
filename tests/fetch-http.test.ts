@@ -57,6 +57,20 @@ describe("httpJson response cap", () => {
     expect(r.ok).toBe(true);
     expect(r.data).toEqual({ ok: 1 });
   });
+
+  it("answers a body of exactly the cap, and refuses one byte more", async () => {
+    // A cap that rejects its own limit is a cap of max-1. Reading only `max`
+    // bytes cannot tell "exactly the cap" from "cut off at the cap", so the
+    // reader takes one byte more and the check compares against that.
+    const exact = JSON.stringify({ ok: 1 });
+    installFetchMock(() => ({ body: exact, contentType: "application/json" }));
+    const at = await httpJson("GET", "https://x.test/exact", undefined, { maxBytes: exact.length, retries: 0 });
+    expect(at.ok).toBe(true);
+    expect(at.data).toEqual({ ok: 1 });
+    const over = await httpJson("GET", "https://x.test/exact", undefined, { maxBytes: exact.length - 1, retries: 0 });
+    expect(over.ok).toBe(false);
+    expect(over.error).toMatch(/too large/);
+  });
 });
 
 describe("htmlToText", () => {
@@ -148,6 +162,30 @@ describe("fetchAndExtract", () => {
   it("does not carry bytes for an ordinary page — the decoded body is the payload", async () => {
     installFetchMock(routes([["x.test/page", { body: "<p>hi</p>", contentType: "text/html" }]]));
     expect((await httpGet("https://x.test/page")).bytes).toBeUndefined();
+  });
+
+  it("refetches a content-type-only PDF that overran the text cap, rather than extracting a truncated one", async () => {
+    // Found by diffing against the pre-refactor bundle. A text fetch caps at
+    // 4 MB and a PDF fetch at 16, so a 5 MB PDF nobody announced arrives here
+    // cut in half. Keeping those bytes replaced the refetch that gets the whole
+    // file with an extraction that cannot succeed — the document simply stopped
+    // being readable. Under the cap, one download is still enough.
+    const big = Buffer.concat([Buffer.from(`%PDF-1.4\n${"% padding\n".repeat(60)}`), Buffer.from("\nstream\nBT (TailMarker) Tj ET\nendstream\n")]);
+    let calls = 0;
+    installFetchMock((url) => {
+      if (!url.includes("x.test/big")) return undefined;
+      calls++;
+      // The second request comes from the PDF path, whose cap is larger: serve
+      // the whole file then, and a body the text cap must cut on the first.
+      return { bytes: big, contentType: "application/pdf" };
+    });
+    // A tiny cap stands in for the real 4 MB one, so the fixture stays small.
+    const capped = await httpGet("https://x.test/big", { maxBytes: 64 });
+    expect(capped.bytes).toBeUndefined(); // truncated ⇒ not handed on
+    calls = 0;
+    const whole = await httpGet("https://x.test/big", { maxBytes: 1_000_000 });
+    expect(whole.bytes?.length).toBe(big.length); // complete ⇒ handed on
+    expect(calls).toBe(1);
   });
 
   it("returns a note when a PDF yields no extractable text", async () => {

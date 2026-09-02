@@ -254,7 +254,13 @@ export async function httpGet(
       // the origin says the body is a PDF or an office document that the URL
       // did not announce: they are already in memory, and handing them over is
       // what spares fetchAndExtract a second full download of the same file.
-      const keepBytes = opts.binary || isBinaryDocument(meta.contentType);
+      //
+      // Only when they are COMPLETE, though. A text fetch caps at 4 MB while a
+      // document fetch caps at 16, so a 5 MB PDF nobody announced arrives here
+      // truncated — and handing over a truncated PDF would silently replace the
+      // refetch that gets the whole thing with an extraction that cannot work.
+      // Short of the cap the bytes are all of them, and one download is enough.
+      const keepBytes = opts.binary || (isBinaryDocument(meta.contentType) && bytes.length < max);
       const result: HttpResult = {
         ok: res.ok,
         status: res.status,
@@ -325,9 +331,12 @@ export async function httpJson(
       // Wayback API all come through here, and a runaway answer from any of
       // them was the one unbounded read left in this module.
       const max = opts.maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
-      const bytes = await readCappedBytes(res, max);
+      // One byte past the cap, so a body of exactly `max` is answered rather
+      // than refused: reading only `max` cannot tell "exactly the cap" from
+      // "cut off at the cap", and refusing the former would be a cap of max-1.
+      const bytes = await readCappedBytes(res, max + 1);
       countFetch(bytes.length, false);
-      if (bytes.length >= max) {
+      if (bytes.length > max) {
         ctrl.abort();
         return { ok: false, status: res.status, data: undefined, error: `response too large: over the ${max}-byte cap` };
       }
