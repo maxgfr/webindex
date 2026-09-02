@@ -4106,71 +4106,82 @@ function sameOrigin(a, b) {
     return false;
   }
 }
+function crawlConcurrency() {
+  return envInt("CRAWL_CONCURRENCY", 4, 1, 16);
+}
 async function crawlSite(seed, opts = {}) {
   const maxPages = Math.max(1, opts.maxPages ?? 20);
   const maxDepth = Math.max(0, opts.maxDepth ?? 2);
+  const width = crawlConcurrency();
   const notes = [];
   const disallowed = [];
   const pages = [];
-  let robots = { rules: [], sitemaps: [], absent: true };
-  if (!opts.ignoreRobots) {
-    robots = await fetchRobots(seed);
-    if (robots.absent) notes.push("no robots.txt \u2014 nothing was refused, but nothing was granted either.");
-  } else {
-    notes.push("robots.txt was not consulted (ignoreRobots) \u2014 only correct on a site you own.");
-  }
-  const delay = opts.delayMs ?? robots.crawlDelayMs ?? hostDelayMs();
+  const NONE = { rules: [], sitemaps: [], absent: true };
+  const robotsFor = (url) => opts.ignoreRobots ? Promise.resolve(NONE) : fetchRobots(url);
+  const robots = await robotsFor(seed);
+  if (opts.ignoreRobots) notes.push("robots.txt was not consulted (ignoreRobots) \u2014 only correct on a site you own.");
+  else if (robots.absent) notes.push("no robots.txt \u2014 nothing was refused, but nothing was granted either.");
   if (robots.crawlDelayMs && opts.delayMs === void 0) notes.push(`honouring the declared Crawl-delay of ${robots.crawlDelayMs}ms.`);
+  const delayFor = (r) => opts.delayMs ?? r.crawlDelayMs ?? hostDelayMs();
   const seen = /* @__PURE__ */ new Set([canonicalizeUrl(seed)]);
-  const queue = [{ url: seed, depth: 0 }];
-  if (opts.useSitemap !== false && maxDepth > 0) {
-    const sm = await fetchSitemap(seed, { sitemaps: robots.sitemaps });
-    let added = 0;
-    for (const entry of sm.urls) {
-      const canon = canonicalizeUrl(entry.loc);
-      if (seen.has(canon)) continue;
-      if (!opts.crossOrigin && !sameOrigin(entry.loc, seed)) continue;
-      seen.add(canon);
-      queue.push({ url: entry.loc, depth: 1 });
-      added++;
-    }
-    if (added) notes.push(`seeded ${added} URL(s) from the sitemap.`);
-  }
-  while (queue.length && pages.length < maxPages) {
-    const next = queue.shift();
-    if (!next) break;
-    if (!opts.ignoreRobots && !isAllowed(robots, next.url)) {
-      disallowed.push(next.url);
-      continue;
-    }
-    await awaitHostSlot(next.url, delay);
-    const r = await fetchAndExtract(next.url, { keepHtml: next.depth < maxDepth });
-    if (!r.text) {
-      notes.push(`${next.url}: ${r.note ?? "nothing readable"}`);
-      continue;
-    }
-    const links = r.html ? linksFrom(r.html, next.url) : [];
+  const admit = (url, depth, into) => {
+    const canon = canonicalizeUrl(url);
+    if (seen.has(canon)) return false;
+    if (!opts.crossOrigin && !sameOrigin(url, seed)) return false;
+    seen.add(canon);
+    into.push({ url, depth });
+    return true;
+  };
+  let sitemap = opts.useSitemap !== false && maxDepth > 0 ? fetchSitemap(seed, { sitemaps: robots.sitemaps }) : void 0;
+  const fetchOne = async (item, r) => {
+    await awaitHostSlot(item.url, delayFor(r));
+    const got = await fetchAndExtract(item.url, { keepHtml: item.depth < maxDepth });
+    if (!got.text) return `${item.url}: ${got.note ?? "nothing readable"}`;
     const page = {
-      url: next.url,
-      depth: next.depth,
-      ...r.title ? { title: r.title } : {},
-      text: r.text,
-      extractor: r.extractor ?? "native",
-      links
+      url: item.url,
+      depth: item.depth,
+      ...got.title ? { title: got.title } : {},
+      text: got.text,
+      extractor: got.extractor ?? "native",
+      links: got.html ? linksFrom(got.html, item.url) : []
     };
-    pages.push(page);
     opts.onPage?.(page);
-    if (next.depth >= maxDepth) continue;
-    for (const link of links) {
-      const canon = canonicalizeUrl(link);
-      if (seen.has(canon)) continue;
-      if (!opts.crossOrigin && !sameOrigin(link, seed)) continue;
-      seen.add(canon);
-      queue.push({ url: link, depth: next.depth + 1 });
+    return page;
+  };
+  let wave = [{ url: seed, depth: 0 }];
+  while (wave.length && pages.length < maxPages) {
+    const files = await Promise.all(wave.map((it) => robotsFor(it.url)));
+    const allowed = [];
+    wave.forEach((item, i) => {
+      const r = files[i];
+      if (!opts.ignoreRobots && !isAllowed(r, item.url)) disallowed.push(item.url);
+      else allowed.push({ item, robots: r });
+    });
+    const batch = allowed.slice(0, maxPages - pages.length);
+    const leftover = allowed.slice(batch.length).map((a) => a.item);
+    const results = await mapLimit(batch, width, (a) => fetchOne(a.item, a.robots));
+    const next = [];
+    if (sitemap) {
+      const sm = await sitemap;
+      sitemap = void 0;
+      let added = 0;
+      for (const entry of sm.urls) if (admit(entry.loc, 1, next)) added++;
+      if (added) notes.push(`seeded ${added} URL(s) from the sitemap.`);
     }
+    for (const r of results) {
+      if (typeof r === "string") {
+        notes.push(r);
+        continue;
+      }
+      pages.push(r);
+      if (r.depth >= maxDepth) continue;
+      for (const link of r.links) admit(link, r.depth + 1, next);
+    }
+    wave = [...leftover, ...next];
   }
-  if (queue.length) notes.push(`stopped at the ${maxPages}-page budget with ${queue.length} URL(s) still queued.`);
-  return { pages, pending: queue.map((q) => q.url), disallowed, notes };
+  const pending = wave.map((q) => q.url);
+  if (pending.length) notes.push(`stopped at the ${maxPages}-page budget with ${pending.length} URL(s) still queued.`);
+  return { pages, pending, disallowed, notes };
 }
 
 // src/embed.ts
@@ -5538,6 +5549,7 @@ export {
   contentCoverage,
   contentHash,
   cosine,
+  crawlConcurrency,
   crawlSite,
   createServer,
   danglingTokens,

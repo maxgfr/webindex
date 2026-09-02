@@ -10,6 +10,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   resetHostSchedule();
   resetRobotsCache();
 });
@@ -211,5 +212,121 @@ describe("crawlSite", () => {
     const seen: string[] = [];
     await crawlSite("https://s.test/", { maxPages: 3, maxDepth: 1, useSitemap: false, delayMs: 0, onPage: (p) => seen.push(p.url) });
     expect(seen).toEqual(["https://s.test/", "https://s.test/a", "https://s.test/b"]);
+  });
+});
+
+describe("crawlSite concurrency", () => {
+  const LEAVES = 10;
+  /** A hub with LEAVES children; each child answers after `latencyOf(i)` ms. */
+  function wideSite(latencyOf: (i: number) => number, extra: (url: string) => ReturnType<Parameters<typeof installFetchMock>[0]> = () => undefined) {
+    const inner = installFetchMock((url) => {
+      if (url.includes("robots.txt") || url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+      const custom = extra(url);
+      if (custom) return custom;
+      if (url === "https://s.test/") return html(Array.from({ length: LEAVES }, (_, i) => `<a href="/p${i}">${i}</a>`).join(""));
+      const m = /\/p(\d+)$/.exec(url);
+      if (m) return html(`<p>leaf ${m[1]}</p>`);
+      return html("<p>elsewhere</p>");
+    });
+    let inFlight = 0;
+    let peak = 0;
+    vi.stubGlobal("fetch", async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      const m = /\/p(\d+)$/.exec(url);
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      try {
+        if (m) await new Promise((r) => setTimeout(r, latencyOf(Number(m[1]))));
+        return await inner(input, init);
+      } finally {
+        inFlight--;
+      }
+    });
+    return { inner, peak: () => peak };
+  }
+
+  it("keeps up to <PREFIX>_CRAWL_CONCURRENCY pages in flight, and never more", async () => {
+    vi.stubEnv(envName("CRAWL_CONCURRENCY"), "3");
+    const s = wideSite(() => 10);
+    const r = await crawlSite("https://s.test/", { maxPages: 20, maxDepth: 1, useSitemap: false, delayMs: 0 });
+    expect(r.pages).toHaveLength(1 + LEAVES);
+    expect(s.peak()).toBe(3);
+  });
+
+  it("is single-file at a concurrency of 1", async () => {
+    vi.stubEnv(envName("CRAWL_CONCURRENCY"), "1");
+    const s = wideSite(() => 2);
+    await crawlSite("https://s.test/", { maxPages: 20, maxDepth: 1, useSitemap: false, delayMs: 0 });
+    expect(s.peak()).toBe(1);
+  });
+
+  it("lists pages in frontier order whatever order the answers arrived in", async () => {
+    // The first link is the slowest, so arrival order is the reverse of link
+    // order. Consumers number their sources from `pages`: two runs over one
+    // site must agree, so the network's timing cannot be allowed to leak in.
+    wideSite((i) => (LEAVES - i) * 3);
+    const arrived: string[] = [];
+    const r = await crawlSite("https://s.test/", { maxPages: 20, maxDepth: 1, useSitemap: false, delayMs: 0, onPage: (p) => arrived.push(p.url) });
+    const expected = ["https://s.test/", ...Array.from({ length: LEAVES }, (_, i) => `https://s.test/p${i}`)];
+    expect(r.pages.map((p) => p.url)).toEqual(expected);
+    // …while the stream saw them as they landed, which is a different order.
+    expect(arrived).not.toEqual(expected);
+    expect([...arrived].sort()).toEqual([...expected].sort());
+  });
+
+  it("never fetches past the page budget, even with a wide wave", async () => {
+    const s = wideSite(() => 1);
+    const r = await crawlSite("https://s.test/", { maxPages: 5, maxDepth: 1, useSitemap: false, delayMs: 0 });
+    expect(r.pages).toHaveLength(5);
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/", "https://s.test/p0", "https://s.test/p1", "https://s.test/p2", "https://s.test/p3"]);
+    expect(r.pending).toEqual(Array.from({ length: LEAVES - 4 }, (_, i) => `https://s.test/p${i + 4}`));
+    const pageFetches = s.inner.mock.calls.map((c) => String(c[0])).filter((u) => !/robots|sitemap/.test(u));
+    expect(pageFetches).toHaveLength(5);
+  });
+
+  it("spends a budget slot lost to an unreadable page on the next URL in line", async () => {
+    // With 3 pages allowed and /p0 broken, the walk must go on to /p2 rather
+    // than stop with the budget unspent — the rest of the wave is still queued.
+    wideSite(
+      () => 1,
+      (url) => (url === "https://s.test/p0" ? { status: 500, body: "", contentType: "text/plain" } : undefined),
+    );
+    const r = await crawlSite("https://s.test/", { maxPages: 3, maxDepth: 1, useSitemap: false, delayMs: 0 });
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/", "https://s.test/p1", "https://s.test/p2"]);
+    expect(r.pending[0]).toBe("https://s.test/p3");
+    expect(r.notes.join(" ")).toContain("https://s.test/p0");
+  });
+
+  it("reads each origin's OWN robots.txt when crossing origins", async () => {
+    // A cross-origin walk used to apply the seed's file everywhere and never
+    // read the other host's. Here the seed allows everything and the other
+    // host refuses /x: only its own file can say so.
+    const spy = installFetchMock((url) => {
+      if (url === "https://s.test/robots.txt") return { status: 404, body: "", contentType: "text/plain" };
+      if (url === "https://other.test/robots.txt") return { status: 200, body: "User-agent: *\nDisallow: /x", contentType: "text/plain" };
+      if (url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+      if (url === "https://s.test/") return html('<a href="https://other.test/x">x</a><a href="https://other.test/y">y</a>');
+      return html("<p>ok</p>");
+    });
+    const r = await crawlSite("https://s.test/", { maxPages: 10, maxDepth: 1, useSitemap: false, crossOrigin: true, delayMs: 0 });
+    expect(r.disallowed).toEqual(["https://other.test/x"]);
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/", "https://other.test/y"]);
+    expect(spy.mock.calls.map((c) => String(c[0]))).toContain("https://other.test/robots.txt");
+  });
+
+  it("fetches the sitemap while the seed page is in flight, not before it", async () => {
+    const order: string[] = [];
+    installFetchMock((url) => {
+      order.push(url);
+      if (url.includes("robots.txt")) return { status: 404, body: "", contentType: "text/plain" };
+      if (url.includes("sitemap.xml"))
+        return { status: 200, body: "<urlset><url><loc>https://s.test/listed</loc></url></urlset>", contentType: "application/xml" };
+      return html("<p>ok</p>");
+    });
+    const r = await crawlSite("https://s.test/", { maxPages: 10, maxDepth: 1, delayMs: 0 });
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/", "https://s.test/listed"]);
+    // Both requests were issued before either answered: the seed fetch did not
+    // wait for the sitemap to come back.
+    expect(order.slice(0, 3)).toEqual(["https://s.test/robots.txt", "https://s.test/sitemap.xml", "https://s.test/"]);
   });
 });

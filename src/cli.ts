@@ -171,6 +171,8 @@ ENVIRONMENT
   WEBINDEX_QDRANT        vector store base URL, or "off"      (default http://localhost:6333)
   WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
   WEBINDEX_CACHE_DIR     where the fetch cache lives
+  WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
+  WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
   WEBINDEX_UA            override the browser User-Agent
 
 Every optional helper degrades to a note. Nothing here needs an API key.`;

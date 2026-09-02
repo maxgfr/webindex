@@ -22,6 +22,7 @@
 import { envInt } from "./brand.js";
 import { fetchAndExtract, sleep } from "./fetch.js";
 import { fetchSitemap } from "./feed.js";
+import { mapLimit } from "./pool.js";
 import { fetchRobots, isAllowed } from "./robots.js";
 import { canonicalizeUrl } from "./url.js";
 
@@ -162,6 +163,20 @@ function sameOrigin(a: string, b: string): boolean {
 }
 
 /**
+ * How many pages a crawl keeps in flight at once (`<PREFIX>_CRAWL_CONCURRENCY`,
+ * default 4, 1–16). Per-host politeness still serialises DEPARTURES to one
+ * host through `awaitHostSlot`; this only lets the responses overlap.
+ */
+export function crawlConcurrency(): number {
+  return envInt("CRAWL_CONCURRENCY", 4, 1, 16);
+}
+
+interface Frontier {
+  url: string;
+  depth: number;
+}
+
+/**
  * Walk a site from a seed, breadth-first.
  *
  * Bounded three independent ways — pages, depth, and origin — because any one
@@ -169,94 +184,115 @@ function sameOrigin(a: string, b: string): boolean {
  * frontier, a page limit alone will spend the whole budget on a paginated
  * archive, and neither stops a link out to an unrelated host.
  *
- * robots.txt is consulted at EVERY hop, not once for the seed. That is the
- * difference between this and `fetch`, and it is deliberate: `fetch` follows a
- * URL the caller was handed, which is not crawling; this enumerates, which is.
- * A refused URL is reported in `disallowed` rather than dropped, because a
- * silent skip is indistinguishable from a page that does not exist.
+ * robots.txt is consulted at EVERY hop, not once for the seed, and per ORIGIN
+ * when the walk crosses one. That is the difference between this and `fetch`,
+ * and it is deliberate: `fetch` follows a URL the caller was handed, which is
+ * not crawling; this enumerates, which is. A refused URL is reported in
+ * `disallowed` rather than dropped, because a silent skip is indistinguishable
+ * from a page that does not exist.
  *
  * Breadth-first, so a shallow budget returns the pages nearest the seed — the
- * ones a reader would have reached first — rather than one deep spur.
+ * ones a reader would have reached first — rather than one deep spur. Each
+ * depth is fetched as one wave with `crawlConcurrency()` pages in flight, and
+ * `pages` keeps frontier order regardless of which answer came back first.
  */
 export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<CrawlResult> {
   const maxPages = Math.max(1, opts.maxPages ?? 20);
   const maxDepth = Math.max(0, opts.maxDepth ?? 2);
+  const width = crawlConcurrency();
   const notes: string[] = [];
   const disallowed: string[] = [];
   const pages: CrawledPage[] = [];
 
-  let robots = { rules: [], sitemaps: [], absent: true } as Awaited<ReturnType<typeof fetchRobots>>;
-  if (!opts.ignoreRobots) {
-    robots = await fetchRobots(seed);
-    if (robots.absent) notes.push("no robots.txt — nothing was refused, but nothing was granted either.");
-  } else {
-    notes.push("robots.txt was not consulted (ignoreRobots) — only correct on a site you own.");
-  }
-  const delay = opts.delayMs ?? robots.crawlDelayMs ?? hostDelayMs();
+  // robots.txt is read PER ORIGIN, memoised in fetchRobots: a cross-origin walk
+  // used to apply the seed's file to every other host and never read theirs.
+  const NONE = { rules: [], sitemaps: [], absent: true } as Awaited<ReturnType<typeof fetchRobots>>;
+  const robotsFor = (url: string) => (opts.ignoreRobots ? Promise.resolve(NONE) : fetchRobots(url));
+
+  const robots = await robotsFor(seed);
+  if (opts.ignoreRobots) notes.push("robots.txt was not consulted (ignoreRobots) — only correct on a site you own.");
+  else if (robots.absent) notes.push("no robots.txt — nothing was refused, but nothing was granted either.");
   if (robots.crawlDelayMs && opts.delayMs === undefined) notes.push(`honouring the declared Crawl-delay of ${robots.crawlDelayMs}ms.`);
+  const delayFor = (r: { crawlDelayMs?: number }) => opts.delayMs ?? r.crawlDelayMs ?? hostDelayMs();
 
   const seen = new Set<string>([canonicalizeUrl(seed)]);
-  const queue: { url: string; depth: number }[] = [{ url: seed, depth: 0 }];
+  const admit = (url: string, depth: number, into: Frontier[]): boolean => {
+    const canon = canonicalizeUrl(url);
+    if (seen.has(canon)) return false;
+    if (!opts.crossOrigin && !sameOrigin(url, seed)) return false;
+    seen.add(canon);
+    into.push({ url, depth });
+    return true;
+  };
 
   // The sitemap is the site's own statement of what it wants found, so it is a
   // better frontier than whatever the seed page happens to link to — and it
-  // costs one request. Seeded at depth 1 so `maxDepth: 0` still means "the seed
-  // page only".
-  if (opts.useSitemap !== false && maxDepth > 0) {
-    const sm = await fetchSitemap(seed, { sitemaps: robots.sitemaps });
-    let added = 0;
-    for (const entry of sm.urls) {
-      const canon = canonicalizeUrl(entry.loc);
-      if (seen.has(canon)) continue;
-      if (!opts.crossOrigin && !sameOrigin(entry.loc, seed)) continue;
-      seen.add(canon);
-      queue.push({ url: entry.loc, depth: 1 });
-      added++;
-    }
-    if (added) notes.push(`seeded ${added} URL(s) from the sitemap.`);
-  }
+  // costs one request, which overlaps the seed fetch below. Seeded at depth 1
+  // so `maxDepth: 0` still means "the seed page only", and ahead of the seed's
+  // own links so the site's order wins over the page's.
+  let sitemap = opts.useSitemap !== false && maxDepth > 0 ? fetchSitemap(seed, { sitemaps: robots.sitemaps }) : undefined;
 
-  while (queue.length && pages.length < maxPages) {
-    const next = queue.shift();
-    if (!next) break;
-
-    if (!opts.ignoreRobots && !isAllowed(robots, next.url)) {
-      disallowed.push(next.url);
-      continue;
-    }
-
-    await awaitHostSlot(next.url, delay);
-    const r = await fetchAndExtract(next.url, { keepHtml: next.depth < maxDepth });
-    if (!r.text) {
-      notes.push(`${next.url}: ${r.note ?? "nothing readable"}`);
-      continue;
-    }
-
-    const links = r.html ? linksFrom(r.html, next.url) : [];
+  const fetchOne = async (item: Frontier, r: Awaited<ReturnType<typeof fetchRobots>>): Promise<CrawledPage | string> => {
+    await awaitHostSlot(item.url, delayFor(r));
+    const got = await fetchAndExtract(item.url, { keepHtml: item.depth < maxDepth });
+    if (!got.text) return `${item.url}: ${got.note ?? "nothing readable"}`;
     const page: CrawledPage = {
-      url: next.url,
-      depth: next.depth,
-      ...(r.title ? { title: r.title } : {}),
-      text: r.text,
-      extractor: r.extractor ?? "native",
-      links,
+      url: item.url,
+      depth: item.depth,
+      ...(got.title ? { title: got.title } : {}),
+      text: got.text,
+      extractor: got.extractor ?? "native",
+      links: got.html ? linksFrom(got.html, item.url) : [],
     };
-    pages.push(page);
+    // Streamed as it lands — arrival order. `pages` below keeps frontier order.
     opts.onPage?.(page);
+    return page;
+  };
 
-    if (next.depth >= maxDepth) continue;
-    for (const link of links) {
-      const canon = canonicalizeUrl(link);
-      if (seen.has(canon)) continue;
-      if (!opts.crossOrigin && !sameOrigin(link, seed)) continue;
-      seen.add(canon);
-      queue.push({ url: link, depth: next.depth + 1 });
+  // Breadth-first in WAVES: one depth at a time, `width` pages of it in flight,
+  // results kept in frontier order so two runs over one site list the same
+  // pages in the same order whatever the network did.
+  let wave: Frontier[] = [{ url: seed, depth: 0 }];
+  while (wave.length && pages.length < maxPages) {
+    const files = await Promise.all(wave.map((it) => robotsFor(it.url)));
+    const allowed: { item: Frontier; robots: Awaited<ReturnType<typeof fetchRobots>> }[] = [];
+    wave.forEach((item, i) => {
+      const r = files[i]!;
+      if (!opts.ignoreRobots && !isAllowed(r, item.url)) disallowed.push(item.url);
+      else allowed.push({ item, robots: r });
+    });
+
+    // Only the budget's worth leaves. What is left of the wave goes back to the
+    // front of the next one: it is still nearer the seed than anything found by
+    // this batch, and it is what the caller sees as pending if the budget ends.
+    const batch = allowed.slice(0, maxPages - pages.length);
+    const leftover = allowed.slice(batch.length).map((a) => a.item);
+    const results = await mapLimit(batch, width, (a) => fetchOne(a.item, a.robots));
+
+    const next: Frontier[] = [];
+    if (sitemap) {
+      const sm = await sitemap;
+      sitemap = undefined;
+      let added = 0;
+      for (const entry of sm.urls) if (admit(entry.loc, 1, next)) added++;
+      if (added) notes.push(`seeded ${added} URL(s) from the sitemap.`);
     }
+    for (const r of results) {
+      if (typeof r === "string") {
+        notes.push(r);
+        continue;
+      }
+      pages.push(r);
+      if (r.depth >= maxDepth) continue;
+      for (const link of r.links) admit(link, r.depth + 1, next);
+    }
+    wave = [...leftover, ...next];
   }
 
   // Say what was left rather than implying the site was exhausted. A budget
   // that ran out and a site that ended look identical from the outside.
-  if (queue.length) notes.push(`stopped at the ${maxPages}-page budget with ${queue.length} URL(s) still queued.`);
+  const pending = wave.map((q) => q.url);
+  if (pending.length) notes.push(`stopped at the ${maxPages}-page budget with ${pending.length} URL(s) still queued.`);
 
-  return { pages, pending: queue.map((q) => q.url), disallowed, notes };
+  return { pages, pending, disallowed, notes };
 }
