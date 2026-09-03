@@ -344,6 +344,162 @@ describe("the branches a forge and a repo ref actually take", () => {
     expect(requests).toBe(2);
   });
 
+  // The publication-time suffix is the one request in this file whose input is a
+  // PARTIAL document by construction: a byte range that opens mid-JSON, or — when
+  // a registry or a corporate proxy ignores `Range` altogether — the capped head
+  // of a document that was never meant to be cut. Both arrive as malformed JSON
+  // whose shape a package author partly controls, since a packument carries that
+  // package's own README and manifest fields verbatim. The contract on all of
+  // them is the same: the timestamp is optional, the package facts are not.
+
+  it("degrades to no timestamp when a proxy ignores Range and streams the whole packument", async () => {
+    let pulled = 0;
+    const CHUNK = 64 * 1024;
+    // Six megabytes served whole, chunked and with no content-length — the shape
+    // a proxy produces when it drops the Range header and re-encodes the body.
+    // Nothing in it opens a `time` map, so no timestamp is the honest answer;
+    // what matters is that the transfer stops at the cap instead of at the end.
+    const oversized = `{"name":"wide","dist-tags":{"latest":"9.9.9"},"readme":"${"z".repeat(6 * 1024 * 1024)}"}`;
+    installFetchMock((url, init) => {
+      if (url.endsWith("/wide/latest")) return json({ name: "wide", version: "9.9.9", license: "MIT" });
+      if (url.endsWith("/wide")) {
+        // The header went out; this registry simply answers 200 with everything.
+        expect((init?.headers as Record<string, string> | undefined)?.range).toBe("bytes=-2097152");
+        return { body: oversized, contentType: "application/json", chunkSize: CHUNK, onPull: (n: number) => (pulled += n) };
+      }
+      return { status: 404, body: "{}", contentType: "application/json" };
+    });
+
+    const p = await lookupPackage("npm", "wide");
+    expect(p).toMatchObject({ registry: "npm", name: "wide", version: "9.9.9", license: "MIT" });
+    expect(p?.publishedAt).toBeUndefined();
+    // At most the 2 MiB cap plus the chunk that crossed it — not the whole 6 MiB.
+    expect(pulled).toBeLessThanOrEqual(2 * 1024 * 1024 + CHUNK);
+  });
+
+  it("degrades to no timestamp when a proxy declares a packument larger than the cap", async () => {
+    let pulled = 0;
+    installFetchMock((url) => {
+      if (url.endsWith("/declared/latest")) return json({ name: "declared", version: "3.2.1", license: "MIT" });
+      if (url.endsWith("/declared"))
+        return {
+          body: "{}",
+          contentType: "application/json",
+          headers: { "content-length": String(6 * 1024 * 1024) },
+          onPull: (n: number) => (pulled += n),
+        };
+      return { status: 404, body: "{}", contentType: "application/json" };
+    });
+
+    const p = await lookupPackage("npm", "declared");
+    expect(p).toMatchObject({ name: "declared", version: "3.2.1", license: "MIT" });
+    expect(p?.publishedAt).toBeUndefined();
+    // Refused on the declared length: not one byte of the body is read.
+    expect(pulled).toBe(0);
+  });
+
+  it("survives a suffix whose time map is cut in half", async () => {
+    installFetchMock((url) => {
+      if (url.endsWith("/halved/latest")) return json({ name: "halved", version: "2.0.0", license: "MIT" });
+      // A range that landed inside the `time` map: the key is there, the closing
+      // brace never arrives. Parsing it is impossible; throwing is not allowed.
+      if (url.endsWith("/halved")) return { body: '0.9.0":{}}},"time":{"1.0.0":"2020-01-01T00:00:00.000Z","2.0.0":"2021-0', contentType: "application/json" };
+      return { status: 404, body: "{}", contentType: "application/json" };
+    });
+
+    const p = await lookupPackage("npm", "halved");
+    expect(p).toMatchObject({ name: "halved", version: "2.0.0", license: "MIT" });
+    expect(p?.publishedAt).toBeUndefined();
+  });
+
+  it("still reads the time map out of a suffix that opens mid-document", async () => {
+    installFetchMock((url) => {
+      if (url.endsWith("/mid/latest")) return json({ name: "mid", version: "4.1.0", license: "MIT" });
+      // What a real `bytes=-N` range looks like: it starts in the middle of a
+      // string, closes braces it never opened, and only then reaches `time`.
+      if (url.endsWith("/mid"))
+        return {
+          body: 'ate":"2019-04-02T10:00:00.000Z"}},"5.0.0":{"dist":{"tarball":"https://r/x.tgz"}}},"time":{"4.1.0":"2020-05-06T07:08:09.000Z"},"users":{}}',
+          contentType: "application/json",
+        };
+      return { status: 404, body: "{}", contentType: "application/json" };
+    });
+
+    expect(await lookupPackage("npm", "mid")).toMatchObject({ version: "4.1.0", publishedAt: "2020-05-06T07:08:09.000Z" });
+  });
+
+  it("scans a suffix full of unclosed time markers in linear time", async () => {
+    // 256 KiB of `"time":{` and not one closing brace — every marker opens a
+    // candidate object that runs to the end of the body without ever balancing.
+    // A README is carried verbatim in a packument, so the bytes that land in
+    // this window are partly the package author's to choose.
+    //
+    // Rescanning to the end per marker is quadratic: this input costs ~7s, and
+    // the 2 MiB the cap actually permits costs minutes of a pinned event loop —
+    // inside an enrichment step that is budgeted 2.5 seconds and whose whole
+    // point is that it may be skipped.
+    const decoys = '"time":{'.repeat((256 * 1024) / 8);
+    installFetchMock((url) => {
+      if (url.endsWith("/decoy/latest")) return json({ name: "decoy", version: "1.0.0", license: "MIT" });
+      if (url.endsWith("/decoy")) return { body: decoys, contentType: "application/json" };
+      return { status: 404, body: "{}", contentType: "application/json" };
+    });
+
+    const started = Date.now();
+    const p = await lookupPackage("npm", "decoy");
+    const elapsed = Date.now() - started;
+
+    expect(p).toMatchObject({ name: "decoy", version: "1.0.0", license: "MIT" });
+    // No timestamp is the honest answer for a body that never closes an object.
+    expect(p?.publishedAt).toBeUndefined();
+    // One pass over the body finishes in single-digit milliseconds; the bound is
+    // loose enough that only a superlinear scan can cross it.
+    expect(elapsed).toBeLessThan(1_000);
+  }, 60_000);
+
+  it("gives up on the optional suffix after 2.5 seconds, without retrying", async () => {
+    // Pinned on fake timers rather than by waiting: a registry that accepts the
+    // connection and then says nothing is exactly what the budget is for, and
+    // the clock says precisely when the enrichment abandoned it.
+    const answer = installFetchMock(() => json({ name: "slow", version: "1.0.0", license: "MIT" }));
+    let requests = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        requests++;
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.endsWith("/slow/latest")) return answer(input, init);
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" })));
+        });
+      }),
+    );
+
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const pending = lookupPackage("npm", "slow").then((p) => {
+        settled = true;
+        return p;
+      });
+
+      await vi.advanceTimersByTimeAsync(2_400);
+      // Still waiting: the budget is 2.5s, not something shorter.
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(200);
+      // Done: the budget is 2.5s, not httpGet's 20s default nor the 12s the
+      // primary lookup uses — and the abort was not followed by a second try.
+      expect(settled).toBe(true);
+
+      const p = await pending;
+      expect(p).toMatchObject({ name: "slow", version: "1.0.0", license: "MIT" });
+      expect(p?.publishedAt).toBeUndefined();
+      expect(requests).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("treats npm's boolean deprecation flag as a notice", async () => {
     installFetchMock(() => json({ name: "p", "dist-tags": { latest: "1.0.0" }, versions: { "1.0.0": { deprecated: true } } }));
     expect((await lookupPackage("npm", "p"))?.deprecated).toBe("deprecated");

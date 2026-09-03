@@ -70,11 +70,54 @@ function reqOpts() {
 // timestamp when its full response exceeds the same cap.
 const NPM_TIME_TAIL_BYTES = 2 * 1024 * 1024;
 
-function jsonObjectAt(text: string, open: number): Record<string, unknown> | undefined {
+const isWs = (c: string | undefined) => c === " " || c === "\t" || c === "\n" || c === "\r";
+
+/** Whether the unquoted `{` at `i` is the one that opens a `time` map. */
+function opensTimeMap(text: string, i: number): boolean {
+  // Looked up BACKWARDS over the key, which costs a fixed handful of characters,
+  // rather than forwards from a `"time":{` match — the direction that made
+  // finding the map cost a scan of everything after it.
+  let j = i - 1;
+  while (j >= 0 && isWs(text[j])) j--;
+  if (text[j] !== ":") return false;
+  j--;
+  while (j >= 0 && isWs(text[j])) j--;
+  return j >= 5 && text.slice(j - 5, j + 1) === '"time"';
+}
+
+// At most this many `time` maps may be open at once. A real packument has ONE,
+// at the top level; a body full of `"time":{` that never closes has as many as
+// it has bytes, and without a ceiling each one costs an entry that is never
+// popped. Past the ceiling the body simply yields no timestamp, which is what it
+// was always going to yield.
+const MAX_OPEN_TIME_MAPS = 16;
+
+/**
+ * Read a `time` map out of the body in ONE pass, tracking brace depth and string
+ * state and closing each map on the brace that actually balances it.
+ *
+ * The previous shape — match every `"time":{`, then scan forward from each to
+ * find its close — is quadratic on exactly the input this is fed. The body is a
+ * PARTIAL document by construction, so a marker routinely has no matching brace
+ * and costs a scan to the end; 2 MiB of unclosed markers, which a package's own
+ * README (carried verbatim in its packument) is enough to put there, pins the
+ * event loop for minutes inside a step budgeted 2.5 seconds.
+ *
+ * Reading string state as it goes also makes it stricter for free: a `"time":{`
+ * sitting inside a README string is no longer a candidate at all.
+ *
+ * `startQuoted` is the phase to read the first character in — see the caller.
+ */
+function scanTimeMap(text: string, version: string, startQuoted: boolean): string | undefined {
+  let publishedAt: string | undefined;
   let depth = 0;
-  let quoted = false;
+  let quoted = startQuoted;
   let escaped = false;
-  for (let i = open; i < text.length; i++) {
+  // Open `time` maps, innermost last. Depths are relative: a suffix that starts
+  // mid-document closes braces it never opened, so `depth` legitimately goes
+  // negative and only the DIFFERENCE between an open and its close matters.
+  const open: { at: number; depth: number }[] = [];
+  for (let i = 0; i < text.length; i++) {
     const c = text[i]!;
     if (quoted) {
       if (escaped) escaped = false;
@@ -83,27 +126,45 @@ function jsonObjectAt(text: string, open: number): Record<string, unknown> | und
       continue;
     }
     if (c === '"') quoted = true;
-    else if (c === "{") depth++;
-    else if (c === "}" && --depth === 0) {
-      try {
-        const parsed = JSON.parse(text.slice(open, i + 1));
-        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
-      } catch {
-        return undefined;
+    else if (c === "{") {
+      if (open.length < MAX_OPEN_TIME_MAPS && opensTimeMap(text, i)) open.push({ at: i, depth });
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      const top = open[open.length - 1];
+      if (top?.depth === depth) {
+        open.pop();
+        try {
+          const time = JSON.parse(text.slice(top.at, i + 1));
+          if (time && typeof time === "object" && !Array.isArray(time) && typeof time[version] === "string") publishedAt = time[version];
+        } catch (err) {
+          // A `time` map that does not parse is one more thing this body cannot
+          // tell us; the rest of it still can. Only malformed JSON is expected
+          // here — anything else came from this scanner, not from the body, and
+          // swallowing it would hide a real defect behind a missing timestamp.
+          if (!(err instanceof SyntaxError)) throw err;
+        }
       }
+      // Candidates the document can no longer close: a suffix carries more `}`
+      // than `{`, and an entry left above the current depth would otherwise
+      // match a brace that has nothing to do with it.
+      while (open.length && open[open.length - 1]!.depth > depth) open.pop();
     }
   }
-  return undefined;
+  return publishedAt;
 }
 
 function npmTimeFromTail(text: string, version: string): string | undefined {
-  const key = /"time"\s*:\s*\{/g;
-  let publishedAt: string | undefined;
-  for (let match = key.exec(text); match; match = key.exec(text)) {
-    const time = jsonObjectAt(text, text.indexOf("{", match.index));
-    if (typeof time?.[version] === "string") publishedAt = time[version] as string;
-  }
-  return publishedAt;
+  // A `bytes=-N` suffix cuts the document at an arbitrary byte, so its first
+  // character is either inside a JSON string or outside one and there is no way
+  // to tell from the bytes alone — get that phase wrong and every quote after it
+  // is inverted, which is how a real range landing mid-README hides the `time`
+  // map that follows it. There are only two phases, so read the body in the
+  // likelier one (a whole document, or a cut that fell outside a string) and fall
+  // back to the other. Two linear passes are still linear, and a `time` map found
+  // in the wrong phase would have to survive `JSON.parse` and carry this exact
+  // version as a string key to be believed at all.
+  return scanTimeMap(text, version, false) ?? scanTimeMap(text, version, true);
 }
 
 async function npmPublishedAt(packageUrl: string, version: string | undefined): Promise<string | undefined> {

@@ -2599,11 +2599,23 @@ function reqOpts2() {
   return { timeoutMs: 12e3, userAgent: contactUa(), accept: "application/json" };
 }
 var NPM_TIME_TAIL_BYTES = 2 * 1024 * 1024;
-function jsonObjectAt(text, open) {
+var isWs = (c) => c === " " || c === "	" || c === "\n" || c === "\r";
+function opensTimeMap(text, i) {
+  let j = i - 1;
+  while (j >= 0 && isWs(text[j])) j--;
+  if (text[j] !== ":") return false;
+  j--;
+  while (j >= 0 && isWs(text[j])) j--;
+  return j >= 5 && text.slice(j - 5, j + 1) === '"time"';
+}
+var MAX_OPEN_TIME_MAPS = 16;
+function scanTimeMap(text, version, startQuoted) {
+  let publishedAt;
   let depth = 0;
-  let quoted = false;
+  let quoted = startQuoted;
   let escaped = false;
-  for (let i = open; i < text.length; i++) {
+  const open = [];
+  for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (quoted) {
       if (escaped) escaped = false;
@@ -2612,26 +2624,28 @@ function jsonObjectAt(text, open) {
       continue;
     }
     if (c === '"') quoted = true;
-    else if (c === "{") depth++;
-    else if (c === "}" && --depth === 0) {
-      try {
-        const parsed = JSON.parse(text.slice(open, i + 1));
-        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : void 0;
-      } catch {
-        return void 0;
+    else if (c === "{") {
+      if (open.length < MAX_OPEN_TIME_MAPS && opensTimeMap(text, i)) open.push({ at: i, depth });
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      const top = open[open.length - 1];
+      if (top?.depth === depth) {
+        open.pop();
+        try {
+          const time = JSON.parse(text.slice(top.at, i + 1));
+          if (time && typeof time === "object" && !Array.isArray(time) && typeof time[version] === "string") publishedAt = time[version];
+        } catch (err) {
+          if (!(err instanceof SyntaxError)) throw err;
+        }
       }
+      while (open.length && open[open.length - 1].depth > depth) open.pop();
     }
   }
-  return void 0;
+  return publishedAt;
 }
 function npmTimeFromTail(text, version) {
-  const key = /"time"\s*:\s*\{/g;
-  let publishedAt;
-  for (let match = key.exec(text); match; match = key.exec(text)) {
-    const time = jsonObjectAt(text, text.indexOf("{", match.index));
-    if (typeof time?.[version] === "string") publishedAt = time[version];
-  }
-  return publishedAt;
+  return scanTimeMap(text, version, false) ?? scanTimeMap(text, version, true);
 }
 async function npmPublishedAt(packageUrl, version) {
   if (!version) return void 0;
