@@ -455,6 +455,22 @@ describe("the branches a forge and a repo ref actually take", () => {
     expect(await lookupPackage("npm", "mid")).toMatchObject({ version: "4.1.0", publishedAt: "2020-05-06T07:08:09.000Z" });
   });
 
+  it("still reads the time map out of a suffix that opens on an escaped character", async () => {
+    installFetchMock((url) => {
+      if (url.endsWith("/escaped/latest")) return json({ name: "escaped", version: "6.2.0", license: "MIT" });
+      // The cut a `bytes=-N` range makes is a byte offset, so it can fall
+      // BETWEEN the two bytes of a `\\` escape inside the README string that a
+      // packument carries verbatim. The suffix then opens on a character that
+      // the document says is escaped: read as an ordinary one it ends the
+      // string here, which inverts every quote after it and hides the `time`
+      // map that follows.
+      if (url.endsWith("/escaped")) return { body: '\\","time":{"6.2.0":"2021-03-04T05:06:07.000Z"},"users":{}}', contentType: "application/json" };
+      return { status: 404, body: "{}", contentType: "application/json" };
+    });
+
+    expect(await lookupPackage("npm", "escaped")).toMatchObject({ version: "6.2.0", publishedAt: "2021-03-04T05:06:07.000Z" });
+  });
+
   it("scans a suffix full of unclosed time markers in linear time", async () => {
     // 256 KiB of `"time":{` and not one closing brace — every marker opens a
     // candidate object that runs to the end of the body without ever balancing.
@@ -482,6 +498,33 @@ describe("the branches a forge and a repo ref actually take", () => {
     // One pass over the body finishes in single-digit milliseconds; the bound is
     // loose enough that only a superlinear scan can cross it.
     expect(elapsed).toBeLessThan(1_000);
+  }, 60_000);
+
+  it("scans a full-cap suffix in linear time in every start phase", async () => {
+    // The worst input the cap actually permits, aimed at the two places where a
+    // scan could go superlinear: 2 MiB of `time` markers that DO balance — so
+    // the candidate stack drains and every brace pays for the backwards walk
+    // over the key — each one held away from its key by a whitespace run. The
+    // leading backslash leaves the opening state genuinely ambiguous, so none of
+    // the three phases finds a timestamp and all three run the body end to end.
+    const CHUNK = `"time":${" ".repeat(55)}{}`;
+    const adversarial = `\\${CHUNK.repeat((2 * 1024 * 1024 - 64) / CHUNK.length)}`;
+    installFetchMock((url) => {
+      if (url.endsWith("/adversarial/latest")) return json({ name: "adversarial", version: "1.0.0", license: "MIT" });
+      if (url.endsWith("/adversarial")) return { body: adversarial, contentType: "application/json" };
+      return { status: 404, body: "{}", contentType: "application/json" };
+    });
+
+    const started = Date.now();
+    const p = await lookupPackage("npm", "adversarial");
+    const elapsed = Date.now() - started;
+
+    expect(p).toMatchObject({ name: "adversarial", version: "1.0.0", license: "MIT" });
+    // Every `time` map here is empty, so no timestamp is the honest answer.
+    expect(p?.publishedAt).toBeUndefined();
+    // Three linear passes over 2 MiB are tens of milliseconds; the bound is
+    // loose enough that only a superlinear scan can cross it.
+    expect(elapsed).toBeLessThan(2_000);
   }, 60_000);
 
   it("gives up on the optional suffix after 2.5 seconds, without retrying", async () => {

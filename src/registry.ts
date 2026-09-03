@@ -85,6 +85,19 @@ function opensTimeMap(text: string, i: number): boolean {
   return j >= 5 && text.slice(j - 5, j + 1) === '"time"';
 }
 
+/**
+ * The state a JSON reader can be in at an arbitrary byte of a document.
+ *
+ * `outside` is between tokens; `string` is inside a string literal; `escape` is
+ * inside one directly after a backslash, so the NEXT character is consumed by
+ * the escape rather than read. A byte range can start in any of the three —
+ * `escape` is what a cut landing between the two bytes of a `\\` produces —
+ * and no other state changes how quotes and braces are read. `\uXXXX` needs no
+ * state of its own: its hex digits are neither quote nor brace nor backslash,
+ * so reading them as ordinary string characters gives the same answer.
+ */
+type ScanPhase = "outside" | "string" | "escape";
+
 // At most this many `time` maps may be open at once. A real packument has ONE,
 // at the top level; a body full of `"time":{` that never closes has as many as
 // it has bytes, and without a ceiling each one costs an entry that is never
@@ -106,13 +119,13 @@ const MAX_OPEN_TIME_MAPS = 16;
  * Reading string state as it goes also makes it stricter for free: a `"time":{`
  * sitting inside a README string is no longer a candidate at all.
  *
- * `startQuoted` is the phase to read the first character in — see the caller.
+ * `phase` is the state to read the first character in — see the caller.
  */
-function scanTimeMap(text: string, version: string, startQuoted: boolean): string | undefined {
+function scanTimeMap(text: string, version: string, phase: ScanPhase): string | undefined {
   let publishedAt: string | undefined;
   let depth = 0;
-  let quoted = startQuoted;
-  let escaped = false;
+  let quoted = phase !== "outside";
+  let escaped = phase === "escape";
   // Open `time` maps, innermost last. Depths are relative: a suffix that starts
   // mid-document closes braces it never opened, so `depth` legitimately goes
   // negative and only the DIFFERENCE between an open and its close matters.
@@ -155,16 +168,15 @@ function scanTimeMap(text: string, version: string, startQuoted: boolean): strin
 }
 
 function npmTimeFromTail(text: string, version: string): string | undefined {
-  // A `bytes=-N` suffix cuts the document at an arbitrary byte, so its first
-  // character is either inside a JSON string or outside one and there is no way
-  // to tell from the bytes alone — get that phase wrong and every quote after it
-  // is inverted, which is how a real range landing mid-README hides the `time`
-  // map that follows it. There are only two phases, so read the body in the
-  // likelier one (a whole document, or a cut that fell outside a string) and fall
-  // back to the other. Two linear passes are still linear, and a `time` map found
-  // in the wrong phase would have to survive `JSON.parse` and carry this exact
-  // version as a string key to be believed at all.
-  return scanTimeMap(text, version, false) ?? scanTimeMap(text, version, true);
+  // A `bytes=-N` suffix cuts the document at an arbitrary byte, so the state its
+  // first character belongs to cannot be told from the bytes alone — get it
+  // wrong and every quote after it is inverted, which is how a real range
+  // landing mid-README hides the `time` map that follows it. There are exactly
+  // three such states, so read the body in the likeliest one and fall back
+  // through the rest. Three linear passes are still linear, and a `time` map
+  // found in the wrong phase would have to survive `JSON.parse` and carry this
+  // exact version as a string key to be believed at all.
+  return scanTimeMap(text, version, "outside") ?? scanTimeMap(text, version, "string") ?? scanTimeMap(text, version, "escape");
 }
 
 async function npmPublishedAt(packageUrl: string, version: string | undefined): Promise<string | undefined> {

@@ -4062,11 +4062,11 @@ function opensTimeMap(text, i) {
   return j >= 5 && text.slice(j - 5, j + 1) === '"time"';
 }
 var MAX_OPEN_TIME_MAPS = 16;
-function scanTimeMap(text, version, startQuoted) {
+function scanTimeMap(text, version, phase) {
   let publishedAt;
   let depth = 0;
-  let quoted = startQuoted;
-  let escaped = false;
+  let quoted = phase !== "outside";
+  let escaped = phase === "escape";
   const open = [];
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
@@ -4098,7 +4098,7 @@ function scanTimeMap(text, version, startQuoted) {
   return publishedAt;
 }
 function npmTimeFromTail(text, version) {
-  return scanTimeMap(text, version, false) ?? scanTimeMap(text, version, true);
+  return scanTimeMap(text, version, "outside") ?? scanTimeMap(text, version, "string") ?? scanTimeMap(text, version, "escape");
 }
 async function npmPublishedAt(packageUrl, version) {
   if (!version) return void 0;
