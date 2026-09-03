@@ -337,6 +337,19 @@ describe("the MCP tools", () => {
     }
   });
 
+  it("does not promise a single network request for package metadata", () => {
+    const packageTool = adapter.listTools(LATEST_PROTOCOL).find((tool) => tool.name === "webindex_package");
+    const publicDescriptions = [
+      packageTool?.description ?? "",
+      readFileSync(new URL("../README.md", import.meta.url), "utf8"),
+      readFileSync(new URL("../src/index.ts", import.meta.url), "utf8"),
+    ];
+    for (const description of publicDescriptions) {
+      expect(description).not.toMatch(/\bone request\b/i);
+      expect(description).toMatch(/bounded registry requests/i);
+    }
+  });
+
   it("says which backend was missing rather than reporting an empty web", async () => {
     // A search tool that returns "no results" when nothing is running teaches
     // the model the answer does not exist. It has to fail loudly instead.

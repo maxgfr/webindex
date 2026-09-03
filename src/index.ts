@@ -110,7 +110,7 @@ export * from "./forge.js";
 
 // ── Package registries ──────────────────────────────────────────────────────
 // A library's NAME → its repository, docs, current version, licence and whether
-// it is deprecated. One request instead of a web search and a guess.
+// it is deprecated. Bounded registry requests instead of a web search and a guess.
 export * from "./registry.js";
 
 // ── Character encoding ──────────────────────────────────────────────────────
