@@ -9,9 +9,9 @@ import { contactUa, httpGet, httpJson } from "./fetch.js";
 // something the registry states outright, and both are how a tool ends up
 // documenting a fork, an abandoned mirror, or a name-squatted package.
 //
-// A registry lookup is one keyless request that answers repository, homepage,
-// documentation, current version, licence and — the one nothing else surfaces —
-// whether the package is DEPRECATED.
+// A registry lookup uses keyless, bounded requests to answer repository,
+// homepage, documentation, current version, licence and — the one nothing else
+// surfaces — whether the package is DEPRECATED.
 
 export type RegistryKind = "npm" | "pypi" | "crates";
 
@@ -193,9 +193,9 @@ export async function lookupPackage(registry: RegistryKind, name: string, versio
  * be right, and return the first that knows it.
  *
  * Order is deliberate rather than alphabetical: npm has by far the most names,
- * so trying it first resolves most lookups in one request. An explicit
- * `registry` skips the guessing entirely, which a caller who knows the ecosystem
- * should always do.
+ * so trying it first resolves most lookups without probing another registry. An
+ * explicit `registry` skips the guessing entirely, which a caller who knows the
+ * ecosystem should always do.
  */
 export async function resolvePackage(name: string, opts: { registry?: RegistryKind; version?: string } = {}): Promise<PackageFacts | undefined> {
   const order: RegistryKind[] = opts.registry ? [opts.registry] : ["npm", "pypi", "crates"];

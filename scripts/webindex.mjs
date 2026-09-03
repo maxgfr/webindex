@@ -5056,7 +5056,7 @@ function webindexAdapter() {
       {
         name: "webindex_package",
         title: "Resolve a library name to its real coordinates",
-        description: "Look a package up in npm, PyPI or crates.io and return its repository, homepage, documentation URL, current version, licence and any DEPRECATION notice. Use this before searching the web for a library: it is one request, and it is the registry's own answer rather than whatever ranks for '<name> official documentation'.",
+        description: "Look a package up in npm, PyPI or crates.io and return its repository, homepage, documentation URL, current version, licence and any DEPRECATION notice. Use this before searching the web for a library: it uses bounded registry requests, and it is the registry's own answer rather than whatever ranks for '<name> official documentation'.",
         inputSchema: {
           type: "object",
           properties: {
