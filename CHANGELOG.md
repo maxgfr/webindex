@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.18.9](https://github.com/maxgfr/webindex/compare/v1.18.8...v1.18.9) (2026-09-03)
+
+
+### Bug Fixes
+
+* **docs:** describe bounded registry requests ([23a7100](https://github.com/maxgfr/webindex/commit/23a71002b8ceafc6ee23393142e431fe44a61279))
+* **registry:** bound optional npm enrichment ([554994c](https://github.com/maxgfr/webindex/commit/554994cccd8db594ec925b54b2577beea4a752ca))
+* **registry:** handle escaped npm suffix boundaries ([e4ea967](https://github.com/maxgfr/webindex/commit/e4ea967b44063d7ba0e67579c0d8811a4d637bc3))
+* **registry:** parse npm time suffix linearly ([6f09667](https://github.com/maxgfr/webindex/commit/6f09667aa61dca18935dc6bc7970462aa556a09b))
+* **registry:** preserve npm publication metadata ([4aa2c27](https://github.com/maxgfr/webindex/commit/4aa2c27ecea93b6ccd7ad471c3c8bf1eaa34da29))
+* **registry:** use compact npm version documents ([12ef6c3](https://github.com/maxgfr/webindex/commit/12ef6c3df3651225679399af388c1a1c6a15f22f))
+
+
+### Performance Improvements
+
+* **registry:** reuse npm packument timestamps ([005a66a](https://github.com/maxgfr/webindex/commit/005a66ad439e12d0b806e9cf6f9ceb00e0e616cb))
+
 ## [1.18.8](https://github.com/maxgfr/webindex/compare/v1.18.7...v1.18.8) (2026-09-02)
 
 
