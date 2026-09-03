@@ -4054,12 +4054,13 @@ function reqOpts2() {
 async function lookupPackage(registry, name, version) {
   const n = name.trim();
   if (!n) return void 0;
-  const r = await httpJson("GET", REGISTRY_URL[registry](n), void 0, reqOpts2());
+  const url = registry === "npm" ? `${REGISTRY_URL.npm(n)}/${encodeURIComponent(version ?? "latest")}` : REGISTRY_URL[registry](n);
+  const r = await httpJson("GET", url, void 0, reqOpts2());
   if (!r.ok || !r.data || typeof r.data !== "object") return void 0;
   const d = r.data;
   if (registry === "npm") {
-    const latest = version ?? d["dist-tags"]?.latest;
-    const v = latest && d.versions?.[latest] || {};
+    const latest = version ?? d["dist-tags"]?.latest ?? d.version;
+    const v = latest && d.versions?.[latest] || d;
     const deprecated = typeof v.deprecated === "string" ? v.deprecated : v.deprecated === true ? "deprecated" : void 0;
     return {
       registry,

@@ -280,6 +280,31 @@ describe("the branches a forge and a repo ref actually take", () => {
     expect(p?.description).toBe("d");
   });
 
+  it("resolves a large npm package through the compact latest-version endpoint", async () => {
+    const seen: string[] = [];
+    installFetchMock((url) => {
+      seen.push(url);
+      if (url.endsWith("/typescript/latest"))
+        return json({
+          name: "typescript",
+          version: "7.0.2",
+          description: "TypeScript is a language for application scale JavaScript development",
+          repository: { url: "git+https://github.com/microsoft/TypeScript.git" },
+          license: "Apache-2.0",
+        });
+      return { status: 413, body: "{}", contentType: "application/json" };
+    });
+
+    expect(await lookupPackage("npm", "typescript")).toMatchObject({
+      registry: "npm",
+      name: "typescript",
+      version: "7.0.2",
+      repository: "https://github.com/microsoft/TypeScript",
+      license: "Apache-2.0",
+    });
+    expect(seen).toEqual(["https://registry.npmjs.org/typescript/latest"]);
+  });
+
   it("treats npm's boolean deprecation flag as a notice", async () => {
     installFetchMock(() => json({ name: "p", "dist-tags": { latest: "1.0.0" }, versions: { "1.0.0": { deprecated: true } } }));
     expect((await lookupPackage("npm", "p"))?.deprecated).toBe("deprecated");

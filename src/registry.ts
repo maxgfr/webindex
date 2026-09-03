@@ -72,13 +72,19 @@ function reqOpts() {
 export async function lookupPackage(registry: RegistryKind, name: string, version?: string): Promise<PackageFacts | undefined> {
   const n = name.trim();
   if (!n) return undefined;
-  const r = await httpJson("GET", REGISTRY_URL[registry](n), undefined, reqOpts());
+  // npm's package document can be many megabytes for long-lived packages and
+  // legitimately exceeds the shared HTTP safety cap. The version endpoint
+  // returns the same facts this API exposes without downloading every release.
+  const url = registry === "npm" ? `${REGISTRY_URL.npm(n)}/${encodeURIComponent(version ?? "latest")}` : REGISTRY_URL[registry](n);
+  const r = await httpJson("GET", url, undefined, reqOpts());
   if (!r.ok || !r.data || typeof r.data !== "object") return undefined;
   const d = r.data as Record<string, any>;
 
   if (registry === "npm") {
-    const latest = version ?? d["dist-tags"]?.latest;
-    const v = (latest && d.versions?.[latest]) || {};
+    // Keep accepting a full packument here for embedders that provide their own
+    // fetch implementation, while preferring npm's compact version document.
+    const latest = version ?? d["dist-tags"]?.latest ?? d.version;
+    const v = (latest && d.versions?.[latest]) || d;
     // npm marks deprecation on the VERSION, not the package — so a package whose
     // latest release is deprecated looks perfectly healthy at the top level.
     const deprecated = typeof v.deprecated === "string" ? v.deprecated : v.deprecated === true ? "deprecated" : undefined;
