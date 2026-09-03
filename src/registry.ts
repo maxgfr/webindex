@@ -204,7 +204,11 @@ export async function lookupPackage(registry: RegistryKind, name: string, versio
     // fetch implementation, while preferring npm's compact version document.
     const latest = version ?? d["dist-tags"]?.latest ?? d.version;
     const v = (latest && d.versions?.[latest]) || d;
-    const publishedAt = await npmPublishedAt(REGISTRY_URL.npm(n), latest);
+    // A full packument states the publication time outright; the compact version
+    // document does not. Buying it again from the suffix would cost a 2 MiB range
+    // read against a 2.5s budget for a date this response already carries.
+    const stated = latest ? d.time?.[latest] : undefined;
+    const publishedAt = typeof stated === "string" ? stated : await npmPublishedAt(REGISTRY_URL.npm(n), latest);
     // npm marks deprecation on the VERSION, not the package — so a package whose
     // latest release is deprecated looks perfectly healthy at the top level.
     const deprecated = typeof v.deprecated === "string" ? v.deprecated : v.deprecated === true ? "deprecated" : undefined;
@@ -218,7 +222,7 @@ export async function lookupPackage(registry: RegistryKind, name: string, versio
       documentation: typeof v.documentation === "string" ? v.documentation : undefined,
       license: typeof v.license === "string" ? v.license : v.license?.type,
       ...(deprecated ? { deprecated } : {}),
-      publishedAt: publishedAt ?? (latest ? d.time?.[latest] : undefined),
+      publishedAt,
     };
   }
 

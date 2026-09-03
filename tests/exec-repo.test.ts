@@ -344,6 +344,33 @@ describe("the branches a forge and a repo ref actually take", () => {
     expect(requests).toBe(2);
   });
 
+  it("spends no suffix request when the response already carries the publication time", async () => {
+    let requests = 0;
+    installFetchMock((url) => {
+      requests++;
+      // What an embedder's own fetch adapter does: answer the version endpoint
+      // with the whole packument, publication times included.
+      if (url.endsWith("/left-pad/latest"))
+        return json({
+          name: "left-pad",
+          "dist-tags": { latest: "1.3.0" },
+          time: { "1.3.0": "2018-01-01T00:00:00.000Z" },
+          versions: { "1.3.0": { license: "WTFPL" } },
+        });
+      return { status: 404, body: "{}", contentType: "application/json" };
+    });
+
+    expect(await lookupPackage("npm", "left-pad")).toMatchObject({
+      name: "left-pad",
+      version: "1.3.0",
+      license: "WTFPL",
+      publishedAt: "2018-01-01T00:00:00.000Z",
+    });
+    // The date was already in hand — buying it again costs a 2 MiB range read
+    // against a 2.5s budget, for a value this document already stated.
+    expect(requests).toBe(1);
+  });
+
   // The publication-time suffix is the one request in this file whose input is a
   // PARTIAL document by construction: a byte range that opens mid-JSON, or — when
   // a registry or a corporate proxy ignores `Range` altogether — the capped head

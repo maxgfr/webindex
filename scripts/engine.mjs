@@ -2670,7 +2670,8 @@ async function lookupPackage(registry, name, version) {
   if (registry === "npm") {
     const latest = version ?? d["dist-tags"]?.latest ?? d.version;
     const v = latest && d.versions?.[latest] || d;
-    const publishedAt = await npmPublishedAt(REGISTRY_URL.npm(n), latest);
+    const stated = latest ? d.time?.[latest] : void 0;
+    const publishedAt = typeof stated === "string" ? stated : await npmPublishedAt(REGISTRY_URL.npm(n), latest);
     const deprecated = typeof v.deprecated === "string" ? v.deprecated : v.deprecated === true ? "deprecated" : void 0;
     return {
       registry,
@@ -2682,7 +2683,7 @@ async function lookupPackage(registry, name, version) {
       documentation: typeof v.documentation === "string" ? v.documentation : void 0,
       license: typeof v.license === "string" ? v.license : v.license?.type,
       ...deprecated ? { deprecated } : {},
-      publishedAt: publishedAt ?? (latest ? d.time?.[latest] : void 0)
+      publishedAt
     };
   }
   if (registry === "pypi") {
