@@ -87,11 +87,29 @@ describe("running a command without blocking", () => {
   });
 
   it("actually overlaps — that is the reason it exists", async () => {
-    const started = Date.now();
-    await Promise.all([1, 2, 3].map(() => shAsync(NODE, ["-e", "setTimeout(() => {}, 120)"])));
-    // Serially this is ~360ms. A generous ceiling keeps the assertion about
-    // overlap rather than about timer precision on a loaded machine.
-    expect(Date.now() - started).toBeLessThan(320);
+    const rendezvous = mkdtempSync(join(tmpdir(), "webindex-overlap-"));
+    try {
+      const runs = await Promise.all(
+        [1, 2, 3].map((id) =>
+          shAsync(
+            NODE,
+            [
+              "-e",
+              "const fs=require('node:fs');const path=require('node:path');const [dir,id]=process.argv.slice(1);fs.writeFileSync(path.join(dir,id),'');const deadline=Date.now()+2000;(function wait(){if(fs.readdirSync(dir).length===3)process.exit(0);if(Date.now()>deadline)process.exit(1);setTimeout(wait,10)})()",
+              rendezvous,
+              String(id),
+            ],
+            { timeoutMs: 3_000 },
+          ),
+        ),
+      );
+      // A serial implementation deadlocks on the first child because none of
+      // its peers can create their rendezvous markers. This proves overlap
+      // without assuming how fast process startup is on the current machine.
+      expect(runs.map((r) => r.status)).toEqual([0, 0, 0]);
+    } finally {
+      rmSync(rendezvous, { recursive: true, force: true });
+    }
   });
 });
 
