@@ -110,6 +110,10 @@ async function npmPublishedAt(packageUrl: string, version: string | undefined): 
   if (!version) return undefined;
   const tail = await httpGet(packageUrl, {
     ...reqOpts(),
+    // Optional enrichment must not inherit the primary lookup's retry budget:
+    // package facts are already usable if this suffix is slow or unavailable.
+    timeoutMs: 2_500,
+    retries: 0,
     headers: { range: `bytes=-${NPM_TIME_TAIL_BYTES}` },
     maxBytes: NPM_TIME_TAIL_BYTES,
   });

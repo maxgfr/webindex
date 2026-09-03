@@ -331,6 +331,19 @@ describe("the branches a forge and a repo ref actually take", () => {
     });
   });
 
+  it("does not retry optional npm publication-time recovery", async () => {
+    let requests = 0;
+    installFetchMock((url) => {
+      requests++;
+      if (url.endsWith("/left-pad/latest")) return json({ name: "left-pad", version: "1.3.0", license: "WTFPL" });
+      if (url.endsWith("/left-pad")) return { status: 503, body: "{}", contentType: "application/json" };
+      return { status: 404, body: "{}", contentType: "application/json" };
+    });
+
+    expect(await lookupPackage("npm", "left-pad")).toMatchObject({ name: "left-pad", version: "1.3.0" });
+    expect(requests).toBe(2);
+  });
+
   it("treats npm's boolean deprecation flag as a notice", async () => {
     installFetchMock(() => json({ name: "p", "dist-tags": { latest: "1.0.0" }, versions: { "1.0.0": { deprecated: true } } }));
     expect((await lookupPackage("npm", "p"))?.deprecated).toBe("deprecated");
