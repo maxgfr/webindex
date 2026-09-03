@@ -281,9 +281,9 @@ describe("the branches a forge and a repo ref actually take", () => {
   });
 
   it("resolves a large npm package through the compact latest-version endpoint", async () => {
-    const seen: string[] = [];
-    installFetchMock((url) => {
-      seen.push(url);
+    const seen: { url: string; range?: string }[] = [];
+    installFetchMock((url, init) => {
+      seen.push({ url, range: (init?.headers as Record<string, string> | undefined)?.range });
       if (url.endsWith("/typescript/latest"))
         return json({
           name: "typescript",
@@ -291,6 +291,12 @@ describe("the branches a forge and a repo ref actually take", () => {
           description: "TypeScript is a language for application scale JavaScript development",
           repository: { url: "git+https://github.com/microsoft/TypeScript.git" },
           license: "Apache-2.0",
+        });
+      if (url.endsWith("/typescript"))
+        return json({
+          ignored: "the response starts in the middle of the packument",
+          time: { "7.0.2": "2026-07-08T15:55:18.431Z" },
+          maintainers: [],
         });
       return { status: 413, body: "{}", contentType: "application/json" };
     });
@@ -301,8 +307,28 @@ describe("the branches a forge and a repo ref actually take", () => {
       version: "7.0.2",
       repository: "https://github.com/microsoft/TypeScript",
       license: "Apache-2.0",
+      publishedAt: "2026-07-08T15:55:18.431Z",
     });
-    expect(seen).toEqual(["https://registry.npmjs.org/typescript/latest"]);
+    expect(seen).toEqual([
+      { url: "https://registry.npmjs.org/typescript/latest", range: undefined },
+      { url: "https://registry.npmjs.org/typescript", range: "bytes=-2097152" },
+    ]);
+  });
+
+  it("preserves npm publication time for an explicit scoped version", async () => {
+    installFetchMock((url, init) => {
+      if (url.endsWith("/@types%2Fnode/22.0.0")) return json({ name: "@types/node", version: "22.0.0", license: "MIT" });
+      if (url.endsWith("/@types%2Fnode") && (init?.headers as Record<string, string> | undefined)?.range === "bytes=-2097152") {
+        return json({ time: { "22.0.0": "2024-07-22T17:04:35.367Z" } });
+      }
+      return { status: 404, body: "{}", contentType: "application/json" };
+    });
+
+    expect(await lookupPackage("npm", "@types/node", "22.0.0")).toMatchObject({
+      name: "@types/node",
+      version: "22.0.0",
+      publishedAt: "2024-07-22T17:04:35.367Z",
+    });
   });
 
   it("treats npm's boolean deprecation flag as a notice", async () => {

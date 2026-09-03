@@ -4051,6 +4051,50 @@ function normalizeRepoUrl(raw) {
 function reqOpts2() {
   return { timeoutMs: 12e3, userAgent: contactUa(), accept: "application/json" };
 }
+var NPM_TIME_TAIL_BYTES = 2 * 1024 * 1024;
+function jsonObjectAt(text, open) {
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let i = open; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') quoted = false;
+      continue;
+    }
+    if (c === '"') quoted = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) {
+      try {
+        const parsed = JSON.parse(text.slice(open, i + 1));
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : void 0;
+      } catch {
+        return void 0;
+      }
+    }
+  }
+  return void 0;
+}
+function npmTimeFromTail(text, version) {
+  const key = /"time"\s*:\s*\{/g;
+  let publishedAt;
+  for (let match = key.exec(text); match; match = key.exec(text)) {
+    const time = jsonObjectAt(text, text.indexOf("{", match.index));
+    if (typeof time?.[version] === "string") publishedAt = time[version];
+  }
+  return publishedAt;
+}
+async function npmPublishedAt(packageUrl, version) {
+  if (!version) return void 0;
+  const tail = await httpGet(packageUrl, {
+    ...reqOpts2(),
+    headers: { range: `bytes=-${NPM_TIME_TAIL_BYTES}` },
+    maxBytes: NPM_TIME_TAIL_BYTES
+  });
+  return tail.ok ? npmTimeFromTail(tail.body, version) : void 0;
+}
 async function lookupPackage(registry, name, version) {
   const n = name.trim();
   if (!n) return void 0;
@@ -4061,6 +4105,7 @@ async function lookupPackage(registry, name, version) {
   if (registry === "npm") {
     const latest = version ?? d["dist-tags"]?.latest ?? d.version;
     const v = latest && d.versions?.[latest] || d;
+    const publishedAt = await npmPublishedAt(REGISTRY_URL.npm(n), latest);
     const deprecated = typeof v.deprecated === "string" ? v.deprecated : v.deprecated === true ? "deprecated" : void 0;
     return {
       registry,
@@ -4072,7 +4117,7 @@ async function lookupPackage(registry, name, version) {
       documentation: typeof v.documentation === "string" ? v.documentation : void 0,
       license: typeof v.license === "string" ? v.license : v.license?.type,
       ...deprecated ? { deprecated } : {},
-      publishedAt: latest ? d.time?.[latest] : void 0
+      publishedAt: publishedAt ?? (latest ? d.time?.[latest] : void 0)
     };
   }
   if (registry === "pypi") {
