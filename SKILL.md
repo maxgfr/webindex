@@ -14,11 +14,10 @@ This document is served over MCP as `skill://SKILL.md`, alongside
 
 ## What this is not
 
-**It is not the tool that answers a research question.** It has no evidence
-model, no dossier, no citation gate and no report — deliberately, because those
-are the product decisions it exists to stay out of. An agent that reaches for
-`search` → `crawl` → `fetch` and writes a summary from what comes back has
-produced exactly the ungrounded answer the tools below exist to prevent.
+The calling agent owns the research question, source selection, evidence checks
+and final citations. webindex supplies discovery, extraction and ranking. Read
+the source passages before writing a conclusion; search snippets and relevance
+scores alone do not establish a claim.
 
 So it is also **not meant to compete for implicit skill selection**. The
 `agents/openai.yaml` policy disables implicit invocation while keeping explicit
@@ -39,6 +38,21 @@ Route by what you actually want:
 | a precise answer about a named open-source project | `ultradoc` |
 | an idea turned into a buildable spec | `construct` |
 | one URL turned into clean text, or a pool ranked | this, directly |
+
+## Combine with the host's search
+
+When ChatGPT or Claude already provides native web search, use it to discover
+sources for broad or current questions, then send useful URLs to
+`webindex_fetch`. Use `webindex_search` to supplement missing coverage or when
+native search is unavailable. A supplied URL can go straight to extraction.
+
+Rank the fetched `{url,title,text}` documents with `webindex_rank`, keeping
+the original URLs and discovery provenance in the caller's records. Inspect
+the relevant passages and cite their sources. For a blocked or unreadable page,
+try the host's reader or another source and report the gap if it remains.
+
+Read `references/host-search.md` for the ChatGPT/Claude workflow, connection
+boundaries and a concrete MCP example.
 
 ## The commands
 
@@ -121,6 +135,7 @@ them off for sandboxes, test suites and air-gapped runs.
 
 ## References
 
+- `references/host-search.md` — combining ChatGPT or Claude search with extraction and ranking.
 - `references/web-discovery.md` — the discovery cascade, and what each rung costs.
 - `references/provider-apis.md` — forges and package registries, and their quotas.
 - `references/ranking.md` — how a candidate pool becomes a reading order.

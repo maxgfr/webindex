@@ -15,7 +15,7 @@
 // deciding whether to re-extract should be able to tell them apart.
 
 import { createHash } from "node:crypto";
-import { httpGet } from "./fetch.js";
+import { httpGet, type HttpResult } from "./fetch.js";
 
 export interface Fingerprint {
   /** The URL as asked for. Not canonicalised: a caller comparing must compare like with like. */
@@ -37,6 +37,18 @@ export function contentHash(body: string | Buffer): string {
   return createHash("sha256").update(body).digest("hex");
 }
 
+function observation(url: string, res: HttpResult): Fingerprint {
+  return {
+    url,
+    ...(res.etag ? { etag: res.etag } : {}),
+    ...(res.lastModified ? { lastModified: res.lastModified } : {}),
+    ...(res.ok && !res.truncated ? { contentHash: contentHash(res.body) } : {}),
+    bytes: res.bytesRead ?? Buffer.byteLength(res.body),
+    status: res.status,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
 /**
  * Observe a URL: its validators, its hash, and when it was seen.
  *
@@ -46,15 +58,7 @@ export function contentHash(body: string | Buffer): string {
  */
 export async function fingerprint(url: string, opts: { timeoutMs?: number; maxBytes?: number } = {}): Promise<Fingerprint> {
   const res = await httpGet(url, opts);
-  return {
-    url,
-    ...(res.etag ? { etag: res.etag } : {}),
-    ...(res.lastModified ? { lastModified: res.lastModified } : {}),
-    ...(res.ok ? { contentHash: contentHash(res.body) } : {}),
-    bytes: res.body.length,
-    status: res.status,
-    fetchedAt: new Date().toISOString(),
-  };
+  return observation(url, res);
 }
 
 export interface ChangeVerdict {
@@ -89,20 +93,16 @@ export async function hasChanged(
   if (previous?.lastModified) headers["if-modified-since"] = previous.lastModified;
 
   const res = await httpGet(url, { ...opts, ...(Object.keys(headers).length ? { headers } : {}) });
-  const observed: Fingerprint = {
-    url,
-    ...(res.etag ? { etag: res.etag } : {}),
-    ...(res.lastModified ? { lastModified: res.lastModified } : {}),
-    ...(res.ok && res.body ? { contentHash: contentHash(res.body) } : {}),
-    bytes: res.body.length,
-    status: res.status,
-    fetchedAt: new Date().toISOString(),
-  };
+  const observed = observation(url, res);
 
   if (res.status === 304) return { changed: false, via: "not-modified", fingerprint: { ...observed, ...previous, status: 304, bytes: 0 } };
 
   if (!res.ok) {
     return { via: "unknown", fingerprint: observed, note: `could not read ${url}: ${res.error ?? `status ${res.status}`}` };
+  }
+
+  if (res.truncated) {
+    return { via: "unknown", fingerprint: observed, note: `could not compare ${url}: response truncated at the byte cap.` };
   }
 
   // With nothing to compare against, the first observation is not a change —

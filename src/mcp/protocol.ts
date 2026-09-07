@@ -80,7 +80,7 @@ export function validateArgs(schema: JsonSchema, args: Record<string, unknown>):
     const actual = Array.isArray(value) ? "array" : typeof value;
 
     if (spec.type === "number") {
-      if (actual === "number") continue;
+      if (actual === "number" && Number.isFinite(value)) continue;
       if (actual === "string" && (value as string).trim() !== "" && Number.isFinite(Number(value))) continue;
       return `\`${key}\` must be a number, got ${actual === "string" ? JSON.stringify(value) : actual}`;
     }
@@ -179,7 +179,7 @@ const LOOPBACK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 export function isOriginAllowed(origin: string | undefined, allowed: string[] = []): boolean {
   if (origin === undefined) return true;
   const o = origin.trim();
-  if (o === "" || o === "null") return true;
+  if (o === "" || o === "null") return false;
   if (LOOPBACK_ORIGIN.test(o)) return true;
   return allowed.some((a) => a === "*" || a.toLowerCase() === o.toLowerCase());
 }

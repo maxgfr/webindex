@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BOOL_FLAGS, HELP, main, VALUE_FLAGS, webindexAdapter } from "../src/cli.js";
 import { documentedFlags, missingFromHelp } from "../src/cli-kit.js";
-import { ToolError } from "../src/mcp/server.js";
+import { createServer, ToolError } from "../src/mcp/server.js";
 import { LATEST_PROTOCOL } from "../src/mcp/protocol.js";
 import { STACK_SERVICES } from "../src/stack.js";
 import { installFetchMock } from "./fetchmock.js";
@@ -1001,5 +1001,99 @@ describe("the new commands", () => {
     installFetchMock(() => ({ status: 500, body: "", contentType: "text/plain" }));
     expect(await run(["changed", "https://c.test/", "--etag", '"a"'])).toBe(1);
     expect(stdout()).toMatch(/unknown/);
+  });
+});
+
+describe("audit regressions", () => {
+  it.each(["txt", "md"])("preserves literal markup in explicit .%s files through CLI and MCP", async (extension) => {
+    const file = join(dir, `literal.${extension}`);
+    const text = "<html> is a literal tag in this document. <T> is a generic.\n";
+    writeFileSync(file, text);
+    expect(await run(["extract", file, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ text, extractor: "plain" });
+    expect((await webindexAdapter().callTool("webindex_extract", { path: file })).text).toBe(`${text}\n\n---\nextractor: plain`);
+  });
+
+  it("extracts HTML fragments when the extension explicitly names HTML", async () => {
+    const file = join(dir, "fragment.html");
+    writeFileSync(file, "<p>Visible text</p>");
+    expect(await run(["extract", file, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ text: "Visible text", extractor: "native" });
+  });
+
+  it("preserves a rank limit sent by an MCP client as a numeric string", async () => {
+    const server = createServer(webindexAdapter());
+    const messages: any[] = [];
+    await server.handle(
+      {
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "webindex_rank",
+          arguments: {
+            question: "alpha",
+            limit: "1",
+            documents: [
+              { url: "a", text: "alpha beta" },
+              { url: "b", text: "alpha zeta" },
+            ],
+          },
+        },
+      },
+      (m) => {
+        messages.push(m);
+      },
+    );
+    expect(JSON.parse(messages[0].result.content[0].text).ranked).toHaveLength(1);
+  });
+
+  it.each(["text", "title", "headings"])("rejects an incorrectly typed rank %s as invalid params", async (field) => {
+    const server = createServer(webindexAdapter());
+    const messages: any[] = [];
+    await server.handle(
+      {
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "webindex_rank",
+          arguments: {
+            question: "alpha",
+            documents: [{ url: "a", [field]: 123 }],
+          },
+        },
+      },
+      (m) => {
+        messages.push(m);
+      },
+    );
+    expect(messages[0].error).toMatchObject({ code: -32602 });
+    expect(messages[0].error.message).toContain(field);
+    expect(messages[0].error.message).toContain("[0]");
+  });
+
+  it.each([false, true])("fails a stopword-only rank consistently (json=%s)", async (json) => {
+    const docs = join(dir, "docs.json");
+    writeFileSync(docs, JSON.stringify([{ url: "a", text: "alpha" }]));
+    expect(await run(["rank", "--query", "what is the of", "--docs", docs, ...(json ? ["--json"] : [])])).toBe(1);
+    expect(stderr()).toContain("no rankable terms");
+    if (json) expect(JSON.parse(stdout()).queryTerms).toEqual([]);
+  });
+
+  it.each([false, true])("fails an empty local extraction consistently (json=%s)", async (json) => {
+    const file = join(dir, "empty.txt");
+    writeFileSync(file, "");
+    expect(await run(["extract", file, ...(json ? ["--json"] : [])])).toBe(1);
+    if (json) expect(JSON.parse(stdout()).chars).toBe(0);
+  });
+
+  it.each([false, true])("fails a disabled search consistently (json=%s)", async (json) => {
+    expect(await run(["search", "alpha", "--engine", "off", "--searxng", "off", "--firecrawl", "off", ...(json ? ["--json"] : [])])).toBe(1);
+    if (json) expect(JSON.parse(stdout()).hits).toEqual([]);
+  });
+
+  it.each([false, true])("fails an unreadable fetched page consistently (json=%s)", async (json) => {
+    installFetchMock(() => ({ body: "", status: 404 }));
+    expect(await run(["fetch", "https://audit.test/empty", ...(json ? ["--json"] : [])])).toBe(1);
+    if (json) expect(JSON.parse(stdout()).chars).toBe(0);
   });
 });

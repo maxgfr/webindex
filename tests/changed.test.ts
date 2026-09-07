@@ -28,6 +28,32 @@ describe("fingerprint", () => {
 });
 
 describe("hasChanged", () => {
+  it("compares a successful empty body against the previous hash", async () => {
+    installFetchMock(() => ({ status: 200, body: "", contentType: "text/plain" }));
+    expect(await hasChanged(URL_A, { contentHash: contentHash("previous") })).toMatchObject({
+      changed: true,
+      via: "hash",
+      fingerprint: { contentHash: contentHash(""), bytes: 0 },
+    });
+    expect(await hasChanged(URL_A, { contentHash: contentHash("") })).toMatchObject({ changed: false, via: "hash" });
+  });
+
+  it("counts response bytes before decoding a non-ASCII body", async () => {
+    installFetchMock(() => ({ status: 200, body: "été", contentType: "text/plain; charset=utf-8" }));
+    expect((await fingerprint(URL_A)).bytes).toBe(5);
+    expect((await hasChanged(URL_A)).fingerprint.bytes).toBe(5);
+  });
+
+  it("does not treat a truncated body as a complete fingerprint or an unchanged page", async () => {
+    installFetchMock(() => ({ status: 200, body: "prefix changed suffix", contentType: "text/plain" }));
+    expect((await fingerprint(URL_A, { maxBytes: 6 })).contentHash).toBeUndefined();
+    const verdict = await hasChanged(URL_A, { contentHash: contentHash("prefix") }, { maxBytes: 6 });
+    expect(verdict.changed).toBeUndefined();
+    expect(verdict.via).toBe("unknown");
+    expect(verdict.note).toMatch(/truncat|incomplete|cap/i);
+    expect(verdict.fingerprint.contentHash).toBeUndefined();
+  });
+
   it("sends the conditional headers when it has validators", async () => {
     let sent: Record<string, string> = {};
     installFetchMock((_url, init) => {

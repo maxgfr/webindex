@@ -2,7 +2,7 @@
 
 // src/cli.ts
 import { existsSync as existsSync7, readFileSync as readFileSync9 } from "fs";
-import { basename as basename4, join as join12, relative as relative2, resolve as resolve3 } from "path";
+import { basename as basename4, extname, join as join12, relative as relative2, resolve as resolve3 } from "path";
 import { pathToFileURL } from "url";
 
 // src/brand.ts
@@ -939,26 +939,83 @@ async function readCappedBytes(res, max) {
   }
   return Buffer.concat(chunks);
 }
+async function readMeasuredBody(res, max) {
+  const read = await readCappedBytes(res, max + 1);
+  const bytes = read.subarray(0, max);
+  return { bytes, bytesRead: bytes.length, truncated: read.length > max };
+}
 var DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 function isBinaryDocument(contentType) {
   return /application\/pdf/i.test(contentType) || docFormatForContentType(contentType) !== void 0;
+}
+var REDIRECT_STATUS = /* @__PURE__ */ new Set([301, 302, 303, 307, 308]);
+async function authorizedGet(url, init, authorize) {
+  let target = url;
+  const fail2 = (error) => ({ failure: { ok: false, status: 0, body: "", contentType: "", url: target, error } });
+  const headers = { ...init.headers };
+  for (let redirects = 0; ; redirects++) {
+    try {
+      if (!await authorize(target)) return fail2(`URL not authorized: ${target}`);
+    } catch (e) {
+      return fail2(`URL authorization failed for ${target}: ${e.message}`);
+    }
+    const response = await fetch(target, { ...init, headers, redirect: "manual" });
+    const location = response.headers.get("location");
+    if (!REDIRECT_STATUS.has(response.status) || !location) return { response };
+    await response.body?.cancel().catch(() => {
+    });
+    if (redirects >= 20) return fail2("Too many redirects (maximum 20)");
+    try {
+      const next = new URL(location, target);
+      if (!/^https?:$/.test(next.protocol)) return fail2(`Unsupported redirect protocol: ${next.protocol}`);
+      if (next.origin !== new URL(target).origin) {
+        delete headers.authorization;
+        delete headers.cookie;
+        delete headers["proxy-authorization"];
+      }
+      target = next.href;
+    } catch {
+      return fail2(`Invalid redirect URL from ${target}`);
+    }
+  }
 }
 async function httpGet(url, opts = {}) {
   const attempts = attemptsFor(opts.retries);
   let last = { ok: false, status: 0, body: "", contentType: "", url };
   for (let attempt = 0; attempt < attempts; attempt++) {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 2e4);
+    let t;
+    let remainingMs = opts.timeoutMs ?? 2e4;
+    let startedAt = 0;
+    const pauseTimeout = () => {
+      if (t === void 0) return;
+      clearTimeout(t);
+      t = void 0;
+      remainingMs -= performance.now() - startedAt;
+    };
+    const resumeTimeout = () => {
+      startedAt = performance.now();
+      if (remainingMs <= 0) ctrl.abort();
+      else t = setTimeout(() => ctrl.abort(), remainingMs);
+    };
     try {
       const headers = { "user-agent": opts.userAgent ?? defaultUa(), accept: opts.accept ?? "*/*" };
       if (opts.acceptLanguage) headers["accept-language"] = opts.acceptLanguage;
       for (const [k, v] of Object.entries(opts.headers ?? {})) headers[k.toLowerCase()] = v;
-      const res = await fetch(url, {
+      const init = {
         signal: ctrl.signal,
         redirect: "follow",
         headers
-      });
-      const max = opts.maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+      };
+      if (!opts.authorizeUrl) resumeTimeout();
+      const requested = opts.authorizeUrl ? await authorizedGet(url, init, async (target) => {
+        pauseTimeout();
+        const allowed = await opts.authorizeUrl(target);
+        if (allowed) resumeTimeout();
+        return allowed;
+      }) : { response: await fetch(url, init) };
+      if ("failure" in requested) return requested.failure;
+      const res = requested.response;
       const meta = {
         contentType: res.headers.get("content-type") ?? "",
         url: res.url || url,
@@ -967,14 +1024,15 @@ async function httpGet(url, opts = {}) {
         rateLimited: detectRateLimited(res.status, res.headers),
         retryAfterMs: parseRetryAfter(res.headers)
       };
+      const max = opts.maxBytes ?? (isBinaryDocument(meta.contentType) ? opts.maxDocumentBytes : void 0) ?? DEFAULT_MAX_RESPONSE_BYTES;
       const declared = Number(res.headers.get("content-length"));
       if (Number.isFinite(declared) && declared > max) {
         ctrl.abort();
-        return { ok: false, status: res.status, body: "", ...meta, error: `response too large: ${declared} bytes > ${max} cap` };
+        return { ok: false, status: res.status, body: "", bytesRead: 0, truncated: true, ...meta, error: `response too large: ${declared} bytes > ${max} cap` };
       }
-      const bytes = res.status === 304 ? Buffer.alloc(0) : await readCappedBytes(res, max);
+      const { bytes, bytesRead, truncated } = res.status === 304 ? { bytes: Buffer.alloc(0), bytesRead: 0, truncated: false } : await readMeasuredBody(res, max);
       countFetch(bytes.length, false);
-      const keepBytes = opts.binary || isBinaryDocument(meta.contentType) && bytes.length < max;
+      const keepBytes = opts.binary || isBinaryDocument(meta.contentType) && !truncated;
       const result = {
         ok: res.ok,
         status: res.status,
@@ -983,6 +1041,8 @@ async function httpGet(url, opts = {}) {
         // replaced by U+FFFD, and nothing anywhere noticed.
         body: opts.binary ? "" : decodeBody(bytes, meta.contentType),
         bytes: keepBytes ? bytes : void 0,
+        bytesRead,
+        truncated,
         ...meta
       };
       if (RETRY_STATUS.has(res.status) && attempt < attempts - 1) {
@@ -1021,11 +1081,11 @@ async function httpJson(method, url, body, opts = {}) {
         body: body === void 0 ? void 0 : JSON.stringify(body)
       });
       const max = opts.maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
-      const bytes = await readCappedBytes(res, max + 1);
+      const { bytes, bytesRead, truncated } = await readMeasuredBody(res, max);
       countFetch(bytes.length, false);
-      if (bytes.length > max) {
+      if (truncated) {
         ctrl.abort();
-        return { ok: false, status: res.status, data: void 0, error: `response too large: over the ${max}-byte cap` };
+        return { ok: false, status: res.status, data: void 0, bytesRead, truncated, error: `response too large: over the ${max}-byte cap` };
       }
       const text = bytes.toString("utf8");
       let data;
@@ -1034,7 +1094,7 @@ async function httpJson(method, url, body, opts = {}) {
       } catch {
         data = text;
       }
-      const result = { ok: res.ok, status: res.status, data };
+      const result = { ok: res.ok, status: res.status, data, bytesRead, truncated };
       if (RETRY_STATUS.has(res.status) && attempt < attempts - 1) {
         last = result;
         await sleep(retryDelayMs(res.headers));
@@ -1186,6 +1246,14 @@ function htmlTitle(html) {
   const t = decodeEntities(m[1].replace(/\s+/g, " ").trim());
   return t || void 0;
 }
+function htmlAttributes(tag) {
+  const attrs = /* @__PURE__ */ new Map();
+  for (const m of tag.matchAll(/([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) {
+    const name = m[1].toLowerCase();
+    if (!attrs.has(name)) attrs.set(name, m[2] ?? m[3] ?? m[4] ?? "");
+  }
+  return attrs;
+}
 function htmlCanonicalUrl(html) {
   const head = html.slice(0, 6e4);
   const canonical = /<link\b[^>]*\brel=["']?canonical["']?[^>]*>/i.exec(head)?.[0];
@@ -1258,7 +1326,7 @@ async function fetchAndExtract(url, opts = {}) {
   const wantsPdf = looksLikePdfUrl(url);
   const wantsDoc = wantsPdf ? void 0 : docFormatForUrl(url);
   let firecrawlNote;
-  if (!wantsPdf && !wantsDoc) {
+  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl) {
     const fc = await scrapeViaFirecrawl(url, opts);
     if (fc.data && (fc.data.statusCode ?? 200) < 400) {
       return {
@@ -1272,7 +1340,7 @@ async function fetchAndExtract(url, opts = {}) {
     firecrawlNote = fc.data ? `Firecrawl got HTTP ${fc.data.statusCode} for ${url} \u2014 fell back to the built-in extractor.` : fc.why;
   }
   const base = wantsPdf ? PDF_FETCH_OPTS : wantsDoc ? DOC_FETCH_OPTS : { accept: "text/html,text/plain,*/*", acceptLanguage: opts.acceptLanguage };
-  const fetchOpts = opts.headers ? { ...base, headers: opts.headers } : base;
+  const fetchOpts = { ...base, maxDocumentBytes: PDF_FETCH_OPTS.maxBytes, headers: opts.headers, authorizeUrl: opts.authorizeUrl };
   let res = await httpGet(url, fetchOpts);
   if (!res.ok && brand().defaultUa === "contact" && (res.status === 403 || res.status === 429)) {
     res = await httpGet(url, { ...fetchOpts, userAgent: browserUa(), acceptLanguage: opts.acceptLanguage ?? "en-US,en;q=0.9" });
@@ -1285,16 +1353,21 @@ async function fetchAndExtract(url, opts = {}) {
     return { text: "", finalUrl: res.url, status: res.status, note: `Could not fetch ${url} (${why}).` };
   }
   const validators = res.etag || res.lastModified ? { etag: res.etag, lastModified: res.lastModified } : {};
+  if (res.truncated && (wantsPdf || wantsDoc || isBinaryDocument(res.contentType))) {
+    return { text: "", finalUrl: res.url, status: res.status, note: `Fetched ${url} but the document exceeds the response size cap.` };
+  }
   if (wantsPdf || /application\/pdf/i.test(res.contentType)) {
-    const bytes = res.bytes ?? (await httpGet(url, PDF_FETCH_OPTS)).bytes;
+    const bytes = res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl })).bytes;
     const got = bytes ? await extractPdf(bytes, {
       firecrawl: async () => {
+        if (opts.authorizeUrl) return void 0;
         const fc = await scrapeViaFirecrawl(url, opts);
         return fc.data && (fc.data.statusCode ?? 200) < 400 ? fc.data.markdown : void 0;
       }
     }) : { text: "", reason: "empty response body" };
     return {
       text: got.text,
+      documentType: "pdf",
       finalUrl: res.url,
       status: res.status,
       // `native` keeps reporting as absent, which is what the cache key and every
@@ -1306,18 +1379,20 @@ async function fetchAndExtract(url, opts = {}) {
   }
   const docFmt = wantsDoc ?? docFormatForContentType(res.contentType);
   if (docFmt) {
-    const bytes = res.bytes ?? (await httpGet(url, DOC_FETCH_OPTS)).bytes;
+    const bytes = res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl })).bytes;
     const got = bytes ? await extractDocument(bytes, docFmt, {
       firecrawl: async () => {
+        if (opts.authorizeUrl) return void 0;
         const fc = await scrapeViaFirecrawl(url, opts);
         return fc.data && (fc.data.statusCode ?? 200) < 400 ? fc.data.markdown : void 0;
       }
     }) : { text: "", reason: "empty response body" };
     if (!got.text && docFmt.textFallback && bytes?.length) {
-      return { text: bytes.toString("utf8"), finalUrl: res.url, status: res.status, note: firecrawlNote, ...validators };
+      return { text: decodeBody(bytes, res.contentType), documentType: "doc", finalUrl: res.url, status: res.status, note: firecrawlNote, ...validators };
     }
     return {
       text: got.text,
+      documentType: "doc",
       finalUrl: res.url,
       status: res.status,
       extractor: got.via,
@@ -1325,7 +1400,9 @@ async function fetchAndExtract(url, opts = {}) {
       ...validators
     };
   }
-  const isHtml = /html/i.test(res.contentType) || /^\s*</.test(res.body);
+  const mime = res.contentType.split(";")[0].trim().toLowerCase();
+  const ambiguousType = !mime || mime === "application/octet-stream";
+  const isHtml = /^(?:text\/html|application\/xhtml\+xml)$/.test(mime) || ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(res.body);
   const stripped = isHtml ? htmlToText(extractMainHtml(res.body)) : res.body;
   const text = isHtml && opts.stripConsent ? stripConsentBoilerplate(stripped).text : stripped;
   const title = isHtml ? htmlTitle(res.body) : void 0;
@@ -1367,9 +1444,15 @@ function stripConsentBoilerplate(text) {
   return { text: kept.join("\n"), dropped };
 }
 function metaDescriptionOf(html) {
-  const m = /<meta[^>]+name=["']description["'][^>]*content=["']([^"']+)["']/i.exec(html) || /<meta[^>]+content=["']([^"']+)["'][^>]*name=["']description["']/i.exec(html) || /<meta[^>]+property=["']og:description["'][^>]*content=["']([^"']+)["']/i.exec(html);
-  const d = m?.[1]?.replace(/\s+/g, " ").trim();
-  return d ? decodeEntities(d) : void 0;
+  let og;
+  for (const match of html.matchAll(/<meta\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi)) {
+    const attrs = htmlAttributes(match[0]);
+    const value = attrs.get("content")?.replace(/\s+/g, " ").trim();
+    if (!value) continue;
+    if (attrs.get("name")?.toLowerCase() === "description") return decodeEntities(value);
+    if (attrs.get("property")?.toLowerCase() === "og:description" && og === void 0) og = decodeEntities(value);
+  }
+  return og;
 }
 
 // src/stack.ts
@@ -2287,7 +2370,7 @@ async function fetchSitemap(url, opts = {}) {
     const next = queue.shift();
     if (seen.has(next)) continue;
     seen.add(next);
-    const r = await httpGet(next, { accept: "application/xml,text/xml,*/*", timeoutMs: 1e4 });
+    const r = await httpGet(next, { accept: "application/xml,text/xml,*/*", timeoutMs: 1e4, authorizeUrl: opts.authorizeUrl });
     fetched++;
     if (!r.ok || !r.body.trim()) continue;
     const parsed = parseSitemap(r.body);
@@ -2376,7 +2459,8 @@ function isAllowed(robots, url) {
   return true;
 }
 var cache = /* @__PURE__ */ new Map();
-async function fetchRobots(url) {
+var guardedCaches = /* @__PURE__ */ new WeakMap();
+async function fetchRobots(url, opts = {}) {
   if (envFlag("NO_ROBOTS")) return EMPTY;
   let origin;
   try {
@@ -2384,14 +2468,20 @@ async function fetchRobots(url) {
   } catch {
     return EMPTY;
   }
-  let p = cache.get(origin);
+  let scopedCache = cache;
+  if (opts.authorizeUrl) {
+    const existing = guardedCaches.get(opts.authorizeUrl);
+    scopedCache = existing ?? /* @__PURE__ */ new Map();
+    if (!existing) guardedCaches.set(opts.authorizeUrl, scopedCache);
+  }
+  let p = scopedCache.get(origin);
   if (!p) {
     p = (async () => {
-      const r = await httpGet(`${origin}/robots.txt`, { accept: "text/plain", timeoutMs: 5e3, maxBytes: 512 * 1024 });
+      const r = await httpGet(`${origin}/robots.txt`, { accept: "text/plain", timeoutMs: 5e3, maxBytes: 512 * 1024, authorizeUrl: opts.authorizeUrl });
       if (!r.ok || !r.body.trim()) return EMPTY;
       return parseRobots(r.body, env("ROBOTS_UA") ?? brand().name);
     })();
-    cache.set(origin, p);
+    scopedCache.set(origin, p);
   }
   return p;
 }
@@ -2420,8 +2510,9 @@ async function awaitHostSlot(url, delayMs = hostDelayMs(), now = Date.now()) {
 function linksFrom(html, baseUrl) {
   const out = [];
   const seen = /* @__PURE__ */ new Set();
-  for (const m of html.matchAll(/<a\b[^>]*?\bhref\s*=\s*["']([^"'#]+)["']/gi)) {
-    const raw = m[1].trim();
+  for (const m of html.matchAll(/<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
+    const raw = decodeEntities(m[1] ?? m[2] ?? "").trim();
+    if (!raw || raw.startsWith("#")) continue;
     if (/^(mailto|tel|javascript|data):/i.test(raw)) continue;
     try {
       const abs = new URL(raw, baseUrl);
@@ -2457,12 +2548,27 @@ async function crawlSite(seed, opts = {}) {
   const disallowed = [];
   const pages = [];
   const NONE = { rules: [], sitemaps: [], absent: true };
-  const robotsFor = (url) => opts.ignoreRobots ? Promise.resolve(NONE) : fetchRobots(url);
+  const authorizeOrigin = async (url) => {
+    if (opts.crossOrigin || sameOrigin(url, seed)) return true;
+    notes.push(`${url}: destination is outside the crawl origin.`);
+    return false;
+  };
+  const robotsFor = (url) => opts.ignoreRobots ? Promise.resolve(NONE) : fetchRobots(url, { authorizeUrl: authorizeOrigin });
   const robots = await robotsFor(seed);
   if (opts.ignoreRobots) notes.push("robots.txt was not consulted (ignoreRobots) \u2014 only correct on a site you own.");
   else if (robots.absent) notes.push("no robots.txt \u2014 nothing was refused, but nothing was granted either.");
   if (robots.crawlDelayMs && opts.delayMs === void 0) notes.push(`honouring the declared Crawl-delay of ${robots.crawlDelayMs}ms.`);
   const delayFor = (r) => opts.delayMs ?? r.crawlDelayMs ?? hostDelayMs();
+  const authorizeUrl = async (url) => {
+    if (!await authorizeOrigin(url)) return false;
+    const r = await robotsFor(url);
+    if (!opts.ignoreRobots && !isAllowed(r, url)) {
+      if (!disallowed.includes(url)) disallowed.push(url);
+      return false;
+    }
+    await awaitHostSlot(url, delayFor(r));
+    return true;
+  };
   const seen = /* @__PURE__ */ new Set([canonicalizeUrl(seed)]);
   const admit = (url, depth, into) => {
     const canon = canonicalizeUrl(url);
@@ -2472,18 +2578,17 @@ async function crawlSite(seed, opts = {}) {
     into.push({ url, depth });
     return true;
   };
-  let sitemap = opts.useSitemap !== false && maxDepth > 0 ? fetchSitemap(seed, { sitemaps: robots.sitemaps }) : void 0;
-  const fetchOne = async (item, r) => {
-    await awaitHostSlot(item.url, delayFor(r));
-    const got = await fetchAndExtract(item.url, { keepHtml: item.depth < maxDepth });
+  let sitemap = opts.useSitemap !== false && maxDepth > 0 ? fetchSitemap(seed, { sitemaps: robots.sitemaps, authorizeUrl }) : void 0;
+  const fetchOne = async (item) => {
+    const got = await fetchAndExtract(item.url, { keepHtml: item.depth < maxDepth, authorizeUrl });
     if (!got.text) return `${item.url}: ${got.note ?? "nothing readable"}`;
     const page = {
-      url: item.url,
+      url: got.finalUrl,
       depth: item.depth,
       ...got.title ? { title: got.title } : {},
       text: got.text,
       extractor: got.extractor ?? "native",
-      links: got.html ? linksFrom(got.html, item.url) : []
+      links: got.html ? linksFrom(got.html, got.finalUrl) : []
     };
     return page;
   };
@@ -2511,7 +2616,7 @@ async function crawlSite(seed, opts = {}) {
       }
     };
     const results = await mapLimit(batch, width, async (a, i) => {
-      const got = await fetchOne(a.item, a.robots);
+      const got = await fetchOne(a.item);
       settled[i] = got;
       streamReady();
       return got;
@@ -2630,35 +2735,33 @@ import { createHash } from "crypto";
 function contentHash(body) {
   return createHash("sha256").update(body).digest("hex");
 }
-async function fingerprint(url, opts = {}) {
-  const res = await httpGet(url, opts);
+function observation(url, res) {
   return {
     url,
     ...res.etag ? { etag: res.etag } : {},
     ...res.lastModified ? { lastModified: res.lastModified } : {},
-    ...res.ok ? { contentHash: contentHash(res.body) } : {},
-    bytes: res.body.length,
+    ...res.ok && !res.truncated ? { contentHash: contentHash(res.body) } : {},
+    bytes: res.bytesRead ?? Buffer.byteLength(res.body),
     status: res.status,
     fetchedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
+}
+async function fingerprint(url, opts = {}) {
+  const res = await httpGet(url, opts);
+  return observation(url, res);
 }
 async function hasChanged(url, previous, opts = {}) {
   const headers = {};
   if (previous?.etag) headers["if-none-match"] = previous.etag;
   if (previous?.lastModified) headers["if-modified-since"] = previous.lastModified;
   const res = await httpGet(url, { ...opts, ...Object.keys(headers).length ? { headers } : {} });
-  const observed = {
-    url,
-    ...res.etag ? { etag: res.etag } : {},
-    ...res.lastModified ? { lastModified: res.lastModified } : {},
-    ...res.ok && res.body ? { contentHash: contentHash(res.body) } : {},
-    bytes: res.body.length,
-    status: res.status,
-    fetchedAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
+  const observed = observation(url, res);
   if (res.status === 304) return { changed: false, via: "not-modified", fingerprint: { ...observed, ...previous, status: 304, bytes: 0 } };
   if (!res.ok) {
     return { via: "unknown", fingerprint: observed, note: `could not read ${url}: ${res.error ?? `status ${res.status}`}` };
+  }
+  if (res.truncated) {
+    return { via: "unknown", fingerprint: observed, note: `could not compare ${url}: response truncated at the byte cap.` };
   }
   if (!previous || !previous.etag && !previous.lastModified && !previous.contentHash) {
     return { changed: false, via: "unknown", fingerprint: observed, note: "no previous observation \u2014 this is the baseline." };
@@ -3573,6 +3676,10 @@ var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
   return env("CACHE_DIR") ?? brand().cacheDir ?? join9(tmpdir3(), brand().name, "cache");
 }
+var PDF_CACHE_NS = "pdf";
+var DOC_CACHE_NS = "doc";
+var DOCUMENT_NAMESPACES = [PDF_CACHE_NS, DOC_CACHE_NS, "pdf-inspector", "pdftotext", "anydoc", "ocr"];
+var WRITTEN_NAMESPACES = ["native", "firecrawl", ...DOCUMENT_NAMESPACES];
 function ttlMs() {
   const fallback = brand().cacheTtlMs ?? DEFAULT_TTL_MS;
   if (env("CACHE_TTL_HOURS") !== void 0) return envInt("CACHE_TTL_HOURS", fallback / 36e5, 0) * 36e5;
@@ -4200,7 +4307,7 @@ function validateArgs(schema, args) {
     if (!spec?.type) continue;
     const actual = Array.isArray(value) ? "array" : typeof value;
     if (spec.type === "number") {
-      if (actual === "number") continue;
+      if (actual === "number" && Number.isFinite(value)) continue;
       if (actual === "string" && value.trim() !== "" && Number.isFinite(Number(value))) continue;
       return `\`${key}\` must be a number, got ${actual === "string" ? JSON.stringify(value) : actual}`;
     }
@@ -4255,7 +4362,7 @@ var LOOPBACK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 function isOriginAllowed(origin, allowed = []) {
   if (origin === void 0) return true;
   const o = origin.trim();
-  if (o === "" || o === "null") return true;
+  if (o === "" || o === "null") return false;
   if (LOOPBACK_ORIGIN.test(o)) return true;
   return allowed.some((a) => a === "*" || a.toLowerCase() === o.toLowerCase());
 }
@@ -4339,6 +4446,8 @@ function firstProse(file) {
 // src/mcp/server.ts
 var ToolError = class extends Error {
 };
+var InvalidParamsError = class extends Error {
+};
 var PromptError = class extends Error {
 };
 var ERR_INVALID_REQUEST = -32600;
@@ -4349,8 +4458,7 @@ function createServer(adapter, opts = {}) {
   const serverInfo = { name: opts.serverName ?? brand().name, version: adapter.version };
   const maxBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES2;
   let protocol = LATEST_PROTOCOL;
-  const cancelled = /* @__PURE__ */ new Set();
-  const CANCELLED_MAX = 1024;
+  const active = /* @__PURE__ */ new Map();
   const listTools = () => adapter.listTools(protocol);
   const prompts = () => adapter.prompts ?? [];
   async function handle(msg, send) {
@@ -4362,15 +4470,17 @@ function createServer(adapter, opts = {}) {
       if (msg.method === "notifications/cancelled") {
         const target = msg.params?.requestId;
         if (typeof target === "string" || typeof target === "number") {
-          if (cancelled.size >= CANCELLED_MAX) cancelled.delete(cancelled.values().next().value);
-          cancelled.add(String(target));
+          const request2 = active.get(target);
+          if (request2) request2.cancelled = true;
         }
       }
       return;
     }
     const id = msg.id;
+    const request = { cancelled: false };
+    active.set(id, request);
     const reply = (out) => {
-      if (cancelled.delete(String(id))) return;
+      if (request.cancelled) return;
       send({ jsonrpc: "2.0", id, ...out });
     };
     try {
@@ -4441,6 +4551,8 @@ function createServer(adapter, opts = {}) {
       }
     } catch (e) {
       reply({ error: { code: ERR_INTERNAL, message: errMessage(e) } });
+    } finally {
+      if (active.get(id) === request) active.delete(id);
     }
   }
   async function handleToolCall(msg, reply) {
@@ -4458,12 +4570,22 @@ function createServer(adapter, opts = {}) {
       return;
     }
     try {
-      const { text: raw, artifact } = await adapter.callTool(name, args);
+      const normalized = Object.fromEntries(
+        Object.entries(args).map(([key, value]) => [
+          key,
+          decl.inputSchema.properties[key]?.type === "number" && typeof value === "string" ? Number(value) : value
+        ])
+      );
+      const { text: raw, artifact } = await adapter.callTool(name, normalized);
       const text = capResponse(raw, name, maxBytes, artifact, adapter.capAdvice);
       const capped = text !== raw;
       const structured = protocol >= RICH_TOOLS_SINCE ? structuredContentFor(text, capped, decl.outputSchema !== void 0) : void 0;
       reply({ result: { content: [{ type: "text", text }], ...structured ? { structuredContent: structured } : {} } });
     } catch (e) {
+      if (e instanceof InvalidParamsError) {
+        reply({ error: { code: ERR_INVALID_PARAMS, message: e.message } });
+        return;
+      }
       if (e instanceof ToolError) {
         reply({ result: { content: [{ type: "text", text: e.message }], isError: true } });
         return;
@@ -4784,8 +4906,8 @@ COMMANDS
              then Firecrawl. Prints what it found, or says which backend was
              missing and how to start it \u2014 those are different answers.
   fetch      Fetch a URL and print the extracted text. Routes PDFs and office
-             documents to their ladders automatically, and falls back through
-             Firecrawl and the Wayback Machine when a page resists.
+             documents to their ladders automatically. Uses Firecrawl when
+             available, with built-in extraction as fallback.
   extract    Same extraction, on a file already on disk.
   rank       Order candidate documents against a question \u2014 BM25F, then a
              near-duplicate collapse, then MMR so the top says several
@@ -4925,7 +5047,7 @@ async function extractLocal(path) {
   try {
     bytes = readFileSync9(path);
   } catch (e) {
-    fail(`cannot read ${path}: ${e.message}`);
+    throw new ToolError(`cannot read ${path}: ${e.message}`);
   }
   const asUrl = pathToFileURL(path).href;
   if (looksLikePdfUrl(asUrl) || bytes.subarray(0, 5).toString("latin1") === "%PDF-") {
@@ -4938,7 +5060,9 @@ async function extractLocal(path) {
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason };
   }
   const raw = bytes.toString("utf8");
-  const looksHtml = /^\s*<(?:!doctype|html|head|body)\b/i.test(raw);
+  const extension = extname(path).toLowerCase();
+  const explicitText = [".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".xml", ".yaml", ".yml"].includes(extension);
+  const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
   return { text: looksHtml ? htmlToText(raw) : raw, extractor: looksHtml ? "native" : "plain" };
 }
 function rankDocuments(question, docs, limit) {
@@ -4969,9 +5093,15 @@ function parseRankDocs(value, where) {
   const arr = typeof value === "string" ? JSON.parse(value) : value;
   if (!Array.isArray(arr) || !arr.length) throw new Error(`${where} must be a non-empty JSON array of {url, text}`);
   return arr.map((d, i) => {
-    if (!d || typeof d !== "object") throw new Error(`${where}[${i}] is not an object`);
+    if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error(`${where}[${i}] is not an object`);
     const url = d.url;
     if (typeof url !== "string" || !url) throw new Error(`${where}[${i}] has no url`);
+    for (const field of ["title", "headings", "text"]) {
+      if (d[field] !== void 0 && typeof d[field] !== "string") throw new Error(`${where}[${i}].${field} must be a string`);
+    }
+    if (d.score !== void 0 && (typeof d.score !== "number" || !Number.isFinite(d.score))) {
+      throw new Error(`${where}[${i}].score must be a finite number`);
+    }
     return d;
   });
 }
@@ -5001,7 +5131,7 @@ function webindexAdapter() {
       {
         name: "webindex_fetch",
         title: "Fetch a URL as clean text",
-        description: "Fetch a URL and return its readable text. Handles HTML, PDFs (native reader \u2192 pdf-inspector \u2192 anydoc \u2192 Firecrawl \u2192 pdftotext \u2192 OCR) and office documents, and falls back through Firecrawl and the Wayback Machine for pages that resist. Returns the extracted text plus which rung produced it \u2014 never raw bytes.",
+        description: "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector \u2192 anydoc \u2192 Firecrawl \u2192 pdftotext \u2192 native \u2192 OCR) and office documents, and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text plus which rung produced it \u2014 never raw bytes. Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
         inputSchema: {
           type: "object",
           properties: {
@@ -5020,7 +5150,7 @@ function webindexAdapter() {
       {
         name: "webindex_rank",
         title: "Rank candidate documents against a question",
-        description: "Order a pool of documents by relevance to a question: BM25F (title and headings weighted above body), then SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. Returns the ranking with a score, the matched query terms, and what was collapsed \u2014 deterministic, no model, no network. Use it after gathering pages to decide what to actually read.",
+        description: "Order a pool of documents by relevance to a question: BM25F (title and headings weighted above body), then SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. Returns the ranking with a score, the matched query terms, and what was collapsed \u2014 deterministic, no model, no network. Use it after gathering pages from any search provider to decide what to actually read. Scores measure relevance within this pool, not factual accuracy.",
         inputSchema: {
           type: "object",
           properties: {
@@ -5218,7 +5348,7 @@ extractor: ${r.extractor}` };
         try {
           docs = parseRankDocs(args.documents, "`documents`");
         } catch (e) {
-          throw new ToolError(e.message);
+          throw new InvalidParamsError(e.message);
         }
         const r = rankDocuments(question, docs, typeof args.limit === "number" ? args.limit : void 0);
         if (!r.queryTerms.length) {
@@ -5325,10 +5455,10 @@ async function main(argv = process.argv.slice(2)) {
   try {
     await dispatch(argv);
   } catch (e) {
-    if (!(e instanceof UsageError)) throw e;
+    if (!(e instanceof UsageError) && !(e instanceof ToolError)) throw e;
     process.stderr.write(`webindex: ${e.message}
 `);
-    process.exit(EXIT_USAGE);
+    process.exit(e instanceof UsageError ? EXIT_USAGE : EXIT_FAILURE);
   }
 }
 async function dispatch(argv) {
@@ -5358,18 +5488,18 @@ async function dispatch(argv) {
     });
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));
-      return;
-    }
-    for (const h of r.hits) {
-      process.stdout.write(`${h.title}
+    } else {
+      for (const h of r.hits) {
+        process.stdout.write(`${h.title}
   ${h.url}${h.snippet ? `
   ${h.snippet.slice(0, 160)}` : ""}
 
 `);
-    }
-    for (const n of r.notes) process.stderr.write(`  ${n}
+      }
+      for (const n of r.notes) process.stderr.write(`  ${n}
 `);
-    if (!r.hits.length) process.exit(1);
+    }
+    if (!r.hits.length) process.exit(EXIT_FAILURE);
     return;
   }
   if (cmd === "fetch") {
@@ -5381,10 +5511,10 @@ async function dispatch(argv) {
       process.stdout.write(
         JSON.stringify({ url, title: r.title, extractor: r.extractor, status: r.status, chars: r.text.length, note: r.note, text: r.text }, null, 2) + "\n"
       );
-      return;
+    } else if (r.text) {
+      process.stdout.write(r.text + "\n");
     }
     if (!r.text) fail(`nothing readable at ${url}${r.note ? ` \u2014 ${r.note}` : ""}`);
-    process.stdout.write(r.text + "\n");
     return;
   }
   if (cmd === "extract") {
@@ -5395,10 +5525,10 @@ async function dispatch(argv) {
       process.stdout.write(
         JSON.stringify({ file: basename4(path), extractor: r.extractor, chars: r.text.length, reason: r.reason, text: r.text }, null, 2) + "\n"
       );
-      return;
+    } else if (r.text) {
+      process.stdout.write(r.text + "\n");
     }
     if (!r.text) fail(`nothing readable in ${path}${r.reason ? ` \u2014 ${r.reason}` : ""}`);
-    process.stdout.write(r.text + "\n");
     return;
   }
   if (cmd === "mcp") {
@@ -5455,15 +5585,15 @@ async function dispatch(argv) {
     const r = rankDocuments(question, docs, limit);
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));
-      return;
-    }
-    process.stdout.write(
-      r.ranked.map((x) => `${x.rank}. [${x.score.toFixed(3)}] ${x.title ?? x.url}
+    } else {
+      process.stdout.write(
+        r.ranked.map((x) => `${x.rank}. [${x.score.toFixed(3)}] ${x.title ?? x.url}
    ${x.url}${x.matched.length ? `
    matched: ${x.matched.join(", ")}` : ""}`).join("\n\n") + "\n"
-    );
-    if (r.collapsed) process.stderr.write(`${r.collapsed} near-duplicate(s) collapsed.
+      );
+      if (r.collapsed) process.stderr.write(`${r.collapsed} near-duplicate(s) collapsed.
 `);
+    }
     if (!r.queryTerms.length) {
       process.stderr.write("The question has no rankable terms once stopwords are removed \u2014 the order is arbitrary.\n");
       process.exit(1);

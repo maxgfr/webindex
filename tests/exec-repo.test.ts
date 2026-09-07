@@ -87,11 +87,27 @@ describe("running a command without blocking", () => {
   });
 
   it("actually overlaps — that is the reason it exists", async () => {
-    const started = Date.now();
-    await Promise.all([1, 2, 3].map(() => shAsync(NODE, ["-e", "setTimeout(() => {}, 120)"])));
-    // Serially this is ~360ms. A generous ceiling keeps the assertion about
-    // overlap rather than about timer precision on a loaded machine.
-    expect(Date.now() - started).toBeLessThan(320);
+    const dir = mkdtempSync(join(tmpdir(), "webindex-overlap-"));
+    // Each child waits for all three arrivals before it can succeed. A serial
+    // implementation times out its first child; a loaded machine may take its
+    // time without turning scheduler latency into a false failure.
+    const child = `
+      const fs = require('node:fs');
+      fs.writeFileSync(process.argv[1], 'ready');
+      const deadline = setTimeout(() => process.exit(3), 4000);
+      const poll = setInterval(() => {
+        if (fs.readdirSync('.').length !== 3) return;
+        clearTimeout(deadline);
+        clearInterval(poll);
+        process.stdout.write('overlapped');
+      }, 10);
+    `;
+    try {
+      const results = await Promise.all([1, 2, 3].map((id) => shAsync(NODE, ["-e", child, String(id)], { cwd: dir, timeoutMs: 5000 })));
+      for (const result of results) expect(result).toMatchObject({ ok: true, stdout: "overlapped" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -176,7 +176,10 @@ export function parseSitemap(xml: string): Sitemap {
  * many documents are fetched, because a sitemap index is an invitation to
  * enumerate a site and that has to stay a budget the caller sets.
  */
-export async function fetchSitemap(url: string, opts: { sitemaps?: string[]; max?: number } = {}): Promise<Sitemap> {
+export async function fetchSitemap(
+  url: string,
+  opts: { sitemaps?: string[]; max?: number; authorizeUrl?: (url: string) => Promise<boolean> } = {},
+): Promise<Sitemap> {
   const out: Sitemap = { urls: [], sitemaps: [] };
   let origin: string;
   try {
@@ -193,7 +196,7 @@ export async function fetchSitemap(url: string, opts: { sitemaps?: string[]; max
     const next = queue.shift()!;
     if (seen.has(next)) continue;
     seen.add(next);
-    const r = await httpGet(next, { accept: "application/xml,text/xml,*/*", timeoutMs: 10000 });
+    const r = await httpGet(next, { accept: "application/xml,text/xml,*/*", timeoutMs: 10000, authorizeUrl: opts.authorizeUrl });
     fetched++;
     if (!r.ok || !r.body.trim()) continue;
     const parsed = parseSitemap(r.body);

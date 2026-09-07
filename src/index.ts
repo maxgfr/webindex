@@ -23,8 +23,7 @@ export { ENGINE_VERSION } from "./version.js";
 export { type Brand, brand, configure, env, envFlag, envInt, envName, resetBrand } from "./brand.js";
 
 // ── Retrieval: PDF ──────────────────────────────────────────────────────────
-// The ladder tries the strongest available extractor first: native reader →
-// pdf-inspector → anydoc → Firecrawl → pdftotext → OCR.
+// The ladder tries pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR.
 export * from "./pdf.js";
 
 // ── Retrieval: office documents ─────────────────────────────────────────────
@@ -41,7 +40,7 @@ export { ANYDOC_SPEC, PDF_INSPECTOR_SPEC, runWithInput } from "./pdf/exec.js";
 // httpGet/httpJson are the retrying, byte-capped, never-throwing HTTP floor;
 // fetchAndExtract is the whole decision tree from a URL to citable text
 // (Firecrawl → PDF ladder → office ladder → built-in HTML extractor), with
-// rescueViaWayback behind it for dead links.
+// rescueViaWayback available separately for explicit dead-link recovery.
 export * from "./fetch.js";
 
 // The Firecrawl CLIENT — probe, scrape, search. The discovery *backend* built

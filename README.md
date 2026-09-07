@@ -21,7 +21,7 @@ rather than an error.
 |---|---|
 | **Discovery** | A cascade: a local SearXNG, then the keyless engines (DuckDuckGo, DDG Lite, **Mojeek** — its own index, not a reseller), then Firecrawl. Pagination that stops when a page adds nothing new, cross-page dedupe, and throttled-upstream detection. `search` · `webindex_search` |
 | **Retrieval** | HTTP with retry, **streaming byte caps** (the transfer is cancelled at the cap, not trimmed after), **conditional GET** (a stale cache entry costs a 304, not a re-download), rate-limit and `Retry-After` semantics, and **encoding detection** — BOM, `Content-Type` charset, `<meta charset>` — so a Windows-1252 page is not silently mojibake. `fetch` · `webindex_fetch` |
-| **Extraction** | HTML→text with main-content isolation and consent-banner stripping; the **PDF ladder** (native → `pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → **OCR**) with a length-independent garbage gate; the **office ladder** over 20 formats; Wayback rescue for dead links. `extract` · `webindex_extract` |
+| **Extraction** | HTML→text with main-content isolation and consent-banner stripping; the **PDF ladder** (`pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → native → **OCR**) with a length-independent garbage gate; the **office ladder** over 20 formats; an explicit library primitive for Wayback rescue. `extract` · `webindex_extract` |
 | **Ranking** | RRF fusion, **BM25F** with title/heading weighting and an off-topic floor, **SimHash** near-duplicate collapse, **MMR** diversification so the top of a list says several different things. Generic over your item type — the engine ranks, it never sees your evidence model. `rank` · `webindex_rank` |
 | **Forges** | GitHub, GitLab and Gitea: issues, pull requests, releases, tags, and a repository's own record — stars, licence, last push, **archived**. Rename-following, GitHub Enterprise bases, and a quota reported rather than retried. `repo` `issues` `prs` `releases` |
 | **Registries** | A library **name** → its repository, homepage, docs, current version, licence and **deprecation**, through npm, PyPI or crates.io. Bounded registry requests instead of a web search and a guess. `package` · `webindex_package` |
@@ -43,7 +43,7 @@ rather than an error.
 |---|---|
 | `webindex search <query>` | Candidate URLs, through a cascade: a local SearXNG, then the keyless engines (DuckDuckGo, DDG Lite, Mojeek — no key, no container), then Firecrawl. Prints title, URL and snippet; `--json` returns them structured with the notes. `--limit <n>`, `--pages <n>` walk further, `--lang fr-FR` sets the result language, `--engine ddg\|ddglite\|mojeek\|off` pins or disables the keyless rung. Exits non-zero when it found nothing, and says on stderr which backend was missing. |
 | `webindex rank --query <q>` | Order candidate documents against a question — BM25F with title and heading weighting, a SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. Reads a JSON array of `{url,title,text}` from `--docs <file>` or stdin. Deterministic: no model, no network. |
-| `webindex fetch <url>` | Fetch a URL and print its readable text. Routes PDFs and office documents to their ladders, falls back through Firecrawl and the Wayback Machine when a page resists. `--json` adds the title, status, extractor and any note. `--lang fr-FR` sets Accept-Language, `--firecrawl <base>\|off` overrides the extractor. |
+| `webindex fetch <url>` | Fetch a URL and print its readable text. Routes PDFs and office documents to their ladders; HTML uses Firecrawl when available, then the built-in extractor. `--json` adds the title, status, extractor and any note. `--lang fr-FR` sets Accept-Language, `--firecrawl <base>\|off` overrides the extractor. |
 | `webindex extract <file>` | The same extraction on a file already on disk — PDF, office document, HTML or plain text. `--json` as above. |
 | `webindex mcp` | Serve the tools below to an agent. `--transport stdio` (default) or `http` with `--port`, `--bind`, `--allow-remote`. |
 | `webindex searxng up\|down\|status` | Drive the keyless SearXNG container. |
@@ -85,6 +85,19 @@ webindex stack status
 webindex stack path        # where the compose file landed, if you want to read it
 ```
 
+## Combine with ChatGPT or Claude search
+
+Use the host's native search to discover current sources, pass their URLs to
+`webindex_fetch`, then rank the extracted `{url,title,text}` pool with
+`webindex_rank`. Keep the source URLs for citations and inspect the passages
+before answering. `webindex_search` can supplement the pool or take over when
+native search is unavailable. Already have the URL? Fetch it directly.
+
+This workflow uses the tools available in the calling host; webindex does not
+call a ChatGPT or Claude search API itself. See the
+[host search guide](references/host-search.md) for connection details and the
+[verification report](docs/verification.md) for the actual trials and limits.
+
 ## The MCP server
 
 `webindex mcp` exposes fifteen tools — primitives only. Point any MCP client at it:
@@ -97,7 +110,7 @@ claude mcp add --transport http webindex http://127.0.0.1:7340/mcp
 | Tool | Arguments | Returns |
 |---|---|---|
 | `webindex_search` | `query` (required), `limit`, `lang`, `engine` | Candidate URLs with titles and snippets, through the same cascade as the CLI. Not page text — follow up with `webindex_fetch` on the ones worth reading. When nothing answers it fails loudly with which piece was missing, rather than returning an empty list that reads like "nothing exists". |
-| `webindex_fetch` | `url` (required), `lang` | The page's readable text plus the rung that produced it. Handles HTML, PDFs and office documents, and falls back through Firecrawl and the Wayback Machine. Never raw bytes. |
+| `webindex_fetch` | `url` (required), `lang` | The page's readable text plus the rung that produced it. Handles HTML, PDFs and office documents, using Firecrawl when available and local extraction as fallback. Never raw bytes. |
 | `webindex_extract` | `path` (required) | The same for a file already on disk. |
 | `webindex_rank` | `question` (required), `documents` (required), `limit` | The reading order for a pool of candidates: BM25F, near-duplicate collapse, then MMR. Returns each entry's score and matched query terms, plus how many duplicates were collapsed. The brick an agent otherwise re-implements — deterministic, no model, no network. |
 
@@ -120,7 +133,7 @@ A library of **primitives**, not a pipeline.
 | Layer | What it owns |
 |---|---|
 | Discovery | the SearXNG JSON API and Firecrawl's `/search`, with pagination, cross-page dedupe, and throttled-upstream detection |
-| Retrieval | HTTP with retry, **streaming** byte caps and conditional GET, HTML→text, main-content extraction, consent-banner stripping, Firecrawl, the PDF ladder (native → `pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → OCR), the office-document ladder, Wayback rescue, the revalidating fetch cache |
+| Retrieval | HTTP with retry, **streaming** byte caps and conditional GET, HTML→text, main-content extraction, consent-banner stripping, Firecrawl, the PDF ladder (`pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → native → OCR), the office-document ladder, explicit Wayback rescue, the revalidating fetch cache |
 | Text | keyword extraction, accent- and plural-folded matching, camelCase splitting, excerpting, URL canonicalisation and identity |
 | Ranking | RRF fusion, BM25F with field weighting and a relevance floor, SimHash near-duplicate collapse, MMR diversification, DOI/arXiv identity, pool-relative recency |
 | MCP | the whole protocol — negotiation, cancellation, schema validation, response capping, the error taxonomy — plus the stdio and HTTP transports |
@@ -131,6 +144,23 @@ scholarly or vertical APIs builds it on these primitives.
 
 Ranking is generic over the caller's item type: anything with a `url` and a `score` satisfies
 it. The engine decides reading order; it never sees an evidence model.
+
+`rescueViaWayback` is a library primitive callers invoke explicitly for a dead link.
+The CLI and MCP fetch tool do not automatically substitute an archived page.
+
+`httpGet` reports `bytesRead` and `truncated` for capped responses. A truncated
+body cannot establish a complete content fingerprint; `hasChanged` returns an
+unknown verdict in that case. Document MIME types receive the 16 MB extraction
+budget even when the URL has no file extension, and explicit HTTP byte limits
+remain authoritative.
+
+The crawler checks its origin and robots restrictions before each redirected
+request, including sitemap requests, and resolves links against the final URL.
+The origin boundary also applies to robots.txt redirects.
+It uses local extraction so a remote browser cannot bypass those checks.
+Library callers can supply the same asynchronous `authorizeUrl` check to
+`httpGet`, `fetchAndExtract`, `fetchSitemap`, and `fetchRobots`. Authorization
+and politeness waits do not consume the HTTP network timeout budget.
 
 ## What is deliberately out of scope
 

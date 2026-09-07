@@ -4,7 +4,7 @@ import { envName } from "../src/brand.js";
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { cacheClean, cacheStats, cachedFetchAndExtract, cachePath } from "../src/cache.js";
+import { cacheClean, cacheStats, cachedFetchAndExtract, cachePath, setCacheMode, resetCacheMode } from "../src/cache.js";
 import { installFetchMock } from "./fetchmock.js";
 
 describe("cache writes", () => {
@@ -50,6 +50,7 @@ beforeEach(() => {
   process.env[envName("CACHE_DIR")] = dir;
 });
 afterEach(() => {
+  resetCacheMode();
   vi.unstubAllGlobals();
   if (SETUP_CACHE_DIR === undefined) delete process.env[envName("CACHE_DIR")];
   else process.env[envName("CACHE_DIR")] = SETUP_CACHE_DIR;
@@ -61,6 +62,42 @@ const PAGE = { body: "<html><body><article><p>cached article body about token bu
 const URL = "https://ex.test/page";
 
 describe("cachedFetchAndExtract (--cache)", () => {
+  it("prefers the newest document entry over an older entry under the former HTML namespace", async () => {
+    const url = "https://ex.test/download";
+    const entry = { finalUrl: url, status: 200 };
+    writeFileSync(cachePath(url, "", "native"), JSON.stringify({ ...entry, text: "Old PDF text", cachedAt: 1000 }));
+    writeFileSync(cachePath(url, "", "pdf"), JSON.stringify({ ...entry, text: "Updated PDF text", documentType: "pdf", cachedAt: 2000 }));
+    const spy = installFetchMock(() => ({ status: 404 }));
+    expect(await cachedFetchAndExtract(url, { firecrawl: "off" }, true, 2100)).toMatchObject({ cached: true, text: "Updated PDF text" });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("serves a legacy extensionless converted PDF online and offline without downloading again", async () => {
+    const url = "https://ex.test/download";
+    writeFileSync(
+      cachePath(url, "", "pdftotext"),
+      JSON.stringify({ text: "Previously converted PDF text", extractor: "pdftotext", finalUrl: url, status: 200, cachedAt: 1000 }),
+    );
+    const spy = installFetchMock(() => ({ status: 404 }));
+    expect(await cachedFetchAndExtract(url, { firecrawl: "off" }, true, 1100)).toMatchObject({ cached: true, text: "Previously converted PDF text" });
+    setCacheMode({ offline: true });
+    expect(await cachedFetchAndExtract(url, {}, true, 1200)).toMatchObject({ cached: true, text: "Previously converted PDF text" });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("remembers a document detected only from Content-Type and reuses it offline", async () => {
+    const url = "https://ex.test/export";
+    const spy = installFetchMock(() => ({ body: "name,value\nExample,42", contentType: "text/csv" }));
+    const first = await cachedFetchAndExtract(url, { firecrawl: "off" }, true, 1000);
+    expect(first.documentType).toBe("doc");
+    // Document caches are independent of the selected HTML extractor.
+    writeFileSync(cachePath(url, "", "native"), "corrupt");
+    expect(await cachedFetchAndExtract(url, { firecrawl: "off" }, true, 1100)).toMatchObject({ cached: true, text: first.text });
+    setCacheMode({ offline: true });
+    expect(await cachedFetchAndExtract(url, {}, true, 1200)).toMatchObject({ cached: true, text: first.text });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
   it("serves a fresh hit from disk without a second fetch", async () => {
     const spy = installFetchMock(() => PAGE);
     const a = await cachedFetchAndExtract(URL, {}, true, 1000);

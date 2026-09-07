@@ -103,6 +103,15 @@ describe("origin checking", () => {
     expect(res.status).toBe(403);
   });
 
+  it.each(["null", ""])("rejects opaque or empty Origin %j on preflight and tool calls", async (origin) => {
+    const preflight = await fetch(running.url, { method: "OPTIONS", headers: { origin, "access-control-request-method": "POST" } });
+    expect(preflight.status).toBe(403);
+    expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+    const response = await post(rpc(1, "tools/call", { name: "probe_echo", arguments: { text: "private result" } }), { origin });
+    expect(response.status).toBe(403);
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
   it("accepts an origin the caller allowlisted", async () => {
     const s = await startHttpServer(testAdapter(), { port: 0, allowOrigin: ["https://app.example.com"] });
     const res = await fetch(s.url, {

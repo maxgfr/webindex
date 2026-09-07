@@ -20,7 +20,7 @@
 // server.
 
 import { envInt } from "./brand.js";
-import { fetchAndExtract, sleep } from "./fetch.js";
+import { decodeEntities, fetchAndExtract, sleep } from "./fetch.js";
 import { fetchSitemap } from "./feed.js";
 import { mapLimit } from "./pool.js";
 import { fetchRobots, isAllowed } from "./robots.js";
@@ -142,8 +142,9 @@ export interface CrawlResult {
 export function linksFrom(html: string, baseUrl: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const m of html.matchAll(/<a\b[^>]*?\bhref\s*=\s*["']([^"'#]+)["']/gi)) {
-    const raw = (m[1] as string).trim();
+  for (const m of html.matchAll(/<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
+    const raw = decodeEntities(m[1] ?? m[2] ?? "").trim();
+    if (!raw || raw.startsWith("#")) continue;
     // A mailto:, tel: or javascript: href is not a page. `new URL` would happily
     // accept the first two and hand back something no fetch can use.
     if (/^(mailto|tel|javascript|data):/i.test(raw)) continue;
@@ -218,13 +219,34 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
   // robots.txt is read PER ORIGIN, memoised in fetchRobots: a cross-origin walk
   // used to apply the seed's file to every other host and never read theirs.
   const NONE = { rules: [], sitemaps: [], absent: true } as Awaited<ReturnType<typeof fetchRobots>>;
-  const robotsFor = (url: string) => (opts.ignoreRobots ? Promise.resolve(NONE) : fetchRobots(url));
+  // Policy metadata needs the origin boundary too, without recursively asking
+  // robots.txt whether it may fetch itself.
+  const authorizeOrigin = async (url: string): Promise<boolean> => {
+    if (opts.crossOrigin || sameOrigin(url, seed)) return true;
+    notes.push(`${url}: destination is outside the crawl origin.`);
+    return false;
+  };
+  const robotsFor = (url: string) => (opts.ignoreRobots ? Promise.resolve(NONE) : fetchRobots(url, { authorizeUrl: authorizeOrigin }));
 
   const robots = await robotsFor(seed);
   if (opts.ignoreRobots) notes.push("robots.txt was not consulted (ignoreRobots) — only correct on a site you own.");
   else if (robots.absent) notes.push("no robots.txt — nothing was refused, but nothing was granted either.");
   if (robots.crawlDelayMs && opts.delayMs === undefined) notes.push(`honouring the declared Crawl-delay of ${robots.crawlDelayMs}ms.`);
   const delayFor = (r: { crawlDelayMs?: number }) => opts.delayMs ?? r.crawlDelayMs ?? hostDelayMs();
+
+  // This runs before the initial request and before each redirect, so a
+  // permitted URL cannot redirect the crawler outside its origin or into a
+  // robots-refused page. Delays apply to the destination host as well.
+  const authorizeUrl = async (url: string): Promise<boolean> => {
+    if (!(await authorizeOrigin(url))) return false;
+    const r = await robotsFor(url);
+    if (!opts.ignoreRobots && !isAllowed(r, url)) {
+      if (!disallowed.includes(url)) disallowed.push(url);
+      return false;
+    }
+    await awaitHostSlot(url, delayFor(r));
+    return true;
+  };
 
   const seen = new Set<string>([canonicalizeUrl(seed)]);
   const admit = (url: string, depth: number, into: Frontier[]): boolean => {
@@ -241,19 +263,18 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
   // costs one request, which overlaps the seed fetch below. Seeded at depth 1
   // so `maxDepth: 0` still means "the seed page only", and ahead of the seed's
   // own links so the site's order wins over the page's.
-  let sitemap = opts.useSitemap !== false && maxDepth > 0 ? fetchSitemap(seed, { sitemaps: robots.sitemaps }) : undefined;
+  let sitemap = opts.useSitemap !== false && maxDepth > 0 ? fetchSitemap(seed, { sitemaps: robots.sitemaps, authorizeUrl }) : undefined;
 
-  const fetchOne = async (item: Frontier, r: Awaited<ReturnType<typeof fetchRobots>>): Promise<CrawledPage | string> => {
-    await awaitHostSlot(item.url, delayFor(r));
-    const got = await fetchAndExtract(item.url, { keepHtml: item.depth < maxDepth });
+  const fetchOne = async (item: Frontier): Promise<CrawledPage | string> => {
+    const got = await fetchAndExtract(item.url, { keepHtml: item.depth < maxDepth, authorizeUrl });
     if (!got.text) return `${item.url}: ${got.note ?? "nothing readable"}`;
     const page: CrawledPage = {
-      url: item.url,
+      url: got.finalUrl,
       depth: item.depth,
       ...(got.title ? { title: got.title } : {}),
       text: got.text,
       extractor: got.extractor ?? "native",
-      links: got.html ? linksFrom(got.html, item.url) : [],
+      links: got.html ? linksFrom(got.html, got.finalUrl) : [],
     };
     return page;
   };
@@ -305,7 +326,7 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
       }
     };
     const results = await mapLimit(batch, width, async (a, i) => {
-      const got = await fetchOne(a.item, a.robots);
+      const got = await fetchOne(a.item);
       settled[i] = got;
       streamReady();
       return got;

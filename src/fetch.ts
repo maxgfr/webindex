@@ -93,6 +93,10 @@ export interface HttpResult {
   contentType: string;
   url: string; // final URL after redirects (for post-redirect exclude re-check)
   bytes?: Buffer; // raw body, only when opts.binary (for PDF extraction)
+  /** Retained response bytes, before character decoding. */
+  bytesRead?: number;
+  /** The body exceeded the cap; its retained prefix is incomplete. */
+  truncated?: boolean;
   error?: string;
   /** Cache validators, kept so a stale entry can be revalidated for free. */
   etag?: string;
@@ -185,12 +189,58 @@ export async function readCappedBytes(res: Response, max: number): Promise<Buffe
   return Buffer.concat(chunks);
 }
 
+// Read one byte beyond the limit to distinguish an exact-sized body from an
+// incomplete prefix. Only retained bytes are exposed in byte accounting.
+async function readMeasuredBody(res: Response, max: number): Promise<{ bytes: Buffer; bytesRead: number; truncated: boolean }> {
+  const read = await readCappedBytes(res, max + 1);
+  const bytes = read.subarray(0, max);
+  return { bytes, bytesRead: bytes.length, truncated: read.length > max };
+}
+
 /** The body cap for a text or JSON response. PDFs and office documents get their own, larger one. */
 const DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 /** A response whose content-type names a PDF or an office document — a body only an extractor can read. */
 function isBinaryDocument(contentType: string): boolean {
   return /application\/pdf/i.test(contentType) || docFormatForContentType(contentType) !== undefined;
+}
+
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
+
+// A crawler's policy must run before each request, including redirect hops.
+// Authorization failures are returned, not thrown into the network retry loop.
+async function authorizedGet(
+  url: string,
+  init: RequestInit,
+  authorize: (url: string) => Promise<boolean>,
+): Promise<{ response: Response } | { failure: HttpResult }> {
+  let target = url;
+  const fail = (error: string): { failure: HttpResult } => ({ failure: { ok: false, status: 0, body: "", contentType: "", url: target, error } });
+  const headers = { ...(init.headers as Record<string, string>) };
+  for (let redirects = 0; ; redirects++) {
+    try {
+      if (!(await authorize(target))) return fail(`URL not authorized: ${target}`);
+    } catch (e) {
+      return fail(`URL authorization failed for ${target}: ${(e as Error).message}`);
+    }
+    const response = await fetch(target, { ...init, headers, redirect: "manual" });
+    const location = response.headers.get("location");
+    if (!REDIRECT_STATUS.has(response.status) || !location) return { response };
+    await response.body?.cancel().catch(() => {});
+    if (redirects >= 20) return fail("Too many redirects (maximum 20)");
+    try {
+      const next = new URL(location, target);
+      if (!/^https?:$/.test(next.protocol)) return fail(`Unsupported redirect protocol: ${next.protocol}`);
+      if (next.origin !== new URL(target).origin) {
+        delete headers.authorization;
+        delete headers.cookie;
+        delete headers["proxy-authorization"];
+      }
+      target = next.href;
+    } catch {
+      return fail(`Invalid redirect URL from ${target}`);
+    }
+  }
 }
 
 // Minimal HTTP GET on Node's built-in fetch (Node ≥18) — no dependencies.
@@ -203,8 +253,13 @@ export async function httpGet(
     accept?: string;
     acceptLanguage?: string;
     maxBytes?: number;
+    /** Optional larger cap for a response identified as a document by MIME.
+     *  An explicit maxBytes always wins. */
+    maxDocumentBytes?: number;
     userAgent?: string;
     binary?: boolean;
+    /** Approve the initial URL and every redirect before network access. */
+    authorizeUrl?: (url: string) => Promise<boolean>;
     /** Extra request headers, lower-cased. The escape hatch for conditional GET
      *  (`if-none-match`, `if-modified-since`) and for an API that wants auth. */
     headers?: Record<string, string>;
@@ -218,17 +273,43 @@ export async function httpGet(
   let last: HttpResult = { ok: false, status: 0, body: "", contentType: "", url };
   for (let attempt = 0; attempt < attempts; attempt++) {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 20_000);
+    let t: ReturnType<typeof setTimeout> | undefined;
+    let remainingMs = opts.timeoutMs ?? 20_000;
+    let startedAt = 0;
+    const pauseTimeout = () => {
+      if (t === undefined) return;
+      clearTimeout(t);
+      t = undefined;
+      remainingMs -= performance.now() - startedAt;
+    };
+    const resumeTimeout = () => {
+      startedAt = performance.now();
+      if (remainingMs <= 0) ctrl.abort();
+      else t = setTimeout(() => ctrl.abort(), remainingMs);
+    };
     try {
       const headers: Record<string, string> = { "user-agent": opts.userAgent ?? defaultUa(), accept: opts.accept ?? "*/*" };
       if (opts.acceptLanguage) headers["accept-language"] = opts.acceptLanguage;
       for (const [k, v] of Object.entries(opts.headers ?? {})) headers[k.toLowerCase()] = v;
-      const res = await fetch(url, {
+      const init: RequestInit = {
         signal: ctrl.signal,
         redirect: "follow",
         headers,
-      });
-      const max = opts.maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+      };
+      // Crawl-delay and robots checks are policy waits, not network time.
+      // Keep one cumulative network budget across redirects, paused while each
+      // destination is authorized and resumed for its fetch and response body.
+      if (!opts.authorizeUrl) resumeTimeout();
+      const requested = opts.authorizeUrl
+        ? await authorizedGet(url, init, async (target) => {
+            pauseTimeout();
+            const allowed = await opts.authorizeUrl!(target);
+            if (allowed) resumeTimeout();
+            return allowed;
+          })
+        : { response: await fetch(url, init) };
+      if ("failure" in requested) return requested.failure;
+      const res = requested.response;
       const meta = {
         contentType: res.headers.get("content-type") ?? "",
         url: res.url || url,
@@ -237,30 +318,30 @@ export async function httpGet(
         rateLimited: detectRateLimited(res.status, res.headers),
         retryAfterMs: parseRetryAfter(res.headers),
       };
+      const max = opts.maxBytes ?? (isBinaryDocument(meta.contentType) ? opts.maxDocumentBytes : undefined) ?? DEFAULT_MAX_RESPONSE_BYTES;
 
       // Refuse a body the server has already declared too big, before a single
       // byte of it is read. Not retried: the size will be the same next time.
       const declared = Number(res.headers.get("content-length"));
       if (Number.isFinite(declared) && declared > max) {
         ctrl.abort();
-        return { ok: false, status: res.status, body: "", ...meta, error: `response too large: ${declared} bytes > ${max} cap` };
+        return { ok: false, status: res.status, body: "", bytesRead: 0, truncated: true, ...meta, error: `response too large: ${declared} bytes > ${max} cap` };
       }
 
       // 304 carries no body by definition — reading it is not an error, and the
       // caller (the cache) wants the status, not an empty-body complaint.
-      const bytes = res.status === 304 ? Buffer.alloc(0) : await readCappedBytes(res, max);
+      const { bytes, bytesRead, truncated } =
+        res.status === 304 ? { bytes: Buffer.alloc(0), bytesRead: 0, truncated: false } : await readMeasuredBody(res, max);
       countFetch(bytes.length, false);
       // The raw bytes are kept when the caller asked for them, and ALSO when
       // the origin says the body is a PDF or an office document that the URL
       // did not announce: they are already in memory, and handing them over is
       // what spares fetchAndExtract a second full download of the same file.
       //
-      // Only when they are COMPLETE, though. A text fetch caps at 4 MB while a
-      // document fetch caps at 16, so a 5 MB PDF nobody announced arrives here
-      // truncated — and handing over a truncated PDF would silently replace the
-      // refetch that gets the whole thing with an extraction that cannot work.
-      // Short of the cap the bytes are all of them, and one download is enough.
-      const keepBytes = opts.binary || (isBinaryDocument(meta.contentType) && bytes.length < max);
+      // Only complete documents are handed over implicitly. fetchAndExtract
+      // allows 16 MB after MIME detection; a caller's explicit cap still wins,
+      // and a prefix cut at that cap must never masquerade as a complete file.
+      const keepBytes = opts.binary || (isBinaryDocument(meta.contentType) && !truncated);
       const result: HttpResult = {
         ok: res.ok,
         status: res.status,
@@ -269,6 +350,8 @@ export async function httpGet(
         // replaced by U+FFFD, and nothing anywhere noticed.
         body: opts.binary ? "" : decodeBody(bytes, meta.contentType),
         bytes: keepBytes ? bytes : undefined,
+        bytesRead,
+        truncated,
         ...meta,
       };
       if (RETRY_STATUS.has(res.status) && attempt < attempts - 1) {
@@ -306,7 +389,7 @@ export async function httpJson(
     /** Response cap in bytes; over it the transfer is cancelled and the call fails. Default 4 MB. */
     maxBytes?: number;
   } = {},
-): Promise<{ ok: boolean; status: number; data: any; error?: string }> {
+): Promise<{ ok: boolean; status: number; data: any; error?: string; bytesRead?: number; truncated?: boolean }> {
   const attempts = attemptsFor(opts.retries);
   let last: { ok: boolean; status: number; data: any; error?: string } = { ok: false, status: 0, data: undefined };
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -334,11 +417,11 @@ export async function httpJson(
       // One byte past the cap, so a body of exactly `max` is answered rather
       // than refused: reading only `max` cannot tell "exactly the cap" from
       // "cut off at the cap", and refusing the former would be a cap of max-1.
-      const bytes = await readCappedBytes(res, max + 1);
+      const { bytes, bytesRead, truncated } = await readMeasuredBody(res, max);
       countFetch(bytes.length, false);
-      if (bytes.length > max) {
+      if (truncated) {
         ctrl.abort();
-        return { ok: false, status: res.status, data: undefined, error: `response too large: over the ${max}-byte cap` };
+        return { ok: false, status: res.status, data: undefined, bytesRead, truncated, error: `response too large: over the ${max}-byte cap` };
       }
       const text = bytes.toString("utf8");
       let data: any;
@@ -347,7 +430,7 @@ export async function httpJson(
       } catch {
         data = text;
       }
-      const result = { ok: res.ok, status: res.status, data };
+      const result = { ok: res.ok, status: res.status, data, bytesRead, truncated };
       if (RETRY_STATUS.has(res.status) && attempt < attempts - 1) {
         last = result;
         await sleep(retryDelayMs(res.headers));
@@ -545,6 +628,15 @@ export function htmlTitle(html: string): string | undefined {
   return t || undefined;
 }
 
+function htmlAttributes(tag: string): Map<string, string> {
+  const attrs = new Map<string, string>();
+  for (const m of tag.matchAll(/([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) {
+    const name = m[1]!.toLowerCase();
+    if (!attrs.has(name)) attrs.set(name, m[2] ?? m[3] ?? m[4] ?? "");
+  }
+  return attrs;
+}
+
 // The URL a page declares for ITSELF — `<link rel="canonical">`, else the
 // OpenGraph `og:url`. Only meaningful when the URL we fetched is not itself
 // citable (an API endpoint, a redirector): the page names its own address, so
@@ -683,6 +775,8 @@ export interface ExtractResult {
   finalUrl: string;
   status: number;
   extractor?: ExtractorId;
+  /** Document type detected from the URL or response, independent of converter. */
+  documentType?: "pdf" | "doc";
   canonical?: string; // the url the page declares for itself (rel=canonical / og:url)
   /**
    * The page's own one-line summary (`<meta name=description>`, else
@@ -731,6 +825,8 @@ export async function fetchAndExtract(
      *  `if-none-match` / `if-modified-since`. Firecrawl does its own fetching and
      *  ignores these, which is why a revalidating caller skips it. */
     headers?: Record<string, string>;
+    /** Check the initial URL and each redirect; disables remote extraction. */
+    authorizeUrl?: (url: string) => Promise<boolean>;
     /**
      * Drop consent-banner lines from the extracted text.
      *
@@ -754,7 +850,7 @@ export async function fetchAndExtract(
   // happens to be up. Firecrawl is still reachable — as rung 2, via callback.
   const wantsDoc = wantsPdf ? undefined : docFormatForUrl(url);
   let firecrawlNote: string | undefined;
-  if (!wantsPdf && !wantsDoc) {
+  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl) {
     const fc = await scrapeViaFirecrawl(url, opts);
     // Firecrawl reports success even for an error page, handing back the
     // origin's 404/403 body as markdown. Accept only a 2xx/3xx: anything else
@@ -772,7 +868,7 @@ export async function fetchAndExtract(
     firecrawlNote = fc.data ? `Firecrawl got HTTP ${fc.data.statusCode} for ${url} — fell back to the built-in extractor.` : fc.why;
   }
   const base = wantsPdf ? PDF_FETCH_OPTS : wantsDoc ? DOC_FETCH_OPTS : { accept: "text/html,text/plain,*/*", acceptLanguage: opts.acceptLanguage };
-  const fetchOpts = opts.headers ? { ...base, headers: opts.headers } : base;
+  const fetchOpts = { ...base, maxDocumentBytes: PDF_FETCH_OPTS.maxBytes, headers: opts.headers, authorizeUrl: opts.authorizeUrl };
   let res = await httpGet(url, fetchOpts);
   // A brand that identifies itself honestly gets refused by some hosts. Retry
   // once wearing a browser UA before giving up — but only for a brand that had
@@ -794,11 +890,14 @@ export async function fetchAndExtract(
   // Only materialised when the origin actually sent one, so an entry written for
   // a validator-less server keeps exactly the shape it had before.
   const validators = res.etag || res.lastModified ? { etag: res.etag, lastModified: res.lastModified } : {};
+  if (res.truncated && (wantsPdf || wantsDoc || isBinaryDocument(res.contentType))) {
+    return { text: "", finalUrl: res.url, status: res.status, note: `Fetched ${url} but the document exceeds the response size cap.` };
+  }
   if (wantsPdf || /application\/pdf/i.test(res.contentType)) {
     // httpGet keeps the raw bytes of anything the origin labelled a PDF, so a
     // content-type-only PDF (no .pdf in the URL) is not downloaded twice. The
     // refetch is only for a response that somehow arrived without them.
-    const bytes = res.bytes ?? (await httpGet(url, PDF_FETCH_OPTS)).bytes;
+    const bytes = res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl })).bytes;
     // The ladder tries pdf-inspector, then an already-running Firecrawl, then
     // pdftotext, then the built-in reader — and refuses rather than hand back
     // text no extractor could vouch for. Firecrawl is injected as a callback so
@@ -806,6 +905,7 @@ export async function fetchAndExtract(
     const got = bytes
       ? await extractPdf(bytes, {
           firecrawl: async () => {
+            if (opts.authorizeUrl) return undefined;
             const fc = await scrapeViaFirecrawl(url, opts);
             return fc.data && (fc.data.statusCode ?? 200) < 400 ? fc.data.markdown : undefined;
           },
@@ -813,6 +913,7 @@ export async function fetchAndExtract(
       : { text: "", reason: "empty response body" };
     return {
       text: got.text,
+      documentType: "pdf",
       finalUrl: res.url,
       status: res.status,
       // `native` keeps reporting as absent, which is what the cache key and every
@@ -830,10 +931,11 @@ export async function fetchAndExtract(
   if (docFmt) {
     // Same as the PDF path: the bytes of a content-type-only document are
     // already here; the refetch is the fallback, not the rule.
-    const bytes = res.bytes ?? (await httpGet(url, DOC_FETCH_OPTS)).bytes;
+    const bytes = res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl })).bytes;
     const got = bytes
       ? await extractDocument(bytes, docFmt, {
           firecrawl: async () => {
+            if (opts.authorizeUrl) return undefined;
             const fc = await scrapeViaFirecrawl(url, opts);
             return fc.data && (fc.data.statusCode ?? 200) < 400 ? fc.data.markdown : undefined;
           },
@@ -843,10 +945,11 @@ export async function fetchAndExtract(
     // converter is available: it was usable before this ladder existed, so
     // refusing it would be a regression rather than a fix.
     if (!got.text && docFmt.textFallback && bytes?.length) {
-      return { text: bytes.toString("utf8"), finalUrl: res.url, status: res.status, note: firecrawlNote, ...validators };
+      return { text: decodeBody(bytes, res.contentType), documentType: "doc", finalUrl: res.url, status: res.status, note: firecrawlNote, ...validators };
     }
     return {
       text: got.text,
+      documentType: "doc",
       finalUrl: res.url,
       status: res.status,
       extractor: got.via,
@@ -854,7 +957,11 @@ export async function fetchAndExtract(
       ...validators,
     };
   }
-  const isHtml = /html/i.test(res.contentType) || /^\s*</.test(res.body);
+  const mime = res.contentType.split(";")[0]!.trim().toLowerCase();
+  const ambiguousType = !mime || mime === "application/octet-stream";
+  const isHtml =
+    /^(?:text\/html|application\/xhtml\+xml)$/.test(mime) ||
+    (ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(res.body));
   const stripped = isHtml ? htmlToText(extractMainHtml(res.body)) : res.body;
   const text = isHtml && opts.stripConsent ? stripConsentBoilerplate(stripped).text : stripped;
   const title = isHtml ? htmlTitle(res.body) : undefined;
@@ -884,9 +991,9 @@ export const DEAD_LINK_STATUS = new Set([404, 410, 451, 403]);
 // callers record the snapshot in meta + a note. Disable with `<PREFIX>_NO_WAYBACK`.
 export async function rescueViaWayback(
   url: string,
-  opts: { acceptLanguage?: string; firecrawl?: string } = {},
+  opts: { acceptLanguage?: string; firecrawl?: string; authorizeUrl?: (url: string) => Promise<boolean> } = {},
 ): Promise<{ text: string; title?: string; snapshotUrl: string; timestamp: string } | undefined> {
-  if (envFlag("NO_WAYBACK")) return undefined;
+  if (opts.authorizeUrl || envFlag("NO_WAYBACK")) return undefined;
   const api = `https://archive.org/wayback/available?url=${encodeURIComponent(url)}`;
   const r = await httpJson("GET", api, undefined, { timeoutMs: 10000, userAgent: contactUa() });
   const snap = r.ok ? r.data?.archived_snapshots?.closest : undefined;
@@ -972,12 +1079,15 @@ export function stripConsentBoilerplate(text: string): { text: string; dropped: 
  * — better than citing a nav bar.
  */
 export function metaDescriptionOf(html: string): string | undefined {
-  const m =
-    /<meta[^>]+name=["']description["'][^>]*content=["']([^"']+)["']/i.exec(html) ||
-    /<meta[^>]+content=["']([^"']+)["'][^>]*name=["']description["']/i.exec(html) ||
-    /<meta[^>]+property=["']og:description["'][^>]*content=["']([^"']+)["']/i.exec(html);
-  const d = m?.[1]?.replace(/\s+/g, " ").trim();
-  return d ? decodeEntities(d) : undefined;
+  let og: string | undefined;
+  for (const match of html.matchAll(/<meta\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi)) {
+    const attrs = htmlAttributes(match[0]);
+    const value = attrs.get("content")?.replace(/\s+/g, " ").trim();
+    if (!value) continue;
+    if (attrs.get("name")?.toLowerCase() === "description") return decodeEntities(value);
+    if (attrs.get("property")?.toLowerCase() === "og:description" && og === undefined) og = decodeEntities(value);
+  }
+  return og;
 }
 
 // Query-focused, multi-sentence snippet (the lead a caller shows beside a

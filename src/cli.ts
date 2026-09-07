@@ -11,7 +11,7 @@
 // URLs through the local keyless stack, turn a URL or a local file into clean
 // text, drive the containers, and serve all of that to an agent over MCP.
 import { existsSync, readFileSync } from "node:fs";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { configure } from "./brand.js";
 import { ENGINE_VERSION } from "./version.js";
@@ -52,7 +52,7 @@ import {
   UsageError,
 } from "./cli-kit.js";
 import { ensureDir, writeArtifact } from "./no-write.js";
-import { ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
+import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
 
@@ -101,8 +101,8 @@ COMMANDS
              then Firecrawl. Prints what it found, or says which backend was
              missing and how to start it — those are different answers.
   fetch      Fetch a URL and print the extracted text. Routes PDFs and office
-             documents to their ladders automatically, and falls back through
-             Firecrawl and the Wayback Machine when a page resists.
+             documents to their ladders automatically. Uses Firecrawl when
+             available, with built-in extraction as fallback.
   extract    Same extraction, on a file already on disk.
   rank       Order candidate documents against a question — BM25F, then a
              near-duplicate collapse, then MMR so the top says several
@@ -267,7 +267,7 @@ async function extractLocal(path: string): Promise<{ text: string; extractor: st
   try {
     bytes = readFileSync(path);
   } catch (e) {
-    fail(`cannot read ${path}: ${(e as Error).message}`);
+    throw new ToolError(`cannot read ${path}: ${(e as Error).message}`);
   }
   const asUrl = pathToFileURL(path).href;
 
@@ -281,7 +281,9 @@ async function extractLocal(path: string): Promise<{ text: string; extractor: st
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason };
   }
   const raw = bytes.toString("utf8");
-  const looksHtml = /^\s*<(?:!doctype|html|head|body)\b/i.test(raw);
+  const extension = extname(path).toLowerCase();
+  const explicitText = [".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".xml", ".yaml", ".yml"].includes(extension);
+  const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
   return { text: looksHtml ? htmlToText(raw) : raw, extractor: looksHtml ? "native" : "plain" };
 }
 
@@ -343,9 +345,15 @@ function parseRankDocs(value: unknown, where: string): RankInput[] {
   const arr = typeof value === "string" ? JSON.parse(value) : value;
   if (!Array.isArray(arr) || !arr.length) throw new Error(`${where} must be a non-empty JSON array of {url, text}`);
   return arr.map((d, i) => {
-    if (!d || typeof d !== "object") throw new Error(`${where}[${i}] is not an object`);
+    if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error(`${where}[${i}] is not an object`);
     const url = (d as RankInput).url;
     if (typeof url !== "string" || !url) throw new Error(`${where}[${i}] has no url`);
+    for (const field of ["title", "headings", "text"] as const) {
+      if (d[field] !== undefined && typeof d[field] !== "string") throw new Error(`${where}[${i}].${field} must be a string`);
+    }
+    if (d.score !== undefined && (typeof d.score !== "number" || !Number.isFinite(d.score))) {
+      throw new Error(`${where}[${i}].score must be a finite number`);
+    }
     return d as RankInput;
   });
 }
@@ -387,8 +395,9 @@ export function webindexAdapter(): McpAdapter {
         name: "webindex_fetch",
         title: "Fetch a URL as clean text",
         description:
-          "Fetch a URL and return its readable text. Handles HTML, PDFs (native reader → pdf-inspector → anydoc → Firecrawl → pdftotext → OCR) and office documents, " +
-          "and falls back through Firecrawl and the Wayback Machine for pages that resist. Returns the extracted text plus which rung produced it — never raw bytes.",
+          "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR) and office documents, " +
+          "and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text plus which rung produced it — never raw bytes. " +
+          "Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
         inputSchema: {
           type: "object",
           properties: {
@@ -409,7 +418,7 @@ export function webindexAdapter(): McpAdapter {
         title: "Rank candidate documents against a question",
         description:
           "Order a pool of documents by relevance to a question: BM25F (title and headings weighted above body), then SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. " +
-          "Returns the ranking with a score, the matched query terms, and what was collapsed — deterministic, no model, no network. Use it after gathering pages to decide what to actually read.",
+          "Returns the ranking with a score, the matched query terms, and what was collapsed — deterministic, no model, no network. Use it after gathering pages from any search provider to decide what to actually read. Scores measure relevance within this pool, not factual accuracy.",
         inputSchema: {
           type: "object",
           properties: {
@@ -617,7 +626,7 @@ export function webindexAdapter(): McpAdapter {
         try {
           docs = parseRankDocs(args.documents, "`documents`");
         } catch (e) {
-          throw new ToolError((e as Error).message);
+          throw new InvalidParamsError((e as Error).message);
         }
         const r = rankDocuments(question, docs, typeof args.limit === "number" ? args.limit : undefined);
         if (!r.queryTerms.length) {
@@ -740,9 +749,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   try {
     await dispatch(argv);
   } catch (e) {
-    if (!(e instanceof UsageError)) throw e;
+    if (!(e instanceof UsageError) && !(e instanceof ToolError)) throw e;
     process.stderr.write(`webindex: ${e.message}\n`);
-    process.exit(EXIT_USAGE);
+    process.exit(e instanceof UsageError ? EXIT_USAGE : EXIT_FAILURE);
   }
 }
 
@@ -774,15 +783,14 @@ async function dispatch(argv: string[]): Promise<void> {
     });
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));
-      return;
+    } else {
+      for (const h of r.hits) {
+        process.stdout.write(`${h.title}\n  ${h.url}${h.snippet ? `\n  ${h.snippet.slice(0, 160)}` : ""}\n\n`);
+      }
+      // Notes stay off stdout so pipelines retain clean results.
+      for (const n of r.notes) process.stderr.write(`  ${n}\n`);
     }
-    for (const h of r.hits) {
-      process.stdout.write(`${h.title}\n  ${h.url}${h.snippet ? `\n  ${h.snippet.slice(0, 160)}` : ""}\n\n`);
-    }
-    // Notes go to stderr so `webindex search q | head` stays a clean URL list
-    // while the reason for a short one is still visible.
-    for (const n of r.notes) process.stderr.write(`  ${n}\n`);
-    if (!r.hits.length) process.exit(1);
+    if (!r.hits.length) process.exit(EXIT_FAILURE);
     return;
   }
 
@@ -795,10 +803,10 @@ async function dispatch(argv: string[]): Promise<void> {
       process.stdout.write(
         JSON.stringify({ url, title: r.title, extractor: r.extractor, status: r.status, chars: r.text.length, note: r.note, text: r.text }, null, 2) + "\n",
       );
-      return;
+    } else if (r.text) {
+      process.stdout.write(r.text + "\n");
     }
     if (!r.text) fail(`nothing readable at ${url}${r.note ? ` — ${r.note}` : ""}`);
-    process.stdout.write(r.text + "\n");
     return;
   }
 
@@ -810,10 +818,10 @@ async function dispatch(argv: string[]): Promise<void> {
       process.stdout.write(
         JSON.stringify({ file: basename(path), extractor: r.extractor, chars: r.text.length, reason: r.reason, text: r.text }, null, 2) + "\n",
       );
-      return;
+    } else if (r.text) {
+      process.stdout.write(r.text + "\n");
     }
     if (!r.text) fail(`nothing readable in ${path}${r.reason ? ` — ${r.reason}` : ""}`);
-    process.stdout.write(r.text + "\n");
     return;
   }
 
@@ -886,16 +894,16 @@ async function dispatch(argv: string[]): Promise<void> {
     const r = rankDocuments(question, docs, limit);
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));
-      return;
+    } else {
+      // Human form on stdout, the collapse note on stderr — so pipelines
+      // retain a clean ranked list.
+      process.stdout.write(
+        r.ranked
+          .map((x) => `${x.rank}. [${x.score.toFixed(3)}] ${x.title ?? x.url}\n   ${x.url}${x.matched.length ? `\n   matched: ${x.matched.join(", ")}` : ""}`)
+          .join("\n\n") + "\n",
+      );
+      if (r.collapsed) process.stderr.write(`${r.collapsed} near-duplicate(s) collapsed.\n`);
     }
-    // Human form on stdout, the collapse note on stderr — so `| head` stays a
-    // clean ranked list, the same rule `search` follows.
-    process.stdout.write(
-      r.ranked
-        .map((x) => `${x.rank}. [${x.score.toFixed(3)}] ${x.title ?? x.url}\n   ${x.url}${x.matched.length ? `\n   matched: ${x.matched.join(", ")}` : ""}`)
-        .join("\n\n") + "\n",
-    );
-    if (r.collapsed) process.stderr.write(`${r.collapsed} near-duplicate(s) collapsed.\n`);
     if (!r.queryTerms.length) {
       process.stderr.write("The question has no rankable terms once stopwords are removed — the order is arbitrary.\n");
       process.exit(1);

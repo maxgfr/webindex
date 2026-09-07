@@ -47,20 +47,34 @@ describe("notifications", () => {
     expect(r).toBeUndefined();
   });
 
-  it("suppress the response to a cancelled request", async () => {
-    // Per spec a cancelled request gets NO response at all.
-    const server = createServer(testAdapter());
-    await server.handle({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 7 } }, () => {
-      throw new Error("a notification must not be answered");
-    });
-    const out = await call(rpc("ping", {}, 7), server);
-    expect(out).toBeUndefined();
+  it("suppresses only the response of an active cancelled request and cleans up", async () => {
+    let finish!: () => void;
+    const server = createServer(
+      testAdapter({
+        callTool: async () => {
+          await new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          return { text: "done" };
+        },
+      }),
+    );
+    const pending = call(rpc("tools/call", { name: "probe_echo", arguments: { text: "hi" } }, 7), server);
+    await call({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 7 } }, server);
+    expect(await call(rpc("ping", {}, "7"), server)).toMatchObject({ id: "7", result: {} });
+    finish();
+    expect(await pending).toBeUndefined();
+    expect(await call(rpc("ping", {}, 7), server)).toMatchObject({ id: 7, result: {} });
   });
 
-  it("cancelling an id that was never in flight does not affect other ids", async () => {
+  it("ignores unknown and already-completed cancellation ids", async () => {
     const server = createServer(testAdapter());
-    await server.handle({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: "ghost" } }, () => {});
-    expect(await call(rpc("ping", {}, 1), server)).toBeDefined();
+    for (const id of [7, "ghost"]) {
+      await call({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id } }, server);
+      expect(await call(rpc("ping", {}, id), server)).toMatchObject({ id, result: {} });
+      await call({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id } }, server);
+      expect(await call(rpc("ping", {}, id), server)).toMatchObject({ id, result: {} });
+    }
   });
 });
 
@@ -95,6 +109,13 @@ describe("tools/call", () => {
   it("runs the tool and returns its text", async () => {
     const r = await call(rpc("tools/call", { name: "probe_echo", arguments: { text: "ab", times: 2 } }));
     expect((r!.result as any).content).toEqual([{ type: "text", text: "abab" }]);
+  });
+
+  it("normalizes numeric strings before handing arguments to the adapter", async () => {
+    const args = { text: "ab", times: "2" };
+    const r = await call(rpc("tools/call", { name: "probe_echo", arguments: args }));
+    expect((r!.result as any).content[0].text).toBe("abab");
+    expect(args.times).toBe("2");
   });
 
   it("rejects an unknown tool as a PROTOCOL error", async () => {

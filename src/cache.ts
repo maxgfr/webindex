@@ -87,10 +87,15 @@ async function currentExtractor(opts: { firecrawl?: string }, url: string): Prom
   return base && (await probeFirecrawl(base, firecrawlIsExplicit(opts))) ? "firecrawl" : "native";
 }
 
-// Every namespace an entry is ever WRITTEN under. The PDF ladder's individual
-// rungs never appear here: PDFs and office documents each share one namespace,
-// for the reason documented above currentExtractor.
-const WRITTEN_NAMESPACES: CacheNamespace[] = ["native", "firecrawl", PDF_CACHE_NS, DOC_CACHE_NS];
+// Older entries for extensionless documents were filed under the converter.
+// Keep reading those alongside the format namespaces so upgrading keeps both
+// online and offline caches usable.
+const DOCUMENT_NAMESPACES: CacheNamespace[] = [PDF_CACHE_NS, DOC_CACHE_NS, "pdf-inspector", "pdftotext", "anydoc", "ocr"];
+const WRITTEN_NAMESPACES: CacheNamespace[] = ["native", "firecrawl", ...DOCUMENT_NAMESPACES];
+
+function namespaceFor(result: Extract, predicted: CacheNamespace): CacheNamespace {
+  return result.documentType ?? (predicted === PDF_CACHE_NS || predicted === DOC_CACHE_NS ? predicted : (result.extractor ?? "native"));
+}
 
 /**
  * The stored entry for a URL under ANY namespace, newest first.
@@ -101,9 +106,9 @@ const WRITTEN_NAMESPACES: CacheNamespace[] = ["native", "firecrawl", PDF_CACHE_N
  * which extractor produced it would defeat the point of the switch. So offline
  * looks everywhere and serves the freshest thing it finds.
  */
-function readAnyNamespace(url: string, acceptLanguage: string): CacheEntry | undefined {
+function readAnyNamespace(url: string, acceptLanguage: string, namespaces = WRITTEN_NAMESPACES): CacheEntry | undefined {
   let best: CacheEntry | undefined;
-  for (const ns of WRITTEN_NAMESPACES) {
+  for (const ns of namespaces) {
     const hit = readCache(url, acceptLanguage, ns);
     if (hit && (!best || hit.cachedAt > best.cachedAt)) best = hit;
   }
@@ -299,7 +304,7 @@ export async function cachedFetchAndExtract(
   const ns = await currentExtractor(opts, url);
   // --refresh does not read, but it still writes: the point is to replace what
   // is there, not to stop caching for the run.
-  const hit = refresh ? undefined : readCache(url, lang, ns);
+  const hit = refresh ? undefined : readAnyNamespace(url, lang, [...new Set([ns, ...DOCUMENT_NAMESPACES])]);
   if (hit && isCacheFresh(hit, now)) return served(hit);
 
   // Stale but revalidatable: ask the origin whether anything changed. A 304
@@ -310,13 +315,13 @@ export async function cachedFetchAndExtract(
   if (hit && Object.keys(revalidate).length) {
     const probe = await fetchAndExtract(url, { ...opts, headers: revalidate });
     if (probe.status === 304) {
-      touchCache(url, hit, now, lang, ns);
+      touchCache(url, hit, now, lang, namespaceFor(hit, ns));
       return served(hit);
     }
     // Changed (or the origin ignored the validators) — the body we just pulled
     // IS the fresh one, so use it rather than paying for a second request.
     if (probe.text?.trim()) {
-      writeCache(url, probe, now, lang, ns === PDF_CACHE_NS || ns === DOC_CACHE_NS ? ns : (probe.extractor ?? "native"));
+      writeCache(url, probe, now, lang, namespaceFor(probe, ns));
       return probe;
     }
   }
@@ -327,7 +332,7 @@ export async function cachedFetchAndExtract(
   // must not leave that page sitting in Firecrawl's namespace. PDFs keep the
   // shared namespace resolved above, for the reason documented there.
   if (res.text?.trim()) {
-    writeCache(url, res, now, lang, ns === PDF_CACHE_NS || ns === DOC_CACHE_NS ? ns : (res.extractor ?? "native"));
+    writeCache(url, res, now, lang, namespaceFor(res, ns));
     return res;
   }
   // The origin gave us nothing. A stale copy of the page beats a hole in the

@@ -136,10 +136,13 @@ export function isAllowed(robots: Robots, url: string): boolean {
 }
 
 const cache = new Map<string, Promise<Robots>>();
+type UrlAuthorizer = (url: string) => Promise<boolean>;
+let guardedCaches = new WeakMap<UrlAuthorizer, Map<string, Promise<Robots>>>();
 
 /** Test seam: forget every fetched robots.txt. */
 export function resetRobotsCache(): void {
   cache.clear();
+  guardedCaches = new WeakMap();
 }
 
 /**
@@ -150,7 +153,7 @@ export function resetRobotsCache(): void {
  * by `<PREFIX>_NO_ROBOTS`, for an operator who knows they are crawling their own
  * site.
  */
-export async function fetchRobots(url: string): Promise<Robots> {
+export async function fetchRobots(url: string, opts: { authorizeUrl?: UrlAuthorizer } = {}): Promise<Robots> {
   if (envFlag("NO_ROBOTS")) return EMPTY;
   let origin: string;
   try {
@@ -158,17 +161,25 @@ export async function fetchRobots(url: string): Promise<Robots> {
   } catch {
     return EMPTY;
   }
-  let p = cache.get(origin);
+  // Policy-bearing reads must not reuse results fetched under a different
+  // policy. Weak keys keep per-crawl caches collectible after the walk ends.
+  let scopedCache = cache;
+  if (opts.authorizeUrl) {
+    const existing = guardedCaches.get(opts.authorizeUrl);
+    scopedCache = existing ?? new Map();
+    if (!existing) guardedCaches.set(opts.authorizeUrl, scopedCache);
+  }
+  let p = scopedCache.get(origin);
   if (!p) {
     p = (async () => {
-      const r = await httpGet(`${origin}/robots.txt`, { accept: "text/plain", timeoutMs: 5000, maxBytes: 512 * 1024 });
+      const r = await httpGet(`${origin}/robots.txt`, { accept: "text/plain", timeoutMs: 5000, maxBytes: 512 * 1024, authorizeUrl: opts.authorizeUrl });
       // 4xx means no robots.txt, which means no restrictions. A 5xx arguably
       // means "unknown", but treating a flaky origin as forbidden would make
       // retrieval depend on somebody else's uptime.
       if (!r.ok || !r.body.trim()) return EMPTY;
       return parseRobots(r.body, env("ROBOTS_UA") ?? brand().name);
     })();
-    cache.set(origin, p);
+    scopedCache.set(origin, p);
   }
   return p;
 }

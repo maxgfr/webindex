@@ -78,6 +78,9 @@ export interface ToolOutcome {
  */
 export class ToolError extends Error {}
 
+/** Malformed domain arguments discovered by a tool handler. */
+export class InvalidParamsError extends Error {}
+
 /** Thrown for an unknown prompt or a missing required argument. A client bug. */
 export class PromptError extends Error {}
 
@@ -134,13 +137,9 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
   const maxBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   // Until a client says otherwise, assume the newest. `initialize` replaces it.
   let protocol: ProtocolVersion = LATEST_PROTOCOL;
-  // Requests the client withdrew. Per spec a cancelled request gets NO response
-  // at all, so the id has to survive until the in-flight work finishes. An id
-  // that never had a request in flight is never claimed, so the set is bounded:
-  // a client that cancels ids it never sent cannot grow it without limit in a
-  // process that may run for days.
-  const cancelled = new Set<string>();
-  const CANCELLED_MAX = 1024;
+  // Only active requests can be cancelled. Keep the original identifier type:
+  // numeric 7 and string "7" name different JSON-RPC requests.
+  const active = new Map<string | number, { cancelled: boolean }>();
 
   const listTools = () => adapter.listTools(protocol);
   const prompts = () => adapter.prompts ?? [];
@@ -156,18 +155,20 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
       if (msg.method === "notifications/cancelled") {
         const target = msg.params?.requestId;
         if (typeof target === "string" || typeof target === "number") {
-          if (cancelled.size >= CANCELLED_MAX) cancelled.delete(cancelled.values().next().value!);
-          cancelled.add(String(target));
+          const request = active.get(target);
+          if (request) request.cancelled = true;
         }
       }
       return;
     }
     const id = msg.id;
+    const request = { cancelled: false };
+    active.set(id, request);
 
     const reply = (out: Omit<JsonRpcMessage, "jsonrpc" | "id">) => {
       // A cancelled request is dropped on the floor — answering it after the
       // client moved on is exactly what the notification asks us not to do.
-      if (cancelled.delete(String(id))) return;
+      if (request.cancelled) return;
       send({ jsonrpc: "2.0", id, ...out });
     };
 
@@ -244,6 +245,8 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
       // server, not a bad request — report it as such rather than as a tool
       // failure the model might try to work around.
       reply({ error: { code: ERR_INTERNAL, message: errMessage(e) } });
+    } finally {
+      if (active.get(id) === request) active.delete(id);
     }
   }
 
@@ -269,7 +272,15 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
     }
 
     try {
-      const { text: raw, artifact } = await adapter.callTool(name, args);
+      // Some clients stringify number arguments. Validation accepts those;
+      // normalize a copy so handlers observe the type their schema declares.
+      const normalized = Object.fromEntries(
+        Object.entries(args).map(([key, value]) => [
+          key,
+          decl.inputSchema.properties[key]?.type === "number" && typeof value === "string" ? Number(value) : value,
+        ]),
+      );
+      const { text: raw, artifact } = await adapter.callTool(name, normalized);
       const text = capResponse(raw, name, maxBytes, artifact, adapter.capAdvice);
       const capped = text !== raw;
       const structured = protocol >= RICH_TOOLS_SINCE ? structuredContentFor(text, capped, decl.outputSchema !== undefined) : undefined;
@@ -283,6 +294,10 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
       // a successful result — an unreachable issues API is information, not a
       // failure, and reporting it as one would make the model retry work that
       // already told it everything it is going to.
+      if (e instanceof InvalidParamsError) {
+        reply({ error: { code: ERR_INVALID_PARAMS, message: e.message } });
+        return;
+      }
       if (e instanceof ToolError) {
         reply({ result: { content: [{ type: "text", text: e.message }], isError: true } });
         return;
