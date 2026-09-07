@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.18.10](https://github.com/maxgfr/webindex/compare/v1.18.9...v1.18.10) (2026-09-07)
+
+
+### Bug Fixes
+
+* harden retrieval and MCP workflows with verified integrations ([9341b72](https://github.com/maxgfr/webindex/commit/9341b723a3504439e8ea0b21f99b5688fc770f02))
+
 ## [1.18.9](https://github.com/maxgfr/webindex/compare/v1.18.8...v1.18.9) (2026-09-03)
 
 
