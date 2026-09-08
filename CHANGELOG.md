@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.19.3](https://github.com/maxgfr/webindex/compare/v1.19.2...v1.19.3) (2026-09-08)
+
+
+### Bug Fixes
+
+* **skillkit:** complete workflows on the fork origin ([62b0667](https://github.com/maxgfr/webindex/commit/62b0667ff63769a259238583eb608075ee232218))
+
 ## [1.19.2](https://github.com/maxgfr/webindex/compare/v1.19.1...v1.19.2) (2026-09-08)
 
 
