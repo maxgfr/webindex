@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.19.4](https://github.com/maxgfr/webindex/compare/v1.19.3...v1.19.4) (2026-09-08)
+
+
+### Bug Fixes
+
+* **skillkit:** keep workflow updates outside bot repins ([dbf3941](https://github.com/maxgfr/webindex/commit/dbf39418e211b2519e7f89c15425751345f55ed1))
+
 ## [1.19.3](https://github.com/maxgfr/webindex/compare/v1.19.2...v1.19.3) (2026-09-08)
 
 
