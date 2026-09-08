@@ -268,3 +268,9 @@ added fields and members are allowed, replaced identities are not. Numeric direc
 and volatile fields are explicit consumer policy. Changed prose and unsupported
 snapshot formats require review instead of being approved by line counts. A changed
 baseline is committed deliberately after its semantic difference is validated.
+
+The reusable workflow reference is pinned separately from the development CLI.
+GitHub's default automation token cannot modify workflow definitions, so `skill repin`
+updates runtime engines and the maintenance dependency without editing `.github/workflows`.
+A maintainer can advance the immutable workflow reference after reviewing a workflow change.
+The stable shell continues to execute the consumer's prepare/gate scripts and the current CLI.

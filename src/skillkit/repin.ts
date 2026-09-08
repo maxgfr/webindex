@@ -55,7 +55,7 @@ export async function repinSkill(root: string, config: SkillConfig): Promise<str
     if (engine.dependency) pkg.devDependencies[engine.dependency] = tag.slice(1);
     changes.push(`${name}: ${pin.tag} -> ${tag}`);
   }
-  // The CLI and reusable workflow come from the SAME immutable release tree.
+  // The development CLI follows stable releases independently of the pinned workflow shell.
   const toolTag = latest("maxgfr/webindex");
   const toolCommit = releaseCommit("maxgfr/webindex", toolTag);
   const toolUrl = `https://codeload.github.com/maxgfr/webindex/tar.gz/${toolCommit}`;
@@ -64,11 +64,8 @@ export async function repinSkill(root: string, config: SkillConfig): Promise<str
     const installed = JSON.parse(readFileSync(join(root, "node_modules/@maxgfr/webindex/package.json"), "utf8"));
     if (compareTags(toolTag, `v${installed.version}`) < 0) throw new Error("Refusing maintenance-tool downgrade");
     pkg.devDependencies = { ...pkg.devDependencies, "@maxgfr/webindex": toolUrl };
-    const workflow = join(root, ".github/workflows/engine-repin.yml");
-    const source = readFileSync(workflow, "utf8");
-    const updated = source.replace(/(maxgfr\/webindex\/\.github\/workflows\/skill-repin\.yml@)[a-f0-9]{40}/g, `$1${toolCommit}`);
-    if (updated === source && !source.includes(`skill-repin.yml@${toolCommit}`)) throw new Error("No pinned shared repin workflow found");
-    writeFileSync(workflow, updated);
+    // GITHUB_TOKEN cannot push workflow-definition changes. The reusable shell
+    // is pinned separately and only maintainers advance that reviewed reference.
     changes.push(`skillkit -> ${toolTag} (${toolCommit})`);
   }
   if (changes.length) writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);

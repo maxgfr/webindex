@@ -428,11 +428,6 @@ async function repinSkill(root, config) {
     const installed = JSON.parse(readFileSync5(join6(root, "node_modules/@maxgfr/webindex/package.json"), "utf8"));
     if (compareTags(toolTag, `v${installed.version}`) < 0) throw new Error("Refusing maintenance-tool downgrade");
     pkg.devDependencies = { ...pkg.devDependencies, "@maxgfr/webindex": toolUrl };
-    const workflow = join6(root, ".github/workflows/engine-repin.yml");
-    const source = readFileSync5(workflow, "utf8");
-    const updated = source.replace(/(maxgfr\/webindex\/\.github\/workflows\/skill-repin\.yml@)[a-f0-9]{40}/g, `$1${toolCommit}`);
-    if (updated === source && !source.includes(`skill-repin.yml@${toolCommit}`)) throw new Error("No pinned shared repin workflow found");
-    writeFileSync2(workflow, updated);
     changes.push(`skillkit -> ${toolTag} (${toolCommit})`);
   }
   if (changes.length) writeFileSync2(pkgPath, `${JSON.stringify(pkg, null, 2)}
