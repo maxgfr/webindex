@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.19.1](https://github.com/maxgfr/webindex/compare/v1.19.0...v1.19.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **skillkit:** verify lazy engine versions and ship workflow contract ([aa7e175](https://github.com/maxgfr/webindex/commit/aa7e175bcf3e8e1cd85e2a4dc1e42b8d1a87966f))
+
 # [1.19.0](https://github.com/maxgfr/webindex/compare/v1.18.10...v1.19.0) (2026-09-08)
 
 
