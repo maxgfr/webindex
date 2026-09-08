@@ -1276,7 +1276,7 @@ async function dispatch(argv: string[]): Promise<void> {
         } catch {
           fail(`cannot read the vendored declarations for "${engineName}" — run \`webindex skill vendor --ref <tag>\` first`);
         }
-        const report = auditEngineUsage(root, usageConfig, dts);
+        const report = auditEngineUsage(root, usageConfig, dts, engineName);
         if (asJson) {
           process.stdout.write(jsonLine(report));
         } else {

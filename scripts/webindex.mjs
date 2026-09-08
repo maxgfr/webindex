@@ -85,7 +85,7 @@ async function finishRepin(root) {
       const previous = new Set(existing.map((r) => r.databaseId));
       gh(["workflow", "run", workflow, "--ref", "main"]);
       for (let attempt = 0; attempt < 30 && !run; attempt++) {
-        await new Promise((resolve4) => setTimeout(resolve4, 2e3));
+        await new Promise((resolve5) => setTimeout(resolve5, 2e3));
         existing = runs();
         run = existing.find((r) => !previous.has(r.databaseId) && r.event === "workflow_dispatch");
       }
@@ -430,7 +430,7 @@ async function repinSkill(root, config) {
 
 // src/cli.ts
 import { existsSync as existsSync7, readFileSync as readFileSync12 } from "fs";
-import { basename as basename4, extname, join as join15, relative as relative2, resolve as resolve3 } from "path";
+import { basename as basename4, extname, join as join15, relative as relative2, resolve as resolve4 } from "path";
 import { pathToFileURL } from "url";
 
 // src/version.ts
@@ -501,12 +501,12 @@ function binaryName(name) {
   return process.platform === "win32" && name === "npx" ? "npx.cmd" : name;
 }
 function runWithInput(cmd, args, input, timeoutMs) {
-  return new Promise((resolve4) => {
+  return new Promise((resolve5) => {
     let child;
     try {
       child = spawn(binaryName(cmd), args, { stdio: ["pipe", "pipe", "pipe"] });
     } catch (e) {
-      resolve4({ ok: false, stdout: "", error: e.message });
+      resolve5({ ok: false, stdout: "", error: e.message });
       return;
     }
     const chunks = [];
@@ -516,7 +516,7 @@ function runWithInput(cmd, args, input, timeoutMs) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve4(r);
+      resolve5(r);
     };
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
@@ -3155,9 +3155,9 @@ async function hasChanged(url, previous, opts = {}) {
 
 // src/skillkit/usage.ts
 import { readdirSync, readFileSync as readFileSync8, statSync } from "fs";
-import { join as join9, relative } from "path";
+import { dirname as dirname2, join as join9, relative, resolve } from "path";
 var DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|enum)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm;
-var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["'](?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs)["']/g;
+var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']((?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs))["']/g;
 function engineExports(dts) {
   const block = /export\s*\{([\s\S]*?)\}\s*;?\s*$/.exec(dts);
   if (!block) return /* @__PURE__ */ new Set();
@@ -3182,7 +3182,7 @@ function walkSources(dir, skip = "vendor", out = []) {
   }
   return out;
 }
-function auditEngineUsage(root, config, dts) {
+function auditEngineUsage(root, config, dts, engineName) {
   const surface = engineExports(dts);
   const files = walkSources(join9(root, "src"));
   const forks = new Map(Object.entries(config.forks));
@@ -3200,6 +3200,20 @@ function auditEngineUsage(root, config, dts) {
       else collisions.push({ file: rel, name });
     }
     for (const m of src.matchAll(USES_ENGINE)) {
+      if (engineName) {
+        const spec = m[2] ?? "";
+        if (spec.endsWith("-engine.mjs")) {
+          if (!spec.endsWith(`/vendor/${engineName}-engine.mjs`) && !spec.endsWith(`vendor/${engineName}-engine.mjs`)) continue;
+        } else {
+          let shim = "";
+          try {
+            shim = readFileSync8(resolve(dirname2(file), spec.replace(/\.js$/, ".ts")), "utf8");
+          } catch {
+            continue;
+          }
+          if (!shim.includes(`vendor/${engineName}-engine.mjs`)) continue;
+        }
+      }
       for (const raw of m[1].split(",")) {
         const name = raw.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0];
         if (name && surface.has(name)) imported.add(name);
@@ -4028,7 +4042,7 @@ function pageMetadata(html) {
 // src/repo.ts
 import { existsSync as existsSync5, mkdirSync as mkdirSync4, readdirSync as readdirSync4, rmSync as rmSync3, statSync as statSync3 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
-import { basename as basename2, join as join13, resolve } from "path";
+import { basename as basename2, join as join13, resolve as resolve2 } from "path";
 
 // src/exec.ts
 import { spawn as spawn2, spawnSync as spawnSync2 } from "child_process";
@@ -4056,13 +4070,13 @@ function have(cmd) {
 }
 function shAsync(cmd, args, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
-  return new Promise((resolve4) => {
+  return new Promise((resolve5) => {
     let settled = false;
     const done = (r) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve4(r);
+      resolve5(r);
     };
     const child = spawn2(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
@@ -4086,7 +4100,7 @@ function shAsync(cmd, args, opts = {}) {
 function resolveRepo(raw) {
   const trimmed = raw.trim();
   if (trimmed) {
-    const asPath = resolve(trimmed);
+    const asPath = resolve2(trimmed);
     if (existsSync5(asPath) && statSync3(asPath).isDirectory()) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename2(asPath)}-${asPath}`)}` };
     }
@@ -4552,14 +4566,14 @@ function isOriginAllowed(origin, allowed = []) {
 
 // src/mcp/resources.ts
 import { existsSync as existsSync6, readdirSync as readdirSync5, readFileSync as readFileSync11, realpathSync, statSync as statSync4 } from "fs";
-import { basename as basename3, dirname as dirname2, join as join14, resolve as resolve2, sep } from "path";
+import { basename as basename3, dirname as dirname3, join as join14, resolve as resolve3, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
 function resolveSkillRoot(moduleDir) {
-  const here = moduleDir ?? dirname2(fileURLToPath(import.meta.url));
+  const here = moduleDir ?? dirname3(fileURLToPath(import.meta.url));
   const name = brand().name;
-  const candidates = [resolve2(here, ".."), resolve2(here, "..", "skills", name), resolve2(here, "..", "..", "skills", name)];
+  const candidates = [resolve3(here, ".."), resolve3(here, "..", "skills", name), resolve3(here, "..", "..", "skills", name)];
   return candidates.find((dir) => existsSync6(join14(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
@@ -4582,7 +4596,7 @@ function readResource(uri, moduleDir) {
   if (!root) throw new ResourceError("no skill payload found next to this build \u2014 nothing to read");
   const rel = uri.slice(URI_SCHEME.length);
   if (!rel) throw new ResourceError("empty resource path");
-  const target = resolve2(root, rel);
+  const target = resolve3(root, rel);
   const rootReal = realpathSync(root);
   let targetReal;
   try {
@@ -4820,7 +4834,7 @@ async function runStdioServer(adapter, opts = {}) {
   let active = 0;
   const waiting = [];
   const runHandler = async (msg, send2) => {
-    while (active >= MAX_IN_FLIGHT) await new Promise((resolve4) => waiting.push(resolve4));
+    while (active >= MAX_IN_FLIGHT) await new Promise((resolve5) => waiting.push(resolve5));
     active++;
     try {
       await server.handle(msg, send2);
@@ -4897,14 +4911,14 @@ function startHttpServer(adapter, opts = {}) {
   server.requestTimeout = 0;
   server.headersTimeout = 6e4;
   server.keepAliveTimeout = 12e4;
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     server.once("error", reject);
     server.listen(opts.port ?? 0, bind, () => {
       server.removeListener("error", reject);
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : opts.port ?? 0;
       const host = bind.includes(":") ? `[${bind}]` : bind;
-      resolve4({
+      resolve5({
         server,
         port,
         url: `http://${host}:${port}${MCP_PATH}`,
@@ -5013,7 +5027,7 @@ function sendJson(res, status, body, origin, extra = {}) {
 }
 var DRAIN_LIMIT = MAX_BODY_BYTES * 8;
 function readBody(req) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const chunks = [];
     let size = 0;
     let over = false;
@@ -5037,7 +5051,7 @@ function readBody(req) {
     });
     req.on("end", () => {
       if (over) reject(new Error("too large"));
-      else resolve4(Buffer.concat(chunks).toString("utf8"));
+      else resolve5(Buffer.concat(chunks).toString("utf8"));
     });
     req.on("error", reject);
     req.on("aborted", () => reject(new Error("client aborted the request")));
@@ -6041,7 +6055,7 @@ hash ${f.contentHash ?? "-"}
   }
   if (cmd === "skill") {
     const action = args.positional[0] ?? "";
-    const root = resolve3(argValue(args, "root") ?? process.cwd());
+    const root = resolve4(argValue(args, "root") ?? process.cwd());
     const asJson = argBool(args, "json");
     if (action === "init") {
       const name = args.positional[1];
@@ -6136,7 +6150,7 @@ hash ${f.contentHash ?? "-"}
         } catch {
           fail(`cannot read the vendored declarations for "${engineName}" \u2014 run \`webindex skill vendor --ref <tag>\` first`);
         }
-        const report = auditEngineUsage(root, usageConfig, dts);
+        const report = auditEngineUsage(root, usageConfig, dts, engineName);
         if (asJson) {
           process.stdout.write(jsonLine(report));
         } else {

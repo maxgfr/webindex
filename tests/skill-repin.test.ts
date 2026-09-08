@@ -5,6 +5,7 @@ import { afterEach, expect, it } from "vitest";
 import { latestStable } from "../src/skillkit/repin.js";
 import { preserves } from "../src/skillkit/recall.js";
 import { vendorEngine, checkPins } from "../src/skillkit/vendor.js";
+import { auditEngineUsage } from "../src/skillkit/usage.js";
 import { readSkillConfig } from "../src/skillkit/config.js";
 const roots: string[] = [];
 afterEach(() => {
@@ -119,4 +120,13 @@ it("verifies CodeIndex lazy module version assignments", async () => {
   );
   expect(result.errors).toEqual([]);
   expect(checkPins(root, config)[0]?.ok).toBe(true);
+});
+
+it("attributes overlapping names to the engine actually imported", () => {
+  const { root, config } = fixture();
+  writeFileSync(join(root, "src/engine.ts"), 'export * from "./vendor/webindex-engine.mjs";');
+  writeFileSync(join(root, "src/use.ts"), 'import { sh } from "./engine.js";\nimport { walk } from "./vendor/codeindex-engine.mjs";');
+  const surface = "export { sh, walk };";
+  expect(auditEngineUsage(root, config, surface, "codeindex").imported).toEqual(["walk"]);
+  expect(auditEngineUsage(root, config, surface, "webindex").imported).toEqual(["sh"]);
 });

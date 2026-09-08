@@ -779,6 +779,7 @@ describe("webindex skill", () => {
   it("passes a tree that re-exports the engine rather than declaring over it", async () => {
     skillJson();
     writeIn("src/vendor/webindex-engine.d.mts", "export { rrf, slugify };");
+    writeIn("src/engine.ts", 'export * from "./vendor/webindex-engine.mjs";');
     writeIn("src/util.ts", 'export { rrf } from "./engine.js";');
     expect(await run(["skill", "check", "--root", repo])).toBe(0);
     expect(stdout()).toMatch(/1 engine symbols in use/);
@@ -797,6 +798,7 @@ describe("webindex skill", () => {
   it("fails when a layer stopped being used", async () => {
     skillJson({ usageFloor: 5 });
     writeIn("src/vendor/webindex-engine.d.mts", "export { rrf };");
+    writeIn("src/engine.ts", 'export * from "./vendor/webindex-engine.mjs";');
     writeIn("src/util.ts", 'export { rrf } from "./engine.js";');
     expect(await run(["skill", "check", "--root", repo])).toBe(1);
     expect(stderr()).toMatch(/floor is 5/);

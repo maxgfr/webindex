@@ -20,7 +20,7 @@
 // a layer has to be a decision someone makes on purpose.
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import type { SkillConfig } from "./config.js";
 
 /**
@@ -50,7 +50,7 @@ const DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|
  * but not `./engine.js`, so every top-level shim was invisible to the counter
  * and the floor was met by subdirectories alone.
  */
-const USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["'](?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs)["']/g;
+const USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']((?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs))["']/g;
 
 /** The engine's public surface, read from the vendored declarations rather than hardcoded. */
 export function engineExports(dts: string): Set<string> {
@@ -107,7 +107,7 @@ export interface UsageReport {
  * this module reports what is true about the tree, and a build gate is a
  * policy on top of it.
  */
-export function auditEngineUsage(root: string, config: SkillConfig, dts: string): UsageReport {
+export function auditEngineUsage(root: string, config: SkillConfig, dts: string, engineName?: string): UsageReport {
   const surface = engineExports(dts);
   const files = walkSources(join(root, "src"));
   const forks = new Map(Object.entries(config.forks));
@@ -127,6 +127,22 @@ export function auditEngineUsage(root: string, config: SkillConfig, dts: string)
       else collisions.push({ file: rel, name });
     }
     for (const m of src.matchAll(USES_ENGINE)) {
+      if (engineName) {
+        const spec = m[2] ?? "";
+        if (spec.endsWith("-engine.mjs")) {
+          if (!spec.endsWith(`/vendor/${engineName}-engine.mjs`) && !spec.endsWith(`vendor/${engineName}-engine.mjs`)) continue;
+        } else {
+          // Attribute a configured engine shim to its actual vendor import. The
+          // same exported name in a different engine is not evidence of use.
+          let shim = "";
+          try {
+            shim = readFileSync(resolve(dirname(file), spec.replace(/\.js$/, ".ts")), "utf8");
+          } catch {
+            continue;
+          }
+          if (!shim.includes(`vendor/${engineName}-engine.mjs`)) continue;
+        }
+      }
       for (const raw of (m[1] as string).split(",")) {
         const name = raw
           .trim()
