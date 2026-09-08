@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
+import { githubRepoForRemote } from "../src/skillkit/finish.js";
 import { latestStable } from "../src/skillkit/repin.js";
 import { preserves } from "../src/skillkit/recall.js";
 import { vendorEngine, checkPins } from "../src/skillkit/vendor.js";
@@ -129,4 +130,11 @@ it("attributes overlapping names to the engine actually imported", () => {
   const surface = "export { sh, walk };";
   expect(auditEngineUsage(root, config, surface, "codeindex").imported).toEqual(["walk"]);
   expect(auditEngineUsage(root, config, surface, "webindex").imported).toEqual(["sh"]);
+});
+
+it("targets the fork origin for workflow completion", () => {
+  expect(githubRepoForRemote("git@github.com:maxgfr/ultra11y.git")).toBe("maxgfr/ultra11y");
+  expect(githubRepoForRemote("https://github.com/maxgfr/ultra11y.git")).toBe("maxgfr/ultra11y");
+  expect(githubRepoForRemote("ssh://git@github.com/maxgfr/ultra11y")).toBe("maxgfr/ultra11y");
+  expect(() => githubRepoForRemote("/local/checkout")).toThrow();
 });

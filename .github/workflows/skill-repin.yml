@@ -14,6 +14,7 @@ jobs:
         shell: bash
     env:
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v6
         with:

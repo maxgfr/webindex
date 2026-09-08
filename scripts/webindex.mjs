@@ -69,9 +69,11 @@ import { join as join2 } from "path";
 async function finishRepin(root) {
   const config = JSON.parse(readFileSync2(join2(root, "skill.json"), "utf8"));
   const workflows = config.repin?.workflows ?? ["ci.yml", "release.yml"];
-  const gh = (args) => execFileSync2("gh", args, { cwd: root, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
-  const sha = execFileSync2("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-  const repo = gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).trim();
+  const git = (args) => execFileSync2("git", args, { cwd: root, encoding: "utf8" }).trim();
+  const repo = githubRepoForRemote(git(["remote", "get-url", "origin"]));
+  const env2 = { ...process.env, GH_REPO: repo };
+  const gh = (args) => execFileSync2("gh", args, { cwd: root, env: env2, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+  const sha = git(["rev-parse", "HEAD"]);
   for (const workflow of workflows) {
     const runs = () => JSON.parse(
       gh(["run", "list", "--workflow", workflow, "--commit", sha, "--limit", "30", "--json", "databaseId,headSha,conclusion,status,event"])
@@ -93,8 +95,18 @@ async function finishRepin(root) {
     if (!run) throw new Error(`No ${workflow} run appeared for ${sha}`);
     process.stdout.write(`Waiting for ${workflow}: ${run.databaseId}
 `);
-    execFileSync2("gh", ["run", "watch", String(run.databaseId), "--exit-status", "--interval", "15"], { cwd: root, stdio: "inherit", timeout: 25 * 6e4 });
+    execFileSync2("gh", ["run", "watch", String(run.databaseId), "--exit-status", "--interval", "15"], {
+      cwd: root,
+      env: env2,
+      stdio: "inherit",
+      timeout: 25 * 6e4
+    });
   }
+}
+function githubRepoForRemote(remote) {
+  const match = /github\.com[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(remote);
+  if (!match) throw new Error("origin must be a GitHub repository");
+  return match[1];
 }
 
 // src/skillkit/repin.ts

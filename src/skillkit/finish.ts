@@ -13,9 +13,11 @@ interface Run {
 export async function finishRepin(root: string): Promise<void> {
   const config = JSON.parse(readFileSync(join(root, "skill.json"), "utf8"));
   const workflows: string[] = config.repin?.workflows ?? ["ci.yml", "release.yml"];
-  const gh = (args: string[]) => execFileSync("gh", args, { cwd: root, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
-  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-  const repo = gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).trim();
+  const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  const repo = githubRepoForRemote(git(["remote", "get-url", "origin"]));
+  const env = { ...process.env, GH_REPO: repo };
+  const gh = (args: string[]) => execFileSync("gh", args, { cwd: root, env, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+  const sha = git(["rev-parse", "HEAD"]);
   for (const workflow of workflows) {
     const runs = () =>
       JSON.parse(
@@ -37,6 +39,18 @@ export async function finishRepin(root: string): Promise<void> {
     }
     if (!run) throw new Error(`No ${workflow} run appeared for ${sha}`);
     process.stdout.write(`Waiting for ${workflow}: ${run.databaseId}\n`);
-    execFileSync("gh", ["run", "watch", String(run.databaseId), "--exit-status", "--interval", "15"], { cwd: root, stdio: "inherit", timeout: 25 * 60_000 });
+    execFileSync("gh", ["run", "watch", String(run.databaseId), "--exit-status", "--interval", "15"], {
+      cwd: root,
+      env,
+      stdio: "inherit",
+      timeout: 25 * 60_000,
+    });
   }
+}
+
+/** A fork must dispatch its own workflows, irrespective of gh's preferred upstream. */
+export function githubRepoForRemote(remote: string): string {
+  const match = /github\.com[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(remote);
+  if (!match) throw new Error("origin must be a GitHub repository");
+  return match[1]!;
 }
