@@ -24,6 +24,10 @@ export const SKILL_CONFIG = "skill.json";
 export interface EnginePin {
   /** `owner/name` on GitHub, where the built artifacts are fetched from. */
   repo: string;
+  usageFloor?: number;
+  forks?: Record<string, string>;
+  /** Also align a grammar-provisioning development dependency, when present. */
+  dependency?: string;
   /**
    * The oldest release this repo's SOURCE is written against.
    *
@@ -101,13 +105,25 @@ export function readSkillConfig(root: string): ConfigResult {
         errors.push(`${SKILL_CONFIG}: engines.${key}.repo must be "owner/name".`);
         continue;
       }
-      if (typeof e.minRef !== "string" || !/^v\d+\.\d+\.\d+/.test(e.minRef)) {
+      if (typeof e.minRef !== "string" || !/^v\d+\.\d+\.\d+$/.test(e.minRef)) {
         errors.push(`${SKILL_CONFIG}: engines.${key}.minRef must be a "vX.Y.Z" tag.`);
         continue;
       }
+      if (e.usageFloor !== undefined && (!Number.isInteger(e.usageFloor) || e.usageFloor < 0))
+        errors.push(`${SKILL_CONFIG}: engines.${key}.usageFloor must be a non-negative integer.`);
+      if (
+        e.forks !== undefined &&
+        (typeof e.forks !== "object" ||
+          e.forks === null ||
+          Array.isArray(e.forks) ||
+          Object.values(e.forks).some((why) => typeof why !== "string" || !why.trim()))
+      )
+        errors.push(`${SKILL_CONFIG}: engines.${key}.forks must map declarations to non-empty reasons.`);
+      if (e.dependency !== undefined && (typeof e.dependency !== "string" || !e.dependency.trim()))
+        errors.push(`${SKILL_CONFIG}: engines.${key}.dependency must be a package name.`);
       const meta = typeof e.meta === "string" && e.meta ? e.meta : `${key}.meta.json`;
       const files = Array.isArray(e.files) && e.files.length ? e.files : DEFAULT_FILES.map((f) => ({ ...f, local: f.local.replace("{name}", key) }));
-      engines[key] = { repo: e.repo, minRef: e.minRef, meta, files };
+      engines[key] = { repo: e.repo, minRef: e.minRef, meta, files, usageFloor: e.usageFloor, forks: e.forks, dependency: e.dependency };
     }
     if (!Object.keys(engines).length && !errors.length) errors.push(`${SKILL_CONFIG}: "engines" is empty — nothing to vendor or police.`);
   }

@@ -248,3 +248,23 @@ pinned tag.
 ## License
 
 MIT
+
+### Shared consumer maintenance
+
+Consumer repositories declare engines, minimum versions, usage exceptions and their
+validation hooks in `skill.json`. The development-only CLI is installed from an
+immutable GitHub release archive; its runtime engine is vendored only when the skill
+actually needs web retrieval. `skill vendor --check` remains fully offline.
+
+`webindex skill repin` compares all stable releases numerically, resolves each tag
+to a commit, verifies the downloaded version before replacing files, and updates
+the maintenance CLI and reusable workflow together. `skill finish` waits for CI and
+publication, resuming interrupted dispatches even when no pin changed. The reusable
+workflow is `.github/workflows/skill-repin.yml`; consumers implement `engine:prepare`
+and `engine:gate` and declare the paths allowed into its candidate commit.
+
+`skill recall` compares regenerated JSON to baseline elements and their evidence;
+added fields and members are allowed, replaced identities are not. Numeric direction
+and volatile fields are explicit consumer policy. Changed prose and unsupported
+snapshot formats require review instead of being approved by line counts. A changed
+baseline is committed deliberately after its semantic difference is validated.

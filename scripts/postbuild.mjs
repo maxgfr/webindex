@@ -61,7 +61,7 @@ const pkgVersion = JSON.parse(readFileSync(join(scriptsDir, "..", "package.json"
 for (const artifact of ["engine.mjs", "webindex.mjs"]) {
   const file = join(scriptsDir, artifact);
   if (!existsSync(file)) continue;
-  const found = readFileSync(file, "utf8").match(/ENGINE_VERSION = "([^"]+)"/)?.[1];
+  const found = readFileSync(file, "utf8").match(/(?:^|\n)(?:var|const|let) ENGINE_VERSION = "([^"]+)"/)?.[1];
   if (found !== pkgVersion) {
     console.error(`postbuild: scripts/${artifact} reports ${found ?? "no version"} but package.json says ${pkgVersion}`);
     process.exit(1);

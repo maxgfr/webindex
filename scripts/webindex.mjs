@@ -1,9 +1,116 @@
 #!/usr/bin/env node
 
-// src/cli.ts
-import { existsSync as existsSync7, readFileSync as readFileSync9 } from "fs";
-import { basename as basename4, extname, join as join12, relative as relative2, resolve as resolve3 } from "path";
-import { pathToFileURL } from "url";
+// src/skillkit/recall.ts
+import { execFileSync } from "child_process";
+import { readFileSync } from "fs";
+import { join } from "path";
+function preserves(before, after, policy, key = "") {
+  if (Array.isArray(before)) {
+    if (!Array.isArray(after)) return false;
+    const candidates = before.map((old) => after.flatMap((next, i) => preserves(old, next, policy, key) ? [i] : []));
+    const owner = /* @__PURE__ */ new Map();
+    const assign = (row, seen) => {
+      for (const candidate of candidates[row] ?? []) {
+        if (seen.has(candidate)) continue;
+        seen.add(candidate);
+        const previous = owner.get(candidate);
+        if (previous === void 0 || assign(previous, seen)) {
+          owner.set(candidate, row);
+          return true;
+        }
+      }
+      return false;
+    };
+    return candidates.every((_, row) => assign(row, /* @__PURE__ */ new Set()));
+  }
+  if (before !== null && typeof before === "object") {
+    if (after === null || typeof after !== "object" || Array.isArray(after)) return false;
+    return Object.entries(before).every(([k, value]) => policy.ignoreKeys?.includes(k) || preserves(value, after[k], policy, k));
+  }
+  if (typeof before === "number" && typeof after === "number") {
+    if (policy.growing?.includes(key)) return after >= before;
+    if (policy.shrinking?.includes(key)) return after <= before;
+  }
+  return Object.is(before, after);
+}
+function checkArtifactRecall(root, ref = "HEAD") {
+  const config = JSON.parse(readFileSync(join(root, "skill.json"), "utf8"));
+  const policy = config.repin?.recall;
+  if (!policy) return [];
+  const git = (args) => execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  const files = git(["ls-tree", "-r", "--name-only", ref, "--", ...policy.paths]).trim().split("\n").filter(Boolean);
+  if (!files.length) throw new Error("No baseline artifacts matched the declared recall paths");
+  const lost = [];
+  for (const file of files) {
+    const before = git(["show", `${ref}:${file}`]);
+    let after;
+    try {
+      after = readFileSync(join(root, file), "utf8");
+    } catch {
+      lost.push(`${file}: deleted`);
+      continue;
+    }
+    if (before === after) continue;
+    if (file.endsWith(".json")) {
+      try {
+        if (preserves(JSON.parse(before), JSON.parse(after), policy)) continue;
+      } catch {
+      }
+    }
+    lost.push(`${file}: baseline content changed or disappeared; review the semantic difference`);
+  }
+  return lost;
+}
+
+// src/skillkit/finish.ts
+import { execFileSync as execFileSync2 } from "child_process";
+import { readFileSync as readFileSync2 } from "fs";
+import { join as join2 } from "path";
+async function finishRepin(root) {
+  const config = JSON.parse(readFileSync2(join2(root, "skill.json"), "utf8"));
+  const workflows = config.repin?.workflows ?? ["ci.yml", "release.yml"];
+  const gh = (args) => execFileSync2("gh", args, { cwd: root, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+  const sha = execFileSync2("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+  const repo = gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).trim();
+  for (const workflow of workflows) {
+    const runs = () => JSON.parse(
+      gh(["run", "list", "--workflow", workflow, "--commit", sha, "--limit", "30", "--json", "databaseId,headSha,conclusion,status,event"])
+    );
+    let existing = runs();
+    if (existing.some((r) => r.conclusion === "success")) continue;
+    let run = existing.find((r) => r.status !== "completed");
+    if (!run) {
+      if (gh(["api", `repos/${repo}/commits/main`, "--jq", ".sha"]).trim() !== sha)
+        throw new Error("main moved before workflow dispatch; retry from its new HEAD");
+      const previous = new Set(existing.map((r) => r.databaseId));
+      gh(["workflow", "run", workflow, "--ref", "main"]);
+      for (let attempt = 0; attempt < 30 && !run; attempt++) {
+        await new Promise((resolve4) => setTimeout(resolve4, 2e3));
+        existing = runs();
+        run = existing.find((r) => !previous.has(r.databaseId) && r.event === "workflow_dispatch");
+      }
+    }
+    if (!run) throw new Error(`No ${workflow} run appeared for ${sha}`);
+    process.stdout.write(`Waiting for ${workflow}: ${run.databaseId}
+`);
+    execFileSync2("gh", ["run", "watch", String(run.databaseId), "--exit-status", "--interval", "15"], { cwd: root, stdio: "inherit", timeout: 25 * 6e4 });
+  }
+}
+
+// src/skillkit/repin.ts
+import { execFileSync as execFileSync3 } from "child_process";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync2 } from "fs";
+import { join as join6 } from "path";
+
+// src/skillkit/config.ts
+import { join as join4 } from "path";
+
+// src/run.ts
+import { join as join3 } from "path";
+import { readFileSync as readFileSync3 } from "fs";
+
+// src/no-write.ts
+import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "fs";
 
 // src/brand.ts
 var DEFAULT_BRAND = {
@@ -55,6 +162,276 @@ function envInt(suffix, def, min = 0, max = Number.MAX_SAFE_INTEGER) {
   if (!Number.isFinite(n)) return def;
   return Math.min(max, Math.max(min, Math.trunc(n)));
 }
+
+// src/no-write.ts
+var flagged = false;
+function isNoWrite() {
+  return flagged || envFlag("NO_WRITE");
+}
+var collected = [];
+function ensureDir(dir) {
+  if (isNoWrite()) return;
+  mkdirSync(dir, { recursive: true });
+}
+function writeArtifact(path, content) {
+  if (isNoWrite()) {
+    const at = collected.findIndex((a) => a.path === path);
+    if (at !== -1) collected[at] = { path, content };
+    else collected.push({ path, content });
+    return path;
+  }
+  writeFileAtomic(path, content);
+  return path;
+}
+var tmpCounter = 0;
+function writeFileAtomic(path, content) {
+  const tmp = `${path}.${process.pid}.${tmpCounter++}.tmp`;
+  try {
+    writeFileSync(tmp, content);
+    renameSync(tmp, path);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+    }
+    throw e;
+  }
+}
+
+// src/run.ts
+function readJsonSafe(path) {
+  try {
+    return JSON.parse(readFileSync3(path, "utf8"));
+  } catch {
+    return void 0;
+  }
+}
+
+// src/skillkit/config.ts
+var SKILL_CONFIG = "skill.json";
+var DEFAULT_FILES = [
+  { remote: "scripts/engine.mjs", local: "{name}-engine.mjs" },
+  { remote: "scripts/engine.d.mts", local: "{name}-engine.d.mts" }
+];
+function readSkillConfig(root) {
+  const path = join4(root, SKILL_CONFIG);
+  const raw = readJsonSafe(path);
+  if (!raw) return { errors: [`no readable ${SKILL_CONFIG} at ${path} \u2014 run \`skill init\` to scaffold one.`] };
+  const errors = [];
+  const name = typeof raw.name === "string" && raw.name ? raw.name : void 0;
+  if (!name) errors.push(`${SKILL_CONFIG}: "name" must be a non-empty string.`);
+  const engines = {};
+  const rawEngines = raw.engines;
+  if (!rawEngines || typeof rawEngines !== "object") {
+    errors.push(`${SKILL_CONFIG}: "engines" must be an object of { repo, minRef, meta }.`);
+  } else {
+    for (const [key, value] of Object.entries(rawEngines)) {
+      const e = value;
+      if (typeof e?.repo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(e.repo)) {
+        errors.push(`${SKILL_CONFIG}: engines.${key}.repo must be "owner/name".`);
+        continue;
+      }
+      if (typeof e.minRef !== "string" || !/^v\d+\.\d+\.\d+$/.test(e.minRef)) {
+        errors.push(`${SKILL_CONFIG}: engines.${key}.minRef must be a "vX.Y.Z" tag.`);
+        continue;
+      }
+      if (e.usageFloor !== void 0 && (!Number.isInteger(e.usageFloor) || e.usageFloor < 0))
+        errors.push(`${SKILL_CONFIG}: engines.${key}.usageFloor must be a non-negative integer.`);
+      if (e.forks !== void 0 && (typeof e.forks !== "object" || e.forks === null || Array.isArray(e.forks) || Object.values(e.forks).some((why) => typeof why !== "string" || !why.trim())))
+        errors.push(`${SKILL_CONFIG}: engines.${key}.forks must map declarations to non-empty reasons.`);
+      if (e.dependency !== void 0 && (typeof e.dependency !== "string" || !e.dependency.trim()))
+        errors.push(`${SKILL_CONFIG}: engines.${key}.dependency must be a package name.`);
+      const meta = typeof e.meta === "string" && e.meta ? e.meta : `${key}.meta.json`;
+      const files = Array.isArray(e.files) && e.files.length ? e.files : DEFAULT_FILES.map((f) => ({ ...f, local: f.local.replace("{name}", key) }));
+      engines[key] = { repo: e.repo, minRef: e.minRef, meta, files, usageFloor: e.usageFloor, forks: e.forks, dependency: e.dependency };
+    }
+    if (!Object.keys(engines).length && !errors.length) errors.push(`${SKILL_CONFIG}: "engines" is empty \u2014 nothing to vendor or police.`);
+  }
+  const floor = raw.usageFloor;
+  if (floor !== void 0 && (typeof floor !== "number" || !Number.isInteger(floor) || floor < 0)) {
+    errors.push(`${SKILL_CONFIG}: "usageFloor" must be a non-negative integer.`);
+  }
+  const forks = raw.forks;
+  if (forks !== void 0 && (typeof forks !== "object" || forks === null || Array.isArray(forks))) {
+    errors.push(`${SKILL_CONFIG}: "forks" must be an object of "path:Name" -> reason.`);
+  }
+  const foreign = raw.allowedForeignFlags;
+  if (foreign !== void 0 && (!Array.isArray(foreign) || foreign.some((f) => typeof f !== "string"))) {
+    errors.push(`${SKILL_CONFIG}: "allowedForeignFlags" must be an array of strings.`);
+  }
+  if (errors.length) return { errors };
+  return {
+    config: {
+      name,
+      vendorDir: typeof raw.vendorDir === "string" && raw.vendorDir ? raw.vendorDir : join4("src", "vendor"),
+      engines,
+      usageFloor: typeof floor === "number" ? floor : 0,
+      forks: forks ?? {},
+      allowedForeignFlags: foreign ?? []
+    },
+    errors: []
+  };
+}
+function compareTags(a, b) {
+  const parts = (t) => String(t).replace(/^v/, "").split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const [x, y] = [parts(a), parts(b)];
+  for (let i = 0; i < 3; i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+// src/skillkit/vendor.ts
+import { createHash } from "crypto";
+import { readFileSync as readFileSync4 } from "fs";
+import { join as join5 } from "path";
+var sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
+function checkPins(root, config) {
+  return Object.entries(config.engines).map(([name, pin]) => {
+    const problems = [];
+    const metaPath = join5(root, config.vendorDir, pin.meta);
+    const meta = readJsonSafe(metaPath);
+    if (!meta?.tag || !meta.sha256) {
+      return {
+        engine: name,
+        ok: false,
+        problems: [`no readable pin at ${config.vendorDir}/${pin.meta} \u2014 run \`skill vendor --engine ${name} --ref <tag>\` first.`]
+      };
+    }
+    for (const f of pin.files ?? []) {
+      const local = join5(root, config.vendorDir, f.local);
+      let actual;
+      try {
+        actual = sha256(readFileSync4(local));
+      } catch {
+        problems.push(`${config.vendorDir}/${f.local} is missing \u2014 the pin records it but it is not on disk.`);
+        continue;
+      }
+      const expected = meta.sha256[f.local];
+      if (!expected) problems.push(`${config.vendorDir}/${f.local} is not recorded in ${pin.meta} \u2014 re-pin.`);
+      else if (actual !== expected) problems.push(`DRIFT in ${config.vendorDir}/${f.local} \u2014 the bytes differ from the ${meta.tag} pin.`);
+    }
+    if (!problems.length) {
+      const first = pin.files?.[0];
+      const body = first ? readFileSync4(join5(root, config.vendorDir, first.local), "utf8") : "";
+      const version = /(?:^|\n)(?:var|const|let) ENGINE_VERSION = "([^"]+)"/.exec(body)?.[1];
+      if (!version || meta.tag !== `v${version}` || meta.engineVersion !== version) problems.push("tag, engineVersion and embedded ENGINE_VERSION disagree");
+      if (meta.commit && !/^[a-f0-9]{40}$/.test(meta.commit)) problems.push("invalid upstream commit");
+    }
+    if (!problems.length && compareTags(meta.tag, pin.minRef) < 0) {
+      problems.push(
+        `STALE ${name} pin \u2014 vendored ${meta.tag}, but this repo's source needs at least ${pin.minRef}. Run \`skill vendor --engine ${name} --ref ${pin.minRef}\` (or newer).`
+      );
+    }
+    return { engine: name, ok: problems.length === 0, tag: meta.tag, engineVersion: meta.engineVersion, problems };
+  });
+}
+async function vendorEngine(root, config, name, ref, fetchFile, commit) {
+  const pin = config.engines[name];
+  if (!pin) return { written: [], errors: [`unknown engine "${name}" \u2014 expected one of: ${Object.keys(config.engines).join(", ")}.`] };
+  if (!/^v\d+\.\d+\.\d+$/.test(ref)) return { written: [], errors: [`invalid stable release tag ${ref}`] };
+  if (compareTags(ref, pin.minRef) < 0) return { written: [], errors: [`${ref} is below the minimum ${pin.minRef}`] };
+  if (commit !== void 0 && !/^[a-f0-9]{40}$/.test(commit)) return { written: [], errors: ["invalid upstream commit"] };
+  const vendorDir = join5(root, config.vendorDir);
+  const current2 = readJsonSafe(join5(vendorDir, pin.meta));
+  if (current2?.tag && compareTags(ref, current2.tag) < 0) return { written: [], errors: [`refusing downgrade from ${current2.tag} to ${ref}`] };
+  const staged = [];
+  const sums = {};
+  for (const f of pin.files ?? []) {
+    const url = `https://raw.githubusercontent.com/${pin.repo}/${commit ?? ref}/${f.remote}`;
+    const buf = await fetchFile(url);
+    if (!buf) return { written: [], errors: [`could not fetch ${url}`] };
+    staged.push({ local: join5(vendorDir, f.local), buf });
+    sums[f.local] = sha256(buf);
+  }
+  const engineVersion = /(?:^|\n)(?:var|const|let) ENGINE_VERSION = "([^"]+)"/.exec(staged[0]?.buf.toString("utf8") ?? "")?.[1];
+  if (!engineVersion || `v${engineVersion}` !== ref)
+    return {
+      written: [],
+      errors: [
+        `the ${name} bundle reports ENGINE_VERSION=${engineVersion ?? "?"} but the pinned ref is ${ref} \u2014 refusing to record a pin that disagrees with its bytes.`
+      ]
+    };
+  if (current2?.tag === ref && (current2.commit && commit && current2.commit !== commit || Object.entries(current2.sha256).some(([file, hash]) => sums[file] !== hash))) {
+    return { written: [], errors: [`upstream moved the existing ${ref} pin`] };
+  }
+  const meta = { tag: ref, engineVersion, sha256: sums, syncedAt: (/* @__PURE__ */ new Date()).toISOString(), ...commit ? { commit } : {} };
+  ensureDir(vendorDir);
+  for (const file of staged) writeFileAtomic(file.local, file.buf);
+  const metaPath = join5(vendorDir, pin.meta);
+  writeFileAtomic(metaPath, `${JSON.stringify(meta, null, 2)}
+`);
+  return { written: [...staged.map((f) => f.local), metaPath], errors: [], tag: ref, engineVersion };
+}
+
+// src/skillkit/repin.ts
+function latestStable(releases) {
+  const tags = releases.filter((r) => !r.draft && !r.prerelease && /^v\d+\.\d+\.\d+$/.test(r.tag_name)).map((r) => r.tag_name);
+  tags.sort((a, b) => compareTags(b, a));
+  if (!tags[0]) throw new Error("No stable engine release found");
+  return tags[0];
+}
+function githubJson(path, pages = false) {
+  return JSON.parse(execFileSync3("gh", ["api", path, ...pages ? ["--paginate", "--slurp"] : []], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }));
+}
+function releaseCommit(repo, tag) {
+  const result = githubJson(`repos/${repo}/commits/${tag}`);
+  if (!result.sha || !/^[a-f0-9]{40}$/.test(result.sha)) throw new Error(`Invalid commit for ${repo}@${tag}`);
+  return result.sha;
+}
+function latest(repo) {
+  return latestStable(githubJson(`repos/${repo}/releases?per_page=100`, true).flat());
+}
+async function fetchEngineFile(url) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(6e4) });
+  if (!response.ok) return void 0;
+  return Buffer.from(await response.arrayBuffer());
+}
+async function repinSkill(root, config) {
+  const bad = checkPins(root, config).filter((s) => !s.ok);
+  if (bad.length) throw new Error(bad.flatMap((s) => s.problems).join("\n"));
+  const changes = [];
+  const pkgPath = join6(root, "package.json");
+  const pkg = JSON.parse(readFileSync5(pkgPath, "utf8"));
+  for (const [name, engine] of Object.entries(config.engines)) {
+    const pin = JSON.parse(readFileSync5(join6(root, config.vendorDir, engine.meta), "utf8"));
+    const tag = latest(engine.repo);
+    if (compareTags(tag, pin.tag) < 0) throw new Error(`Refusing downgrade of ${name}: ${pin.tag} -> ${tag}`);
+    if (engine.dependency && pkg.devDependencies?.[engine.dependency] !== tag.slice(1)) {
+      pkg.devDependencies = { ...pkg.devDependencies, [engine.dependency]: tag.slice(1) };
+      changes.push(`${engine.dependency} -> ${tag}`);
+    }
+    if (tag === pin.tag && pin.commit) continue;
+    const result = await vendorEngine(root, config, name, tag, fetchEngineFile, releaseCommit(engine.repo, tag));
+    if (result.errors.length) throw new Error(result.errors.join("\n"));
+    if (engine.dependency) pkg.devDependencies[engine.dependency] = tag.slice(1);
+    changes.push(`${name}: ${pin.tag} -> ${tag}`);
+  }
+  const toolTag = latest("maxgfr/webindex");
+  const toolCommit = releaseCommit("maxgfr/webindex", toolTag);
+  const toolUrl = `https://codeload.github.com/maxgfr/webindex/tar.gz/${toolCommit}`;
+  const oldTool = pkg.devDependencies?.["@maxgfr/webindex"];
+  if (oldTool !== toolUrl) {
+    const installed = JSON.parse(readFileSync5(join6(root, "node_modules/@maxgfr/webindex/package.json"), "utf8"));
+    if (compareTags(toolTag, `v${installed.version}`) < 0) throw new Error("Refusing maintenance-tool downgrade");
+    pkg.devDependencies = { ...pkg.devDependencies, "@maxgfr/webindex": toolUrl };
+    const workflow = join6(root, ".github/workflows/engine-repin.yml");
+    const source = readFileSync5(workflow, "utf8");
+    const updated = source.replace(/(maxgfr\/webindex\/\.github\/workflows\/skill-repin\.yml@)[a-f0-9]{40}/g, `$1${toolCommit}`);
+    if (updated === source && !source.includes(`skill-repin.yml@${toolCommit}`)) throw new Error("No pinned shared repin workflow found");
+    writeFileSync2(workflow, updated);
+    changes.push(`skillkit -> ${toolTag} (${toolCommit})`);
+  }
+  if (changes.length) writeFileSync2(pkgPath, `${JSON.stringify(pkg, null, 2)}
+`);
+  return changes;
+}
+
+// src/cli.ts
+import { existsSync as existsSync7, readFileSync as readFileSync12 } from "fs";
+import { basename as basename4, extname, join as join15, relative as relative2, resolve as resolve3 } from "path";
+import { pathToFileURL } from "url";
 
 // src/version.ts
 var ENGINE_VERSION = "1.18.10";
@@ -346,8 +723,8 @@ function pdfToText(buf) {
 }
 
 // src/pdf/ocr.ts
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "fs";
-import { join } from "path";
+import { mkdtempSync, readFileSync as readFileSync6, rmSync, writeFileSync as writeFileSync3, existsSync } from "fs";
+import { join as join7 } from "path";
 import { tmpdir } from "os";
 var DEFAULT_TIMEOUT_MS = 3e5;
 var DEFAULT_MAX_DOCS = 3;
@@ -371,17 +748,17 @@ async function ocrPdf(bytes) {
   if (ocrBudgetLeft() <= 0) return void 0;
   const { copyablePdf, tesseract } = await ocrTools();
   if (!copyablePdf || !tesseract) return void 0;
-  const dir = mkdtempSync(join(tmpdir(), `${brand().name}-ocr-`));
+  const dir = mkdtempSync(join7(tmpdir(), `${brand().name}-ocr-`));
   try {
-    const input = join(dir, "in.pdf");
-    const output = join(dir, "out.pdf");
-    writeFileSync(input, bytes);
+    const input = join7(dir, "in.pdf");
+    const output = join7(dir, "out.pdf");
+    writeFileSync3(input, bytes);
     const lang = env("OCR_LANG") || DEFAULT_LANG;
     const r = await runWithInput("copyable-pdf", ["-o", output, "-m", "-l", lang, input], Buffer.alloc(0), envInt("OCR_TIMEOUT_MS", DEFAULT_TIMEOUT_MS));
     spent++;
     if (!r.ok) return void 0;
     const md = output.replace(/\.pdf$/, ".md");
-    return existsSync(md) ? readFileSync(md, "utf8") : void 0;
+    return existsSync(md) ? readFileSync6(md, "utf8") : void 0;
   } catch {
     return void 0;
   } finally {
@@ -1457,9 +1834,9 @@ function metaDescriptionOf(html) {
 
 // src/stack.ts
 import { spawnSync } from "child_process";
-import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync7, writeFileSync as writeFileSync4 } from "fs";
 import { tmpdir as tmpdir2 } from "os";
-import { dirname, join as join2 } from "path";
+import { dirname, join as join8 } from "path";
 var COMPOSE_YAML = `# Optional, fully-local, no-API-key stack for a semantic mode, web
 # search and content extraction. Start it with \`{{CLI}} semantic up\` (or
 # \`docker compose --profile all up -d\`). The published bundle stays
@@ -1720,13 +2097,13 @@ function renderAsset(template) {
   return template.replaceAll("{{CLI}}", brand().cli);
 }
 function cacheRoot() {
-  return env("CACHE_DIR") ?? brand().cacheDir ?? join2(tmpdir2(), brand().name);
+  return env("CACHE_DIR") ?? brand().cacheDir ?? join8(tmpdir2(), brand().name);
 }
 function ensureComposeMaterialized() {
-  const base = join2(cacheRoot(), "compose");
-  const composePath = join2(base, "docker-compose.yml");
-  const settingsPath = join2(base, "docker", "searxng", "settings.yml");
-  const firecrawlEnvPath = join2(base, "docker", "firecrawl", "firecrawl.env");
+  const base = join8(cacheRoot(), "compose");
+  const composePath = join8(base, "docker-compose.yml");
+  const settingsPath = join8(base, "docker", "searxng", "settings.yml");
+  const firecrawlEnvPath = join8(base, "docker", "firecrawl", "firecrawl.env");
   writeIfChanged(composePath, renderAsset(COMPOSE_YAML));
   writeIfChanged(settingsPath, renderAsset(SEARXNG_SETTINGS_YAML));
   writeIfChanged(firecrawlEnvPath, renderAsset(FIRECRAWL_ENV));
@@ -1734,9 +2111,9 @@ function ensureComposeMaterialized() {
 }
 function writeIfChanged(path, content) {
   try {
-    if (existsSync2(path) && readFileSync2(path, "utf8") === content) return;
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync2(path, content);
+    if (existsSync2(path) && readFileSync7(path, "utf8") === content) return;
+    mkdirSync2(dirname(path), { recursive: true });
+    writeFileSync4(path, content);
   } catch {
   }
 }
@@ -2731,9 +3108,9 @@ function tableToMarkdown(table) {
 }
 
 // src/changed.ts
-import { createHash } from "crypto";
+import { createHash as createHash2 } from "crypto";
 function contentHash(body) {
-  return createHash("sha256").update(body).digest("hex");
+  return createHash2("sha256").update(body).digest("hex");
 }
 function observation(url, res) {
   return {
@@ -2776,132 +3153,11 @@ async function hasChanged(url, previous, opts = {}) {
   return { via: "unknown", fingerprint: observed, note: "nothing comparable between the two observations \u2014 store contentHash to make this answerable." };
 }
 
-// src/skillkit/config.ts
-import { join as join4 } from "path";
-
-// src/run.ts
-import { join as join3 } from "path";
-import { readFileSync as readFileSync3 } from "fs";
-
-// src/no-write.ts
-import { mkdirSync as mkdirSync2, renameSync, unlinkSync, writeFileSync as writeFileSync3 } from "fs";
-var flagged = false;
-function isNoWrite() {
-  return flagged || envFlag("NO_WRITE");
-}
-var collected = [];
-function ensureDir(dir) {
-  if (isNoWrite()) return;
-  mkdirSync2(dir, { recursive: true });
-}
-function writeArtifact(path, content) {
-  if (isNoWrite()) {
-    const at = collected.findIndex((a) => a.path === path);
-    if (at !== -1) collected[at] = { path, content };
-    else collected.push({ path, content });
-    return path;
-  }
-  writeFileAtomic(path, content);
-  return path;
-}
-var tmpCounter = 0;
-function writeFileAtomic(path, content) {
-  const tmp = `${path}.${process.pid}.${tmpCounter++}.tmp`;
-  try {
-    writeFileSync3(tmp, content);
-    renameSync(tmp, path);
-  } catch (e) {
-    try {
-      unlinkSync(tmp);
-    } catch {
-    }
-    throw e;
-  }
-}
-
-// src/run.ts
-function readJsonSafe(path) {
-  try {
-    return JSON.parse(readFileSync3(path, "utf8"));
-  } catch {
-    return void 0;
-  }
-}
-
-// src/skillkit/config.ts
-var SKILL_CONFIG = "skill.json";
-var DEFAULT_FILES = [
-  { remote: "scripts/engine.mjs", local: "{name}-engine.mjs" },
-  { remote: "scripts/engine.d.mts", local: "{name}-engine.d.mts" }
-];
-function readSkillConfig(root) {
-  const path = join4(root, SKILL_CONFIG);
-  const raw = readJsonSafe(path);
-  if (!raw) return { errors: [`no readable ${SKILL_CONFIG} at ${path} \u2014 run \`skill init\` to scaffold one.`] };
-  const errors = [];
-  const name = typeof raw.name === "string" && raw.name ? raw.name : void 0;
-  if (!name) errors.push(`${SKILL_CONFIG}: "name" must be a non-empty string.`);
-  const engines = {};
-  const rawEngines = raw.engines;
-  if (!rawEngines || typeof rawEngines !== "object") {
-    errors.push(`${SKILL_CONFIG}: "engines" must be an object of { repo, minRef, meta }.`);
-  } else {
-    for (const [key, value] of Object.entries(rawEngines)) {
-      const e = value;
-      if (typeof e?.repo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(e.repo)) {
-        errors.push(`${SKILL_CONFIG}: engines.${key}.repo must be "owner/name".`);
-        continue;
-      }
-      if (typeof e.minRef !== "string" || !/^v\d+\.\d+\.\d+/.test(e.minRef)) {
-        errors.push(`${SKILL_CONFIG}: engines.${key}.minRef must be a "vX.Y.Z" tag.`);
-        continue;
-      }
-      const meta = typeof e.meta === "string" && e.meta ? e.meta : `${key}.meta.json`;
-      const files = Array.isArray(e.files) && e.files.length ? e.files : DEFAULT_FILES.map((f) => ({ ...f, local: f.local.replace("{name}", key) }));
-      engines[key] = { repo: e.repo, minRef: e.minRef, meta, files };
-    }
-    if (!Object.keys(engines).length && !errors.length) errors.push(`${SKILL_CONFIG}: "engines" is empty \u2014 nothing to vendor or police.`);
-  }
-  const floor = raw.usageFloor;
-  if (floor !== void 0 && (typeof floor !== "number" || !Number.isInteger(floor) || floor < 0)) {
-    errors.push(`${SKILL_CONFIG}: "usageFloor" must be a non-negative integer.`);
-  }
-  const forks = raw.forks;
-  if (forks !== void 0 && (typeof forks !== "object" || forks === null || Array.isArray(forks))) {
-    errors.push(`${SKILL_CONFIG}: "forks" must be an object of "path:Name" -> reason.`);
-  }
-  const foreign = raw.allowedForeignFlags;
-  if (foreign !== void 0 && (!Array.isArray(foreign) || foreign.some((f) => typeof f !== "string"))) {
-    errors.push(`${SKILL_CONFIG}: "allowedForeignFlags" must be an array of strings.`);
-  }
-  if (errors.length) return { errors };
-  return {
-    config: {
-      name,
-      vendorDir: typeof raw.vendorDir === "string" && raw.vendorDir ? raw.vendorDir : join4("src", "vendor"),
-      engines,
-      usageFloor: typeof floor === "number" ? floor : 0,
-      forks: forks ?? {},
-      allowedForeignFlags: foreign ?? []
-    },
-    errors: []
-  };
-}
-function compareTags(a, b) {
-  const parts = (t) => String(t).replace(/^v/, "").split(".").map((n) => Number.parseInt(n, 10) || 0);
-  const [x, y] = [parts(a), parts(b)];
-  for (let i = 0; i < 3; i++) {
-    const d = (x[i] ?? 0) - (y[i] ?? 0);
-    if (d !== 0) return d;
-  }
-  return 0;
-}
-
 // src/skillkit/usage.ts
-import { readdirSync, readFileSync as readFileSync4, statSync } from "fs";
-import { join as join5, relative } from "path";
+import { readdirSync, readFileSync as readFileSync8, statSync } from "fs";
+import { join as join9, relative } from "path";
 var DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|enum)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm;
-var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*"(?:\.{1,2}\/)*engine\.js"/g;
+var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["'](?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs)["']/g;
 function engineExports(dts) {
   const block = /export\s*\{([\s\S]*?)\}\s*;?\s*$/.exec(dts);
   if (!block) return /* @__PURE__ */ new Set();
@@ -2919,7 +3175,7 @@ function walkSources(dir, skip = "vendor", out = []) {
     return out;
   }
   for (const e of entries) {
-    const p = join5(dir, e);
+    const p = join9(dir, e);
     if (statSync(p).isDirectory()) {
       if (e !== skip) walkSources(p, skip, out);
     } else if (e.endsWith(".ts")) out.push(p);
@@ -2928,13 +3184,13 @@ function walkSources(dir, skip = "vendor", out = []) {
 }
 function auditEngineUsage(root, config, dts) {
   const surface = engineExports(dts);
-  const files = walkSources(join5(root, "src"));
+  const files = walkSources(join9(root, "src"));
   const forks = new Map(Object.entries(config.forks));
   const collisions = [];
   const tolerated = [];
   const imported = /* @__PURE__ */ new Set();
   for (const file of files) {
-    const src = readFileSync4(file, "utf8");
+    const src = readFileSync8(file, "utf8");
     const rel = relative(root, file);
     for (const m of src.matchAll(DECL)) {
       const name = m[1] ?? m[2];
@@ -2946,7 +3202,7 @@ function auditEngineUsage(root, config, dts) {
     for (const m of src.matchAll(USES_ENGINE)) {
       for (const raw of m[1].split(",")) {
         const name = raw.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0];
-        if (name) imported.add(name);
+        if (name && surface.has(name)) imported.add(name);
       }
     }
   }
@@ -2955,82 +3211,9 @@ function auditEngineUsage(root, config, dts) {
   return { collisions, tolerated, stale, imported: [...imported], surface: surface.size };
 }
 
-// src/skillkit/vendor.ts
-import { createHash as createHash2 } from "crypto";
-import { readFileSync as readFileSync5 } from "fs";
-import { join as join6 } from "path";
-var sha256 = (buf) => createHash2("sha256").update(buf).digest("hex");
-function checkPins(root, config) {
-  return Object.entries(config.engines).map(([name, pin]) => {
-    const problems = [];
-    const metaPath = join6(root, config.vendorDir, pin.meta);
-    const meta = readJsonSafe(metaPath);
-    if (!meta?.tag || !meta.sha256) {
-      return {
-        engine: name,
-        ok: false,
-        problems: [`no readable pin at ${config.vendorDir}/${pin.meta} \u2014 run \`skill vendor --engine ${name} --ref <tag>\` first.`]
-      };
-    }
-    for (const f of pin.files ?? []) {
-      const local = join6(root, config.vendorDir, f.local);
-      let actual;
-      try {
-        actual = sha256(readFileSync5(local));
-      } catch {
-        problems.push(`${config.vendorDir}/${f.local} is missing \u2014 the pin records it but it is not on disk.`);
-        continue;
-      }
-      const expected = meta.sha256[f.local];
-      if (!expected) problems.push(`${config.vendorDir}/${f.local} is not recorded in ${pin.meta} \u2014 re-pin.`);
-      else if (actual !== expected) problems.push(`DRIFT in ${config.vendorDir}/${f.local} \u2014 the bytes differ from the ${meta.tag} pin.`);
-    }
-    if (!problems.length && compareTags(meta.tag, pin.minRef) < 0) {
-      problems.push(
-        `STALE ${name} pin \u2014 vendored ${meta.tag}, but this repo's source needs at least ${pin.minRef}. Run \`skill vendor --engine ${name} --ref ${pin.minRef}\` (or newer).`
-      );
-    }
-    return { engine: name, ok: problems.length === 0, tag: meta.tag, engineVersion: meta.engineVersion, problems };
-  });
-}
-async function vendorEngine(root, config, name, ref, fetchFile) {
-  const pin = config.engines[name];
-  if (!pin) return { written: [], errors: [`unknown engine "${name}" \u2014 expected one of: ${Object.keys(config.engines).join(", ")}.`] };
-  const vendorDir = join6(root, config.vendorDir);
-  ensureDir(vendorDir);
-  const sums = {};
-  const written = [];
-  for (const f of pin.files ?? []) {
-    const url = `https://raw.githubusercontent.com/${pin.repo}/${ref}/${f.remote}`;
-    const buf = await fetchFile(url);
-    if (!buf) return { written, errors: [`could not fetch ${url}`] };
-    const local = join6(vendorDir, f.local);
-    writeFileAtomic(local, buf);
-    sums[f.local] = sha256(buf);
-    written.push(local);
-  }
-  const first = (pin.files ?? [])[0];
-  const bundle = first ? readFileSync5(join6(vendorDir, first.local), "utf8") : "";
-  const engineVersion = /ENGINE_VERSION = "([^"]+)"/.exec(bundle)?.[1];
-  if (!engineVersion || `v${engineVersion}` !== ref) {
-    return {
-      written,
-      errors: [
-        `the ${name} bundle reports ENGINE_VERSION=${engineVersion ?? "?"} but the pinned ref is ${ref} \u2014 refusing to record a pin that disagrees with its bytes.`
-      ]
-    };
-  }
-  const meta = { tag: ref, engineVersion, sha256: sums, syncedAt: (/* @__PURE__ */ new Date()).toISOString() };
-  const metaPath = join6(vendorDir, pin.meta);
-  writeFileAtomic(metaPath, `${JSON.stringify(meta, null, 2)}
-`);
-  written.push(metaPath);
-  return { written, errors: [], tag: ref, engineVersion };
-}
-
 // src/skillkit/bundle.ts
-import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "fs";
-import { join as join7 } from "path";
+import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync9 } from "fs";
+import { join as join10 } from "path";
 
 // src/cli-kit.ts
 import { basename } from "path";
@@ -3140,17 +3323,17 @@ function auditSkillBundle(root, config, cli) {
   const out = [];
   const check = (ok, message) => out.push({ ok, message });
   const name = config.name;
-  const skillDir = join7(root, "skills", name);
+  const skillDir = join10(root, "skills", name);
   check(
-    !existsSync3(join7(root, "SKILL.md")),
-    existsSync3(join7(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name}/SKILL.md` : "no root SKILL.md"
+    !existsSync3(join10(root, "SKILL.md")),
+    existsSync3(join10(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name}/SKILL.md` : "no root SKILL.md"
   );
-  const skillMd = join7(skillDir, "SKILL.md");
+  const skillMd = join10(skillDir, "SKILL.md");
   if (!existsSync3(skillMd)) {
     check(false, `missing skills/${name}/SKILL.md \u2014 the skill package has no SKILL.md`);
     return out;
   }
-  const raw = readFileSync6(skillMd, "utf8");
+  const raw = readFileSync9(skillMd, "utf8");
   const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
   if (!fm) {
     check(false, `skills/${name}/SKILL.md has no frontmatter block`);
@@ -3173,13 +3356,13 @@ function auditSkillBundle(root, config, cli) {
       len <= DESC_MAX ? `description ${len} chars (<= ${DESC_MAX})` : `description ${len} chars exceeds the ${DESC_MAX}-char headroom cap`
     );
   }
-  const refsDir = join7(skillDir, "references");
+  const refsDir = join10(skillDir, "references");
   if (existsSync3(refsDir)) {
     const files = readdirSync2(refsDir).filter((f) => f.endsWith(".md"));
     for (const m of new Set(raw.match(/references\/[\w.-]+\.md/g) ?? [])) {
       check(
-        existsSync3(join7(skillDir, m)),
-        existsSync3(join7(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
+        existsSync3(join10(skillDir, m)),
+        existsSync3(join10(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
       );
     }
     for (const f of files) {
@@ -3190,12 +3373,12 @@ function auditSkillBundle(root, config, cli) {
     }
   }
   const bundleRel = `scripts/${name}.mjs`;
-  const rootBundle = join7(root, bundleRel);
-  const pkgBundle = join7(skillDir, bundleRel);
+  const rootBundle = join10(root, bundleRel);
+  const pkgBundle = join10(skillDir, bundleRel);
   if (!existsSync3(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
   else if (!existsSync3(pkgBundle)) check(false, `missing skills/${name}/${bundleRel} \u2014 run \`skill copy\``);
   else {
-    const same = readFileSync6(rootBundle).equals(readFileSync6(pkgBundle));
+    const same = readFileSync9(rootBundle).equals(readFileSync9(pkgBundle));
     check(
       same,
       same ? `embedded engine is byte-identical to ${bundleRel}` : `skills/${name}/${bundleRel} differs from ${bundleRel} \u2014 run \`skill copy\` and commit`
@@ -3205,7 +3388,7 @@ function auditSkillBundle(root, config, cli) {
   const universe = /* @__PURE__ */ new Set([...cli.valueFlags, ...cli.boolFlags, "help", "version", ...config.allowedForeignFlags]);
   const docs = [["SKILL.md", raw]];
   if (existsSync3(refsDir)) {
-    for (const f of readdirSync2(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync6(join7(refsDir, f), "utf8")]);
+    for (const f of readdirSync2(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync9(join10(refsDir, f), "utf8")]);
   }
   let unknown = 0;
   for (const [file, text] of docs) {
@@ -3226,7 +3409,7 @@ function auditSkillBundle(root, config, cli) {
 }
 
 // src/skillkit/scaffold.ts
-import { join as join8 } from "path";
+import { join as join11 } from "path";
 var enginesJson = (engine, repo, minRef) => JSON.stringify(
   {
     _comment: "The packaging contract for this skill, read by `skill vendor|check|bundle`. `forks` is a ratchet: entries may leave, never arrive \u2014 so the next declaration shadowing an engine export is an argued decision rather than a quiet copy. `usageFloor` goes up when a layer lands and never down to make a red run pass.",
@@ -3316,8 +3499,8 @@ function scaffoldSkill(root, name, opts = {}) {
   const files = {
     [SKILL_CONFIG]: `${enginesJson(name, opts.engineRepo ?? "maxgfr/webindex", opts.minRef ?? "v1.15.0")}
 `,
-    [join8("src", "engine.ts")]: engineShim(name, prefix),
-    [join8("skills", name, "SKILL.md")]: `---
+    [join11("src", "engine.ts")]: engineShim(name, prefix),
+    [join11("skills", name, "SKILL.md")]: `---
 name: ${name}
 description: TODO \u2014 one sentence saying WHEN to use this skill, under 1000 characters.
 ---
@@ -3326,18 +3509,18 @@ description: TODO \u2014 one sentence saying WHEN to use this skill, under 1000 
 
 TODO
 `,
-    [join8(".github", "workflows", "ci.yml")]: ci(),
+    [join11(".github", "workflows", "ci.yml")]: ci(),
     ".gitignore": gitignore
   };
   const written = [];
   const exists = opts.exists;
   for (const [rel, content] of Object.entries(files)) {
-    const path = join8(root, rel);
+    const path = join11(root, rel);
     if (exists?.(path)) {
       errors.push(`${rel} already exists \u2014 left alone.`);
       continue;
     }
-    ensureDir(join8(path, ".."));
+    ensureDir(join11(path, ".."));
     written.push(writeArtifact(path, content));
   }
   return { written, errors };
@@ -3669,12 +3852,12 @@ async function search(query, opts = {}) {
 }
 
 // src/cache.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync7, readdirSync as readdirSync3, rmSync as rmSync2, statSync as statSync2 } from "fs";
-import { join as join9 } from "path";
+import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync10, readdirSync as readdirSync3, rmSync as rmSync2, statSync as statSync2 } from "fs";
+import { join as join12 } from "path";
 import { tmpdir as tmpdir3 } from "os";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
-  return env("CACHE_DIR") ?? brand().cacheDir ?? join9(tmpdir3(), brand().name, "cache");
+  return env("CACHE_DIR") ?? brand().cacheDir ?? join12(tmpdir3(), brand().name, "cache");
 }
 var PDF_CACHE_NS = "pdf";
 var DOC_CACHE_NS = "doc";
@@ -3695,14 +3878,14 @@ function cacheStats(now = Date.now()) {
   let oldest = Number.POSITIVE_INFINITY;
   let newest = 0;
   for (const name of readdirSync3(dir)) {
-    const abs = join9(dir, name);
+    const abs = join12(dir, name);
     try {
       out.bytes += statSync2(abs).size;
     } catch {
     }
     if (!name.endsWith(".json")) continue;
     try {
-      const entry = JSON.parse(readFileSync7(abs, "utf8"));
+      const entry = JSON.parse(readFileSync10(abs, "utf8"));
       if (typeof entry.cachedAt !== "number") continue;
       out.entries++;
       if (isCacheFresh(entry, now)) out.fresh++;
@@ -3724,11 +3907,11 @@ function cacheClean(all = false, now = Date.now()) {
   let removed = 0;
   for (const name of readdirSync3(dir)) {
     if (!name.endsWith(".json")) continue;
-    const abs = join9(dir, name);
+    const abs = join12(dir, name);
     let drop = all;
     if (!drop) {
       try {
-        const entry = JSON.parse(readFileSync7(abs, "utf8"));
+        const entry = JSON.parse(readFileSync10(abs, "utf8"));
         drop = !isCacheFresh(entry, now);
       } catch {
         drop = true;
@@ -3845,7 +4028,7 @@ function pageMetadata(html) {
 // src/repo.ts
 import { existsSync as existsSync5, mkdirSync as mkdirSync4, readdirSync as readdirSync4, rmSync as rmSync3, statSync as statSync3 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
-import { basename as basename2, join as join10, resolve } from "path";
+import { basename as basename2, join as join13, resolve } from "path";
 
 // src/exec.ts
 import { spawn as spawn2, spawnSync as spawnSync2 } from "child_process";
@@ -4228,15 +4411,15 @@ async function lookupPackage(registry, name, version) {
   if (!r.ok || !r.data || typeof r.data !== "object") return void 0;
   const d = r.data;
   if (registry === "npm") {
-    const latest = version ?? d["dist-tags"]?.latest ?? d.version;
-    const v = latest && d.versions?.[latest] || d;
-    const stated = latest ? d.time?.[latest] : void 0;
-    const publishedAt = typeof stated === "string" ? stated : await npmPublishedAt(REGISTRY_URL.npm(n), latest);
+    const latest2 = version ?? d["dist-tags"]?.latest ?? d.version;
+    const v = latest2 && d.versions?.[latest2] || d;
+    const stated = latest2 ? d.time?.[latest2] : void 0;
+    const publishedAt = typeof stated === "string" ? stated : await npmPublishedAt(REGISTRY_URL.npm(n), latest2);
     const deprecated = typeof v.deprecated === "string" ? v.deprecated : v.deprecated === true ? "deprecated" : void 0;
     return {
       registry,
       name: d.name ?? n,
-      version: latest,
+      version: latest2,
       description: v.description ?? d.description,
       homepage: v.homepage ?? d.homepage,
       repository: normalizeRepoUrl(v.repository ?? d.repository),
@@ -4368,8 +4551,8 @@ function isOriginAllowed(origin, allowed = []) {
 }
 
 // src/mcp/resources.ts
-import { existsSync as existsSync6, readdirSync as readdirSync5, readFileSync as readFileSync8, realpathSync, statSync as statSync4 } from "fs";
-import { basename as basename3, dirname as dirname2, join as join11, resolve as resolve2, sep } from "path";
+import { existsSync as existsSync6, readdirSync as readdirSync5, readFileSync as readFileSync11, realpathSync, statSync as statSync4 } from "fs";
+import { basename as basename3, dirname as dirname2, join as join14, resolve as resolve2, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
@@ -4377,17 +4560,17 @@ function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname2(fileURLToPath(import.meta.url));
   const name = brand().name;
   const candidates = [resolve2(here, ".."), resolve2(here, "..", "skills", name), resolve2(here, "..", "..", "skills", name)];
-  return candidates.find((dir) => existsSync6(join11(dir, "SKILL.md")));
+  return candidates.find((dir) => existsSync6(join14(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
-  const refDir = join11(root, "references");
+  const refDir = join14(root, "references");
   if (!existsSync6(refDir)) return out;
   for (const file of readdirSync5(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join11("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
+    out.push(describe(root, join14("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
   }
   return out;
 }
@@ -4411,7 +4594,7 @@ function readResource(uri, moduleDir) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
   if (!statSync4(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
-  return { uri, mimeType: "text/markdown", text: readFileSync8(targetReal, "utf8") };
+  return { uri, mimeType: "text/markdown", text: readFileSync11(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
 };
@@ -4422,14 +4605,14 @@ function describe(root, rel, fallbackTitle) {
     title: fallbackTitle,
     mimeType: "text/markdown"
   };
-  const summary = firstProse(join11(root, rel));
+  const summary = firstProse(join14(root, rel));
   if (summary) decl.description = summary;
   return decl;
 }
 function firstProse(file) {
   let text;
   try {
-    text = readFileSync8(file, "utf8");
+    text = readFileSync11(file, "utf8");
   } catch {
     return void 0;
   }
@@ -5045,7 +5228,7 @@ function usage(msg) {
 async function extractLocal(path) {
   let bytes;
   try {
-    bytes = readFileSync9(path);
+    bytes = readFileSync12(path);
   } catch (e) {
     throw new ToolError(`cannot read ${path}: ${e.message}`);
   }
@@ -5571,7 +5754,7 @@ async function dispatch(argv) {
     const src = argValue(args, "docs") ?? "-";
     let payload;
     try {
-      payload = src === "-" ? readFileSync9(0, "utf8") : readFileSync9(src, "utf8");
+      payload = src === "-" ? readFileSync12(0, "utf8") : readFileSync12(src, "utf8");
     } catch (e) {
       fail(`cannot read ${src === "-" ? "stdin" : src}: ${e.message}`);
     }
@@ -5803,7 +5986,7 @@ async function dispatch(argv) {
     const src = argValue(args, "docs") ?? "-";
     let payload;
     try {
-      payload = src === "-" ? readFileSync9(0, "utf8") : readFileSync9(src, "utf8");
+      payload = src === "-" ? readFileSync12(0, "utf8") : readFileSync12(src, "utf8");
     } catch (e) {
       fail(`cannot read ${src === "-" ? "stdin" : src}: ${e.message}`);
     }
@@ -5877,7 +6060,31 @@ hash ${f.contentHash ?? "-"}
 `);
       process.exit(EXIT_FAILURE);
     }
+    if (action === "recall") {
+      const lost = checkArtifactRecall(root, argValue(args, "ref") ?? "HEAD");
+      if (lost.length) fail(lost.join("\n"));
+      process.stdout.write("Artifact identities and evidence preserved\n");
+      return;
+    }
+    if (action === "finish") {
+      await finishRepin(root);
+      return;
+    }
+    if (action === "repin") {
+      const changes = await repinSkill(root, config);
+      process.stdout.write(asJson ? jsonLine({ changes }) : `${changes.join("\n") || "All pins are current"}
+`);
+      return;
+    }
     if (action === "vendor") {
+      if (argBool(args, "list")) {
+        for (const [name, pin] of Object.entries(config.engines)) {
+          const meta = JSON.parse(readFileSync12(join15(root, config.vendorDir, pin.meta), "utf8"));
+          process.stdout.write(`${name} ${pin.repo} ${meta.tag}
+`);
+        }
+        return;
+      }
       if (argBool(args, "check")) {
         const statuses = checkPins(root, config);
         if (asJson) process.stdout.write(jsonLine(statuses));
@@ -5900,7 +6107,8 @@ hash ${f.contentHash ?? "-"}
         return res.ok ? res.bytes : void 0;
       };
       for (const n of names) {
-        const r = await vendorEngine(root, config, n, ref, fetchFile);
+        const pin = config.engines[n];
+        const r = await vendorEngine(root, config, n, ref, fetchFile, pin ? releaseCommit(pin.repo, ref) : void 0);
         for (const w of r.written) process.stdout.write(`  wrote ${relative2(root, w)}
 `);
         if (r.errors.length) {
@@ -5914,44 +6122,51 @@ hash ${f.contentHash ?? "-"}
       return;
     }
     if (action === "check") {
-      const engineName = Object.keys(config.engines)[0];
-      const pin = config.engines[engineName];
-      const dtsFile = pin?.files?.find((f) => f.local.endsWith(".d.mts"))?.local;
-      let dts = "";
-      try {
-        dts = readFileSync9(join12(root, config.vendorDir, dtsFile ?? ""), "utf8");
-      } catch {
-        fail(`cannot read the vendored declarations for "${engineName}" \u2014 run \`webindex skill vendor --ref <tag>\` first`);
-      }
-      const report = auditEngineUsage(root, config, dts);
-      if (asJson) {
-        process.stdout.write(jsonLine(report));
-      } else {
-        for (const c of report.collisions) process.stderr.write(`  FAIL ${c.file} declares ${c.name}, which the engine already exports
+      const only = argValue(args, "engine");
+      const engineNames = only ? [only] : Object.keys(config.engines);
+      let failedAny = false;
+      for (const engineName of engineNames) {
+        const pin = config.engines[engineName];
+        if (!pin) fail(`unknown engine ${engineName}`);
+        const usageConfig = { ...config, usageFloor: pin.usageFloor ?? config.usageFloor, forks: pin.forks ?? config.forks };
+        const dtsFile = pin?.files?.find((f) => f.local.endsWith(".d.mts"))?.local;
+        let dts = "";
+        try {
+          dts = readFileSync12(join15(root, config.vendorDir, dtsFile ?? ""), "utf8");
+        } catch {
+          fail(`cannot read the vendored declarations for "${engineName}" \u2014 run \`webindex skill vendor --ref <tag>\` first`);
+        }
+        const report = auditEngineUsage(root, usageConfig, dts);
+        if (asJson) {
+          process.stdout.write(jsonLine(report));
+        } else {
+          for (const c of report.collisions) process.stderr.write(`  FAIL ${c.file} declares ${c.name}, which the engine already exports
 `);
-        if (report.collisions.length)
-          process.stderr.write('\n  Re-export it from ./engine.js instead. (`export { X } from "./engine.js"` is fine and is not flagged.)\n');
-        for (const s of report.stale) process.stderr.write(`  FAIL forks entry "${s}" no longer matches anything \u2014 delete it
+          if (report.collisions.length)
+            process.stderr.write('\n  Re-export it from ./engine.js instead. (`export { X } from "./engine.js"` is fine and is not flagged.)\n');
+          for (const s of report.stale) process.stderr.write(`  FAIL forks entry "${s}" no longer matches anything \u2014 delete it
 `);
-        if (report.imported.length < config.usageFloor) {
-          process.stderr.write(`  FAIL only ${report.imported.length} distinct engine symbols are imported, floor is ${config.usageFloor}.
+          if (report.imported.length < usageConfig.usageFloor) {
+            process.stderr.write(`  FAIL only ${report.imported.length} distinct engine symbols are imported, floor is ${usageConfig.usageFloor}.
 `);
-          process.stderr.write("       A layer stopped being used. If that was deliberate, lower the floor in the same commit.\n");
+            process.stderr.write("       A layer stopped being used. If that was deliberate, lower the floor in the same commit.\n");
+          }
+        }
+        const failed = report.collisions.length > 0 || report.stale.length > 0 || report.imported.length < usageConfig.usageFloor;
+        failedAny ||= failed;
+        if (!asJson) {
+          const forks = report.tolerated.length ? `, ${report.tolerated.length} known fork(s) still to adopt` : ", no local re-declarations";
+          process.stdout.write(
+            `  ok   ${report.imported.length} engine symbols in use (floor ${usageConfig.usageFloor})${forks}, of a ${report.surface}-symbol surface.
+`
+          );
         }
       }
-      const failed = report.collisions.length > 0 || report.stale.length > 0 || report.imported.length < config.usageFloor;
-      if (failed) process.exit(EXIT_FAILURE);
-      if (!asJson) {
-        const forks = report.tolerated.length ? `, ${report.tolerated.length} known fork(s) still to adopt` : ", no local re-declarations";
-        process.stdout.write(
-          `  ok   ${report.imported.length} engine symbols in use (floor ${config.usageFloor})${forks}, of a ${report.surface}-symbol surface.
-`
-        );
-      }
+      if (failedAny) process.exit(EXIT_FAILURE);
       return;
     }
     if (action === "bundle") {
-      const built = join12(root, "scripts", `${config.name}.mjs`);
+      const built = join15(root, "scripts", `${config.name}.mjs`);
       let surface;
       let surfaceProblem;
       const flagList = (v) => v == null || typeof v === "string" || typeof v[Symbol.iterator] !== "function" ? void 0 : [...v];
@@ -5988,11 +6203,11 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
       return;
     }
     if (action === "copy") {
-      const from = join12(root, "scripts", `${config.name}.mjs`);
+      const from = join15(root, "scripts", `${config.name}.mjs`);
       if (!existsSync7(from)) fail(`missing ${relative2(root, from)} \u2014 run the build first`);
-      const to = join12(root, "skills", config.name, "scripts", `${config.name}.mjs`);
-      ensureDir(join12(to, ".."));
-      writeArtifact(to, readFileSync9(from, "utf8"));
+      const to = join15(root, "skills", config.name, "scripts", `${config.name}.mjs`);
+      ensureDir(join15(to, ".."));
+      writeArtifact(to, readFileSync12(from, "utf8"));
       process.stdout.write(`  copied ${relative2(root, from)} -> ${relative2(root, to)}
 `);
       return;

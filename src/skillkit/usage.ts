@@ -50,7 +50,7 @@ const DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|
  * but not `./engine.js`, so every top-level shim was invisible to the counter
  * and the floor was met by subdirectories alone.
  */
-const USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*"(?:\.{1,2}\/)*engine\.js"/g;
+const USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["'](?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs)["']/g;
 
 /** The engine's public surface, read from the vendored declarations rather than hardcoded. */
 export function engineExports(dts: string): Set<string> {
@@ -132,7 +132,7 @@ export function auditEngineUsage(root: string, config: SkillConfig, dts: string)
           .trim()
           .replace(/^type\s+/, "")
           .split(/\s+as\s+/)[0];
-        if (name) imported.add(name);
+        if (name && surface.has(name)) imported.add(name);
       }
     }
   }

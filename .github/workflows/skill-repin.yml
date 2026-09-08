@@ -1,0 +1,74 @@
+name: Shared skill engine repin
+on:
+  workflow_call:
+permissions:
+  contents: write
+  actions: write
+  issues: write
+jobs:
+  repin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Check existing pins, then prepare available stable updates
+        run: |
+          pnpm exec webindex skill vendor --check
+          pnpm exec webindex skill repin
+      - name: Install the exact maintenance tool and grammar dependencies
+        run: pnpm install --no-frozen-lockfile
+      - name: Prepare consumer artifacts and verify their recall
+        run: pnpm run engine:prepare
+      - name: Commit the candidate locally
+        id: candidate
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Paths are declared by the consumer, not everything a test left behind.
+          node -e 'const fs=require("node:fs"),cp=require("node:child_process"); const c=JSON.parse(fs.readFileSync("skill.json")); for(const p of c.repin.artifacts) cp.execFileSync("git",["add","-A","--",p],{stdio:"inherit"});'
+          if ! git diff --cached --quiet; then
+            git commit -m "fix(engine): update shared engines and maintenance tool"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Validate the exact candidate (also on a no-op)
+        run: pnpm run engine:gate
+      - name: Push only the tested commit
+        id: push
+        if: steps.candidate.outputs.changed == 'true'
+        run: |
+          # A normal fast-forward push rejects a concurrent update. No untested rebase.
+          git diff --exit-code
+          git push origin HEAD:main
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+      - name: Complete or resume CI and publication
+        run: pnpm exec webindex skill finish
+      - name: Track failure with the actual publication state
+        if: failure()
+        env:
+          PUSHED: ${{ steps.push.outputs.pushed }}
+        run: |
+          RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh label create engine-repin --color B60205 --description "Engine maintenance needs attention" --force
+          ISSUE=$(gh issue list --state open --label engine-repin --limit 1 --json number --jq '.[0].number // empty')
+          STATE="Candidate preparation/validation failed or publication remains incomplete. Check the failed step; existing main is preserved unless the push step succeeded."
+          if [ "$PUSHED" = true ]; then STATE="The validated candidate was pushed; CI or publication remains incomplete. The next run will retry publication even if the pins are current."; fi
+          printf '%s\n\n%s\n' "$RUN" "$STATE" > "$RUNNER_TEMP/repin-issue.md"
+          if [ -n "$ISSUE" ]; then gh issue comment "$ISSUE" --body-file "$RUNNER_TEMP/repin-issue.md"; else gh issue create --title "Engine repin needs attention" --label engine-repin --body-file "$RUNNER_TEMP/repin-issue.md"; fi
+      - name: Close alert only after CI and publication completed
+        if: success()
+        run: |
+          ISSUE=$(gh issue list --state open --label engine-repin --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$ISSUE" ]; then gh issue close "$ISSUE" --comment "Pins, consumer validation, CI and publication are green: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"; fi

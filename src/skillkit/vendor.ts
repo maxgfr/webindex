@@ -29,6 +29,8 @@ export interface PinFile {
   engineVersion: string;
   sha256: Record<string, string>;
   syncedAt: string;
+  /** Immutable source of every file; legacy pins are upgraded on their next sync. */
+  commit?: string;
 }
 
 export const sha256 = (buf: Buffer | string): string => createHash("sha256").update(buf).digest("hex");
@@ -75,6 +77,14 @@ export function checkPins(root: string, config: SkillConfig): PinStatus[] {
       else if (actual !== expected) problems.push(`DRIFT in ${config.vendorDir}/${f.local} — the bytes differ from the ${meta.tag} pin.`);
     }
 
+    if (!problems.length) {
+      const first = pin.files?.[0];
+      const body = first ? readFileSync(join(root, config.vendorDir, first.local), "utf8") : "";
+      const version = /(?:^|\n)(?:var|const|let) ENGINE_VERSION = "([^"]+)"/.exec(body)?.[1];
+      if (!version || meta.tag !== `v${version}` || meta.engineVersion !== version) problems.push("tag, engineVersion and embedded ENGINE_VERSION disagree");
+      if (meta.commit && !/^[a-f0-9]{40}$/.test(meta.commit)) problems.push("invalid upstream commit");
+    }
+
     // Only worth reporting once the bytes are trustworthy: a tampered vendor
     // that is ALSO stale should say "tampered", which is the actionable half.
     if (!problems.length && compareTags(meta.tag, pin.minRef) < 0) {
@@ -112,43 +122,46 @@ export async function vendorEngine(
   name: string,
   ref: string,
   fetchFile: (url: string) => Promise<Buffer | undefined>,
+  commit?: string,
 ): Promise<VendorResult> {
   const pin: EnginePin | undefined = config.engines[name];
   if (!pin) return { written: [], errors: [`unknown engine "${name}" — expected one of: ${Object.keys(config.engines).join(", ")}.`] };
 
+  if (!/^v\d+\.\d+\.\d+$/.test(ref)) return { written: [], errors: [`invalid stable release tag ${ref}`] };
+  if (compareTags(ref, pin.minRef) < 0) return { written: [], errors: [`${ref} is below the minimum ${pin.minRef}`] };
+  if (commit !== undefined && !/^[a-f0-9]{40}$/.test(commit)) return { written: [], errors: ["invalid upstream commit"] };
   const vendorDir = join(root, config.vendorDir);
-  ensureDir(vendorDir);
-
+  const current = readJsonSafe<PinFile>(join(vendorDir, pin.meta));
+  if (current?.tag && compareTags(ref, current.tag) < 0) return { written: [], errors: [`refusing downgrade from ${current.tag} to ${ref}`] };
+  const staged: { local: string; buf: Buffer }[] = [];
   const sums: Record<string, string> = {};
-  const written: string[] = [];
   for (const f of pin.files ?? []) {
-    const url = `https://raw.githubusercontent.com/${pin.repo}/${ref}/${f.remote}`;
+    const url = `https://raw.githubusercontent.com/${pin.repo}/${commit ?? ref}/${f.remote}`;
     const buf = await fetchFile(url);
-    if (!buf) return { written, errors: [`could not fetch ${url}`] };
-    const local = join(vendorDir, f.local);
-    // The BUFFER, not a decoded string: the hash below has to be over the bytes
-    // that were published, and a round trip through a string encoding is
-    // exactly how a pin comes to record something upstream never shipped.
-    writeFileAtomic(local, buf);
+    if (!buf) return { written: [], errors: [`could not fetch ${url}`] };
+    staged.push({ local: join(vendorDir, f.local), buf });
     sums[f.local] = sha256(buf);
-    written.push(local);
   }
-
-  const first = (pin.files ?? [])[0];
-  const bundle = first ? readFileSync(join(vendorDir, first.local), "utf8") : "";
-  const engineVersion = /ENGINE_VERSION = "([^"]+)"/.exec(bundle)?.[1];
-  if (!engineVersion || `v${engineVersion}` !== ref) {
+  const engineVersion = /(?:^|\n)(?:var|const|let) ENGINE_VERSION = "([^"]+)"/.exec(staged[0]?.buf.toString("utf8") ?? "")?.[1];
+  if (!engineVersion || `v${engineVersion}` !== ref)
     return {
-      written,
+      written: [],
       errors: [
         `the ${name} bundle reports ENGINE_VERSION=${engineVersion ?? "?"} but the pinned ref is ${ref} — refusing to record a pin that disagrees with its bytes.`,
       ],
     };
+  // Re-fetching the same tag audits its immutability; it cannot overwrite the evidence.
+  if (
+    current?.tag === ref &&
+    ((current.commit && commit && current.commit !== commit) || Object.entries(current.sha256).some(([file, hash]) => sums[file] !== hash))
+  ) {
+    return { written: [], errors: [`upstream moved the existing ${ref} pin`] };
   }
-
-  const meta: PinFile = { tag: ref, engineVersion, sha256: sums, syncedAt: new Date().toISOString() };
+  const meta: PinFile = { tag: ref, engineVersion, sha256: sums, syncedAt: new Date().toISOString(), ...(commit ? { commit } : {}) };
+  // Network failures and tag mismatches leave the installed engine untouched.
+  ensureDir(vendorDir);
+  for (const file of staged) writeFileAtomic(file.local, file.buf);
   const metaPath = join(vendorDir, pin.meta);
   writeFileAtomic(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
-  written.push(metaPath);
-  return { written, errors: [], tag: ref, engineVersion };
+  return { written: [...staged.map((f) => f.local), metaPath], errors: [], tag: ref, engineVersion };
 }

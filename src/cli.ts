@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { checkArtifactRecall } from "./skillkit/recall.js";
+import { finishRepin } from "./skillkit/finish.js";
+import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // The webindex command line.
 //
 // A SECOND tsup entry, deliberately not reachable from src/index.ts. The
@@ -1199,7 +1202,31 @@ async function dispatch(argv: string[]): Promise<void> {
       process.exit(EXIT_FAILURE);
     }
 
+    if (action === "recall") {
+      const lost = checkArtifactRecall(root, argValue(args, "ref") ?? "HEAD");
+      if (lost.length) fail(lost.join("\n"));
+      process.stdout.write("Artifact identities and evidence preserved\n");
+      return;
+    }
+    if (action === "finish") {
+      await finishRepin(root);
+      return;
+    }
+
+    if (action === "repin") {
+      const changes = await repinSkill(root, config);
+      process.stdout.write(asJson ? jsonLine({ changes }) : `${changes.join("\n") || "All pins are current"}\n`);
+      return;
+    }
+
     if (action === "vendor") {
+      if (argBool(args, "list")) {
+        for (const [name, pin] of Object.entries(config.engines)) {
+          const meta = JSON.parse(readFileSync(join(root, config.vendorDir, pin.meta), "utf8"));
+          process.stdout.write(`${name} ${pin.repo} ${meta.tag}\n`);
+        }
+        return;
+      }
       // `--check` is offline on purpose: this runs in CI on every commit, and a
       // gate that needs the network goes red when GitHub does.
       if (argBool(args, "check")) {
@@ -1222,7 +1249,8 @@ async function dispatch(argv: string[]): Promise<void> {
         return res.ok ? res.bytes : undefined;
       };
       for (const n of names) {
-        const r = await vendorEngine(root, config, n, ref, fetchFile);
+        const pin = config.engines[n];
+        const r = await vendorEngine(root, config, n, ref, fetchFile, pin ? releaseCommit(pin.repo, ref) : undefined);
         for (const w of r.written) process.stdout.write(`  wrote ${relative(root, w)}\n`);
         if (r.errors.length) {
           for (const e of r.errors) process.stderr.write(`webindex: ${e}\n`);
@@ -1234,36 +1262,43 @@ async function dispatch(argv: string[]): Promise<void> {
     }
 
     if (action === "check") {
-      const engineName = Object.keys(config.engines)[0] as string;
-      const pin = config.engines[engineName];
-      const dtsFile = pin?.files?.find((f) => f.local.endsWith(".d.mts"))?.local;
-      let dts = "";
-      try {
-        dts = readFileSync(join(root, config.vendorDir, dtsFile ?? ""), "utf8");
-      } catch {
-        fail(`cannot read the vendored declarations for "${engineName}" — run \`webindex skill vendor --ref <tag>\` first`);
-      }
-      const report = auditEngineUsage(root, config, dts);
-      if (asJson) {
-        process.stdout.write(jsonLine(report));
-      } else {
-        for (const c of report.collisions) process.stderr.write(`  FAIL ${c.file} declares ${c.name}, which the engine already exports\n`);
-        if (report.collisions.length)
-          process.stderr.write('\n  Re-export it from ./engine.js instead. (`export { X } from "./engine.js"` is fine and is not flagged.)\n');
-        for (const s of report.stale) process.stderr.write(`  FAIL forks entry "${s}" no longer matches anything — delete it\n`);
-        if (report.imported.length < config.usageFloor) {
-          process.stderr.write(`  FAIL only ${report.imported.length} distinct engine symbols are imported, floor is ${config.usageFloor}.\n`);
-          process.stderr.write("       A layer stopped being used. If that was deliberate, lower the floor in the same commit.\n");
+      const only = argValue(args, "engine");
+      const engineNames = only ? [only] : Object.keys(config.engines);
+      let failedAny = false;
+      for (const engineName of engineNames) {
+        const pin = config.engines[engineName];
+        if (!pin) fail(`unknown engine ${engineName}`);
+        const usageConfig = { ...config, usageFloor: pin.usageFloor ?? config.usageFloor, forks: pin.forks ?? config.forks };
+        const dtsFile = pin?.files?.find((f) => f.local.endsWith(".d.mts"))?.local;
+        let dts = "";
+        try {
+          dts = readFileSync(join(root, config.vendorDir, dtsFile ?? ""), "utf8");
+        } catch {
+          fail(`cannot read the vendored declarations for "${engineName}" — run \`webindex skill vendor --ref <tag>\` first`);
+        }
+        const report = auditEngineUsage(root, usageConfig, dts);
+        if (asJson) {
+          process.stdout.write(jsonLine(report));
+        } else {
+          for (const c of report.collisions) process.stderr.write(`  FAIL ${c.file} declares ${c.name}, which the engine already exports\n`);
+          if (report.collisions.length)
+            process.stderr.write('\n  Re-export it from ./engine.js instead. (`export { X } from "./engine.js"` is fine and is not flagged.)\n');
+          for (const s of report.stale) process.stderr.write(`  FAIL forks entry "${s}" no longer matches anything — delete it\n`);
+          if (report.imported.length < usageConfig.usageFloor) {
+            process.stderr.write(`  FAIL only ${report.imported.length} distinct engine symbols are imported, floor is ${usageConfig.usageFloor}.\n`);
+            process.stderr.write("       A layer stopped being used. If that was deliberate, lower the floor in the same commit.\n");
+          }
+        }
+        const failed = report.collisions.length > 0 || report.stale.length > 0 || report.imported.length < usageConfig.usageFloor;
+        failedAny ||= failed;
+        if (!asJson) {
+          const forks = report.tolerated.length ? `, ${report.tolerated.length} known fork(s) still to adopt` : ", no local re-declarations";
+          process.stdout.write(
+            `  ok   ${report.imported.length} engine symbols in use (floor ${usageConfig.usageFloor})${forks}, of a ${report.surface}-symbol surface.\n`,
+          );
         }
       }
-      const failed = report.collisions.length > 0 || report.stale.length > 0 || report.imported.length < config.usageFloor;
-      if (failed) process.exit(EXIT_FAILURE);
-      if (!asJson) {
-        const forks = report.tolerated.length ? `, ${report.tolerated.length} known fork(s) still to adopt` : ", no local re-declarations";
-        process.stdout.write(
-          `  ok   ${report.imported.length} engine symbols in use (floor ${config.usageFloor})${forks}, of a ${report.surface}-symbol surface.\n`,
-        );
-      }
+      if (failedAny) process.exit(EXIT_FAILURE);
       return;
     }
 
