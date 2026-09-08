@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.19.0](https://github.com/maxgfr/webindex/compare/v1.18.10...v1.19.0) (2026-09-08)
+
+
+### Features
+
+* **skillkit:** share verified engine repins and publication recovery ([1f15b78](https://github.com/maxgfr/webindex/commit/1f15b785331f6a03576db2741c015808d5f0b2d8))
+
 ## [1.18.10](https://github.com/maxgfr/webindex/compare/v1.18.9...v1.18.10) (2026-09-07)
 
 
