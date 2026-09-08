@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.19.2](https://github.com/maxgfr/webindex/compare/v1.19.1...v1.19.2) (2026-09-08)
+
+
+### Bug Fixes
+
+* **skillkit:** attribute symbol usage to the imported engine ([cced85c](https://github.com/maxgfr/webindex/commit/cced85cebe333284858f048ad4d7c8beaaa3425d))
+
 ## [1.19.1](https://github.com/maxgfr/webindex/compare/v1.19.0...v1.19.1) (2026-09-08)
 
 
