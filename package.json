@@ -18,7 +18,8 @@
     "scripts/webindex.mjs",
     "src",
     "SKILL.md",
-    "references"
+    "references",
+    ".github/workflows/skill-repin.yml"
   ],
   "engines": {
     "node": ">=18"

@@ -106,3 +106,17 @@ it("allows new evidence, reordered members and explicit per-case metric improvem
   ).toBe(false);
   expect(preserves({ version: "1", sites: 3 }, { version: "2", sites: 4 }, { paths: [], ignoreKeys: ["version"], growing: ["sites"] })).toBe(true);
 });
+
+it("verifies CodeIndex lazy module version assignments", async () => {
+  const { root, config } = fixture();
+  const result = await vendorEngine(
+    root,
+    config,
+    "codeindex",
+    "v2.30.0",
+    async (url) => Buffer.from(url.endsWith("engine.mjs") ? 'var ENGINE_VERSION;\nfunction init() {\n  ENGINE_VERSION = "2.30.0";\n}\ninit();' : "export {};"),
+    "a".repeat(40),
+  );
+  expect(result.errors).toEqual([]);
+  expect(checkPins(root, config)[0]?.ok).toBe(true);
+});

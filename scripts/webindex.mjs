@@ -315,7 +315,7 @@ function checkPins(root, config) {
     if (!problems.length) {
       const first = pin.files?.[0];
       const body = first ? readFileSync4(join5(root, config.vendorDir, first.local), "utf8") : "";
-      const version = /(?:^|\n)(?:var|const|let) ENGINE_VERSION = "([^"]+)"/.exec(body)?.[1];
+      const version = /(?:^|\n)\s*(?:(?:var|const|let)\s+)?ENGINE_VERSION\s*=\s*"([^"]+)"/.exec(body)?.[1];
       if (!version || meta.tag !== `v${version}` || meta.engineVersion !== version) problems.push("tag, engineVersion and embedded ENGINE_VERSION disagree");
       if (meta.commit && !/^[a-f0-9]{40}$/.test(meta.commit)) problems.push("invalid upstream commit");
     }
@@ -345,7 +345,7 @@ async function vendorEngine(root, config, name, ref, fetchFile, commit) {
     staged.push({ local: join5(vendorDir, f.local), buf });
     sums[f.local] = sha256(buf);
   }
-  const engineVersion = /(?:^|\n)(?:var|const|let) ENGINE_VERSION = "([^"]+)"/.exec(staged[0]?.buf.toString("utf8") ?? "")?.[1];
+  const engineVersion = /(?:^|\n)\s*(?:(?:var|const|let)\s+)?ENGINE_VERSION\s*=\s*"([^"]+)"/.exec(staged[0]?.buf.toString("utf8") ?? "")?.[1];
   if (!engineVersion || `v${engineVersion}` !== ref)
     return {
       written: [],
