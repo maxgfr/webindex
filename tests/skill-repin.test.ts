@@ -1,9 +1,9 @@
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { githubRepoForRemote } from "../src/skillkit/finish.js";
-import { latestStable } from "../src/skillkit/repin.js";
+import { latestStable, repinSkill } from "../src/skillkit/repin.js";
 import { preserves } from "../src/skillkit/recall.js";
 import { vendorEngine, checkPins } from "../src/skillkit/vendor.js";
 import { auditEngineUsage } from "../src/skillkit/usage.js";
@@ -137,4 +137,40 @@ it("targets the fork origin for workflow completion", () => {
   expect(githubRepoForRemote("https://github.com/maxgfr/ultra11y.git")).toBe("maxgfr/ultra11y");
   expect(githubRepoForRemote("ssh://git@github.com/maxgfr/ultra11y")).toBe("maxgfr/ultra11y");
   expect(() => githubRepoForRemote("/local/checkout")).toThrow();
+});
+
+it("updates the maintenance dependency without changing workflow definitions", async () => {
+  const { root, config } = fixture();
+  await vendorEngine(
+    root,
+    config,
+    "codeindex",
+    "v2.1.0",
+    async (url) => Buffer.from(url.endsWith("engine.mjs") ? 'const ENGINE_VERSION = "2.1.0";' : "export {};"),
+    "a".repeat(40),
+  );
+  mkdirSync(join(root, "node_modules/@maxgfr/webindex"), { recursive: true });
+  writeFileSync(join(root, "node_modules/@maxgfr/webindex/package.json"), JSON.stringify({ version: "1.19.3" }));
+  writeFileSync(join(root, "package.json"), JSON.stringify({ devDependencies: { "@maxgfr/webindex": "old-url" } }));
+  mkdirSync(join(root, ".github/workflows"), { recursive: true });
+  const workflow = join(root, ".github/workflows/engine-repin.yml");
+  writeFileSync(workflow, "a separately reviewed immutable workflow reference");
+  mkdirSync(join(root, "bin"));
+  const fakeGh = join(root, "bin/gh");
+  writeFileSync(
+    fakeGh,
+    `#!${process.execPath}\nconst path=process.argv[3]; const version=path.includes("codeindex")?"v2.1.0":"v1.19.4"; process.stdout.write(JSON.stringify(path.includes("/releases")?[[{tag_name:version}]]:{sha:"${"b".repeat(40)}"}));\n`,
+  );
+  chmodSync(fakeGh, 0o755);
+  const priorPath = process.env.PATH;
+  try {
+    process.env.PATH = `${join(root, "bin")}:${priorPath}`;
+    await repinSkill(root, config);
+  } finally {
+    process.env.PATH = priorPath;
+  }
+  expect(readFileSync(workflow, "utf8")).toBe("a separately reviewed immutable workflow reference");
+  expect(JSON.parse(readFileSync(join(root, "package.json"), "utf8")).devDependencies["@maxgfr/webindex"]).toBe(
+    `https://codeload.github.com/maxgfr/webindex/tar.gz/${"b".repeat(40)}`,
+  );
 });

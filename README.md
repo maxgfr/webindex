@@ -258,7 +258,7 @@ actually needs web retrieval. `skill vendor --check` remains fully offline.
 
 `webindex skill repin` compares all stable releases numerically, resolves each tag
 to a commit, verifies the downloaded version before replacing files, and updates
-the maintenance CLI and reusable workflow together. `skill finish` waits for CI and
+the maintenance CLI as an exact development dependency. `skill finish` waits for CI and
 publication, resuming interrupted dispatches even when no pin changed. The reusable
 workflow is `.github/workflows/skill-repin.yml`; consumers implement `engine:prepare`
 and `engine:gate` and declare the paths allowed into its candidate commit.
