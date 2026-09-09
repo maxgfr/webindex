@@ -14,7 +14,9 @@
 // Hosts that only ever serve machine payloads.
 const API_HOSTS = new Set(["eutils.ncbi.nlm.nih.gov", "api.crossref.org", "api.openalex.org", "api.semanticscholar.org", "export.arxiv.org"]);
 // Hosts that serve BOTH pages and an API, so only the API path counts.
-const API_PATHS = [/^\/europepmc\/webservices\//i, /^\/search\/publ\/api/i, /^\/api\//i, /\.(fcgi|cgi)$/i];
+// An /api/ prefix also hosts HTML reference pages (for example Node.js docs).
+// Keep machine host/format checks; the prefix alone must not reject HTML.
+const API_PATHS = [/^\/europepmc\/webservices\//i, /^\/search\/publ\/api/i, /^\/api\/(?!.*\.html?$)/i, /\.(fcgi|cgi)$/i];
 // Payload formats nobody reads in a browser.
 const API_FORMATS = /[?&](format|retmode|rettype|output)=(json|xml|text|atom|csv|bibtex)\b/i;
 
