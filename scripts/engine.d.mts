@@ -2631,7 +2631,7 @@ declare function listPhases<T>(runDir: string, engineAbs: string, defs: readonly
 /**
  * Emit the run's orchestration from its current worklists.
  *
- * Writes, in `<run>/orchestration/`:
+ * Writes, in `<RUN>/orchestration/`:
  *   agents/<role>.md      the dispatch contracts, every role, every call
  *   <phase>.workflow.mjs  one launchable Workflow script per ready phase
  *   RUNBOOK.md            the sequential fallback
