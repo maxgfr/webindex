@@ -441,7 +441,7 @@ import { basename as basename4, extname, join as join15, relative as relative2, 
 import { pathToFileURL } from "url";
 
 // src/version.ts
-var ENGINE_VERSION = "1.19.5";
+var ENGINE_VERSION = "1.19.6";
 
 // src/doc/formats.ts
 var BINARY = { textFallback: false };

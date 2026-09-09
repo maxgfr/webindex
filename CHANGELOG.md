@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.19.6](https://github.com/maxgfr/webindex/compare/v1.19.5...v1.19.6) (2026-09-09)
+
+
+### Bug Fixes
+
+* keep HTML API reference pages citable ([046fab7](https://github.com/maxgfr/webindex/commit/046fab7c8daeda6513b28d89f0240b563f34d232))
+
 ## [1.19.5](https://github.com/maxgfr/webindex/compare/v1.19.4...v1.19.5) (2026-09-09)
 
 
