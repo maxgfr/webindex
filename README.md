@@ -274,3 +274,21 @@ GitHub's default automation token cannot modify workflow definitions, so `skill 
 updates runtime engines and the maintenance dependency without editing `.github/workflows`.
 A maintainer can advance the immutable workflow reference after reviewing a workflow change.
 The stable shell continues to execute the consumer's prepare/gate scripts and the current CLI.
+
+## Manual skill invocation
+
+These skills run when explicitly invoked: `webindex`. Use `$name` in Codex or `/name` in Claude Code and OpenCode (with the plugin namespace when installed as a Claude plugin).
+
+The skill bundle disables implicit selection in Codex and Claude Code. OpenCode V2 reads `metadata.opencode/autoinvoke: "false"`. For OpenCode V1, merge these entries into `permission.skill` in `~/.config/opencode/opencode.json` or the project configuration; retain unrelated permissions:
+
+```json
+{
+  "permission": {
+    "skill": {
+      "webindex": "deny"
+    }
+  }
+}
+```
+
+On OpenCode 1.18.30, these rules hide the skills from the agent and reject skill-tool loading, while explicit `/name` commands remain available. Installation with `skills add` does not apply this OpenCode V1 configuration.

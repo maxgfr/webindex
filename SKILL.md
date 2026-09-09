@@ -1,6 +1,9 @@
 ---
 name: webindex
-description: Extract, rank, and inspect web or local documents with a keyless CLI/MCP engine. Use explicitly for fetching one URL or file, ranking a pool, or querying forge, package, or site metadata; use ultrasearch for a cited research report.
+description: Extract, rank, and inspect web or local documents and query forge, package, or site metadata.
+disable-model-invocation: true
+metadata:
+  opencode/autoinvoke: 'false'
 ---
 
 # webindex
