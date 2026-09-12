@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.20.0](https://github.com/maxgfr/webindex/compare/v1.19.7...v1.20.0) (2026-09-12)
+
+
+### Bug Fixes
+
+* consent filter keeps short lines that only name a regulation ([bc3b09b](https://github.com/maxgfr/webindex/commit/bc3b09b0f7dce59ca7b53a42703ef1b85ed7d039))
+* consent filter no longer drops short prose that merely mentions cookies ([565b76f](https://github.com/maxgfr/webindex/commit/565b76f71d57140cb3132ca49384464c6b83ad94))
+* extract decodes local files by BOM and meta charset, with a Windows-1252 rescue ([297124c](https://github.com/maxgfr/webindex/commit/297124ce91cfd39259b7c35d19d02b6d2a17b94b))
+* quote-aware tag matching and raw-text blocks before comments in htmlToText ([7939732](https://github.com/maxgfr/webindex/commit/7939732526c841c743a6af4586f85b00874b32dd))
+* strip comments and raw-text blocks in one pass, sniff charset only for HTML ([2c0c15e](https://github.com/maxgfr/webindex/commit/2c0c15e2659503e5b92e252969f59bd737219b51))
+
+
+### Features
+
+* extract applies the same main-content and consent pipeline as fetch (--full-page opts out) ([abbafbc](https://github.com/maxgfr/webindex/commit/abbafbca9189ae8bb8441a5bc9720b811a9731b8))
+
 ## [1.19.7](https://github.com/maxgfr/webindex/compare/v1.19.6...v1.19.7) (2026-09-09)
 
 
