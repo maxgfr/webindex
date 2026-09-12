@@ -33,13 +33,14 @@ describe("character encoding", () => {
     for (let i = 0xa0; i < 256; i++) expect(out.charCodeAt(i)).toBe(i);
   });
 
-  it("decodes a 4 MB Windows-1252 body in a single pass", () => {
+  it("decodes an entire 4 MB Windows-1252 body", () => {
     const chunk = Buffer.concat([Buffer.from("Une réponse déjà validée ", "latin1"), Buffer.from([0x97, 0x85, 0x80])]);
-    const big = Buffer.concat(Array.from({ length: Math.ceil(4_000_000 / chunk.length) }, () => chunk));
-    const started = performance.now();
+    const repeats = Math.ceil(4_000_000 / chunk.length);
+    const big = Buffer.concat(Array.from({ length: repeats }, () => chunk));
     const out = decodeBody(big, "text/html; charset=windows-1252");
-    expect(performance.now() - started).toBeLessThan(100);
-    expect(out.slice(0, chunk.length)).toBe("Une réponse déjà validée —…€");
+    // Timing belongs in bench/charset.bench.ts: shared CI runners can exceed
+    // 100 ms without a decoding regression. Check every decoded chunk here.
+    expect(out).toBe("Une réponse déjà validée —…€".repeat(repeats));
   });
 
   it("decodes a Windows-1252 body declared in the Content-Type", () => {
