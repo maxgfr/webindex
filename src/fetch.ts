@@ -596,21 +596,37 @@ export function cleanInline(s: string): string {
 // drop script/style/head/nav/footer, turn block tags into newlines, keep
 // heading structure as markdown markers, decode common entities, collapse
 // whitespace. Good enough to ground a report in a page's prose without a DOM.
-export function htmlToText(html: string): string {
+// Tags whose opening or closing marks a line break in the extracted text.
+const BLOCK_TAGS = new Set(["p", "div", "section", "article", "li", "tr", "td", "th", "ul", "ol", "pre", "blockquote", "table"]);
+
+export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): string {
   let s = html;
-  s = s.replace(/<!--[\s\S]*?-->/g, " ");
-  s = s.replace(/<(script|style|noscript|head|nav|footer|svg|template)[\s\S]*?<\/\1>/gi, " ");
-  s = s.replace(/<h([1-6])(?:\s[^>]*)?>/gi, (_m, n) => "\n" + "#".repeat(Number(n)) + " ");
-  s = s.replace(/<\/(p|div|section|article|li|tr|td|th|ul|ol|h[1-6]|pre|blockquote|br)>/gi, "\n");
-  // Break on OPENING block tags too, not only closing ones. Unclosed `<li>` and
-  // `<td>` are valid HTML and extremely common, and with closing tags alone a
-  // whole list or table row collapses onto one line — which then reads as a
-  // single sentence to anything scoring lines against a question. Headings are
-  // excluded because the rule above already turned them into markdown markers;
-  // matching them here as well would double every one of them.
-  s = s.replace(/<(p|div|section|article|li|tr|td|th|ul|ol|pre|blockquote|table)\b[^>]*>/gi, "\n");
-  s = s.replace(/<(br|hr)\s*\/?>/gi, "\n");
-  s = s.replace(/<[^>]+>/g, " ");
+  // Comments and raw-text blocks go in ONE left-to-right pass, so whichever
+  // opens first owns the text up to its own close. Two separate passes get one
+  // of the two orders wrong: comments first lets a script containing "<!--"
+  // swallow the prose after it; blocks first lets "<!-- <script> -->" pair with
+  // a real </script> further down and delete the article in between.
+  // Whole-page callers need navigation and footer text even without a main region.
+  const hidden = opts.fullPage
+    ? /<!--[\s\S]*?-->|<(script|style|noscript|head|svg|template)\b[\s\S]*?<\/\1\s*>/gi
+    : /<!--[\s\S]*?-->|<(script|style|noscript|head|nav|footer|svg|template)\b[\s\S]*?<\/\1\s*>/gi;
+  s = s.replace(hidden, " ");
+  // A quoted `>` belongs to an attribute, not the end of a tag.
+  s = s.replace(/<[a-zA-Z!/?][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g, (tag) => {
+    const name = /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
+    if (/^h[1-6]$/.test(name)) {
+      return tag.startsWith("</") ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
+    }
+    // Break on OPENING block tags too, not only closing ones. Unclosed `<li>` and
+    // `<td>` are valid HTML and extremely common, and with closing tags alone a
+    // whole list or table row collapses onto one line — which then reads as a
+    // single sentence to anything scoring lines against a question. Headings
+    // return above so their markdown markers are never doubled.
+    if (BLOCK_TAGS.has(name) || name === "br" || name === "hr") return "\n";
+    return " ";
+  });
+  // Malformed attributes must not leave tag markup in the extracted prose.
+  s = s.replace(/<[a-zA-Z!/?][^>]*>/g, " ");
   s = decodeEntities(s);
   s = s.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n");
   return s
@@ -770,6 +786,7 @@ export type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext"
 
 export interface ExtractResult {
   text: string;
+  consentDropped?: number;
   title?: string;
   note?: string;
   finalUrl: string;
@@ -836,6 +853,8 @@ export async function fetchAndExtract(
      * documenting HTTP cookies it would eat the article.
      */
     stripConsent?: boolean;
+    /** Keep all page text through the built-in reader, bypassing isolation and consent filtering. */
+    fullPage?: boolean;
     /**
      * Carry the raw HTML up in `html`. For a caller that follows links out of
      * the page it just read; see ExtractResult.html for why it is opt-in.
@@ -850,7 +869,8 @@ export async function fetchAndExtract(
   // happens to be up. Firecrawl is still reachable — as rung 2, via callback.
   const wantsDoc = wantsPdf ? undefined : docFormatForUrl(url);
   let firecrawlNote: string | undefined;
-  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl) {
+  // Firecrawl's cleaned markdown cannot recover navigation or consent text.
+  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl && !opts.fullPage) {
     const fc = await scrapeViaFirecrawl(url, opts);
     // Firecrawl reports success even for an error page, handing back the
     // origin's 404/403 body as markdown. Accept only a 2xx/3xx: anything else
@@ -962,13 +982,14 @@ export async function fetchAndExtract(
   const isHtml =
     /^(?:text\/html|application\/xhtml\+xml)$/.test(mime) ||
     (ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(res.body));
-  const stripped = isHtml ? htmlToText(extractMainHtml(res.body)) : res.body;
-  const text = isHtml && opts.stripConsent ? stripConsentBoilerplate(stripped).text : stripped;
+  const stripped = isHtml ? htmlToText(opts.fullPage ? res.body : extractMainHtml(res.body), opts) : res.body;
+  const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped) : { text: stripped, dropped: 0 };
   const title = isHtml ? htmlTitle(res.body) : undefined;
   const canonical = isHtml ? htmlCanonicalUrl(res.body) : undefined;
   const metaDescription = isHtml ? metaDescriptionOf(res.body) : undefined;
   return {
-    text,
+    text: consent.text,
+    consentDropped: consent.dropped,
     title,
     canonical,
     metaDescription,
@@ -1052,19 +1073,29 @@ const CONSENT_PATTERNS = [
   /legitimate interest/i,
 ];
 
+// A short line needs a consent action or notice too — merely mentioning
+// cookies must not erase an article's prose, headings or list items. Topic
+// words (cookie, consent, GDPR, CCPA) are deliberately absent: they already
+// count as the hit, and an article ABOUT the GDPR names it in short lines.
+const CONSENT_ACTIONS = [
+  /\b(?:accept|reject|decline|agree|allow|manage|preferences|settings|choices)\b/i,
+  /\b(?:opt[ -]out|we use cookies|this (?:site|website) uses cookies|by continuing)\b/i,
+  /\b(?:learn more|privacy policy|cookie policy)\b/i,
+];
+
 /**
  * Drop consent-banner lines from extracted text, and say how many went.
  *
  * Deliberately conservative: a line goes only on two distinct pattern hits, or
- * on one hit when the line is short enough to be a button ("Accept all
- * cookies"). Prose that mentions cookies once inside a real sentence stays —
+ * on one hit when the line is short and reads as a consent action or notice
+ * ("Accept all cookies"). Prose that merely mentions cookies once stays —
  * this must never quietly delete the paragraph someone wanted to cite.
  */
 export function stripConsentBoilerplate(text: string): { text: string; dropped: number } {
   let dropped = 0;
   const kept = text.split("\n").filter((line) => {
     const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(line) ? 1 : 0), 0);
-    const isBanner = hits >= 2 || (hits === 1 && line.trim().length < 120);
+    const isBanner = hits >= 2 || (hits === 1 && line.trim().length < 120 && CONSENT_ACTIONS.some((re) => re.test(line)));
     if (isBanner) dropped++;
     return !isBanner;
   });

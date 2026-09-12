@@ -61,8 +61,8 @@ boundaries and a concrete MCP example.
 
 ```
 webindex search <query> [--engine ddg|ddglite|mojeek|off] [--limit n] [--lang tag]
-webindex fetch <url>                 # → clean text, whatever the format
-webindex extract <file>              # the same, on disk
+webindex fetch <url> [--full-page]    # HTML main content, consent banners dropped; --full-page keeps all page text via the built-in reader
+webindex extract <file> [--full-page] # the same on disk; --full-page keeps navigation and consent banners too
 webindex rank --query <q> --docs <f> # BM25F + near-dup collapse + MMR
 webindex repo|issues|prs|releases <ref>
 webindex package <name> [--registry npm|pypi|crates]

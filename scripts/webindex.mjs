@@ -440,6 +440,106 @@ import { existsSync as existsSync7, readFileSync as readFileSync12 } from "fs";
 import { basename as basename4, extname, join as join15, relative as relative2, resolve as resolve4 } from "path";
 import { pathToFileURL } from "url";
 
+// src/charset.ts
+function bomEncoding(bytes) {
+  if (bytes.length >= 3 && bytes[0] === 239 && bytes[1] === 187 && bytes[2] === 191) return { encoding: "utf-8", skip: 3 };
+  if (bytes.length >= 2 && bytes[0] === 255 && bytes[1] === 254) return { encoding: "utf-16le", skip: 2 };
+  if (bytes.length >= 2 && bytes[0] === 254 && bytes[1] === 255) return { encoding: "utf-16be", skip: 2 };
+  return void 0;
+}
+var CHARSET_IN_CONTENT_TYPE = /charset\s*=\s*["']?([a-z0-9_:.+-]+)/i;
+function charsetFromContentType(contentType) {
+  return CHARSET_IN_CONTENT_TYPE.exec(contentType ?? "")?.[1]?.toLowerCase();
+}
+function charsetFromHtml(head) {
+  const window = head.slice(0, 4096);
+  const direct = /<meta[^>]+charset\s*=\s*["']?([a-z0-9_:.+-]+)/i.exec(window);
+  if (direct) return direct[1].toLowerCase();
+  const httpEquiv = /<meta[^>]+http-equiv\s*=\s*["']?content-type["']?[^>]*content\s*=\s*["'][^"']*charset\s*=\s*([a-z0-9_:.+-]+)/i.exec(window);
+  return httpEquiv?.[1]?.toLowerCase();
+}
+function decodeBody(bytes, contentType = "") {
+  const bom = bomEncoding(bytes);
+  if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
+  const declared = charsetFromContentType(contentType);
+  if (declared && declared !== "utf-8" && declared !== "utf8") return decodeWith(bytes, declared);
+  if (declared) return bytes.toString("utf8");
+  const meta = charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
+  if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
+  return bytes.toString("utf8");
+}
+function decodeLocal(bytes, opts = {}) {
+  const bom = bomEncoding(bytes);
+  if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
+  const meta = opts.sniffHtmlCharset === false ? void 0 : charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
+  if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return decodeCp1252(bytes);
+  }
+}
+var CP1252_C1 = [
+  8364,
+  129,
+  8218,
+  402,
+  8222,
+  8230,
+  8224,
+  8225,
+  710,
+  8240,
+  352,
+  8249,
+  338,
+  141,
+  381,
+  143,
+  144,
+  8216,
+  8217,
+  8220,
+  8221,
+  8226,
+  8211,
+  8212,
+  732,
+  8482,
+  353,
+  8250,
+  339,
+  157,
+  382,
+  376
+];
+var CP1252_LABELS = /* @__PURE__ */ new Set([
+  "windows-1252",
+  "cp1252",
+  "cp-1252",
+  "x-cp1252",
+  "ansi_x3.4-1968",
+  "iso-8859-1",
+  "iso8859-1",
+  "latin1",
+  "l1",
+  "us-ascii",
+  "ascii"
+]);
+var CP1252_C1_RANGE = /[\x80-\x9f]/g;
+var cp1252C1 = (c) => String.fromCharCode(CP1252_C1[c.charCodeAt(0) - 128]);
+function decodeCp1252(bytes) {
+  return bytes.toString("latin1").replace(CP1252_C1_RANGE, cp1252C1);
+}
+function decodeWith(bytes, encoding) {
+  if (CP1252_LABELS.has(encoding)) return decodeCp1252(bytes);
+  try {
+    return new TextDecoder(encoding, { fatal: false }).decode(bytes);
+  } catch {
+    return bytes.toString("utf8");
+  }
+}
+
 // src/version.ts
 var ENGINE_VERSION = "1.19.7";
 
@@ -825,95 +925,6 @@ async function extractPdf(bytes, opts = {}) {
     lastReason = verdict.reason;
   }
   return { text: "", reason: lastReason ?? "no PDF extractor available" };
-}
-
-// src/charset.ts
-function bomEncoding(bytes) {
-  if (bytes.length >= 3 && bytes[0] === 239 && bytes[1] === 187 && bytes[2] === 191) return { encoding: "utf-8", skip: 3 };
-  if (bytes.length >= 2 && bytes[0] === 255 && bytes[1] === 254) return { encoding: "utf-16le", skip: 2 };
-  if (bytes.length >= 2 && bytes[0] === 254 && bytes[1] === 255) return { encoding: "utf-16be", skip: 2 };
-  return void 0;
-}
-var CHARSET_IN_CONTENT_TYPE = /charset\s*=\s*["']?([a-z0-9_:.+-]+)/i;
-function charsetFromContentType(contentType) {
-  return CHARSET_IN_CONTENT_TYPE.exec(contentType ?? "")?.[1]?.toLowerCase();
-}
-function charsetFromHtml(head) {
-  const window = head.slice(0, 4096);
-  const direct = /<meta[^>]+charset\s*=\s*["']?([a-z0-9_:.+-]+)/i.exec(window);
-  if (direct) return direct[1].toLowerCase();
-  const httpEquiv = /<meta[^>]+http-equiv\s*=\s*["']?content-type["']?[^>]*content\s*=\s*["'][^"']*charset\s*=\s*([a-z0-9_:.+-]+)/i.exec(window);
-  return httpEquiv?.[1]?.toLowerCase();
-}
-function decodeBody(bytes, contentType = "") {
-  const bom = bomEncoding(bytes);
-  if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
-  const declared = charsetFromContentType(contentType);
-  if (declared && declared !== "utf-8" && declared !== "utf8") return decodeWith(bytes, declared);
-  if (declared) return bytes.toString("utf8");
-  const meta = charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
-  if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
-  return bytes.toString("utf8");
-}
-var CP1252_C1 = [
-  8364,
-  129,
-  8218,
-  402,
-  8222,
-  8230,
-  8224,
-  8225,
-  710,
-  8240,
-  352,
-  8249,
-  338,
-  141,
-  381,
-  143,
-  144,
-  8216,
-  8217,
-  8220,
-  8221,
-  8226,
-  8211,
-  8212,
-  732,
-  8482,
-  353,
-  8250,
-  339,
-  157,
-  382,
-  376
-];
-var CP1252_LABELS = /* @__PURE__ */ new Set([
-  "windows-1252",
-  "cp1252",
-  "cp-1252",
-  "x-cp1252",
-  "ansi_x3.4-1968",
-  "iso-8859-1",
-  "iso8859-1",
-  "latin1",
-  "l1",
-  "us-ascii",
-  "ascii"
-]);
-var CP1252_C1_RANGE = /[\x80-\x9f]/g;
-var cp1252C1 = (c) => String.fromCharCode(CP1252_C1[c.charCodeAt(0) - 128]);
-function decodeCp1252(bytes) {
-  return bytes.toString("latin1").replace(CP1252_C1_RANGE, cp1252C1);
-}
-function decodeWith(bytes, encoding) {
-  if (CP1252_LABELS.has(encoding)) return decodeCp1252(bytes);
-  try {
-    return new TextDecoder(encoding, { fatal: false }).decode(bytes);
-  } catch {
-    return bytes.toString("utf8");
-  }
 }
 
 // src/text.ts
@@ -1611,15 +1622,20 @@ function decodeEntities(s) {
 function cleanInline(s) {
   return decodeEntities(String(s)).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
-function htmlToText(html) {
+var BLOCK_TAGS = /* @__PURE__ */ new Set(["p", "div", "section", "article", "li", "tr", "td", "th", "ul", "ol", "pre", "blockquote", "table"]);
+function htmlToText(html, opts = {}) {
   let s = html;
-  s = s.replace(/<!--[\s\S]*?-->/g, " ");
-  s = s.replace(/<(script|style|noscript|head|nav|footer|svg|template)[\s\S]*?<\/\1>/gi, " ");
-  s = s.replace(/<h([1-6])(?:\s[^>]*)?>/gi, (_m, n) => "\n" + "#".repeat(Number(n)) + " ");
-  s = s.replace(/<\/(p|div|section|article|li|tr|td|th|ul|ol|h[1-6]|pre|blockquote|br)>/gi, "\n");
-  s = s.replace(/<(p|div|section|article|li|tr|td|th|ul|ol|pre|blockquote|table)\b[^>]*>/gi, "\n");
-  s = s.replace(/<(br|hr)\s*\/?>/gi, "\n");
-  s = s.replace(/<[^>]+>/g, " ");
+  const hidden = opts.fullPage ? /<!--[\s\S]*?-->|<(script|style|noscript|head|svg|template)\b[\s\S]*?<\/\1\s*>/gi : /<!--[\s\S]*?-->|<(script|style|noscript|head|nav|footer|svg|template)\b[\s\S]*?<\/\1\s*>/gi;
+  s = s.replace(hidden, " ");
+  s = s.replace(/<[a-zA-Z!/?][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g, (tag) => {
+    const name = /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
+    if (/^h[1-6]$/.test(name)) {
+      return tag.startsWith("</") ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
+    }
+    if (BLOCK_TAGS.has(name) || name === "br" || name === "hr") return "\n";
+    return " ";
+  });
+  s = s.replace(/<[a-zA-Z!/?][^>]*>/g, " ");
   s = decodeEntities(s);
   s = s.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n");
   return s.split("\n").map((l) => l.trim()).filter((l) => l.length > 0).join("\n");
@@ -1710,7 +1726,7 @@ async function fetchAndExtract(url, opts = {}) {
   const wantsPdf = looksLikePdfUrl(url);
   const wantsDoc = wantsPdf ? void 0 : docFormatForUrl(url);
   let firecrawlNote;
-  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl) {
+  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl && !opts.fullPage) {
     const fc = await scrapeViaFirecrawl(url, opts);
     if (fc.data && (fc.data.statusCode ?? 200) < 400) {
       return {
@@ -1787,13 +1803,14 @@ async function fetchAndExtract(url, opts = {}) {
   const mime = res.contentType.split(";")[0].trim().toLowerCase();
   const ambiguousType = !mime || mime === "application/octet-stream";
   const isHtml = /^(?:text\/html|application\/xhtml\+xml)$/.test(mime) || ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(res.body);
-  const stripped = isHtml ? htmlToText(extractMainHtml(res.body)) : res.body;
-  const text = isHtml && opts.stripConsent ? stripConsentBoilerplate(stripped).text : stripped;
+  const stripped = isHtml ? htmlToText(opts.fullPage ? res.body : extractMainHtml(res.body), opts) : res.body;
+  const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped) : { text: stripped, dropped: 0 };
   const title = isHtml ? htmlTitle(res.body) : void 0;
   const canonical = isHtml ? htmlCanonicalUrl(res.body) : void 0;
   const metaDescription = isHtml ? metaDescriptionOf(res.body) : void 0;
   return {
-    text,
+    text: consent.text,
+    consentDropped: consent.dropped,
     title,
     canonical,
     metaDescription,
@@ -1817,11 +1834,16 @@ var CONSENT_PATTERNS = [
   /advertising partners/i,
   /legitimate interest/i
 ];
+var CONSENT_ACTIONS = [
+  /\b(?:accept|reject|decline|agree|allow|manage|preferences|settings|choices)\b/i,
+  /\b(?:opt[ -]out|we use cookies|this (?:site|website) uses cookies|by continuing)\b/i,
+  /\b(?:learn more|privacy policy|cookie policy)\b/i
+];
 function stripConsentBoilerplate(text) {
   let dropped = 0;
   const kept = text.split("\n").filter((line) => {
     const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(line) ? 1 : 0), 0);
-    const isBanner = hits >= 2 || hits === 1 && line.trim().length < 120;
+    const isBanner = hits >= 2 || hits === 1 && line.trim().length < 120 && CONSENT_ACTIONS.some((re) => re.test(line));
     if (isBanner) dropped++;
     return !isBanner;
   });
@@ -5075,8 +5097,8 @@ documents \u2014 and serve that to an agent over MCP. Zero dependencies, no API 
 USAGE
   webindex search <query> [--json] [--limit <n>] [--pages <n>] [--lang <tag>]
                           [--engine ddg|ddglite|mojeek|off] [--searxng <base>|off]
-  webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>]
-  webindex extract <file> [--json]
+  webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>] [--full-page]
+  webindex extract <file> [--json] [--full-page]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--json]
   webindex repo <ref> [--json]
   webindex issues <ref> [--terms "<words>"] [--limit <n>] [--json]
@@ -5111,8 +5133,11 @@ COMMANDS
              missing and how to start it \u2014 those are different answers.
   fetch      Fetch a URL and print the extracted text. Routes PDFs and office
              documents to their ladders automatically. Uses Firecrawl when
-             available, with built-in extraction as fallback.
-  extract    Same extraction, on a file already on disk.
+             available, with built-in extraction as fallback. HTML is reduced
+             to main content with consent banners dropped.
+  extract    Same extraction, on a file already on disk. For both, --full-page
+             keeps the whole HTML page through the built-in reader: navigation,
+             footer and consent banners included.
   rank       Order candidate documents against a question \u2014 BM25F, then a
              near-duplicate collapse, then MMR so the top says several
              different things. Reads a JSON array of {url,title,text} from
@@ -5208,7 +5233,7 @@ var VALUE_FLAGS = [
   "terms",
   "max"
 ];
-var BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin"];
+var BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page"];
 var COMMANDS = [
   "search",
   "fetch",
@@ -5246,7 +5271,7 @@ function usage(msg) {
 `);
   process.exit(EXIT_USAGE);
 }
-async function extractLocal(path) {
+async function extractLocal(path, fullPage = false) {
   let bytes;
   try {
     bytes = readFileSync12(path);
@@ -5256,18 +5281,20 @@ async function extractLocal(path) {
   const asUrl = pathToFileURL(path).href;
   if (looksLikePdfUrl(asUrl) || bytes.subarray(0, 5).toString("latin1") === "%PDF-") {
     const r = await extractPdf(bytes);
-    return { text: r.text, extractor: r.via ?? "none", reason: r.reason };
+    return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
   const fmt = docFormatForUrl(asUrl);
   if (fmt) {
     const r = await extractDocument(bytes, fmt);
-    return { text: r.text, extractor: r.via ?? "none", reason: r.reason };
+    return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
-  const raw = bytes.toString("utf8");
   const extension = extname(path).toLowerCase();
   const explicitText = [".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".xml", ".yaml", ".yml"].includes(extension);
+  const raw = decodeLocal(bytes, { sniffHtmlCharset: !explicitText });
   const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
-  return { text: looksHtml ? htmlToText(raw) : raw, extractor: looksHtml ? "native" : "plain" };
+  const text = looksHtml ? htmlToText(fullPage ? raw : extractMainHtml(raw), { fullPage }) : raw;
+  const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text) : { text, dropped: 0 };
+  return { text: consent.text, extractor: looksHtml ? "native" : "plain", consentDropped: consent.dropped };
 }
 function rankDocuments(question, docs, limit) {
   const bm = docs.map((d, i) => ({ id: String(i), title: d.title ?? "", headings: d.headings ?? "", body: d.text ?? "" }));
@@ -5340,7 +5367,8 @@ function webindexAdapter() {
           type: "object",
           properties: {
             url: { type: "string", description: "The http(s) URL to fetch." },
-            lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." }
+            lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." },
+            fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." }
           },
           required: ["url"]
         }
@@ -5349,7 +5377,14 @@ function webindexAdapter() {
         name: "webindex_extract",
         title: "Extract text from a local file",
         description: "Read a PDF, office document or HTML file already on disk and return its text, using the same extraction ladders as webindex_fetch.",
-        inputSchema: { type: "object", properties: { path: { type: "string", description: "Absolute path to the file." } }, required: ["path"] }
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Absolute path to the file." },
+            fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." }
+          },
+          required: ["path"]
+        }
       },
       {
         name: "webindex_rank",
@@ -5510,7 +5545,8 @@ function webindexAdapter() {
       if (name === "webindex_fetch") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
-        const r = await fetchAndExtract(url, { acceptLanguage: args.lang ? String(args.lang) : void 0 });
+        const fullPage = args.fullPage === true;
+        const r = await fetchAndExtract(url, { acceptLanguage: args.lang ? String(args.lang) : void 0, fullPage, stripConsent: !fullPage });
         if (!r.text) throw new ToolError(`Nothing readable at ${url}${r.note ? ` \u2014 ${r.note}` : ""}.`);
         return { text: `${r.text}
 
@@ -5538,7 +5574,7 @@ extractor: ${r.extractor ?? "native"}` };
 ${r.notes.join("\n")}` : body };
       }
       if (name === "webindex_extract") {
-        const r = await extractLocal(String(args.path ?? ""));
+        const r = await extractLocal(String(args.path ?? ""), args.fullPage === true);
         if (!r.text) throw new ToolError(`Nothing readable in that file${r.reason ? ` \u2014 ${r.reason}` : ""}.`);
         return { text: `${r.text}
 
@@ -5710,10 +5746,30 @@ async function dispatch(argv) {
     const url = args.positional[0];
     if (!url) usage("usage: webindex fetch <url>");
     if (!/^https?:\/\//i.test(url)) fail("fetch needs an http(s) URL");
-    const r = await fetchAndExtract(url, { acceptLanguage: argValue(args, "lang"), firecrawl: argValue(args, "firecrawl") });
+    const fullPage = argBool(args, "full-page");
+    const r = await fetchAndExtract(url, {
+      acceptLanguage: argValue(args, "lang"),
+      firecrawl: argValue(args, "firecrawl"),
+      fullPage,
+      stripConsent: !fullPage
+    });
     if (argBool(args, "json")) {
       process.stdout.write(
-        JSON.stringify({ url, title: r.title, extractor: r.extractor, status: r.status, chars: r.text.length, note: r.note, text: r.text }, null, 2) + "\n"
+        JSON.stringify(
+          {
+            url,
+            title: r.title,
+            extractor: r.extractor,
+            status: r.status,
+            chars: r.text.length,
+            note: r.note,
+            text: r.text,
+            fullPage,
+            consentDropped: r.consentDropped ?? 0
+          },
+          null,
+          2
+        ) + "\n"
       );
     } else if (r.text) {
       process.stdout.write(r.text + "\n");
@@ -5724,10 +5780,15 @@ async function dispatch(argv) {
   if (cmd === "extract") {
     const path = args.positional[0];
     if (!path) usage("usage: webindex extract <file>");
-    const r = await extractLocal(path);
+    const fullPage = argBool(args, "full-page");
+    const r = await extractLocal(path, fullPage);
     if (argBool(args, "json")) {
       process.stdout.write(
-        JSON.stringify({ file: basename4(path), extractor: r.extractor, chars: r.text.length, reason: r.reason, text: r.text }, null, 2) + "\n"
+        JSON.stringify(
+          { file: basename4(path), extractor: r.extractor, chars: r.text.length, reason: r.reason, text: r.text, fullPage, consentDropped: r.consentDropped },
+          null,
+          2
+        ) + "\n"
       );
     } else if (r.text) {
       process.stdout.write(r.text + "\n");

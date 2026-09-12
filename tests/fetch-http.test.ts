@@ -74,6 +74,46 @@ describe("httpJson response cap", () => {
 });
 
 describe("htmlToText", () => {
+  it("keeps quoted greater-than signs in attributes out of the text", () => {
+    expect(htmlToText(`<div data-mw='{"a > b"}' class="meta"><p>Visible</p></div>`)).toBe("Visible");
+  });
+
+  it("preserves headings and links with both attribute quote styles", () => {
+    const text = htmlToText(`<h1 class="x" title='a > b'>Title</h1><a href='/p?q=">"'>link</a><p>body</p>`);
+    expect(text).toContain("# Title");
+    expect(text).toContain("link");
+    expect(text).toContain("body");
+    expect(text).not.toContain(">");
+    expect(text).not.toContain("class=");
+  });
+
+  it("keeps prose between a commented-out script opener and a real script", () => {
+    // The mirror image of the case below: a comment that quotes "<script>"
+    // must not pair with the real </script> further down.
+    const text = htmlToText("<!-- <script> --> <p>Important text</p><script>analytics()</script><p>After</p>");
+    expect(text).toBe("Important text\nAfter");
+  });
+
+  it("does not treat <header> as <head>", () => {
+    expect(htmlToText("<header><p>Site</p></header><p>Body</p>")).toBe("Site\nBody");
+  });
+
+  it.each(["script", "style"])("keeps prose after a comment opener inside %s", (tag) => {
+    const text = htmlToText(`<${tag}>s="<!--";</${tag}><p>Price</p><!-- x -->`);
+    expect(text).toContain("Price");
+    expect(text).not.toContain("s=");
+    expect(text).not.toContain("x");
+  });
+
+  it("removes tags even when an attribute quote is unbalanced", () => {
+    expect(htmlToText('<p title="oops>Text</p>')).not.toContain("<");
+  });
+
+  it("separates unclosed list items and table cells into lines", () => {
+    expect(htmlToText("<ul><li>a<li>b</ul>")).toBe("a\nb");
+    expect(htmlToText("<td>x<td>y")).toBe("x\ny");
+  });
+
   it("strips script/style/nav and keeps heading + prose", () => {
     const html = `<html><head><title>T</title></head><body>
       <nav>menu junk</nav>
@@ -121,6 +161,42 @@ describe("capExtract", () => {
 });
 
 describe("fetchAndExtract", () => {
+  it("uses the whole source page with fullPage even when Firecrawl offers cleaned markdown", async () => {
+    const body = "<nav>Home About</nav><article><p>Source article text</p><p>Accept all cookies</p></article>";
+    installFetchMock(
+      routes([
+        ["/scrape", { body: JSON.stringify({ success: true, data: { markdown: "Source article text" } }), contentType: "application/json" }],
+        ["fc-full.test", { body: "ok" }],
+        ["x.test/source", { body, contentType: "text/html" }],
+      ]),
+    );
+    const normal = await fetchAndExtract("https://x.test/source", { firecrawl: "http://fc-full.test" });
+    expect(normal).toMatchObject({ text: "Source article text", extractor: "firecrawl" });
+    const full = await fetchAndExtract("https://x.test/source", { firecrawl: "http://fc-full.test", fullPage: true });
+    expect(full.text).toContain("Home About");
+    expect(full.text).toContain("Accept all cookies");
+    expect(full.consentDropped).toBe(0);
+  });
+
+  it("keeps navigation with fullPage while preserving opt-in library consent filtering", async () => {
+    const body = `<nav>Home About</nav><article><h1>Rate limiting</h1><p>${"Token buckets smooth bursts. ".repeat(20)}</p><p>Accept all cookies</p></article><aside>Related reading</aside>`;
+    installFetchMock(routes([["x.test/full-page", { body, contentType: "text/html" }]]));
+    const normal = await fetchAndExtract("https://x.test/full-page");
+    expect(normal.text).not.toMatch(/Home|About|Related reading/);
+    expect(normal.text).toContain("Accept all cookies");
+    const full = await fetchAndExtract("https://x.test/full-page", { fullPage: true });
+    expect(full.text).toContain("Home About");
+    expect(full.text).toContain("Related reading");
+    expect(full.text).toContain("Accept all cookies");
+    expect(full.consentDropped).toBe(0);
+    const clean = await fetchAndExtract("https://x.test/full-page", { stripConsent: true });
+    expect(clean.text).not.toContain("Accept all cookies");
+    expect(clean.consentDropped).toBe(1);
+    const fullDespiteConsent = await fetchAndExtract("https://x.test/full-page", { fullPage: true, stripConsent: true });
+    expect(fullDespiteConsent.text).toBe(full.text);
+    expect(fullDespiteConsent.consentDropped).toBe(0);
+  });
+
   it("returns cleaned text + title for an html page", async () => {
     installFetchMock(routes([["example.com", { body: "<title>Doc</title><h1>Hi</h1><p>body text</p>" }]]));
     const r = await fetchAndExtract("https://example.com/x");
@@ -372,6 +448,35 @@ describe("cache validators and throttling signals", () => {
 });
 
 describe("stripConsentBoilerplate", () => {
+  it("keeps short prose, headings and fragments that merely mention cookies byte-identical", () => {
+    const text = "HTTP cookies persist between requests.\n# Cookies\nSession cookie";
+    expect(stripConsentBoilerplate(text)).toEqual({ text, dropped: 0 });
+  });
+
+  it("keeps a short line that names a regulation without asking for anything", () => {
+    // Seen on MDN's cookies guide: a list item naming the GDPR is content, not
+    // a banner. A topic word is the hit; it must not also count as the action.
+    const text = "The General Data Privacy Regulation (GDPR) in the European Union\nCCPA compliance";
+    expect(stripConsentBoilerplate(text)).toEqual({ text, dropped: 0 });
+  });
+
+  it("drops short consent actions and notices among real prose and counts them", () => {
+    const text = [
+      "A token bucket refills at a fixed rate.",
+      "Accept all cookies",
+      "We use cookies to improve your experience",
+      "Reject all",
+      "Manage preferences",
+      "Cookie settings",
+      "This website uses cookies",
+      "Requests consume tokens from the bucket.",
+    ].join("\n");
+    expect(stripConsentBoilerplate(text)).toEqual({
+      text: "A token bucket refills at a fixed rate.\nRequests consume tokens from the bucket.",
+      dropped: 6,
+    });
+  });
+
   it("drops banner lines and counts them, keeping the article", () => {
     const text = [
       "# Rate limiting",

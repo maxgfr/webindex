@@ -8,7 +8,7 @@ import { documentedFlags, missingFromHelp } from "../src/cli-kit.js";
 import { createServer, ToolError } from "../src/mcp/server.js";
 import { LATEST_PROTOCOL } from "../src/mcp/protocol.js";
 import { STACK_SERVICES } from "../src/stack.js";
-import { installFetchMock } from "./fetchmock.js";
+import { installFetchMock, routes } from "./fetchmock.js";
 import { envName } from "../src/brand.js";
 import { resetOllamaProbe } from "../src/embed.js";
 
@@ -68,6 +68,10 @@ async function run(argv: string[]): Promise<number> {
     exit.mockRestore();
   }
 }
+
+// The article exceeds 30% of the visible page, so main-content isolation wins.
+const articlePage = (consent = "") =>
+  `<nav><a href="/">Home</a> <a href="/about">About</a></nav><article><h1>Rate limiting</h1><p>Token buckets smooth bursts. This sentence pads the article so the region is not tiny.</p>${consent}<p>Second paragraph with more words to pass the size gate of extractMainHtml.</p></article><footer>© Example</footer>`;
 
 describe("help and version", () => {
   it("prints help with no arguments, and does not fail", async () => {
@@ -185,6 +189,82 @@ describe("search", () => {
 });
 
 describe("extract", () => {
+  it("keeps short cookie prose while dropping consent actions by default", async () => {
+    const f = join(dir, "cookie-article.html");
+    writeFileSync(f, articlePage("<p>HTTP cookies persist between requests.</p><p>Accept all cookies</p>"));
+    expect(await run(["extract", f, "--json"])).toBe(0);
+    const result = JSON.parse(stdout());
+    expect(result.text).toContain("HTTP cookies persist between requests.");
+    expect(result.text).not.toContain("Accept all cookies");
+    expect(result.consentDropped).toBe(1);
+  });
+
+  it.each([false, true])("keeps the whole HTML page only when fullPage is %s", async (fullPage) => {
+    const f = join(dir, "page.html");
+    writeFileSync(f, articlePage() + "<aside>Related reading</aside>");
+    expect(await run(["extract", f, "--json", ...(fullPage ? ["--full-page"] : [])])).toBe(0);
+    const result = JSON.parse(stdout());
+    expect(result.text).toContain("# Rate limiting");
+    for (const chrome of ["Home", "About", "© Example", "Related reading"]) {
+      expect(result.text.includes(chrome)).toBe(fullPage);
+    }
+    expect(result).toMatchObject({ fullPage, consentDropped: 0 });
+  });
+
+  it.each([false, true])("drops and counts consent lines unless fullPage is %s", async (fullPage) => {
+    const f = join(dir, "consent.html");
+    writeFileSync(f, articlePage("<p>Accept all cookies</p><p>Manage preferences</p>"));
+    expect(await run(["extract", f, "--json", ...(fullPage ? ["--full-page"] : [])])).toBe(0);
+    const result = JSON.parse(stdout());
+    expect(result.text).toContain("Token buckets");
+    expect(result.text).toContain("Second paragraph");
+    expect(result.text.includes("Accept all cookies")).toBe(fullPage);
+    expect(result.text.includes("Manage preferences")).toBe(fullPage);
+    expect(result).toMatchObject({ fullPage, consentDropped: fullPage ? 0 : 2 });
+  });
+
+  it("isolates main HTML content and reports extraction options in JSON", async () => {
+    const f = join(dir, "page.html");
+    writeFileSync(f, articlePage());
+    expect(await run(["extract", f, "--json"])).toBe(0);
+    const result = JSON.parse(stdout());
+    expect(result.text).toContain("# Rate limiting");
+    expect(result.text).toContain("Token buckets");
+    expect(result.text).not.toMatch(/About|Home|© Example/);
+    expect(result).toMatchObject({ fullPage: false, consentDropped: 0 });
+  });
+
+  const latin1Html = (charset: string) =>
+    Buffer.concat([
+      Buffer.from(`<html><head><meta charset="${charset}"></head><body><p>Une réponse déjà validée `, "latin1"),
+      Buffer.from([0x97]), // The em dash is Windows-1252, outside Node's latin1 encoding.
+      Buffer.from(" coûts</p></body></html>", "latin1"),
+    ]);
+
+  it.each([
+    ["latin1-meta.html", "iso-8859-1"],
+    ["latin1-stale-utf8-meta.html", "utf-8"],
+  ])("decodes %s before extracting HTML", async (name, charset) => {
+    const f = join(dir, name);
+    writeFileSync(f, latin1Html(charset));
+    expect(await run(["extract", f, "--json"])).toBe(0);
+    expect(JSON.parse(stdout()).text).toBe("Une réponse déjà validée — coûts");
+  });
+
+  it("decodes UTF-16LE HTML with a BOM", async () => {
+    const f = join(dir, "utf16.html");
+    writeFileSync(f, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("<p>Bonjour à tous</p>", "utf16le")]));
+    expect(await run(["extract", f, "--json"])).toBe(0);
+    expect(JSON.parse(stdout()).text).toBe("Bonjour à tous");
+  });
+
+  it("decodes Latin-1 HTML through the MCP extract tool too", async () => {
+    const f = join(dir, "latin1-meta.html");
+    writeFileSync(f, latin1Html("iso-8859-1"));
+    const r = await webindexAdapter().callTool("webindex_extract", { path: f });
+    expect(r.text).toBe("Une réponse déjà validée — coûts\n\n---\nextractor: native");
+  });
+
   it("reads an HTML file as clean text", async () => {
     const f = join(dir, "page.html");
     writeFileSync(f, "<html><body><article><h1>Rate limiting</h1><p>Token buckets smooth bursts.</p></article></body></html>");
@@ -222,6 +302,34 @@ describe("extract", () => {
 });
 
 describe("fetch argument handling", () => {
+  it.each([false, true])("fetches main content with consent counts unless fullPage is %s", async (fullPage) => {
+    installFetchMock(routes([["x.test/page", { body: articlePage("<p>Accept all cookies</p>"), contentType: "text/html" }]]));
+    try {
+      expect(await run(["fetch", "https://x.test/page", "--json", ...(fullPage ? ["--full-page"] : [])])).toBe(0);
+      const result = JSON.parse(stdout());
+      expect(result.text).toContain("# Rate limiting");
+      expect(result.text).toContain("Token buckets");
+      expect(result.text.includes("About")).toBe(fullPage);
+      expect(result.text.includes("Accept all cookies")).toBe(fullPage);
+      expect(result).toMatchObject({ fullPage, consentDropped: fullPage ? 0 : 1 });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(["fetch", "extract"])("reports zero consent drops for non-HTML through %s", async (command) => {
+    const text = "Accept all cookies\nManage preferences";
+    const f = join(dir, "notes.txt");
+    writeFileSync(f, text);
+    installFetchMock(routes([["x.test/notes.txt", { body: text, contentType: "text/plain" }]]));
+    try {
+      expect(await run([command, command === "fetch" ? "https://x.test/notes.txt" : f, "--json"])).toBe(0);
+      expect(JSON.parse(stdout())).toMatchObject({ text, fullPage: false, consentDropped: 0 });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("refuses a non-http argument rather than guessing", async () => {
     expect(await run(["fetch", "example.com"])).toBe(1);
     expect(stderr()).toMatch(/http\(s\) URL/);
@@ -305,6 +413,34 @@ describe("unknown input", () => {
 
 describe("the MCP tools", () => {
   const adapter = webindexAdapter();
+
+  it.each(["webindex_fetch", "webindex_extract"])("%s declares an optional fullPage boolean", (name) => {
+    const tool = adapter.listTools(LATEST_PROTOCOL).find((tool) => tool.name === name)!;
+    expect(tool.inputSchema.properties.fullPage).toEqual({
+      type: "boolean",
+      description: "Keep the whole page: no main-content isolation, no consent-banner filter.",
+    });
+    expect(tool.inputSchema.required).not.toContain("fullPage");
+  });
+
+  it.each(["webindex_fetch", "webindex_extract"])("%s defaults to clean main content and honours fullPage", async (name) => {
+    const path = join(dir, "page.html");
+    const body = articlePage("<p>Accept all cookies</p>") + "<aside>Related reading</aside>";
+    writeFileSync(path, body);
+    installFetchMock(routes([["x.test/page", { body, contentType: "text/html" }]]));
+    try {
+      const args = name === "webindex_fetch" ? { url: "https://x.test/page" } : { path };
+      const normal = await webindexAdapter().callTool(name, args);
+      expect(normal.text).toContain("# Rate limiting");
+      expect(normal.text).not.toMatch(/About|Home|Related reading|Accept all cookies/);
+      const full = await webindexAdapter().callTool(name, { ...args, fullPage: true });
+      expect(full.text).toContain("About");
+      expect(full.text).toContain("Related reading");
+      expect(full.text).toContain("Accept all cookies");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 
   it("declares its tools, each with a required argument and cap advice", () => {
     const tools = adapter.listTools(LATEST_PROTOCOL);
@@ -1014,6 +1150,14 @@ describe("audit regressions", () => {
     expect(await run(["extract", file, "--json"])).toBe(0);
     expect(JSON.parse(stdout())).toMatchObject({ text, extractor: "plain" });
     expect((await webindexAdapter().callTool("webindex_extract", { path: file })).text).toBe(`${text}\n\n---\nextractor: plain`);
+  });
+
+  it("does not let a quoted <meta charset> in a Markdown file change its decoding", async () => {
+    const file = join(dir, "charset-example.md");
+    const text = 'Declare it with `<meta charset="iso-8859-1">`.\n\nUn café.\n';
+    writeFileSync(file, text, "utf8");
+    expect(await run(["extract", file, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ text, extractor: "plain" });
   });
 
   it("extracts HTML fragments when the extension explicitly names HTML", async () => {
