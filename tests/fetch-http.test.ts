@@ -437,6 +437,28 @@ describe("cache validators and throttling signals", () => {
 });
 
 describe("stripConsentBoilerplate", () => {
+  it("keeps short prose, headings and fragments that merely mention cookies byte-identical", () => {
+    const text = "HTTP cookies persist between requests.\n# Cookies\nSession cookie";
+    expect(stripConsentBoilerplate(text)).toEqual({ text, dropped: 0 });
+  });
+
+  it("drops short consent actions and notices among real prose and counts them", () => {
+    const text = [
+      "A token bucket refills at a fixed rate.",
+      "Accept all cookies",
+      "We use cookies to improve your experience",
+      "Reject all",
+      "Manage preferences",
+      "Cookie settings",
+      "This website uses cookies",
+      "Requests consume tokens from the bucket.",
+    ].join("\n");
+    expect(stripConsentBoilerplate(text)).toEqual({
+      text: "A token bucket refills at a fixed rate.\nRequests consume tokens from the bucket.",
+      dropped: 6,
+    });
+  });
+
   it("drops banner lines and counts them, keeping the article", () => {
     const text = [
       "# Rate limiting",

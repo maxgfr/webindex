@@ -535,8 +535,8 @@ declare function looksLikeJunkExtraction(text: string): string | undefined;
  * Drop consent-banner lines from extracted text, and say how many went.
  *
  * Deliberately conservative: a line goes only on two distinct pattern hits, or
- * on one hit when the line is short enough to be a button ("Accept all
- * cookies"). Prose that mentions cookies once inside a real sentence stays —
+ * on one hit when the line is short and reads as a consent action or notice
+ * ("Accept all cookies"). Prose that merely mentions cookies once stays —
  * this must never quietly delete the paragraph someone wanted to cite.
  */
 declare function stripConsentBoilerplate(text: string): {

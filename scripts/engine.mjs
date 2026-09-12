@@ -1657,11 +1657,16 @@ var CONSENT_PATTERNS = [
   /advertising partners/i,
   /legitimate interest/i
 ];
+var CONSENT_ACTIONS = [
+  /\b(?:accept|reject|decline|agree|allow|manage|preferences|settings|choices|consent|gdpr|ccpa)\b/i,
+  /\b(?:opt[ -]out|we use cookies|this (?:site|website) uses cookies|by continuing)\b/i,
+  /\b(?:learn more|privacy policy|cookie policy)\b/i
+];
 function stripConsentBoilerplate(text) {
   let dropped = 0;
   const kept = text.split("\n").filter((line) => {
     const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(line) ? 1 : 0), 0);
-    const isBanner = hits >= 2 || hits === 1 && line.trim().length < 120;
+    const isBanner = hits >= 2 || hits === 1 && line.trim().length < 120 && CONSENT_ACTIONS.some((re) => re.test(line));
     if (isBanner) dropped++;
     return !isBanner;
   });

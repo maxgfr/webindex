@@ -189,6 +189,16 @@ describe("search", () => {
 });
 
 describe("extract", () => {
+  it("keeps short cookie prose while dropping consent actions by default", async () => {
+    const f = join(dir, "cookie-article.html");
+    writeFileSync(f, articlePage("<p>HTTP cookies persist between requests.</p><p>Accept all cookies</p>"));
+    expect(await run(["extract", f, "--json"])).toBe(0);
+    const result = JSON.parse(stdout());
+    expect(result.text).toContain("HTTP cookies persist between requests.");
+    expect(result.text).not.toContain("Accept all cookies");
+    expect(result.consentDropped).toBe(1);
+  });
+
   it.each([false, true])("keeps the whole HTML page only when fullPage is %s", async (fullPage) => {
     const f = join(dir, "page.html");
     writeFileSync(f, articlePage() + "<aside>Related reading</aside>");

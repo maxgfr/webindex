@@ -1071,19 +1071,27 @@ const CONSENT_PATTERNS = [
   /legitimate interest/i,
 ];
 
+// A short line needs a consent action or notice too — merely mentioning
+// cookies must not erase an article's prose, headings or list items.
+const CONSENT_ACTIONS = [
+  /\b(?:accept|reject|decline|agree|allow|manage|preferences|settings|choices|consent|gdpr|ccpa)\b/i,
+  /\b(?:opt[ -]out|we use cookies|this (?:site|website) uses cookies|by continuing)\b/i,
+  /\b(?:learn more|privacy policy|cookie policy)\b/i,
+];
+
 /**
  * Drop consent-banner lines from extracted text, and say how many went.
  *
  * Deliberately conservative: a line goes only on two distinct pattern hits, or
- * on one hit when the line is short enough to be a button ("Accept all
- * cookies"). Prose that mentions cookies once inside a real sentence stays —
+ * on one hit when the line is short and reads as a consent action or notice
+ * ("Accept all cookies"). Prose that merely mentions cookies once stays —
  * this must never quietly delete the paragraph someone wanted to cite.
  */
 export function stripConsentBoilerplate(text: string): { text: string; dropped: number } {
   let dropped = 0;
   const kept = text.split("\n").filter((line) => {
     const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(line) ? 1 : 0), 0);
-    const isBanner = hits >= 2 || (hits === 1 && line.trim().length < 120);
+    const isBanner = hits >= 2 || (hits === 1 && line.trim().length < 120 && CONSENT_ACTIONS.some((re) => re.test(line)));
     if (isBanner) dropped++;
     return !isBanner;
   });
