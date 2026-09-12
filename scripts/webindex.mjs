@@ -1611,15 +1611,20 @@ function decodeEntities(s) {
 function cleanInline(s) {
   return decodeEntities(String(s)).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
+var BLOCK_TAGS = /* @__PURE__ */ new Set(["p", "div", "section", "article", "li", "tr", "td", "th", "ul", "ol", "pre", "blockquote", "table"]);
 function htmlToText(html) {
   let s = html;
-  s = s.replace(/<!--[\s\S]*?-->/g, " ");
   s = s.replace(/<(script|style|noscript|head|nav|footer|svg|template)[\s\S]*?<\/\1>/gi, " ");
-  s = s.replace(/<h([1-6])(?:\s[^>]*)?>/gi, (_m, n) => "\n" + "#".repeat(Number(n)) + " ");
-  s = s.replace(/<\/(p|div|section|article|li|tr|td|th|ul|ol|h[1-6]|pre|blockquote|br)>/gi, "\n");
-  s = s.replace(/<(p|div|section|article|li|tr|td|th|ul|ol|pre|blockquote|table)\b[^>]*>/gi, "\n");
-  s = s.replace(/<(br|hr)\s*\/?>/gi, "\n");
-  s = s.replace(/<[^>]+>/g, " ");
+  s = s.replace(/<!--[\s\S]*?-->/g, " ");
+  s = s.replace(/<[a-zA-Z!/?][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g, (tag) => {
+    const name = /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
+    if (/^h[1-6]$/.test(name)) {
+      return tag.startsWith("</") ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
+    }
+    if (BLOCK_TAGS.has(name) || name === "br" || name === "hr") return "\n";
+    return " ";
+  });
+  s = s.replace(/<[a-zA-Z!/?][^>]*>/g, " ");
   s = decodeEntities(s);
   s = s.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n");
   return s.split("\n").map((l) => l.trim()).filter((l) => l.length > 0).join("\n");

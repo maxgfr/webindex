@@ -596,21 +596,31 @@ export function cleanInline(s: string): string {
 // drop script/style/head/nav/footer, turn block tags into newlines, keep
 // heading structure as markdown markers, decode common entities, collapse
 // whitespace. Good enough to ground a report in a page's prose without a DOM.
+// Tags whose opening or closing marks a line break in the extracted text.
+const BLOCK_TAGS = new Set(["p", "div", "section", "article", "li", "tr", "td", "th", "ul", "ol", "pre", "blockquote", "table"]);
+
 export function htmlToText(html: string): string {
   let s = html;
-  s = s.replace(/<!--[\s\S]*?-->/g, " ");
+  // Raw-text content can contain literal comment openers; remove it first so
+  // the comment pass cannot swallow the prose that follows the block.
   s = s.replace(/<(script|style|noscript|head|nav|footer|svg|template)[\s\S]*?<\/\1>/gi, " ");
-  s = s.replace(/<h([1-6])(?:\s[^>]*)?>/gi, (_m, n) => "\n" + "#".repeat(Number(n)) + " ");
-  s = s.replace(/<\/(p|div|section|article|li|tr|td|th|ul|ol|h[1-6]|pre|blockquote|br)>/gi, "\n");
-  // Break on OPENING block tags too, not only closing ones. Unclosed `<li>` and
-  // `<td>` are valid HTML and extremely common, and with closing tags alone a
-  // whole list or table row collapses onto one line — which then reads as a
-  // single sentence to anything scoring lines against a question. Headings are
-  // excluded because the rule above already turned them into markdown markers;
-  // matching them here as well would double every one of them.
-  s = s.replace(/<(p|div|section|article|li|tr|td|th|ul|ol|pre|blockquote|table)\b[^>]*>/gi, "\n");
-  s = s.replace(/<(br|hr)\s*\/?>/gi, "\n");
-  s = s.replace(/<[^>]+>/g, " ");
+  s = s.replace(/<!--[\s\S]*?-->/g, " ");
+  // A quoted `>` belongs to an attribute, not the end of a tag.
+  s = s.replace(/<[a-zA-Z!/?][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g, (tag) => {
+    const name = /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
+    if (/^h[1-6]$/.test(name)) {
+      return tag.startsWith("</") ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
+    }
+    // Break on OPENING block tags too, not only closing ones. Unclosed `<li>` and
+    // `<td>` are valid HTML and extremely common, and with closing tags alone a
+    // whole list or table row collapses onto one line — which then reads as a
+    // single sentence to anything scoring lines against a question. Headings
+    // return above so their markdown markers are never doubled.
+    if (BLOCK_TAGS.has(name) || name === "br" || name === "hr") return "\n";
+    return " ";
+  });
+  // Malformed attributes must not leave tag markup in the extracted prose.
+  s = s.replace(/<[a-zA-Z!/?][^>]*>/g, " ");
   s = decodeEntities(s);
   s = s.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n");
   return s

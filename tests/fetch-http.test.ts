@@ -74,6 +74,35 @@ describe("httpJson response cap", () => {
 });
 
 describe("htmlToText", () => {
+  it("keeps quoted greater-than signs in attributes out of the text", () => {
+    expect(htmlToText(`<div data-mw='{"a > b"}' class="meta"><p>Visible</p></div>`)).toBe("Visible");
+  });
+
+  it("preserves headings and links with both attribute quote styles", () => {
+    const text = htmlToText(`<h1 class="x" title='a > b'>Title</h1><a href='/p?q=">"'>link</a><p>body</p>`);
+    expect(text).toContain("# Title");
+    expect(text).toContain("link");
+    expect(text).toContain("body");
+    expect(text).not.toContain(">");
+    expect(text).not.toContain("class=");
+  });
+
+  it.each(["script", "style"])("keeps prose after a comment opener inside %s", (tag) => {
+    const text = htmlToText(`<${tag}>s="<!--";</${tag}><p>Price</p><!-- x -->`);
+    expect(text).toContain("Price");
+    expect(text).not.toContain("s=");
+    expect(text).not.toContain("x");
+  });
+
+  it("removes tags even when an attribute quote is unbalanced", () => {
+    expect(htmlToText('<p title="oops>Text</p>')).not.toContain("<");
+  });
+
+  it("separates unclosed list items and table cells into lines", () => {
+    expect(htmlToText("<ul><li>a<li>b</ul>")).toBe("a\nb");
+    expect(htmlToText("<td>x<td>y")).toBe("x\ny");
+  });
+
   it("strips script/style/nav and keeps heading + prose", () => {
     const html = `<html><head><title>T</title></head><body>
       <nav>menu junk</nav>
