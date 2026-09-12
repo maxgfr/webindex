@@ -483,6 +483,17 @@ function decodeBody(bytes, contentType = "") {
   if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
   return bytes.toString("utf8");
 }
+function decodeLocal(bytes) {
+  const bom = bomEncoding(bytes);
+  if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
+  const meta = charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
+  if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return decodeCp1252(bytes);
+  }
+}
 var CP1252_C1 = [
   8364,
   129,
@@ -5821,6 +5832,7 @@ export {
   deaccent,
   decodeBody,
   decodeEntities,
+  decodeLocal,
   dedupeByUrl,
   dedupeNearDuplicates,
   defaultUa,

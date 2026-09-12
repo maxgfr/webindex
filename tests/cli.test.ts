@@ -185,6 +185,37 @@ describe("search", () => {
 });
 
 describe("extract", () => {
+  const latin1Html = (charset: string) =>
+    Buffer.concat([
+      Buffer.from(`<html><head><meta charset="${charset}"></head><body><p>Une réponse déjà validée `, "latin1"),
+      Buffer.from([0x97]), // The em dash is Windows-1252, outside Node's latin1 encoding.
+      Buffer.from(" coûts</p></body></html>", "latin1"),
+    ]);
+
+  it.each([
+    ["latin1-meta.html", "iso-8859-1"],
+    ["latin1-stale-utf8-meta.html", "utf-8"],
+  ])("decodes %s before extracting HTML", async (name, charset) => {
+    const f = join(dir, name);
+    writeFileSync(f, latin1Html(charset));
+    expect(await run(["extract", f, "--json"])).toBe(0);
+    expect(JSON.parse(stdout()).text).toBe("Une réponse déjà validée — coûts");
+  });
+
+  it("decodes UTF-16LE HTML with a BOM", async () => {
+    const f = join(dir, "utf16.html");
+    writeFileSync(f, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("<p>Bonjour à tous</p>", "utf16le")]));
+    expect(await run(["extract", f, "--json"])).toBe(0);
+    expect(JSON.parse(stdout()).text).toBe("Bonjour à tous");
+  });
+
+  it("decodes Latin-1 HTML through the MCP extract tool too", async () => {
+    const f = join(dir, "latin1-meta.html");
+    writeFileSync(f, latin1Html("iso-8859-1"));
+    const r = await webindexAdapter().callTool("webindex_extract", { path: f });
+    expect(r.text).toBe("Une réponse déjà validée — coûts\n\n---\nextractor: native");
+  });
+
   it("reads an HTML file as clean text", async () => {
     const f = join(dir, "page.html");
     writeFileSync(f, "<html><body><article><h1>Rate limiting</h1><p>Token buckets smooth bursts.</p></article></body></html>");

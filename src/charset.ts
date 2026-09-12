@@ -75,6 +75,27 @@ export function decodeBody(bytes: Buffer, contentType = ""): string {
   return bytes.toString("utf8");
 }
 
+/**
+ * Decode bytes read from disk: BOM, then `<meta charset>`, then a UTF-8 validity
+ * rescue. A local file has no transport header to trust, and a stale template
+ * declaring UTF-8 over Latin-1 bytes is common. Without a BOM or a non-UTF-8
+ * declaration, trust UTF-8 only when the bytes are valid; otherwise use
+ * Windows-1252 so accents and typographic punctuation survive.
+ */
+export function decodeLocal(bytes: Buffer): string {
+  const bom = bomEncoding(bytes);
+  if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
+
+  const meta = charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
+  if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
+
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return decodeCp1252(bytes);
+  }
+}
+
 // The 32 code points where Windows-1252 differs from ISO-8859-1 — the C1 range,
 // which cp1252 fills with typographic characters (curly quotes, en/em dashes,
 // the euro sign) and latin1 leaves as control characters.

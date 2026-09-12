@@ -17,6 +17,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { configure } from "./brand.js";
+import { decodeLocal } from "./charset.js";
 import { ENGINE_VERSION } from "./version.js";
 import { docFormatForUrl, extractDocument, enabledDocExtractors } from "./doc.js";
 import { enabledExtractors, extractPdf, ocrTools } from "./pdf.js";
@@ -283,7 +284,7 @@ async function extractLocal(path: string): Promise<{ text: string; extractor: st
     const r = await extractDocument(bytes, fmt);
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason };
   }
-  const raw = bytes.toString("utf8");
+  const raw = decodeLocal(bytes);
   const extension = extname(path).toLowerCase();
   const explicitText = [".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".xml", ".yaml", ".yml"].includes(extension);
   const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));

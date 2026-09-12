@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { charsetFromContentType, charsetFromHtml, decodeBody } from "../src/charset.js";
+import { charsetFromContentType, charsetFromHtml, decodeBody, decodeLocal } from "../src/charset.js";
 import { discoverFeeds, parseFeed, parseSitemap } from "../src/feed.js";
 import { httpGet } from "../src/fetch.js";
 import { fetchRobots, isAllowed, parseRobots, resetRobotsCache } from "../src/robots.js";
@@ -70,6 +70,11 @@ describe("character encoding", () => {
     expect(decodeBody(utf8, "")).toBe("plain ascii and héllo");
   });
 
+  it("trusts a UTF-8 header over a Latin-1 meta declaration", () => {
+    const html = '<meta charset="iso-8859-1"><p>héllo</p>';
+    expect(decodeBody(Buffer.from(html, "utf8"), "text/html; charset=utf-8")).toBe(html);
+  });
+
   it("falls back to UTF-8 on a charset nobody has heard of", () => {
     expect(decodeBody(Buffer.from("hello", "utf8"), "text/html; charset=x-made-up")).toBe("hello");
   });
@@ -86,6 +91,52 @@ describe("character encoding", () => {
   it("flows through httpGet, which is the whole point", async () => {
     installFetchMock(() => ({ bytes: latin1, contentType: "text/html; charset=windows-1252" }));
     expect((await httpGet("https://old.test/page")).body).toContain("réponse");
+  });
+});
+
+describe("decodeLocal", () => {
+  it("leaves valid UTF-8 without a declaration unchanged", () => {
+    expect(decodeLocal(Buffer.from("plain ascii and héllo", "utf8"))).toBe("plain ascii and héllo");
+  });
+
+  it("honours a Latin-1 meta charset", () => {
+    const html = '<meta charset="iso-8859-1"><p>Une réponse déjà validée</p>';
+    expect(decodeLocal(Buffer.from(html, "latin1"))).toBe(html);
+  });
+
+  it("honours an http-equiv charset declaration", () => {
+    const html = '<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1"><p>Une réponse déjà validée</p>';
+    expect(decodeLocal(Buffer.from(html, "latin1"))).toBe(html);
+  });
+
+  it("rescues Latin-1 bytes under a stale UTF-8 meta declaration", () => {
+    const html = '<meta charset="utf-8"><p>Une réponse déjà validée</p>';
+    expect(decodeLocal(Buffer.from(html, "latin1"))).toBe(html);
+  });
+
+  it("rescues Latin-1 bytes without a meta declaration", () => {
+    expect(decodeLocal(Buffer.from("Une réponse déjà validée", "latin1"))).toBe("Une réponse déjà validée");
+  });
+
+  it("decodes UTF-16LE by BOM even when a later meta claims Latin-1", () => {
+    const bom = Buffer.from([0xff, 0xfe]);
+    expect(decodeLocal(Buffer.concat([bom, Buffer.from("héllo", "utf16le")]))).toBe("héllo");
+    const html = 'héllo<meta charset="iso-8859-1">';
+    expect(decodeLocal(Buffer.concat([bom, Buffer.from(html, "utf16le")]))).toBe(html);
+  });
+
+  it("lets a UTF-8 BOM beat a Latin-1 meta declaration", () => {
+    const html = '<meta charset="iso-8859-1"><p>héllo</p>';
+    expect(decodeLocal(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(html, "utf8")]))).toBe(html);
+  });
+
+  it("decodes UTF-16BE by BOM", () => {
+    expect(decodeLocal(Buffer.from([0xfe, 0xff, 0x00, 0x68, 0x00, 0xe9, 0x00, 0x6c, 0x00, 0x6c, 0x00, 0x6f]))).toBe("héllo");
+  });
+
+  it("rescues C1 bytes as Windows-1252 punctuation", () => {
+    const bytes = Buffer.concat([Buffer.from("<p>Une réponse ", "latin1"), Buffer.from([0x97]), Buffer.from(" coûts</p>", "latin1")]);
+    expect(decodeLocal(bytes)).toBe("<p>Une réponse — coûts</p>");
   });
 });
 

@@ -440,6 +440,106 @@ import { existsSync as existsSync7, readFileSync as readFileSync12 } from "fs";
 import { basename as basename4, extname, join as join15, relative as relative2, resolve as resolve4 } from "path";
 import { pathToFileURL } from "url";
 
+// src/charset.ts
+function bomEncoding(bytes) {
+  if (bytes.length >= 3 && bytes[0] === 239 && bytes[1] === 187 && bytes[2] === 191) return { encoding: "utf-8", skip: 3 };
+  if (bytes.length >= 2 && bytes[0] === 255 && bytes[1] === 254) return { encoding: "utf-16le", skip: 2 };
+  if (bytes.length >= 2 && bytes[0] === 254 && bytes[1] === 255) return { encoding: "utf-16be", skip: 2 };
+  return void 0;
+}
+var CHARSET_IN_CONTENT_TYPE = /charset\s*=\s*["']?([a-z0-9_:.+-]+)/i;
+function charsetFromContentType(contentType) {
+  return CHARSET_IN_CONTENT_TYPE.exec(contentType ?? "")?.[1]?.toLowerCase();
+}
+function charsetFromHtml(head) {
+  const window = head.slice(0, 4096);
+  const direct = /<meta[^>]+charset\s*=\s*["']?([a-z0-9_:.+-]+)/i.exec(window);
+  if (direct) return direct[1].toLowerCase();
+  const httpEquiv = /<meta[^>]+http-equiv\s*=\s*["']?content-type["']?[^>]*content\s*=\s*["'][^"']*charset\s*=\s*([a-z0-9_:.+-]+)/i.exec(window);
+  return httpEquiv?.[1]?.toLowerCase();
+}
+function decodeBody(bytes, contentType = "") {
+  const bom = bomEncoding(bytes);
+  if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
+  const declared = charsetFromContentType(contentType);
+  if (declared && declared !== "utf-8" && declared !== "utf8") return decodeWith(bytes, declared);
+  if (declared) return bytes.toString("utf8");
+  const meta = charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
+  if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
+  return bytes.toString("utf8");
+}
+function decodeLocal(bytes) {
+  const bom = bomEncoding(bytes);
+  if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
+  const meta = charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
+  if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return decodeCp1252(bytes);
+  }
+}
+var CP1252_C1 = [
+  8364,
+  129,
+  8218,
+  402,
+  8222,
+  8230,
+  8224,
+  8225,
+  710,
+  8240,
+  352,
+  8249,
+  338,
+  141,
+  381,
+  143,
+  144,
+  8216,
+  8217,
+  8220,
+  8221,
+  8226,
+  8211,
+  8212,
+  732,
+  8482,
+  353,
+  8250,
+  339,
+  157,
+  382,
+  376
+];
+var CP1252_LABELS = /* @__PURE__ */ new Set([
+  "windows-1252",
+  "cp1252",
+  "cp-1252",
+  "x-cp1252",
+  "ansi_x3.4-1968",
+  "iso-8859-1",
+  "iso8859-1",
+  "latin1",
+  "l1",
+  "us-ascii",
+  "ascii"
+]);
+var CP1252_C1_RANGE = /[\x80-\x9f]/g;
+var cp1252C1 = (c) => String.fromCharCode(CP1252_C1[c.charCodeAt(0) - 128]);
+function decodeCp1252(bytes) {
+  return bytes.toString("latin1").replace(CP1252_C1_RANGE, cp1252C1);
+}
+function decodeWith(bytes, encoding) {
+  if (CP1252_LABELS.has(encoding)) return decodeCp1252(bytes);
+  try {
+    return new TextDecoder(encoding, { fatal: false }).decode(bytes);
+  } catch {
+    return bytes.toString("utf8");
+  }
+}
+
 // src/version.ts
 var ENGINE_VERSION = "1.19.7";
 
@@ -825,95 +925,6 @@ async function extractPdf(bytes, opts = {}) {
     lastReason = verdict.reason;
   }
   return { text: "", reason: lastReason ?? "no PDF extractor available" };
-}
-
-// src/charset.ts
-function bomEncoding(bytes) {
-  if (bytes.length >= 3 && bytes[0] === 239 && bytes[1] === 187 && bytes[2] === 191) return { encoding: "utf-8", skip: 3 };
-  if (bytes.length >= 2 && bytes[0] === 255 && bytes[1] === 254) return { encoding: "utf-16le", skip: 2 };
-  if (bytes.length >= 2 && bytes[0] === 254 && bytes[1] === 255) return { encoding: "utf-16be", skip: 2 };
-  return void 0;
-}
-var CHARSET_IN_CONTENT_TYPE = /charset\s*=\s*["']?([a-z0-9_:.+-]+)/i;
-function charsetFromContentType(contentType) {
-  return CHARSET_IN_CONTENT_TYPE.exec(contentType ?? "")?.[1]?.toLowerCase();
-}
-function charsetFromHtml(head) {
-  const window = head.slice(0, 4096);
-  const direct = /<meta[^>]+charset\s*=\s*["']?([a-z0-9_:.+-]+)/i.exec(window);
-  if (direct) return direct[1].toLowerCase();
-  const httpEquiv = /<meta[^>]+http-equiv\s*=\s*["']?content-type["']?[^>]*content\s*=\s*["'][^"']*charset\s*=\s*([a-z0-9_:.+-]+)/i.exec(window);
-  return httpEquiv?.[1]?.toLowerCase();
-}
-function decodeBody(bytes, contentType = "") {
-  const bom = bomEncoding(bytes);
-  if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
-  const declared = charsetFromContentType(contentType);
-  if (declared && declared !== "utf-8" && declared !== "utf8") return decodeWith(bytes, declared);
-  if (declared) return bytes.toString("utf8");
-  const meta = charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
-  if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
-  return bytes.toString("utf8");
-}
-var CP1252_C1 = [
-  8364,
-  129,
-  8218,
-  402,
-  8222,
-  8230,
-  8224,
-  8225,
-  710,
-  8240,
-  352,
-  8249,
-  338,
-  141,
-  381,
-  143,
-  144,
-  8216,
-  8217,
-  8220,
-  8221,
-  8226,
-  8211,
-  8212,
-  732,
-  8482,
-  353,
-  8250,
-  339,
-  157,
-  382,
-  376
-];
-var CP1252_LABELS = /* @__PURE__ */ new Set([
-  "windows-1252",
-  "cp1252",
-  "cp-1252",
-  "x-cp1252",
-  "ansi_x3.4-1968",
-  "iso-8859-1",
-  "iso8859-1",
-  "latin1",
-  "l1",
-  "us-ascii",
-  "ascii"
-]);
-var CP1252_C1_RANGE = /[\x80-\x9f]/g;
-var cp1252C1 = (c) => String.fromCharCode(CP1252_C1[c.charCodeAt(0) - 128]);
-function decodeCp1252(bytes) {
-  return bytes.toString("latin1").replace(CP1252_C1_RANGE, cp1252C1);
-}
-function decodeWith(bytes, encoding) {
-  if (CP1252_LABELS.has(encoding)) return decodeCp1252(bytes);
-  try {
-    return new TextDecoder(encoding, { fatal: false }).decode(bytes);
-  } catch {
-    return bytes.toString("utf8");
-  }
 }
 
 // src/text.ts
@@ -5268,7 +5279,7 @@ async function extractLocal(path) {
     const r = await extractDocument(bytes, fmt);
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason };
   }
-  const raw = bytes.toString("utf8");
+  const raw = decodeLocal(bytes);
   const extension = extname(path).toLowerCase();
   const explicitText = [".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".xml", ".yaml", ".yml"].includes(extension);
   const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
