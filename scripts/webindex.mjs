@@ -468,10 +468,10 @@ function decodeBody(bytes, contentType = "") {
   if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
   return bytes.toString("utf8");
 }
-function decodeLocal(bytes) {
+function decodeLocal(bytes, opts = {}) {
   const bom = bomEncoding(bytes);
   if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
-  const meta = charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
+  const meta = opts.sniffHtmlCharset === false ? void 0 : charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
   if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -1625,9 +1625,8 @@ function cleanInline(s) {
 var BLOCK_TAGS = /* @__PURE__ */ new Set(["p", "div", "section", "article", "li", "tr", "td", "th", "ul", "ol", "pre", "blockquote", "table"]);
 function htmlToText(html, opts = {}) {
   let s = html;
-  const hidden = opts.fullPage ? /<(script|style|noscript|head|svg|template)[\s\S]*?<\/\1>/gi : /<(script|style|noscript|head|nav|footer|svg|template)[\s\S]*?<\/\1>/gi;
+  const hidden = opts.fullPage ? /<!--[\s\S]*?-->|<(script|style|noscript|head|svg|template)\b[\s\S]*?<\/\1\s*>/gi : /<!--[\s\S]*?-->|<(script|style|noscript|head|nav|footer|svg|template)\b[\s\S]*?<\/\1\s*>/gi;
   s = s.replace(hidden, " ");
-  s = s.replace(/<!--[\s\S]*?-->/g, " ");
   s = s.replace(/<[a-zA-Z!/?][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g, (tag) => {
     const name = /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
     if (/^h[1-6]$/.test(name)) {
@@ -5289,9 +5288,9 @@ async function extractLocal(path, fullPage = false) {
     const r = await extractDocument(bytes, fmt);
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
-  const raw = decodeLocal(bytes);
   const extension = extname(path).toLowerCase();
   const explicitText = [".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".xml", ".yaml", ".yml"].includes(extension);
+  const raw = decodeLocal(bytes, { sniffHtmlCharset: !explicitText });
   const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
   const text = looksHtml ? htmlToText(fullPage ? raw : extractMainHtml(raw), { fullPage }) : raw;
   const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text) : { text, dropped: 0 };

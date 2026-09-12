@@ -1363,8 +1363,13 @@ declare function decodeBody(bytes: Buffer, contentType?: string): string;
  * declaring UTF-8 over Latin-1 bytes is common. Without a BOM or a non-UTF-8
  * declaration, trust UTF-8 only when the bytes are valid; otherwise use
  * Windows-1252 so accents and typographic punctuation survive.
+ *
+ * `sniffHtmlCharset: false` skips the meta step — for a file the caller already
+ * knows is plain text, where a `<meta charset>` can only be quoted markup.
  */
-declare function decodeLocal(bytes: Buffer): string;
+declare function decodeLocal(bytes: Buffer, opts?: {
+    sniffHtmlCharset?: boolean;
+}): string;
 
 interface RobotsRule {
     allow: boolean;

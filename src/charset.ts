@@ -81,12 +81,15 @@ export function decodeBody(bytes: Buffer, contentType = ""): string {
  * declaring UTF-8 over Latin-1 bytes is common. Without a BOM or a non-UTF-8
  * declaration, trust UTF-8 only when the bytes are valid; otherwise use
  * Windows-1252 so accents and typographic punctuation survive.
+ *
+ * `sniffHtmlCharset: false` skips the meta step — for a file the caller already
+ * knows is plain text, where a `<meta charset>` can only be quoted markup.
  */
-export function decodeLocal(bytes: Buffer): string {
+export function decodeLocal(bytes: Buffer, opts: { sniffHtmlCharset?: boolean } = {}): string {
   const bom = bomEncoding(bytes);
   if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
 
-  const meta = charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
+  const meta = opts.sniffHtmlCharset === false ? undefined : charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
   if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
 
   try {

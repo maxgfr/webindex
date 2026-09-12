@@ -99,6 +99,14 @@ describe("decodeLocal", () => {
     expect(decodeLocal(Buffer.from("plain ascii and héllo", "utf8"))).toBe("plain ascii and héllo");
   });
 
+  it("ignores a quoted meta charset when told the file is plain text", () => {
+    // A Markdown file showing `<meta charset="iso-8859-1">` as an example is
+    // still UTF-8; sniffing it would turn café into cafÃ©.
+    const md = Buffer.from('Example: `<meta charset="iso-8859-1">`\n\ncafé', "utf8");
+    expect(decodeLocal(md, { sniffHtmlCharset: false })).toBe(md.toString("utf8"));
+    expect(decodeLocal(md)).not.toBe(md.toString("utf8"));
+  });
+
   it("honours a Latin-1 meta charset", () => {
     const html = '<meta charset="iso-8859-1"><p>Une réponse déjà validée</p>';
     expect(decodeLocal(Buffer.from(html, "latin1"))).toBe(html);

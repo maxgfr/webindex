@@ -287,9 +287,11 @@ async function extractLocal(path: string, fullPage = false): Promise<{ text: str
     const r = await extractDocument(bytes, fmt);
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
-  const raw = decodeLocal(bytes);
   const extension = extname(path).toLowerCase();
   const explicitText = [".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".xml", ".yaml", ".yml"].includes(extension);
+  // A Markdown file quoting `<meta charset="iso-8859-1">` as an example is not
+  // declaring its own encoding: only a document that may be HTML gets sniffed.
+  const raw = decodeLocal(bytes, { sniffHtmlCharset: !explicitText });
   const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
   const text = looksHtml ? htmlToText(fullPage ? raw : extractMainHtml(raw), { fullPage }) : raw;
   const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text) : { text, dropped: 0 };

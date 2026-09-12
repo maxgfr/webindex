@@ -601,14 +601,16 @@ const BLOCK_TAGS = new Set(["p", "div", "section", "article", "li", "tr", "td", 
 
 export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): string {
   let s = html;
-  // Raw-text content can contain literal comment openers; remove it first so
-  // the comment pass cannot swallow the prose that follows the block.
+  // Comments and raw-text blocks go in ONE left-to-right pass, so whichever
+  // opens first owns the text up to its own close. Two separate passes get one
+  // of the two orders wrong: comments first lets a script containing "<!--"
+  // swallow the prose after it; blocks first lets "<!-- <script> -->" pair with
+  // a real </script> further down and delete the article in between.
   // Whole-page callers need navigation and footer text even without a main region.
   const hidden = opts.fullPage
-    ? /<(script|style|noscript|head|svg|template)[\s\S]*?<\/\1>/gi
-    : /<(script|style|noscript|head|nav|footer|svg|template)[\s\S]*?<\/\1>/gi;
+    ? /<!--[\s\S]*?-->|<(script|style|noscript|head|svg|template)\b[\s\S]*?<\/\1\s*>/gi
+    : /<!--[\s\S]*?-->|<(script|style|noscript|head|nav|footer|svg|template)\b[\s\S]*?<\/\1\s*>/gi;
   s = s.replace(hidden, " ");
-  s = s.replace(/<!--[\s\S]*?-->/g, " ");
   // A quoted `>` belongs to an attribute, not the end of a tag.
   s = s.replace(/<[a-zA-Z!/?][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g, (tag) => {
     const name = /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";

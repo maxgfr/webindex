@@ -87,6 +87,17 @@ describe("htmlToText", () => {
     expect(text).not.toContain("class=");
   });
 
+  it("keeps prose between a commented-out script opener and a real script", () => {
+    // The mirror image of the case below: a comment that quotes "<script>"
+    // must not pair with the real </script> further down.
+    const text = htmlToText("<!-- <script> --> <p>Important text</p><script>analytics()</script><p>After</p>");
+    expect(text).toBe("Important text\nAfter");
+  });
+
+  it("does not treat <header> as <head>", () => {
+    expect(htmlToText("<header><p>Site</p></header><p>Body</p>")).toBe("Site\nBody");
+  });
+
   it.each(["script", "style"])("keeps prose after a comment opener inside %s", (tag) => {
     const text = htmlToText(`<${tag}>s="<!--";</${tag}><p>Price</p><!-- x -->`);
     expect(text).toContain("Price");

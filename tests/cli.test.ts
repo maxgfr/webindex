@@ -1152,6 +1152,14 @@ describe("audit regressions", () => {
     expect((await webindexAdapter().callTool("webindex_extract", { path: file })).text).toBe(`${text}\n\n---\nextractor: plain`);
   });
 
+  it("does not let a quoted <meta charset> in a Markdown file change its decoding", async () => {
+    const file = join(dir, "charset-example.md");
+    const text = 'Declare it with `<meta charset="iso-8859-1">`.\n\nUn café.\n';
+    writeFileSync(file, text, "utf8");
+    expect(await run(["extract", file, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ text, extractor: "plain" });
+  });
+
   it("extracts HTML fragments when the extension explicitly names HTML", async () => {
     const file = join(dir, "fragment.html");
     writeFileSync(file, "<p>Visible text</p>");
