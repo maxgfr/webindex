@@ -1623,9 +1623,10 @@ function cleanInline(s) {
   return decodeEntities(String(s)).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 var BLOCK_TAGS = /* @__PURE__ */ new Set(["p", "div", "section", "article", "li", "tr", "td", "th", "ul", "ol", "pre", "blockquote", "table"]);
-function htmlToText(html) {
+function htmlToText(html, opts = {}) {
   let s = html;
-  s = s.replace(/<(script|style|noscript|head|nav|footer|svg|template)[\s\S]*?<\/\1>/gi, " ");
+  const hidden = opts.fullPage ? /<(script|style|noscript|head|svg|template)[\s\S]*?<\/\1>/gi : /<(script|style|noscript|head|nav|footer|svg|template)[\s\S]*?<\/\1>/gi;
+  s = s.replace(hidden, " ");
   s = s.replace(/<!--[\s\S]*?-->/g, " ");
   s = s.replace(/<[a-zA-Z!/?][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g, (tag) => {
     const name = /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
@@ -1726,7 +1727,7 @@ async function fetchAndExtract(url, opts = {}) {
   const wantsPdf = looksLikePdfUrl(url);
   const wantsDoc = wantsPdf ? void 0 : docFormatForUrl(url);
   let firecrawlNote;
-  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl) {
+  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl && !opts.fullPage) {
     const fc = await scrapeViaFirecrawl(url, opts);
     if (fc.data && (fc.data.statusCode ?? 200) < 400) {
       return {
@@ -1803,13 +1804,14 @@ async function fetchAndExtract(url, opts = {}) {
   const mime = res.contentType.split(";")[0].trim().toLowerCase();
   const ambiguousType = !mime || mime === "application/octet-stream";
   const isHtml = /^(?:text\/html|application\/xhtml\+xml)$/.test(mime) || ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(res.body);
-  const stripped = isHtml ? htmlToText(extractMainHtml(res.body)) : res.body;
-  const text = isHtml && opts.stripConsent ? stripConsentBoilerplate(stripped).text : stripped;
+  const stripped = isHtml ? htmlToText(opts.fullPage ? res.body : extractMainHtml(res.body), opts) : res.body;
+  const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped) : { text: stripped, dropped: 0 };
   const title = isHtml ? htmlTitle(res.body) : void 0;
   const canonical = isHtml ? htmlCanonicalUrl(res.body) : void 0;
   const metaDescription = isHtml ? metaDescriptionOf(res.body) : void 0;
   return {
-    text,
+    text: consent.text,
+    consentDropped: consent.dropped,
     title,
     canonical,
     metaDescription,
@@ -5091,8 +5093,8 @@ documents \u2014 and serve that to an agent over MCP. Zero dependencies, no API 
 USAGE
   webindex search <query> [--json] [--limit <n>] [--pages <n>] [--lang <tag>]
                           [--engine ddg|ddglite|mojeek|off] [--searxng <base>|off]
-  webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>]
-  webindex extract <file> [--json]
+  webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>] [--full-page]
+  webindex extract <file> [--json] [--full-page]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--json]
   webindex repo <ref> [--json]
   webindex issues <ref> [--terms "<words>"] [--limit <n>] [--json]
@@ -5127,8 +5129,11 @@ COMMANDS
              missing and how to start it \u2014 those are different answers.
   fetch      Fetch a URL and print the extracted text. Routes PDFs and office
              documents to their ladders automatically. Uses Firecrawl when
-             available, with built-in extraction as fallback.
-  extract    Same extraction, on a file already on disk.
+             available, with built-in extraction as fallback. HTML is reduced
+             to main content with consent banners dropped.
+  extract    Same extraction, on a file already on disk. For both, --full-page
+             keeps the whole HTML page through the built-in reader: navigation,
+             footer and consent banners included.
   rank       Order candidate documents against a question \u2014 BM25F, then a
              near-duplicate collapse, then MMR so the top says several
              different things. Reads a JSON array of {url,title,text} from
@@ -5224,7 +5229,7 @@ var VALUE_FLAGS = [
   "terms",
   "max"
 ];
-var BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin"];
+var BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page"];
 var COMMANDS = [
   "search",
   "fetch",
@@ -5262,7 +5267,7 @@ function usage(msg) {
 `);
   process.exit(EXIT_USAGE);
 }
-async function extractLocal(path) {
+async function extractLocal(path, fullPage = false) {
   let bytes;
   try {
     bytes = readFileSync12(path);
@@ -5272,18 +5277,20 @@ async function extractLocal(path) {
   const asUrl = pathToFileURL(path).href;
   if (looksLikePdfUrl(asUrl) || bytes.subarray(0, 5).toString("latin1") === "%PDF-") {
     const r = await extractPdf(bytes);
-    return { text: r.text, extractor: r.via ?? "none", reason: r.reason };
+    return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
   const fmt = docFormatForUrl(asUrl);
   if (fmt) {
     const r = await extractDocument(bytes, fmt);
-    return { text: r.text, extractor: r.via ?? "none", reason: r.reason };
+    return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
   const raw = decodeLocal(bytes);
   const extension = extname(path).toLowerCase();
   const explicitText = [".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".xml", ".yaml", ".yml"].includes(extension);
   const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
-  return { text: looksHtml ? htmlToText(raw) : raw, extractor: looksHtml ? "native" : "plain" };
+  const text = looksHtml ? htmlToText(fullPage ? raw : extractMainHtml(raw), { fullPage }) : raw;
+  const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text) : { text, dropped: 0 };
+  return { text: consent.text, extractor: looksHtml ? "native" : "plain", consentDropped: consent.dropped };
 }
 function rankDocuments(question, docs, limit) {
   const bm = docs.map((d, i) => ({ id: String(i), title: d.title ?? "", headings: d.headings ?? "", body: d.text ?? "" }));
@@ -5356,7 +5363,8 @@ function webindexAdapter() {
           type: "object",
           properties: {
             url: { type: "string", description: "The http(s) URL to fetch." },
-            lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." }
+            lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." },
+            fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." }
           },
           required: ["url"]
         }
@@ -5365,7 +5373,14 @@ function webindexAdapter() {
         name: "webindex_extract",
         title: "Extract text from a local file",
         description: "Read a PDF, office document or HTML file already on disk and return its text, using the same extraction ladders as webindex_fetch.",
-        inputSchema: { type: "object", properties: { path: { type: "string", description: "Absolute path to the file." } }, required: ["path"] }
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Absolute path to the file." },
+            fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." }
+          },
+          required: ["path"]
+        }
       },
       {
         name: "webindex_rank",
@@ -5526,7 +5541,8 @@ function webindexAdapter() {
       if (name === "webindex_fetch") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
-        const r = await fetchAndExtract(url, { acceptLanguage: args.lang ? String(args.lang) : void 0 });
+        const fullPage = args.fullPage === true;
+        const r = await fetchAndExtract(url, { acceptLanguage: args.lang ? String(args.lang) : void 0, fullPage, stripConsent: !fullPage });
         if (!r.text) throw new ToolError(`Nothing readable at ${url}${r.note ? ` \u2014 ${r.note}` : ""}.`);
         return { text: `${r.text}
 
@@ -5554,7 +5570,7 @@ extractor: ${r.extractor ?? "native"}` };
 ${r.notes.join("\n")}` : body };
       }
       if (name === "webindex_extract") {
-        const r = await extractLocal(String(args.path ?? ""));
+        const r = await extractLocal(String(args.path ?? ""), args.fullPage === true);
         if (!r.text) throw new ToolError(`Nothing readable in that file${r.reason ? ` \u2014 ${r.reason}` : ""}.`);
         return { text: `${r.text}
 
@@ -5726,10 +5742,30 @@ async function dispatch(argv) {
     const url = args.positional[0];
     if (!url) usage("usage: webindex fetch <url>");
     if (!/^https?:\/\//i.test(url)) fail("fetch needs an http(s) URL");
-    const r = await fetchAndExtract(url, { acceptLanguage: argValue(args, "lang"), firecrawl: argValue(args, "firecrawl") });
+    const fullPage = argBool(args, "full-page");
+    const r = await fetchAndExtract(url, {
+      acceptLanguage: argValue(args, "lang"),
+      firecrawl: argValue(args, "firecrawl"),
+      fullPage,
+      stripConsent: !fullPage
+    });
     if (argBool(args, "json")) {
       process.stdout.write(
-        JSON.stringify({ url, title: r.title, extractor: r.extractor, status: r.status, chars: r.text.length, note: r.note, text: r.text }, null, 2) + "\n"
+        JSON.stringify(
+          {
+            url,
+            title: r.title,
+            extractor: r.extractor,
+            status: r.status,
+            chars: r.text.length,
+            note: r.note,
+            text: r.text,
+            fullPage,
+            consentDropped: r.consentDropped ?? 0
+          },
+          null,
+          2
+        ) + "\n"
       );
     } else if (r.text) {
       process.stdout.write(r.text + "\n");
@@ -5740,10 +5776,15 @@ async function dispatch(argv) {
   if (cmd === "extract") {
     const path = args.positional[0];
     if (!path) usage("usage: webindex extract <file>");
-    const r = await extractLocal(path);
+    const fullPage = argBool(args, "full-page");
+    const r = await extractLocal(path, fullPage);
     if (argBool(args, "json")) {
       process.stdout.write(
-        JSON.stringify({ file: basename4(path), extractor: r.extractor, chars: r.text.length, reason: r.reason, text: r.text }, null, 2) + "\n"
+        JSON.stringify(
+          { file: basename4(path), extractor: r.extractor, chars: r.text.length, reason: r.reason, text: r.text, fullPage, consentDropped: r.consentDropped },
+          null,
+          2
+        ) + "\n"
       );
     } else if (r.text) {
       process.stdout.write(r.text + "\n");

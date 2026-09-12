@@ -43,8 +43,8 @@ rather than an error.
 |---|---|
 | `webindex search <query>` | Candidate URLs, through a cascade: a local SearXNG, then the keyless engines (DuckDuckGo, DDG Lite, Mojeek — no key, no container), then Firecrawl. Prints title, URL and snippet; `--json` returns them structured with the notes. `--limit <n>`, `--pages <n>` walk further, `--lang fr-FR` sets the result language, `--engine ddg\|ddglite\|mojeek\|off` pins or disables the keyless rung. Exits non-zero when it found nothing, and says on stderr which backend was missing. |
 | `webindex rank --query <q>` | Order candidate documents against a question — BM25F with title and heading weighting, a SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. Reads a JSON array of `{url,title,text}` from `--docs <file>` or stdin. Deterministic: no model, no network. |
-| `webindex fetch <url>` | Fetch a URL and print its readable text. Routes PDFs and office documents to their ladders; HTML uses Firecrawl when available, then the built-in extractor. `--json` adds the title, status, extractor and any note. `--lang fr-FR` sets Accept-Language, `--firecrawl <base>\|off` overrides the extractor. |
-| `webindex extract <file>` | The same extraction on a file already on disk — PDF, office document, HTML or plain text. `--json` as above. |
+| `webindex fetch <url>` | Fetch a URL and print its readable text. Routes PDFs and office documents to their ladders; HTML uses Firecrawl when available, then the built-in extractor, reducing the page to main content with consent banners dropped. `--full-page` keeps all page text through the built-in reader, including navigation and consent banners. `--json` adds the title, status, extractor, any note, `fullPage` and `consentDropped` (lines removed by the consent filter; 0 when skipped). `--lang fr-FR` sets Accept-Language, `--firecrawl <base>\|off` overrides the extractor. |
+| `webindex extract <file>` | The same extraction on a file already on disk — PDF, office document, HTML or plain text. HTML is reduced to main content with consent banners dropped; `--full-page` keeps all page text, including navigation and consent banners. `--json` includes `fullPage` and `consentDropped` as above (0 for non-HTML). |
 | `webindex mcp` | Serve the tools below to an agent. `--transport stdio` (default) or `http` with `--port`, `--bind`, `--allow-remote`. |
 | `webindex searxng up\|down\|status` | Drive the keyless SearXNG container. |
 | `webindex semantic up\|down\|status` | Drive Qdrant and Ollama, and pull the embedding model once they answer. |
@@ -110,8 +110,8 @@ claude mcp add --transport http webindex http://127.0.0.1:7340/mcp
 | Tool | Arguments | Returns |
 |---|---|---|
 | `webindex_search` | `query` (required), `limit`, `lang`, `engine` | Candidate URLs with titles and snippets, through the same cascade as the CLI. Not page text — follow up with `webindex_fetch` on the ones worth reading. When nothing answers it fails loudly with which piece was missing, rather than returning an empty list that reads like "nothing exists". |
-| `webindex_fetch` | `url` (required), `lang` | The page's readable text plus the rung that produced it. Handles HTML, PDFs and office documents, using Firecrawl when available and local extraction as fallback. Never raw bytes. |
-| `webindex_extract` | `path` (required) | The same for a file already on disk. |
+| `webindex_fetch` | `url` (required), `lang`, `fullPage` | The page's readable text plus the rung that produced it. Handles HTML, PDFs and office documents, using Firecrawl when available and local extraction as fallback. `fullPage: true` keeps all HTML page text through the built-in reader, including navigation and consent banners. Never raw bytes. |
+| `webindex_extract` | `path` (required), `fullPage` | The same for a file already on disk; `fullPage: true` keeps navigation and consent banners too. |
 | `webindex_rank` | `question` (required), `documents` (required), `limit` | The reading order for a pool of candidates: BM25F, near-duplicate collapse, then MMR. Returns each entry's score and matched query terms, plus how many duplicates were collapsed. The brick an agent otherwise re-implements — deterministic, no model, no network. |
 
 The server implements `initialize`, `ping`, `tools/list`, `tools/call`,

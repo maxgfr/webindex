@@ -1414,9 +1414,10 @@ function cleanInline(s) {
   return decodeEntities(String(s)).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 var BLOCK_TAGS = /* @__PURE__ */ new Set(["p", "div", "section", "article", "li", "tr", "td", "th", "ul", "ol", "pre", "blockquote", "table"]);
-function htmlToText(html) {
+function htmlToText(html, opts = {}) {
   let s = html;
-  s = s.replace(/<(script|style|noscript|head|nav|footer|svg|template)[\s\S]*?<\/\1>/gi, " ");
+  const hidden = opts.fullPage ? /<(script|style|noscript|head|svg|template)[\s\S]*?<\/\1>/gi : /<(script|style|noscript|head|nav|footer|svg|template)[\s\S]*?<\/\1>/gi;
+  s = s.replace(hidden, " ");
   s = s.replace(/<!--[\s\S]*?-->/g, " ");
   s = s.replace(/<[a-zA-Z!/?][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g, (tag) => {
     const name = /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
@@ -1517,7 +1518,7 @@ async function fetchAndExtract(url, opts = {}) {
   const wantsPdf = looksLikePdfUrl(url);
   const wantsDoc = wantsPdf ? void 0 : docFormatForUrl(url);
   let firecrawlNote;
-  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl) {
+  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl && !opts.fullPage) {
     const fc = await scrapeViaFirecrawl(url, opts);
     if (fc.data && (fc.data.statusCode ?? 200) < 400) {
       return {
@@ -1594,13 +1595,14 @@ async function fetchAndExtract(url, opts = {}) {
   const mime = res.contentType.split(";")[0].trim().toLowerCase();
   const ambiguousType = !mime || mime === "application/octet-stream";
   const isHtml = /^(?:text\/html|application\/xhtml\+xml)$/.test(mime) || ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(res.body);
-  const stripped = isHtml ? htmlToText(extractMainHtml(res.body)) : res.body;
-  const text = isHtml && opts.stripConsent ? stripConsentBoilerplate(stripped).text : stripped;
+  const stripped = isHtml ? htmlToText(opts.fullPage ? res.body : extractMainHtml(res.body), opts) : res.body;
+  const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped) : { text: stripped, dropped: 0 };
   const title = isHtml ? htmlTitle(res.body) : void 0;
   const canonical = isHtml ? htmlCanonicalUrl(res.body) : void 0;
   const metaDescription = isHtml ? metaDescriptionOf(res.body) : void 0;
   return {
-    text,
+    text: consent.text,
+    consentDropped: consent.dropped,
     title,
     canonical,
     metaDescription,

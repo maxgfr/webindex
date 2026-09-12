@@ -150,6 +150,42 @@ describe("capExtract", () => {
 });
 
 describe("fetchAndExtract", () => {
+  it("uses the whole source page with fullPage even when Firecrawl offers cleaned markdown", async () => {
+    const body = "<nav>Home About</nav><article><p>Source article text</p><p>Accept all cookies</p></article>";
+    installFetchMock(
+      routes([
+        ["/scrape", { body: JSON.stringify({ success: true, data: { markdown: "Source article text" } }), contentType: "application/json" }],
+        ["fc-full.test", { body: "ok" }],
+        ["x.test/source", { body, contentType: "text/html" }],
+      ]),
+    );
+    const normal = await fetchAndExtract("https://x.test/source", { firecrawl: "http://fc-full.test" });
+    expect(normal).toMatchObject({ text: "Source article text", extractor: "firecrawl" });
+    const full = await fetchAndExtract("https://x.test/source", { firecrawl: "http://fc-full.test", fullPage: true });
+    expect(full.text).toContain("Home About");
+    expect(full.text).toContain("Accept all cookies");
+    expect(full.consentDropped).toBe(0);
+  });
+
+  it("keeps navigation with fullPage while preserving opt-in library consent filtering", async () => {
+    const body = `<nav>Home About</nav><article><h1>Rate limiting</h1><p>${"Token buckets smooth bursts. ".repeat(20)}</p><p>Accept all cookies</p></article><aside>Related reading</aside>`;
+    installFetchMock(routes([["x.test/full-page", { body, contentType: "text/html" }]]));
+    const normal = await fetchAndExtract("https://x.test/full-page");
+    expect(normal.text).not.toMatch(/Home|About|Related reading/);
+    expect(normal.text).toContain("Accept all cookies");
+    const full = await fetchAndExtract("https://x.test/full-page", { fullPage: true });
+    expect(full.text).toContain("Home About");
+    expect(full.text).toContain("Related reading");
+    expect(full.text).toContain("Accept all cookies");
+    expect(full.consentDropped).toBe(0);
+    const clean = await fetchAndExtract("https://x.test/full-page", { stripConsent: true });
+    expect(clean.text).not.toContain("Accept all cookies");
+    expect(clean.consentDropped).toBe(1);
+    const fullDespiteConsent = await fetchAndExtract("https://x.test/full-page", { fullPage: true, stripConsent: true });
+    expect(fullDespiteConsent.text).toBe(full.text);
+    expect(fullDespiteConsent.consentDropped).toBe(0);
+  });
+
   it("returns cleaned text + title for an html page", async () => {
     installFetchMock(routes([["example.com", { body: "<title>Doc</title><h1>Hi</h1><p>body text</p>" }]]));
     const r = await fetchAndExtract("https://example.com/x");

@@ -440,7 +440,9 @@ declare function httpJson(method: string, url: string, body?: unknown, opts?: {
  */
 declare function decodeEntities(s: string): string;
 declare function cleanInline(s: string): string;
-declare function htmlToText(html: string): string;
+declare function htmlToText(html: string, opts?: {
+    fullPage?: boolean;
+}): string;
 declare function htmlTitle(html: string): string | undefined;
 declare function htmlCanonicalUrl(html: string): string | undefined;
 declare function extractMainHtml(html: string): string;
@@ -459,6 +461,7 @@ declare function looksLikePdfUrl(url: string): boolean;
 type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext" | "anydoc" | "ocr";
 interface ExtractResult {
     text: string;
+    consentDropped?: number;
     title?: string;
     note?: string;
     finalUrl: string;
@@ -508,6 +511,8 @@ declare function fetchAndExtract(url: string, opts?: {
      * documenting HTTP cookies it would eat the article.
      */
     stripConsent?: boolean;
+    /** Keep all page text through the built-in reader, bypassing isolation and consent filtering. */
+    fullPage?: boolean;
     /**
      * Carry the raw HTML up in `html`. For a caller that follows links out of
      * the page it just read; see ExtractResult.html for why it is opt-in.

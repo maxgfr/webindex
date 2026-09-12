@@ -599,11 +599,15 @@ export function cleanInline(s: string): string {
 // Tags whose opening or closing marks a line break in the extracted text.
 const BLOCK_TAGS = new Set(["p", "div", "section", "article", "li", "tr", "td", "th", "ul", "ol", "pre", "blockquote", "table"]);
 
-export function htmlToText(html: string): string {
+export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): string {
   let s = html;
   // Raw-text content can contain literal comment openers; remove it first so
   // the comment pass cannot swallow the prose that follows the block.
-  s = s.replace(/<(script|style|noscript|head|nav|footer|svg|template)[\s\S]*?<\/\1>/gi, " ");
+  // Whole-page callers need navigation and footer text even without a main region.
+  const hidden = opts.fullPage
+    ? /<(script|style|noscript|head|svg|template)[\s\S]*?<\/\1>/gi
+    : /<(script|style|noscript|head|nav|footer|svg|template)[\s\S]*?<\/\1>/gi;
+  s = s.replace(hidden, " ");
   s = s.replace(/<!--[\s\S]*?-->/g, " ");
   // A quoted `>` belongs to an attribute, not the end of a tag.
   s = s.replace(/<[a-zA-Z!/?][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g, (tag) => {
@@ -780,6 +784,7 @@ export type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext"
 
 export interface ExtractResult {
   text: string;
+  consentDropped?: number;
   title?: string;
   note?: string;
   finalUrl: string;
@@ -846,6 +851,8 @@ export async function fetchAndExtract(
      * documenting HTTP cookies it would eat the article.
      */
     stripConsent?: boolean;
+    /** Keep all page text through the built-in reader, bypassing isolation and consent filtering. */
+    fullPage?: boolean;
     /**
      * Carry the raw HTML up in `html`. For a caller that follows links out of
      * the page it just read; see ExtractResult.html for why it is opt-in.
@@ -860,7 +867,8 @@ export async function fetchAndExtract(
   // happens to be up. Firecrawl is still reachable — as rung 2, via callback.
   const wantsDoc = wantsPdf ? undefined : docFormatForUrl(url);
   let firecrawlNote: string | undefined;
-  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl) {
+  // Firecrawl's cleaned markdown cannot recover navigation or consent text.
+  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl && !opts.fullPage) {
     const fc = await scrapeViaFirecrawl(url, opts);
     // Firecrawl reports success even for an error page, handing back the
     // origin's 404/403 body as markdown. Accept only a 2xx/3xx: anything else
@@ -972,13 +980,14 @@ export async function fetchAndExtract(
   const isHtml =
     /^(?:text\/html|application\/xhtml\+xml)$/.test(mime) ||
     (ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(res.body));
-  const stripped = isHtml ? htmlToText(extractMainHtml(res.body)) : res.body;
-  const text = isHtml && opts.stripConsent ? stripConsentBoilerplate(stripped).text : stripped;
+  const stripped = isHtml ? htmlToText(opts.fullPage ? res.body : extractMainHtml(res.body), opts) : res.body;
+  const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped) : { text: stripped, dropped: 0 };
   const title = isHtml ? htmlTitle(res.body) : undefined;
   const canonical = isHtml ? htmlCanonicalUrl(res.body) : undefined;
   const metaDescription = isHtml ? metaDescriptionOf(res.body) : undefined;
   return {
-    text,
+    text: consent.text,
+    consentDropped: consent.dropped,
     title,
     canonical,
     metaDescription,
