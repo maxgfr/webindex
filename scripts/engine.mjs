@@ -1658,7 +1658,7 @@ var CONSENT_PATTERNS = [
   /legitimate interest/i
 ];
 var CONSENT_ACTIONS = [
-  /\b(?:accept|reject|decline|agree|allow|manage|preferences|settings|choices|consent|gdpr|ccpa)\b/i,
+  /\b(?:accept|reject|decline|agree|allow|manage|preferences|settings|choices)\b/i,
   /\b(?:opt[ -]out|we use cookies|this (?:site|website) uses cookies|by continuing)\b/i,
   /\b(?:learn more|privacy policy|cookie policy)\b/i
 ];

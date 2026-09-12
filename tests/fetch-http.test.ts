@@ -442,6 +442,13 @@ describe("stripConsentBoilerplate", () => {
     expect(stripConsentBoilerplate(text)).toEqual({ text, dropped: 0 });
   });
 
+  it("keeps a short line that names a regulation without asking for anything", () => {
+    // Seen on MDN's cookies guide: a list item naming the GDPR is content, not
+    // a banner. A topic word is the hit; it must not also count as the action.
+    const text = "The General Data Privacy Regulation (GDPR) in the European Union\nCCPA compliance";
+    expect(stripConsentBoilerplate(text)).toEqual({ text, dropped: 0 });
+  });
+
   it("drops short consent actions and notices among real prose and counts them", () => {
     const text = [
       "A token bucket refills at a fixed rate.",

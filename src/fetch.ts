@@ -1072,9 +1072,11 @@ const CONSENT_PATTERNS = [
 ];
 
 // A short line needs a consent action or notice too — merely mentioning
-// cookies must not erase an article's prose, headings or list items.
+// cookies must not erase an article's prose, headings or list items. Topic
+// words (cookie, consent, GDPR, CCPA) are deliberately absent: they already
+// count as the hit, and an article ABOUT the GDPR names it in short lines.
 const CONSENT_ACTIONS = [
-  /\b(?:accept|reject|decline|agree|allow|manage|preferences|settings|choices|consent|gdpr|ccpa)\b/i,
+  /\b(?:accept|reject|decline|agree|allow|manage|preferences|settings|choices)\b/i,
   /\b(?:opt[ -]out|we use cookies|this (?:site|website) uses cookies|by continuing)\b/i,
   /\b(?:learn more|privacy policy|cookie policy)\b/i,
 ];
