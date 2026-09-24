@@ -159,6 +159,26 @@ describe("the per-process OCR budget", () => {
     expect(ocrBudgetLeft()).toBe(2);
   });
 
+  // The budget was checked before the (awaited) tool probe and spent only after
+  // the conversion, so every concurrent scan passed the check: pool.ts and a
+  // crawl run documents concurrently, which is exactly when the cap matters.
+  it("holds under concurrency", async () => {
+    vi.stubEnv(envName("OCR_MAX"), "2");
+    let conversions = 0;
+    runMock.mockImplementation(async (_cmd, args) => {
+      const i = args.indexOf("-o");
+      if (i >= 0) {
+        conversions++;
+        await new Promise((r) => setTimeout(r, 50));
+        writeFileSync(args[i + 1]!.replace(/\.pdf$/, ".md"), "OCR'd prose");
+      }
+      return { ok: true, stdout: "" };
+    });
+    const results = await Promise.all(Array.from({ length: 6 }, () => ocrPdf(PDF)));
+    expect(conversions).toBe(2);
+    expect(results.filter(Boolean)).toHaveLength(2);
+  });
+
   it("can be switched off entirely with 0", async () => {
     vi.stubEnv(envName("OCR_MAX"), "0");
     toolsPresent();
