@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { killTree } from "../process-tree.js";
 
 // Run an external extractor with the PDF on stdin and its text on stdout.
 //
@@ -73,7 +74,9 @@ export function runWithInput(cmd: string, args: string[], input: Buffer, timeout
     };
 
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
+      // The whole tree: npx runs the real tool as a grandchild, copyable-pdf
+      // spawns pdftoppm and tesseract (see ../process-tree.ts).
+      killTree(child);
       done({ ok: false, stdout: "", error: `timed out after ${Math.round(timeoutMs / 1000)}s` });
     }, timeoutMs);
 

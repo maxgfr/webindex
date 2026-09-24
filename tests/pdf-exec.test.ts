@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { runWithInput, binaryName } from "../src/pdf/exec.js";
 
@@ -40,6 +43,40 @@ describe("runWithInput", () => {
     const big = Buffer.alloc(2 * 1024 * 1024, 0x41);
     const r = await runWithInput(NODE, script("process.stdout.write('done'); process.stdin.destroy();"), big, 30_000);
     expect(r.stdout).toContain("done");
+  });
+
+  // npx runs the real tool as a grandchild (npx → sh → node) and copyable-pdf
+  // spawns pdftoppm and tesseract. SIGKILL on the direct child left those
+  // running, holding the pipes, and the process could not exit until they did.
+  it("kills the tool's children with it at the timeout", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "webindex-tree-"));
+    const pidFile = join(dir, "grandchild.pid");
+    const grandchild = `
+      const { spawn } = require('node:child_process');
+      const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'inherit' });
+      require('node:fs').writeFileSync(process.argv[1], String(g.pid));
+      setTimeout(() => {}, 30000);
+    `;
+    try {
+      const started = performance.now();
+      const r = await runWithInput(NODE, ["-e", grandchild, pidFile], Buffer.alloc(0), 1500);
+      expect(r.error).toMatch(/timed out after/);
+      expect(performance.now() - started).toBeLessThan(4000);
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      let alive = true;
+      for (let i = 0; i < 40 && alive; i++) {
+        try {
+          process.kill(pid, 0);
+          alive = !(process.platform === "linux" && / Z /.test(readFileSync(`/proc/${pid}/stat`, "latin1")));
+        } catch {
+          alive = false;
+        }
+        if (alive) await new Promise((res) => setTimeout(res, 50));
+      }
+      expect(alive).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("drains stderr so a chatty tool cannot deadlock on a full pipe", async () => {
