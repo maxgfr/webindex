@@ -45,12 +45,15 @@ function prescanLabel(label: string): string {
   return lower === "x-user-defined" ? "windows-1252" : lower;
 }
 
-// One `<meta …>` at a time. `(?:>|$)` lets an unclosed tag at the end of the
-// window match (and be consumed) rather than be rescanned from every `<meta`.
-// The value is optional in the attribute pattern for the same reason: a name
-// with no `=` is consumed whole, not retried from each of its characters.
-const META_TAG = /<meta\b[^>]*(?:>|$)/gi;
-const TAG_ATTRIBUTE = /([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+// One `<meta …>` at a time, quotes respected: a raw `<` or `>` is valid inside
+// a quoted value, so `content="Learn <meta charset=…>"` must not end the tag and
+// leak its prose out as a declaration. Every way through the pattern succeeds —
+// an unclosed quote or tag runs to the end of the window (`$`) — so nothing is
+// ever rescanned from a later `<meta`, and it stays linear. The value is optional
+// in the attribute pattern for the same reason: a name with no `=` is consumed
+// whole, not retried from each of its characters.
+const META_TAG = /<meta\b(?:[^>"']|"[^"]*(?:"|$)|'[^']*(?:'|$))*(?:>|$)/gi;
+const TAG_ATTRIBUTE = /([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)(?:"|$)|'([^']*)(?:'|$)|([^\s"'=<>`]+)))?/g;
 
 function metaAttributes(tag: string): Map<string, string> {
   const attrs = new Map<string, string>();

@@ -101,6 +101,8 @@ describe("character encoding", () => {
     expect(charsetFromHtml(head)).toBe("utf-8");
     expect(charsetFromHtml('<meta content="charset=iso-8859-2" name="keywords"><meta charset=euc-jp>')).toBe("euc-jp");
     expect(charsetFromHtml('<meta content="text/html; charset=iso-8859-2" http-equiv="Content-Type">')).toBe("iso-8859-2");
+    // A raw `<` or `>` is valid inside a quoted value; the tag does not end there.
+    expect(charsetFromHtml('<meta name="description" content="Learn <meta charset=iso-8859-1> usage"><meta charset="utf-8">')).toBe("utf-8");
     const page = Buffer.from(`<html><head>${head}</head><body>café</body></html>`, "utf8");
     expect(decodeBody(page, "text/html")).toBe(page.toString("utf8"));
   });
