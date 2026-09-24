@@ -161,7 +161,7 @@ function readAnyNamespace(
 }
 
 /** The requested read of the page if the cache has one, else any read of it — better than a hole. */
-function readAnyRead(url: string, acceptLanguage: string, variant: CacheVariant): CacheEntry | undefined {
+function readAnyCopy(url: string, acceptLanguage: string, variant: CacheVariant): CacheEntry | undefined {
   return readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, [variant]) ?? readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, VARIANTS);
 }
 
@@ -362,7 +362,7 @@ export async function cachedFetchAndExtract(
   };
 
   if (offline) {
-    const stored = readAnyRead(url, lang, variant);
+    const stored = readAnyCopy(url, lang, variant);
     if (stored) return served(stored);
     return { text: "", finalUrl: url, status: 0, note: `Offline: ${url} is not in the cache (drop --offline, or warm it with a normal run).` };
   }
@@ -422,7 +422,7 @@ export async function cachedFetchAndExtract(
   // is, which it cannot do with an empty string. Looked up across namespaces
   // because the copy we hold may have been written by the other extractor, and
   // it is still this page's text.
-  const stale = hit ?? readAnyRead(url, lang, variant);
+  const stale = hit ?? readAnyCopy(url, lang, variant);
   if (stale) return served(stale, `${url} returned ${res.status || "no response"}; served the cached copy from ${new Date(stale.cachedAt).toISOString()}.`);
   return res;
 }
