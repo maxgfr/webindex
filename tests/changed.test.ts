@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { contentHash, fingerprint, hasChanged } from "../src/changed.js";
 import { extractTables, tableToMarkdown } from "../src/tables.js";
@@ -335,6 +337,25 @@ describe("extractTables", () => {
   it("ignores tables inside comments and markup inside scripts", () => {
     expect(extractTables("<!-- <table><tr><td>old</td></tr></table> -->")).toEqual([]);
     expect(extractTables('<table><tr><td>a<script>var t = "<td>b</td>";</script></td></tr></table>')[0]?.rows).toEqual([["a"]]);
+  });
+
+  it("reads a realistic wiki page: layout table, grouped <thead>, spans, omitted end tags, lists and entities in cells", () => {
+    const tables = extractTables(readFileSync(join(__dirname, "fixtures", "html", "tables.html"), "utf8"));
+    // The layout table around the article and the data table inside it; not
+    // the commented-out table, not the one in a script template.
+    expect(tables).toHaveLength(2);
+    expect(tables[0]?.rows[0]?.[0]).toBe("Main page Random page");
+    expect(tables[0]?.rows[0]?.[1]).toContain("Support by engine [1] API Desktop Notes Chrome Firefox widget.open() 89");
+    expect(tables[1]).toEqual({
+      caption: "Support by engine [1]",
+      headers: ["API", "Desktop Chrome", "Desktop Firefox", "Notes"],
+      rows: [
+        ["widget.open()", "89", "—", "Behind a flag in Firefox 90–92."],
+        ["widget.close()", "Both since 2021", "Both since 2021", "Returns a promise Idempotent"],
+        ["widget.move(x, y)", "101", "98", "Clamped to the viewport"],
+        ["widget.move(x, y)", "102[2]", "99", "Accepts <length> values"],
+      ],
+    });
   });
 
   it("reads colspan, not data-colspan", () => {
