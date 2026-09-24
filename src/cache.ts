@@ -38,7 +38,18 @@ export function cacheDir(): string {
   // three skills sharing one engine must not share one cache, or a `--lang de`
   // run in one would be served the body another cached under a different
   // extraction stack.
-  return env("CACHE_DIR") ?? brand().cacheDir ?? join(tmpdir(), brand().name, "cache");
+  //
+  // The default is per USER too, where the platform has uids. The temp dir is
+  // shared by everyone on the machine, so one fixed name there was a directory
+  // any other user could create first — as a symlink into your project for
+  // `cache clean` to sweep, or pre-filled with entries for you to be served.
+  // An explicit directory is taken as given: a shared volume is a choice.
+  return env("CACHE_DIR") ?? brand().cacheDir ?? join(tmpdir(), userScoped(brand().name), "cache");
+}
+
+function userScoped(name: string): string {
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  return uid === undefined ? name : `${name}-${uid}`;
 }
 
 // domain prefix (debuggability) + 64-bit hash of the canonical URL AND the
@@ -121,8 +132,15 @@ function ttlMs(): number {
   // week, a search tool wants a day. `<PREFIX>_CACHE_TTL_HOURS` is accepted
   // alongside `_MS` — hours is the unit consumers' users already have exported,
   // and breaking those variables to adopt this module would be a poor trade.
+  //
+  // Hours are read as a float, not through envInt: truncating first turned
+  // `0.5` into a TTL of 0 — always stale — and `1.5` into one hour.
   const fallback = brand().cacheTtlMs ?? DEFAULT_TTL_MS;
-  if (env("CACHE_TTL_HOURS") !== undefined) return envInt("CACHE_TTL_HOURS", fallback / 3600_000, 0) * 3600_000;
+  const hours = env("CACHE_TTL_HOURS");
+  if (hours !== undefined) {
+    const h = Number(hours);
+    return Number.isFinite(h) ? Math.round(Math.max(0, h) * 3600_000) : fallback;
+  }
   return envInt("CACHE_TTL_MS", fallback);
 }
 
@@ -356,6 +374,51 @@ export interface CacheStats {
   newest?: string; // ISO
 }
 
+// The only files stats and eviction ever look at: the names this module writes
+// — `<domain>-<hex>.json`, its `.body`, and the `<either>.<pid>.<n>.tmp` a
+// writer killed mid-write leaves behind. The directory is whatever
+// `<PREFIX>_CACHE_DIR` says, and one typo there must not make a cleanup
+// reach for somebody's package.json. Parsed by hand rather than by one
+// pattern, which keeps the check linear on any name.
+type OwnFile = { kind: "json" | "body" | "tmp"; stem: string };
+const WRITER_TMP = /\.\d+\.\d+\.tmp$/;
+
+function ownFile(name: string): OwnFile | undefined {
+  const tmp = WRITER_TMP.exec(name);
+  const base = tmp ? name.slice(0, tmp.index) : name;
+  const ext = base.endsWith(".json") ? "json" : base.endsWith(".body") ? "body" : undefined;
+  if (!ext) return undefined;
+  const stem = base.slice(0, -5);
+  const dash = stem.lastIndexOf("-");
+  if (dash < 1 || !/^[0-9a-f]{1,16}$/.test(stem.slice(dash + 1)) || !/^[\w.-]+$/.test(stem.slice(0, dash))) return undefined;
+  return { kind: tmp ? "tmp" : ext, stem };
+}
+
+// …and a `.json` of that shape counts as an entry only when it parses into one.
+// Anything else — unreadable, or valid JSON of some other shape — is left alone:
+// a name that merely looks like ours is not proof that we wrote it.
+function readEntryMeta(abs: string): CacheEntry | undefined {
+  try {
+    const entry = JSON.parse(readFileSync(abs, "utf8")) as CacheEntry | null;
+    return entry && typeof entry.cachedAt === "number" && typeof entry.finalUrl === "string" ? entry : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// A writer lands the body, then the metadata, each by rename. Between the two,
+// the body is an "orphan" and its temp file is live, so a stale-only clean waits
+// this long before calling either abandoned.
+const ORPHAN_GRACE_MS = 10 * 60 * 1000;
+
+function sizeOf(abs: string): number {
+  try {
+    return statSync(abs).size;
+  } catch {
+    return 0; // vanished between readdir and stat
+  }
+}
+
 /**
  * What is on disk right now: how many entries, how much space, how many are
  * still fresh.
@@ -371,27 +434,25 @@ export function cacheStats(now = Date.now()): CacheStats {
   let oldest = Number.POSITIVE_INFINITY;
   let newest = 0;
   for (const name of readdirSync(dir)) {
+    const own = ownFile(name);
+    if (!own) continue;
     const abs = join(dir, name);
-    // Size is summed over EVERY file, metadata and body alike. Counting only the
-    // `.json` half would report a few kilobytes for a directory holding hundreds
-    // of megabytes of page text — a disk-usage number that is not disk usage.
-    try {
-      out.bytes += statSync(abs).size;
-    } catch {
-      /* vanished between readdir and stat */
+    // Size is summed over metadata, bodies and leftover temp files alike.
+    // Counting only the `.json` half would report a few kilobytes for a
+    // directory holding hundreds of megabytes of page text — a disk-usage
+    // number that is not disk usage.
+    if (own.kind !== "json") {
+      out.bytes += sizeOf(abs);
+      continue;
     }
-    if (!name.endsWith(".json")) continue;
-    try {
-      const entry = JSON.parse(readFileSync(abs, "utf8")) as CacheEntry;
-      if (typeof entry.cachedAt !== "number") continue;
-      out.entries++;
-      if (isCacheFresh(entry, now)) out.fresh++;
-      else out.stale++;
-      if (entry.cachedAt < oldest) oldest = entry.cachedAt;
-      if (entry.cachedAt > newest) newest = entry.cachedAt;
-    } catch {
-      /* not one of ours, or half-written — never a reason to fail */
-    }
+    const entry = readEntryMeta(abs);
+    if (!entry) continue;
+    out.bytes += sizeOf(abs);
+    out.entries++;
+    if (isCacheFresh(entry, now)) out.fresh++;
+    else out.stale++;
+    if (entry.cachedAt < oldest) oldest = entry.cachedAt;
+    if (entry.cachedAt > newest) newest = entry.cachedAt;
   }
   if (out.entries) {
     out.oldest = new Date(oldest).toISOString();
@@ -405,33 +466,44 @@ export function cacheStats(now = Date.now()): CacheStats {
  *
  * Nothing else ever removes anything: before this, the only eviction was the TTL
  * deciding not to READ an entry, so a long-lived cache directory grew without
- * bound and kept bodies for pages nobody would look at again.
+ * bound and kept bodies for pages nobody would look at again. The same sweep
+ * takes this module's own debris — a body whose metadata never landed, a
+ * killed writer's temp file — immediately with `all`, and once it is old
+ * enough to be abandoned otherwise. Nothing it did not write is touched.
  */
 export function cacheClean(all = false, now = Date.now()): number {
   const dir = cacheDir();
   if (!existsSync(dir) || isNoWrite()) return 0;
-  let removed = 0;
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".json")) continue;
-    const abs = join(dir, name);
-    let drop = all;
-    if (!drop) {
-      try {
-        const entry = JSON.parse(readFileSync(abs, "utf8")) as CacheEntry;
-        drop = !isCacheFresh(entry, now);
-      } catch {
-        drop = true; // unreadable entries are worth dropping either way
-      }
-    }
-    if (!drop) continue;
+  const names = readdirSync(dir);
+  const present = new Set(names);
+  const remove = (name: string): boolean => {
     try {
-      rmSync(abs, { force: true });
+      rmSync(join(dir, name), { force: true });
+      return true;
+    } catch {
+      return false; // a failed unlink is not a failed run
+    }
+  };
+  const abandoned = (name: string): boolean => {
+    try {
+      return all || now - statSync(join(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
+    } catch {
+      return false;
+    }
+  };
+  let removed = 0;
+  for (const name of names) {
+    const own = ownFile(name);
+    if (!own) continue;
+    if (own.kind === "json") {
+      const entry = readEntryMeta(join(dir, name));
+      if (!entry || (!all && isCacheFresh(entry, now)) || !remove(name)) continue;
       // The body is half the entry; leaving it behind is exactly the unbounded
       // growth this function exists to stop, and it would be the larger half.
-      rmSync(abs.replace(/\.json$/, ".body"), { force: true });
+      remove(`${own.stem}.body`);
       removed++;
-    } catch {
-      /* a failed unlink is not a failed run */
+    } else if (own.kind === "body" ? !present.has(`${own.stem}.json`) && abandoned(name) : abandoned(name)) {
+      remove(name);
     }
   }
   return removed;

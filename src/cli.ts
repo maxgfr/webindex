@@ -55,7 +55,7 @@ import {
   positionalText,
   UsageError,
 } from "./cli-kit.js";
-import { ensureDir, writeArtifact } from "./no-write.js";
+import { ensureDir, isNoWrite, writeArtifact } from "./no-write.js";
 import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
@@ -140,7 +140,8 @@ COMMANDS
   stack      Everything at once; 'path' prints where the compose file was
              written. The stack is EMBEDDED in this binary — no checkout needed.
   cache      What the on-disk fetch cache holds, and how to evict it. 'clean'
-             drops stale entries, '--all' drops every one.
+             drops stale entries, '--all' drops every one. Both only ever
+             count or remove files the cache itself wrote.
   crawl      Walk a site from a seed, breadth-first, honouring robots.txt at
              every hop. --max is REQUIRED: following one citation is not
              crawling and needs no permission, but enumerating a site is, and
@@ -184,7 +185,8 @@ ENVIRONMENT
   WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
   WEBINDEX_TIMEOUT_MS    how long a request may stay silent before it is abandoned,
                          not retried (default 20000; --timeout overrides it per call)
-  WEBINDEX_CACHE_DIR     where the fetch cache lives
+  WEBINDEX_CACHE_DIR     where the fetch cache lives (default <tmp>/webindex-<uid>/cache)
+  WEBINDEX_CACHE_TTL_HOURS  how long a cached page stays fresh (default 24; fractions allowed)
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
   WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
   WEBINDEX_UA            override the browser User-Agent
@@ -1125,6 +1127,11 @@ async function dispatch(argv: string[]): Promise<void> {
     if (action !== "status" && action !== "clean") usage("usage: webindex cache status|clean [--all]");
     if (action === "clean") {
       const all = argBool(args, "all");
+      // "0 entries removed" would read as an empty cache, not a blocked clean.
+      if (isNoWrite()) {
+        process.stdout.write(`no-write mode: nothing removed from ${cacheDir()}\n`);
+        return;
+      }
       const removed = cacheClean(all);
       process.stdout.write(`${removed} entr${removed === 1 ? "y" : "ies"} removed (${all ? "all" : "stale only"}) from ${cacheDir()}\n`);
       return;

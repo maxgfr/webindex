@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Env names resolve through the brand, exactly as the engine resolves them.
-import { envName } from "../src/brand.js";
+import { brand, configure, envName } from "../src/brand.js";
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { cacheClean, cacheStats, cachedFetchAndExtract, cachePath, setCacheMode, resetCacheMode } from "../src/cache.js";
+import { cacheClean, cacheDir, cacheStats, cachedFetchAndExtract, cachePath, setCacheMode, resetCacheMode } from "../src/cache.js";
 import { installFetchMock } from "./fetchmock.js";
 
 describe("cache writes", () => {
@@ -301,5 +301,67 @@ describe("cache introspection and eviction", () => {
     const s = cacheStats(1000);
     expect(s.entries).toBe(0);
     expect(cacheClean(true, 1000)).toBe(0);
+  });
+
+  it("never touches a file it did not write, even with --all", async () => {
+    // One mistyped <PREFIX>_CACHE_DIR (or a planted symlink at the shared
+    // default) used to cost every *.json in the directory: a stale-only clean
+    // unlinked package.json and tsconfig.json as "unreadable entries".
+    process.env[envName("CACHE_TTL_MS")] = "1000";
+    installFetchMock(() => PAGE);
+    await cachedFetchAndExtract(URL, {}, true, 1000);
+    const foreign: Record<string, string> = {
+      "package.json": '{"name":"mine"}',
+      "tsconfig.json": "{ // comments are not JSON",
+      "settings.json": '{"cachedAt":1}',
+      "notes-cafe.json": '{"cachedAt":1}', // our name shape, not our content
+      "ex.test-0123abcd.json": "{ torn", // our name shape, unreadable
+      "README.md": "hello",
+    };
+    for (const [name, content] of Object.entries(foreign)) writeFileSync(join(dir, name), content);
+
+    expect(cacheStats(5000)).toMatchObject({ entries: 1, stale: 1 });
+    expect(cacheClean(false, 5000)).toBe(1);
+    expect(cacheClean(true, 5000)).toBe(0);
+    expect(readdirSync(dir).sort()).toEqual(Object.keys(foreign).sort());
+    expect(cacheStats(5000)).toMatchObject({ entries: 0, bytes: 0 });
+  });
+
+  it("sweeps its own orphans: a body with no metadata and a killed writer's temp files", () => {
+    const own = ["127.0.0.1-deadbeef.body", "ex.test-abc123.json.4242.0.tmp", "ex.test-abc123.body.4242.1.tmp"];
+    for (const name of own) writeFileSync(join(dir, name), "x".repeat(1000));
+    writeFileSync(join(dir, "keep.tmp"), "not ours");
+    expect(cacheStats().bytes).toBe(3000);
+
+    // A stale-only clean leaves recent ones alone: a writer may be mid-rename.
+    expect(cacheClean(false)).toBe(0);
+    expect(readdirSync(dir)).toHaveLength(4);
+    cacheClean(false, Date.now() + 11 * 60_000);
+    expect(readdirSync(dir)).toEqual(["keep.tmp"]);
+
+    for (const name of own) writeFileSync(join(dir, name), "x");
+    cacheClean(true);
+    expect(readdirSync(dir)).toEqual(["keep.tmp"]);
+    expect(cacheStats().bytes).toBe(0);
+  });
+
+  it("defaults to a per-user directory, so two users of one machine never share one", () => {
+    delete process.env[envName("CACHE_DIR")];
+    configure({ ...brand(), cacheDir: undefined });
+    const uid = process.getuid?.();
+    expect(cacheDir()).toBe(join(tmpdir(), uid === undefined ? brand().name : `${brand().name}-${uid}`, "cache"));
+    // An explicit directory is honoured exactly as given.
+    process.env[envName("CACHE_DIR")] = dir;
+    expect(cacheDir()).toBe(dir);
+  });
+
+  it("accepts a fractional TTL in hours", () => {
+    process.env[envName("CACHE_TTL_HOURS")] = "0.5";
+    expect(cacheStats().ttlMs).toBe(30 * 60_000);
+    process.env[envName("CACHE_TTL_HOURS")] = "1.5";
+    expect(cacheStats().ttlMs).toBe(90 * 60_000);
+    process.env[envName("CACHE_TTL_HOURS")] = "soon";
+    expect(cacheStats().ttlMs).toBe(24 * 3600_000);
+    delete process.env[envName("CACHE_TTL_HOURS")];
   });
 });

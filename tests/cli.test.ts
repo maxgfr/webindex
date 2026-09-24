@@ -619,6 +619,13 @@ describe("the fetch cache", () => {
     expect(stdout()).toMatch(/0 entries removed \(all\)/);
   });
 
+  it("says a no-write run removed nothing, rather than reporting zero entries", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "empty-cache");
+    process.env[envName("NO_WRITE")] = "1";
+    expect(await run(["cache", "clean", "--all"])).toBe(0);
+    expect(stdout()).toMatch(/no-write mode: nothing removed/);
+  });
+
   it("rejects an action it does not have", async () => {
     expect(await run(["cache", "purge"])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex cache status\|clean/);
