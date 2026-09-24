@@ -129,7 +129,8 @@ async function viaPdftotext(bytes: Buffer): Promise<RungResult> {
   // `-layout` preserves column structure, which is what keeps a two-column
   // paper's sentences from interleaving. Trailing `-` writes to stdout.
   const r = await runWithInput("pdftotext", ["-layout", "-", "-"], bytes, PDFTOTEXT_TIMEOUT_MS);
-  if (r.ok) return { text: r.stdout };
+  // pdftotext ends each page with a form feed; a reader wants a paragraph break.
+  if (r.ok) return { text: r.stdout.replace(/\f/g, "\n\n") };
   return r.error === "not installed" ? { unavailable: true } : { failure: `pdftotext: ${failureDetail(r)}` };
 }
 

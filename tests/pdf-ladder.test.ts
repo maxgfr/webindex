@@ -74,6 +74,27 @@ describe("assessPdfText", () => {
     expect(v.ok).toBe(false);
     expect(v.reason).toMatch(/unreadable/i);
   });
+
+  // pdftotext ends every page with a form feed. The calibration only ever saw
+  // papers with thousands of characters a page; a deck of short slides crossed
+  // the control-character ratio on form feeds alone and was refused whole.
+  it("accepts pdftotext's page-ending form feeds, however short the pages", () => {
+    const slides = Array.from({ length: 30 }, (_, i) => `Slide ${i + 1}: quarterly revenue grew in every region we serve.`).join("\f");
+    expect(assessPdfText(slides).ok).toBe(true);
+  });
+
+  // A form's fill-in rules are long runs with no letters in them — the shape
+  // the garbled-glyph check looks for — and they are not garbage.
+  it("accepts a form with long fill-in rules", () => {
+    const form = `Name: ${"_".repeat(320)}\nSignature: ${"_".repeat(320)}\nDate: ${".".repeat(320)}\n`.repeat(3);
+    expect(assessPdfText(form).ok).toBe(true);
+  });
+
+  it("judges astral letters, CJK and Thai the way a code-point count does", () => {
+    expect(assessPdfText("𝐀𝐁𝐂 ".repeat(100)).ok).toBe(true);
+    expect(assessPdfText("自然言語処理は計算機科学の一分野である。".repeat(40)).ok).toBe(true);
+    expect(assessPdfText("ภาษาไทยเป็นภาษาที่มีระบบเสียงวรรณยุกต์".repeat(40)).ok).toBe(true);
+  });
 });
 
 describe("enabledExtractors", () => {

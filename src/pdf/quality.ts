@@ -33,9 +33,9 @@ export interface PdfVerdict {
 const MIN_CHARS_FOR_SHAPE_CHECKS = 200;
 
 // Calibrated on a real corpus (arXiv 1706.03762 and 2404.19756, each through
-// every rung). Clean extractors land at 0 – 4.0e-4 (pdftotext keeps a few form
-// feeds); the built-in reader's garbage lands at 4.5e-2 – 1.7e-1. 5e-3 sits an
-// order of magnitude clear of both sides.
+// every rung). Clean extractors land at 0 – 4.0e-4; the built-in reader's
+// garbage lands at 4.5e-2 – 1.7e-1. 5e-3 sits an order of magnitude clear of
+// both sides.
 const CONTROL_RATIO_MAX = 0.005;
 const REPLACEMENT_RATIO_MAX = 0.005;
 
@@ -44,27 +44,83 @@ const REPLACEMENT_RATIO_MAX = 0.005;
 const LONGEST_RUN_MAX = 300;
 const LETTER_RATIO_MIN = 0.5;
 
-// C0 controls (minus tab/LF/CR) and C1 controls are the strongest tell: real
-// text, in any language and any encoding, does not contain them, while binary
-// read as latin1 is full of them. Tested by code point rather than as a literal
-// character class so this file stays free of raw control bytes (which would make
-// git and grep treat it as binary — see tests/source-hygiene.test.ts).
+// C0 controls and C1 controls are the strongest tell: real text, in any
+// language and any encoding, does not contain them, while binary read as latin1
+// is full of them. Tab, LF and CR are text; so are VT and FF, which are
+// whitespace as much as a newline is — and pdftotext ends every page with a
+// form feed, so a deck of short slides crossed the ratio on page breaks alone.
+// Tested by code point rather than as a literal character class so this file
+// stays free of raw control bytes (which would make git and grep treat it as
+// binary — see tests/source-hygiene.test.ts).
 function isControlCode(c: number): boolean {
-  if (c === 0x09 || c === 0x0a || c === 0x0d) return false;
+  if (c >= 0x09 && c <= 0x0d) return false;
   return c < 0x20 || (c >= 0x7f && c <= 0x9f);
 }
 
 const REPLACEMENT_CODE = 0xfffd; // U+FFFD: a decoder already gave up on these bytes.
 
-function scanRatios(t: string): { control: number; replacement: number } {
+// `\s` as JavaScript means it, so a run ends exactly where `split(/\s+/)` would
+// have cut it. ASCII is answered without a regex; the rest is rare.
+const SPACE_RE = /\s/;
+const isSpace = (c: number): boolean => (c < 0x80 ? c === 0x20 || (c >= 0x09 && c <= 0x0d) : SPACE_RE.test(String.fromCharCode(c)));
+const LETTER_RE = /[\p{L}\p{N}]/u;
+
+// Fill-in rules and leaders — `____`, `----`, `....`, `====` — are long runs with
+// no letters in them, the shape of garbled glyphs, and they are not garbage: a
+// form with a 320-character signature line was refused as unreadable.
+const isRuleChar = (c: number): boolean => c === 0x5f || c === 0x2d || c === 0x2e || c === 0x3d;
+
+interface Shape {
+  control: number;
+  replacement: number;
+  /** The longest whitespace-delimited run, in UTF-16 units, rules excepted. */
+  longestRun: number;
+  /** Letters and digits, per code point, over the non-space UTF-16 units. */
+  letterRatio: number;
+}
+
+// One pass for everything the gate weighs. It used to be four — a ratio loop,
+// `split(/\s+/)`, a `match` building one array element per letter and a
+// `replace` — which cost over a second on 13 MB of prose, per rung attempt.
+function scanShape(t: string): Shape {
   let control = 0;
   let replacement = 0;
+  let letters = 0;
+  let nonSpace = 0;
+  let run = 0;
+  let runIsRule = true;
+  let longestRun = 0;
+  const endRun = () => {
+    if (!runIsRule && run > longestRun) longestRun = run;
+    run = 0;
+    runIsRule = true;
+  };
   for (let i = 0; i < t.length; i++) {
     const c = t.charCodeAt(i);
+    if (isSpace(c)) {
+      endRun();
+      continue;
+    }
     if (c === REPLACEMENT_CODE) replacement++;
     else if (isControlCode(c)) control++;
+    if (!isRuleChar(c)) runIsRule = false;
+    if (c < 0x80) {
+      if ((c >= 0x30 && c <= 0x39) || ((c | 0x20) >= 0x61 && (c | 0x20) <= 0x7a)) letters++;
+      nonSpace++;
+      run++;
+      continue;
+    }
+    // Astral letters (mathematical alphanumerics, rare CJK) are one letter in
+    // two UTF-16 units.
+    const cp = t.codePointAt(i)!;
+    const units = cp > 0xffff ? 2 : 1;
+    if (LETTER_RE.test(String.fromCodePoint(cp))) letters++;
+    nonSpace += units;
+    run += units;
+    i += units - 1;
   }
-  return { control: control / t.length, replacement: replacement / t.length };
+  endRun();
+  return { control: control / t.length, replacement: replacement / t.length, longestRun, letterRatio: nonSpace ? letters / nonSpace : 0 };
 }
 
 /** What an empty PDF extraction means — most often, a scan. The ladder sharpens it when it knows better. */
@@ -91,21 +147,18 @@ export function assessExtractedText(text: string, emptyReason: string): PdfVerdi
   const t = text.trim();
   if (!t) return { ok: false, reason: emptyReason };
 
-  const { control, replacement } = scanRatios(t);
-  if (control > CONTROL_RATIO_MAX) {
+  const shape = scanShape(t);
+  if (shape.control > CONTROL_RATIO_MAX) {
     return { ok: false, reason: "binary/control characters in the text (undecodable PDF stream)" };
   }
-  if (replacement > REPLACEMENT_RATIO_MAX) {
+  if (shape.replacement > REPLACEMENT_RATIO_MAX) {
     return { ok: false, reason: "replacement characters throughout (wrong character map)" };
   }
 
   // Two weaker signals, both required: a page of dense tabular data can trip
   // either one on its own.
   if (t.length < MIN_CHARS_FOR_SHAPE_CHECKS) return { ok: true };
-  let longestRun = 0;
-  for (const w of t.split(/\s+/)) if (w.length > longestRun) longestRun = w.length;
-  const letters = (t.match(/\p{L}|\p{N}/gu)?.length ?? 0) / t.replace(/\s+/g, "").length;
-  if (longestRun > LONGEST_RUN_MAX && letters < LETTER_RATIO_MIN) {
+  if (shape.longestRun > LONGEST_RUN_MAX && shape.letterRatio < LETTER_RATIO_MIN) {
     return { ok: false, reason: "unreadable text layer (garbled glyph encoding)" };
   }
 
