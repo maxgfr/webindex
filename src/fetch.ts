@@ -599,20 +599,81 @@ export function cleanInline(s: string): string {
 // Tags whose opening or closing marks a line break in the extracted text.
 const BLOCK_TAGS = new Set(["p", "div", "section", "article", "li", "tr", "td", "th", "ul", "ol", "pre", "blockquote", "table"]);
 
+// One tag, opening or closing. A `>` inside a quoted attribute value does not
+// end it. The unquoted runs exclude `<` as well as `>`, and that is what keeps
+// the scan linear: prose like "if a<b then" has no `>` after its `<`, and a
+// run allowed to cross `<` read from EVERY such `<` to the end of the page —
+// O(n²), a minute of CPU for one hostile megabyte.
+const TAG_RE = /<[a-zA-Z!/?][^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/g;
+// The fallback for a tag whose quotes never balance. Stops at the next `<` for
+// the same reason.
+const LOOSE_TAG_RE = /<[a-zA-Z!/?][^<>]*>/g;
+
+// `</name>` regexes, compiled once per element name.
+const CLOSE_TAG_RE = new Map<string, RegExp>();
+function closeTagRe(name: string): RegExp {
+  let re = CLOSE_TAG_RE.get(name);
+  if (!re) CLOSE_TAG_RE.set(name, (re = new RegExp(`</${name}\\s*>`, "gi")));
+  return re;
+}
+
+/**
+ * Replace every comment and every `<name …>…</name>` element among `names`
+ * with a space, content and all.
+ *
+ * Comments and elements go in ONE left-to-right pass, so whichever opens first
+ * owns the text up to its own close. Two separate passes get one of the two
+ * orders wrong: comments first lets a script containing "<!--" swallow the
+ * prose after it; elements first lets "<!-- <script> -->" pair with a real
+ * </script> further down and delete the article in between.
+ *
+ * Linear by construction. The close is searched forward from its opener, and a
+ * search that fails proves no close exists anywhere after it — so that name is
+ * never searched for again, rather than once per opener (which is what made the
+ * lazy `[\s\S]*?</nav>` regex quadratic on a page of unclosed openers). An
+ * element in `toEof` with no close runs to the end of the input instead, the
+ * browser's own rule for a raw-text element such as a script cut off by a size
+ * cap; the others keep their content, as they always did.
+ */
+function dropElements(html: string, names: readonly string[], toEof: ReadonlySet<string> = new Set()): string {
+  const open = new RegExp(`<!--|<(${names.join("|")})(?=[\\s/>])`, "gi");
+  const unclosed = new Set<string>();
+  let out = "";
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = open.exec(html))) {
+    const name = m[1]?.toLowerCase() ?? "!--";
+    if (unclosed.has(name)) continue;
+    let end: number;
+    if (name === "!--") {
+      // From +2, so the degenerate `<!-->` closes itself as the spec says.
+      const close = html.indexOf("-->", m.index + 2);
+      end = close < 0 ? -1 : close + 3;
+    } else {
+      const close = closeTagRe(name);
+      close.lastIndex = open.lastIndex;
+      const c = close.exec(html);
+      end = c ? c.index + c[0].length : toEof.has(name) ? html.length : -1;
+    }
+    if (end < 0) {
+      unclosed.add(name);
+      continue;
+    }
+    out += html.slice(last, m.index) + " ";
+    last = open.lastIndex = end;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
+
+// Never prose, whatever the page: dropped with everything inside.
+const HIDDEN_ELEMENTS = ["script", "style", "noscript", "head", "svg", "template"];
+// Page chrome, dropped too unless the caller asked for the whole page.
+const CHROME_ELEMENTS = ["nav", "footer"];
+
 export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): string {
-  let s = html;
-  // Comments and raw-text blocks go in ONE left-to-right pass, so whichever
-  // opens first owns the text up to its own close. Two separate passes get one
-  // of the two orders wrong: comments first lets a script containing "<!--"
-  // swallow the prose after it; blocks first lets "<!-- <script> -->" pair with
-  // a real </script> further down and delete the article in between.
   // Whole-page callers need navigation and footer text even without a main region.
-  const hidden = opts.fullPage
-    ? /<!--[\s\S]*?-->|<(script|style|noscript|head|svg|template)\b[\s\S]*?<\/\1\s*>/gi
-    : /<!--[\s\S]*?-->|<(script|style|noscript|head|nav|footer|svg|template)\b[\s\S]*?<\/\1\s*>/gi;
-  s = s.replace(hidden, " ");
-  // A quoted `>` belongs to an attribute, not the end of a tag.
-  s = s.replace(/<[a-zA-Z!/?][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g, (tag) => {
+  let s = dropElements(html, opts.fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS]);
+  s = s.replace(TAG_RE, (tag) => {
     const name = /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
     if (/^h[1-6]$/.test(name)) {
       return tag.startsWith("</") ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
@@ -626,7 +687,7 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
     return " ";
   });
   // Malformed attributes must not leave tag markup in the extracted prose.
-  s = s.replace(/<[a-zA-Z!/?][^>]*>/g, " ");
+  s = s.replace(LOOSE_TAG_RE, " ");
   s = decodeEntities(s);
   s = s.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n");
   return s
@@ -674,71 +735,82 @@ export function htmlCanonicalUrl(html: string): string | undefined {
 // region (or that region looks too small versus the whole page) it returns the
 // input unchanged, so we never extract LESS than the previous behaviour. The
 // strongest matching tier wins: <main>/<article> first, then common content
-// containers. (Regex can't track nested tags; the size gate below catches a
-// container truncated at its first nested close tag and falls back.)
-// Given the index just past a `<tag …>` opening, return the inner HTML up to
-// that tag's MATCHING close, counting nested same-name opens so a nested block
-// doesn't close the container early. Returns null when the tag never closes.
-// Regex alone can't balance nested tags — this is why the previous lazy
-// `([\s\S]*?)</tag>` truncated a content div at its first nested `</div>`.
-function sliceToMatchingClose(html: string, start: number, tag: string): string | null {
-  const re = new RegExp(`<${tag}\\b|</${tag}\\s*>`, "gi");
-  re.lastIndex = start;
-  let depth = 1;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html))) {
-    if (m[0]![1] === "/") {
-      if (--depth === 0) return html.slice(start, m.index);
-    } else {
-      depth++;
-    }
-  }
-  return null;
+// containers.
+
+interface Region {
+  /** Just past the opening tag. */
+  start: number;
+  /** At the matching close tag. */
+  end: number;
 }
 
+/**
+ * Every `<tag>` element whose opening tag passes `isCandidate`, as the span
+ * between its opening tag and its MATCHING close.
+ *
+ * One pass with a stack: push on open, pop on close. A lazy `[\s\S]*?</tag>`
+ * truncates a container at its first nested close, and re-scanning forward from
+ * each candidate to balance it by hand costs a pass per candidate — quadratic
+ * on a page of thousands of unclosed ones. An element that never closes yields
+ * no region.
+ */
+function balancedRegions(html: string, tag: string, isCandidate: (open: string) => boolean): Region[] {
+  const re = new RegExp(`<${tag}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>|</${tag}\\s*>`, "gi");
+  const stack: { start: number; candidate: boolean }[] = [];
+  const out: Region[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    if (m[0][1] === "/") {
+      const open = stack.pop();
+      if (open?.candidate) out.push({ start: open.start, end: m.index });
+    } else {
+      stack.push({ start: re.lastIndex, candidate: isCandidate(m[0]) });
+    }
+  }
+  return out;
+}
+
+// Length of the text a reader would see: tags out, whitespace collapsed.
+const visibleLength = (h: string) =>
+  h
+    .replace(/<[^<>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim().length;
+
+const CONTENT_CONTAINER = /\b(?:id|class)="[^"]*\b(?:content|article|post|entry|story|markdown-body|main|prose)\b[^"]*"/i;
+
 export function extractMainHtml(html: string): string {
-  const visible = (h: string) =>
-    h
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim().length;
-  // Opening-tag matchers, strongest tier first. Each captured group 1 is the
-  // container tag name; the body is recovered by balanced scan (not a lazy
-  // regex) so a nested block never truncates the extraction.
-  const tiers: RegExp[] = [
-    /<(main)\b[^>]*>/gi,
-    /<(article)\b[^>]*>/gi,
-    /<(div|section)\b[^>]*\b(?:id|class)="[^"]*\b(?:content|article|post|entry|story|markdown-body|main|prose)\b[^"]*"[^>]*>/gi,
+  // Strongest tier first; the first tier with a candidate decides.
+  const tiers: { tags: string[]; isCandidate: (open: string) => boolean }[] = [
+    { tags: ["main"], isCandidate: () => true },
+    { tags: ["article"], isCandidate: () => true },
+    { tags: ["div", "section"], isCandidate: (open) => CONTENT_CONTAINER.test(open) },
   ];
-  let candidates: string[] = [];
-  for (const re of tiers) {
-    const found: string[] = [];
-    re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(html))) {
-      const inner = sliceToMatchingClose(html, re.lastIndex, m[1]!.toLowerCase());
-      if (inner !== null) found.push(inner);
+  for (const tier of tiers) {
+    const regions = tier.tags.flatMap((tag) => balancedRegions(html, tag, tier.isCandidate)).sort((a, b) => a.start - b.start);
+    if (!regions.length) continue;
+    // Only an outermost candidate can win — a nested one never has more text
+    // than the candidate around it — so only those are measured. They are
+    // disjoint, which keeps the measuring linear however deep the nesting goes.
+    let best: Region | undefined;
+    let bestLen = -1;
+    let reach = -1;
+    for (const r of regions) {
+      if (r.start < reach) continue;
+      reach = r.end;
+      const len = visibleLength(html.slice(r.start, r.end));
+      if (len > bestLen) {
+        best = r;
+        bestLen = len;
+      }
     }
-    if (found.length) {
-      candidates = found; // use the strongest tier that matched
-      break;
-    }
+    // Size gate: a tiny region (short absolutely AND a small share of the page)
+    // is probably a wrong match — fall back to the full document. The whole
+    // page is only measured when the region is short enough for it to matter.
+    if (bestLen < 500 && bestLen < visibleLength(html) * 0.3) return html;
+    return html.slice(best!.start, best!.end);
   }
-  if (!candidates.length) return html;
-  let best = candidates[0]!;
-  let bestLen = visible(best);
-  for (const c of candidates.slice(1)) {
-    const len = visible(c);
-    if (len > bestLen) {
-      best = c;
-      bestLen = len;
-    }
-  }
-  // Size gate: a tiny region (short absolutely AND a small share of the page) is
-  // probably a truncated/wrong match — fall back to the full document.
-  const fullLen = visible(html);
-  if (bestLen < 500 && bestLen < fullLen * 0.3) return html;
-  return best;
+  return html;
 }
 
 export const PDF_URL_RE = /\.pdf($|[?#])/i;

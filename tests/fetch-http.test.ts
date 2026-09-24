@@ -288,6 +288,42 @@ describe("extractMainHtml", () => {
   });
 });
 
+describe("HTML scans stay linear on hostile markup", () => {
+  // Every shape below used to cost O(n²): a scan that, from each opener, read
+  // to the end of the input looking for a terminator that never came. About
+  // 1 MB of any of them froze the process — CLI and MCP server alike — for
+  // over a minute. The bounds are an order of magnitude above the linear cost
+  // and two below the quadratic one, so a slow CI box cannot flake them.
+  const within = (ms: number, fn: () => unknown) => {
+    const started = performance.now();
+    fn();
+    expect(performance.now() - started).toBeLessThan(ms);
+  };
+
+  it.each([
+    ["a '<' in prose with no '>' after it", "<p>" + "if a<b then ".repeat(80_000)],
+    ["unclosed <nav> openers", "<nav>x ".repeat(150_000)],
+    ["unclosed comment openers", "<!-- x ".repeat(150_000)],
+    ["unclosed <svg> openers", "<svg>x ".repeat(150_000)],
+    ["an unterminated attribute quote per tag", '<a title="x '.repeat(80_000)],
+  ])("htmlToText: %s", (_label, html) => {
+    within(2000, () => htmlToText(html));
+  });
+
+  it("extractMainHtml: thousands of unclosed content containers", () => {
+    within(2000, () => extractMainHtml(`<div class="comment-content"><p>${"word ".repeat(40)}</p>`.repeat(20_000)));
+  });
+
+  it("extractMainHtml: deeply nested content containers", () => {
+    const n = 20_000;
+    within(2000, () => extractMainHtml(`${'<div class="post"><p>word word</p>'.repeat(n)}${"</div>".repeat(n)}`));
+  });
+
+  it("extractMainHtml: many unclosed <main>/<article> openers", () => {
+    within(2000, () => extractMainHtml(`<main><article><p>${"word ".repeat(20)}</p>`.repeat(20_000)));
+  });
+});
+
 describe("looksLikeJunkExtraction", () => {
   it("flags a short consent/JS/anti-bot wall in EN, FR and DE", () => {
     expect(looksLikeJunkExtraction("We use cookies to improve your experience. Accept all cookies")).toMatch(/cookie/i);
