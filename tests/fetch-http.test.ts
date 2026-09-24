@@ -16,6 +16,7 @@ import {
   stripConsentBoilerplate,
   metaDescriptionOf,
   htmlCanonicalUrl,
+  cleanInline,
 } from "../src/fetch.js";
 import { installFetchMock, routes } from "./fetchmock.js";
 
@@ -230,6 +231,23 @@ describe("decodeEntities", () => {
 
   it("is still single-pass and still case-sensitive", () => {
     expect(decodeEntities("&amp;shy; &#38;oelig; &Dagger; &dagger; &Amp; &unknown;")).toBe("&shy; &oelig; ‡ † &Amp; &unknown;");
+  });
+});
+
+describe("cleanInline", () => {
+  it("strips the formatting markup scholarly titles carry, escaped or literal", () => {
+    expect(cleanInline("R&amp;D in &lt;i&gt;P53&lt;/i&gt; mutants")).toBe("R&D in P53 mutants");
+    expect(cleanInline("CO<sub>2</sub> uptake in <i>E. coli</i>")).toBe("CO2 uptake in E. coli");
+    expect(cleanInline("<jats:title>A <jats:italic>novel</jats:italic> <mml:math><mml:mi>β</mml:mi></mml:math> site</jats:title>")).toBe("A novel β site");
+    expect(cleanInline('see <a href="/x">the <span class="hl">docs</span></a><br/>now')).toBe("see the docs now");
+  });
+
+  it("leaves angle-bracket text that is not markup: generics and element names", () => {
+    expect(cleanInline("Vec<u8> to String - Rust")).toBe("Vec<u8> to String - Rust");
+    expect(cleanInline("How to return Promise&lt;void&gt; in TypeScript")).toBe("How to return Promise<void> in TypeScript");
+    expect(cleanInline("The <dialog> element")).toBe("The <dialog> element");
+    expect(cleanInline("<a>: The Anchor element - HTML | MDN")).toBe("<a>: The Anchor element - HTML | MDN");
+    expect(cleanInline("Map<String, List<Integer>> in Java")).toBe("Map<String, List<Integer>> in Java");
   });
 });
 

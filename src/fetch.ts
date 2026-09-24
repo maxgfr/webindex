@@ -545,14 +545,37 @@ export async function httpJson(
 // The decoder lives with the shared markup primitives; this is its public name.
 export { decodeEntities };
 
+// Formatting a title or snippet can carry — Crossref's <i>/<sub>/<scp>, a
+// search backend's highlight <span>s and <a>s — and the MathML/JATS namespaces
+// scholarly metadata nests inside it.
+const INLINE_FORMAT: ReadonlySet<string> = new Set([...INLINE_TAGS, "br", "scp"]);
+const INLINE_FORMAT_TAG = /<(\/?)([a-zA-Z][\w.-]*(?::[\w.-]+)?)(?=[\s/>])([^<>]*)>/g;
+
 // Clean a backend-provided inline field (a title or one-line snippet) that may
 // carry escaped or literal markup: decode entities FIRST (so escaped tags like
 // `&lt;i&gt;` become real tags), THEN strip the tags, then collapse whitespace.
 // Decode-then-strip handles both `R&amp;D` → `R&D` and `&lt;i&gt;P53&lt;/i&gt;`
 // → `P53` (and literal `<i>P53</i>` → `P53`).
+//
+// Only formatting markup goes, and only where it IS markup: a tag with
+// attributes, a <br>, a namespaced MathML/JATS tag, or one whose partner is
+// in the same string. Everything else in angle brackets is text — `Vec<u8>`,
+// `Promise<void>`, and MDN's own titles ("<a>: The Anchor element") all lost
+// their subject when every `<…>` was stripped.
 export function cleanInline(s: string): string {
-  return decodeEntities(String(s))
-    .replace(/<[^>]+>/g, " ")
+  const text = decodeEntities(String(s));
+  const opened = new Set<string>();
+  const closed = new Set<string>();
+  for (const m of text.matchAll(INLINE_FORMAT_TAG)) (m[1] ? closed : opened).add(m[2]!.toLowerCase());
+  return text
+    .replace(INLINE_FORMAT_TAG, (tag, slash: string, rawName: string, attrs: string) => {
+      const name = rawName.toLowerCase();
+      if (name.startsWith("mml:") || name.startsWith("jats:")) return "";
+      if (!INLINE_FORMAT.has(name)) return tag;
+      if (name === "br") return " ";
+      const markup = attrs.trim().replace(/\/$/, "") !== "" || name === "wbr" || (slash ? opened : closed).has(name);
+      return markup ? "" : tag;
+    })
     .replace(/\s+/g, " ")
     .trim();
 }
