@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { charsetFromContentType, charsetFromHtml, decodeBody, decodeLocal } from "../src/charset.js";
-import { discoverFeeds, parseFeed, parseSitemap } from "../src/feed.js";
+import { discoverFeeds, fetchFeed, parseFeed, parseSitemap } from "../src/feed.js";
 import { httpGet } from "../src/fetch.js";
 import { fetchRobots, isAllowed, parseRobots, resetRobotsCache } from "../src/robots.js";
 import { extractJsonLd, extractMetaTags, pageMetadata } from "../src/structured.js";
@@ -92,6 +92,61 @@ describe("character encoding", () => {
   it("flows through httpGet, which is the whole point", async () => {
     installFetchMock(() => ({ bytes: latin1, contentType: "text/html; charset=windows-1252" }));
     expect((await httpGet("https://old.test/page")).body).toContain("réponse");
+  });
+
+  it("reads charset= only from a meta tag's own charset or a content-type pragma", () => {
+    // `charset=` inside a description is prose, not a declaration. Matching it
+    // anywhere in any meta tag decoded the whole page as UTF-16 — CJK garbage.
+    const head = '<meta name="description" content="How to set charset=utf-16 in Java"><meta charset="utf-8">';
+    expect(charsetFromHtml(head)).toBe("utf-8");
+    expect(charsetFromHtml('<meta content="charset=iso-8859-2" name="keywords"><meta charset=euc-jp>')).toBe("euc-jp");
+    expect(charsetFromHtml('<meta content="text/html; charset=iso-8859-2" http-equiv="Content-Type">')).toBe("iso-8859-2");
+    const page = Buffer.from(`<html><head>${head}</head><body>café</body></html>`, "utf8");
+    expect(decodeBody(page, "text/html")).toBe(page.toString("utf8"));
+  });
+
+  it("treats a meta-declared UTF-16 as UTF-8, as the prescan requires", () => {
+    // Bytes an ASCII-compatible scan could read cannot be UTF-16, whatever the
+    // tag claims (WHATWG); x-user-defined likewise means windows-1252.
+    expect(charsetFromHtml('<meta charset="utf-16">')).toBe("utf-8");
+    expect(charsetFromHtml('<meta http-equiv="content-type" content="text/html; charset=UTF-16LE">')).toBe("utf-8");
+    expect(charsetFromHtml('<meta charset="x-user-defined">')).toBe("windows-1252");
+    const ascii = Buffer.from('<html><head><meta charset="utf-16"></head><body>plain</body></html>', "utf8");
+    expect(decodeBody(ascii, "text/html")).toBe(ascii.toString("utf8"));
+  });
+
+  it("does not sniff markup in a body that is not HTML", () => {
+    // A text/plain document quoting a meta tag is not declaring its encoding.
+    const text = Buffer.from('How to declare encoding: <meta charset="iso-8859-1">\nCafé naïve résumé', "utf8");
+    expect(decodeBody(text, "text/plain")).toBe(text.toString("utf8"));
+    expect(decodeBody(text, "application/json")).toBe(text.toString("utf8"));
+  });
+
+  it("rescues undeclared Windows-1252 bytes instead of returning U+FFFD", () => {
+    expect(decodeBody(latin1, "text/html")).toBe("Une réponse déjà validée — coûts");
+    expect(decodeBody(latin1, "")).toBe("Une réponse déjà validée — coûts");
+    // A declaration past the sniff window is as good as none; the rescue still reads it.
+    const late = Buffer.concat([Buffer.from(`<script>${"x".repeat(6000)}</script><meta charset="windows-1252"><p>`), Buffer.from("café", "latin1")]);
+    expect(decodeBody(late, "text/html")).toContain("<p>café");
+    // A UTF-8 header is a declaration, and still wins.
+    expect(decodeBody(latin1, "text/html; charset=utf-8")).toContain("�");
+  });
+
+  it("does not mistake a UTF-8 body cut mid-character at the cap for Windows-1252", () => {
+    const whole = Buffer.from("café au lait — déjà vu é", "utf8");
+    const cut = whole.subarray(0, whole.length - 1); // splits the final é
+    expect(decodeBody(cut, "text/html").startsWith("café au lait — déjà vu ")).toBe(true);
+  });
+
+  it("honours the XML declaration's encoding when the header names none", async () => {
+    const xml = Buffer.from('<?xml version="1.0" encoding="ISO-8859-1"?><rss><channel><title>Résumé à jour</title></channel></rss>', "latin1");
+    expect(decodeBody(xml, "application/rss+xml")).toContain("Résumé à jour");
+    expect(decodeLocal(xml, { sniffHtmlCharset: false })).toContain("Résumé à jour");
+    // Not UTF-16 either, when an ASCII scan could read the declaration.
+    const ascii = Buffer.from('<?xml version="1.0" encoding="UTF-16"?><rss/>', "utf8");
+    expect(decodeBody(ascii, "text/xml")).toBe(ascii.toString("utf8"));
+    installFetchMock(() => ({ bytes: xml, contentType: "application/rss+xml" }));
+    expect((await fetchFeed("https://old.test/feed.xml"))?.title).toBe("Résumé à jour");
   });
 });
 
