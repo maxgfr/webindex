@@ -3,9 +3,11 @@ import type { AddressInfo } from "node:net";
 import { describe, it, expect, afterEach, vi } from "vitest";
 // Env names resolve through the brand, exactly as the engine resolves them.
 import { envName } from "../src/brand.js";
-import { httpGet, httpJson } from "../src/fetch.js";
+import { cachedFetchAndExtract } from "../src/cache.js";
+import { fetchAndExtract, httpGet, httpJson } from "../src/fetch.js";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
 });
@@ -37,6 +39,23 @@ describe("request timeouts", () => {
     expect(r.ok).toBe(false);
     expect(r.status).toBe(0);
     expect(r.error).toBeTruthy();
+  });
+
+  it("takes its default from <PREFIX>_TIMEOUT_MS when the caller names none", async () => {
+    vi.useFakeTimers();
+    installHangingFetch();
+    vi.stubEnv(envName("TIMEOUT_MS"), "1500");
+    const pending = httpGet("https://blackhole.test/x");
+    const json = httpJson("GET", "https://blackhole.test/j");
+    await vi.advanceTimersByTimeAsync(1500);
+    expect((await pending).error).toBe("timed out after 1500 ms");
+    expect((await json).error).toBe("timed out after 1500 ms");
+  });
+
+  it("carries a caller's timeout through fetchAndExtract and the cache", async () => {
+    installHangingFetch();
+    expect((await fetchAndExtract("https://blackhole.test/page", { timeoutMs: 5 })).note).toMatch(/timed out after 5 ms/);
+    expect((await cachedFetchAndExtract("https://blackhole.test/page", { timeoutMs: 5 }, true)).note).toMatch(/timed out after 5 ms/);
   });
 
   it("does the same for a JSON endpoint", async () => {
@@ -91,6 +110,18 @@ describe("network failure reporting", () => {
     expect(spy).toHaveBeenCalledTimes(1);
     const json = failingFetch(cause);
     await httpJson("GET", "https://permanent.test/j", undefined, { retries: 2 });
+    expect(json).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not spend a second full timeout on a host that never answered the first", async () => {
+    // attempts × timeout was the real worst case: a blackholed host cost 40 s
+    // for a documented 20 s budget.
+    const spy = installHangingFetch();
+    const r = await httpGet("https://blackhole.test/x", { timeoutMs: 5, retries: 2 });
+    expect(r.error).toMatch(/timed out/);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const json = installHangingFetch();
+    await httpJson("GET", "https://blackhole.test/j", undefined, { timeoutMs: 5, retries: 2 });
     expect(json).toHaveBeenCalledTimes(1);
   });
 

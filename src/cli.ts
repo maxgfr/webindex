@@ -71,6 +71,7 @@ USAGE
   webindex search <query> [--json] [--limit <n>] [--pages <n>] [--lang <tag>]
                           [--engine ddg|ddglite|mojeek|off] [--searxng <base>|off]
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>] [--full-page]
+                       [--timeout <ms>]
   webindex extract <file> [--json] [--full-page]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--json]
   webindex repo <ref> [--json]
@@ -92,7 +93,7 @@ USAGE
   webindex tables <url> [--markdown] [--json]
   webindex embed <text> [--json]
   webindex hybrid --query <q> [--docs <file.json|->] [--limit <n>] [--json]
-  webindex changed <url> [--etag <v>] [--hash <sha256>] [--json]
+  webindex changed <url> [--etag <v>] [--hash <sha256>] [--timeout <ms>] [--json]
   webindex skill     check|bundle|copy|doctor [--root <dir>] [--json]
   webindex skill     vendor [--engine <name>] --ref <tag> | --check
   webindex skill     init <name> [--root <dir>]
@@ -177,6 +178,8 @@ ENVIRONMENT
   WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
   WEBINDEX_QDRANT        vector store base URL, or "off"      (default http://localhost:6333)
   WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
+  WEBINDEX_TIMEOUT_MS    how long a request may stay silent before it is abandoned,
+                         not retried (default 20000; --timeout overrides it per call)
   WEBINDEX_CACHE_DIR     where the fetch cache lives
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
   WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
@@ -216,6 +219,7 @@ export const VALUE_FLAGS = [
   "version",
   "terms",
   "max",
+  "timeout",
 ];
 export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page"];
 export const COMMANDS = [
@@ -266,6 +270,23 @@ function fail(msg: string): never {
 function usage(msg: string): never {
   process.stderr.write(`webindex: ${msg}\n`);
   process.exit(EXIT_USAGE);
+}
+
+/** `--timeout <ms>`: a positive whole number of milliseconds, or absent for the default. */
+function argTimeout(args: CommandArgs): number | undefined {
+  const ms = argInt(args, "timeout");
+  if (ms !== undefined && ms < 1) throw new UsageError(`--timeout expects a positive number of milliseconds, got "${ms}"`);
+  return ms;
+}
+
+/**
+ * The MCP fetch tool's `timeoutMs`. Clamped rather than refused: an agent's
+ * odd value should cost it a default, not the call — but never an unbounded
+ * wait on a server other clients share.
+ */
+function toolTimeoutMs(value: unknown): number | undefined {
+  const n = typeof value === "string" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(300_000, Math.max(1, Math.round(n))) : undefined;
 }
 
 /** Extraction over bytes already in hand — the shared half of `extract`. */
@@ -415,6 +436,7 @@ export function webindexAdapter(): McpAdapter {
             url: { type: "string", description: "The http(s) URL to fetch." },
             lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." },
             fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
+            timeoutMs: { type: "number", description: "Give up on a silent host after this many ms (default 20000). A timed-out request is not retried." },
           },
           required: ["url"],
         },
@@ -615,7 +637,12 @@ export function webindexAdapter(): McpAdapter {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
         const fullPage = args.fullPage === true;
-        const r = await fetchAndExtract(url, { acceptLanguage: args.lang ? String(args.lang) : undefined, fullPage, stripConsent: !fullPage });
+        const r = await fetchAndExtract(url, {
+          acceptLanguage: args.lang ? String(args.lang) : undefined,
+          fullPage,
+          stripConsent: !fullPage,
+          timeoutMs: toolTimeoutMs(args.timeoutMs),
+        });
         if (!r.text) throw new ToolError(`Nothing readable at ${url}${r.note ? ` — ${r.note}` : ""}.`);
         return { text: `${r.text}\n\n---\nextractor: ${r.extractor ?? "native"}` };
       }
@@ -824,6 +851,7 @@ async function dispatch(argv: string[]): Promise<void> {
       firecrawl: argValue(args, "firecrawl"),
       fullPage,
       stripConsent: !fullPage,
+      timeoutMs: argTimeout(args),
     });
     if (argBool(args, "json")) {
       process.stdout.write(
@@ -1202,12 +1230,13 @@ async function dispatch(argv: string[]): Promise<void> {
     if (!/^https?:\/\//i.test(url)) fail("changed needs an http(s) URL");
     const etag = argValue(args, "etag");
     const hash = argValue(args, "hash");
+    const timeoutMs = argTimeout(args);
     if (!etag && !hash) {
-      const f = await fingerprint(url);
+      const f = await fingerprint(url, { timeoutMs });
       process.stdout.write(argBool(args, "json") ? jsonLine(f) : `etag ${f.etag ?? "-"}\nhash ${f.contentHash ?? "-"}\n`);
       return;
     }
-    const v = await hasChanged(url, { ...(etag ? { etag } : {}), ...(hash ? { contentHash: hash } : {}) });
+    const v = await hasChanged(url, { ...(etag ? { etag } : {}), ...(hash ? { contentHash: hash } : {}) }, { timeoutMs });
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(v));
     } else {

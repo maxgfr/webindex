@@ -280,7 +280,7 @@ function touchCache(url: string, entry: CacheEntry, now: number, acceptLanguage 
 // the clock.
 export async function cachedFetchAndExtract(
   url: string,
-  opts: { acceptLanguage?: string; firecrawl?: string; stripConsent?: boolean } = {},
+  opts: { acceptLanguage?: string; firecrawl?: string; stripConsent?: boolean; timeoutMs?: number } = {},
   enabled = false,
   now = Date.now(),
 ): Promise<Extract & { cached?: boolean }> {

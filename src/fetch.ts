@@ -66,6 +66,10 @@ const RETRY_STATUS = new Set([429, 503, 502, 504]);
 // fixed backoff, clamped to sane bounds.
 const maxAttempts = () => envInt("MAX_ATTEMPTS", 2, 1, 5);
 const defaultRetryMs = () => envInt("RETRY_MS", 600, 0, 5000);
+// How long one request may stay silent before it is abandoned, when the caller
+// names no budget of its own. A timed-out attempt is not retried (see httpGet),
+// so this is also the worst case a hung host costs.
+const defaultTimeoutMs = () => envInt("TIMEOUT_MS", 20_000, 1000, 300_000);
 
 /**
  * Polite pause between successive result-page fetches to the same web engine
@@ -291,6 +295,7 @@ async function authorizedGet(
 export async function httpGet(
   url: string,
   opts: {
+    /** Network budget per attempt, in ms. Default `<PREFIX>_TIMEOUT_MS` (20 s); a timed-out attempt is not retried. */
     timeoutMs?: number;
     accept?: string;
     acceptLanguage?: string;
@@ -313,7 +318,7 @@ export async function httpGet(
 ): Promise<HttpResult> {
   const attempts = attemptsFor(opts.retries);
   let last: HttpResult = { ok: false, status: 0, body: "", contentType: "", url };
-  const timeoutMs = opts.timeoutMs ?? 20_000;
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   for (let attempt = 0; attempt < attempts; attempt++) {
     const ctrl = new AbortController();
     let t: ReturnType<typeof setTimeout> | undefined;
@@ -413,7 +418,10 @@ export async function httpGet(
       return result;
     } catch (e) {
       last = { ok: false, status: 0, body: "", contentType: "", url, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
-      if (isPermanentFailure(e)) break;
+      // A timeout has spent the whole budget the caller granted, and a host
+      // silent for that long rarely answers a second time: retrying it made the
+      // real worst case attempts × timeout, twice what the caller asked for.
+      if (timedOut || isPermanentFailure(e)) break;
       if (attempt < attempts - 1) await sleep(defaultRetryMs());
     } finally {
       clearTimeout(t);
@@ -444,7 +452,7 @@ export async function httpJson(
 ): Promise<{ ok: boolean; status: number; data: any; error?: string; bytesRead?: number; truncated?: boolean }> {
   const attempts = attemptsFor(opts.retries);
   let last: { ok: boolean; status: number; data: any; error?: string } = { ok: false, status: 0, data: undefined };
-  const timeoutMs = opts.timeoutMs ?? 20_000;
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   for (let attempt = 0; attempt < attempts; attempt++) {
     const ctrl = new AbortController();
     let timedOut = false;
@@ -496,7 +504,7 @@ export async function httpJson(
       return result;
     } catch (e) {
       last = { ok: false, status: 0, data: undefined, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
-      if (isPermanentFailure(e)) break;
+      if (timedOut || isPermanentFailure(e)) break;
       if (attempt < attempts - 1) await sleep(defaultRetryMs());
     } finally {
       clearTimeout(t);
@@ -902,6 +910,8 @@ export async function fetchAndExtract(
     headers?: Record<string, string>;
     /** Check the initial URL and each redirect; disables remote extraction. */
     authorizeUrl?: (url: string) => Promise<boolean>;
+    /** Network budget for the built-in fetch, in ms (see httpGet). Firecrawl keeps its own. */
+    timeoutMs?: number;
     /**
      * Drop consent-banner lines from the extracted text.
      *
@@ -946,7 +956,7 @@ export async function fetchAndExtract(
     firecrawlNote = fc.data ? `Firecrawl got HTTP ${fc.data.statusCode} for ${url} — fell back to the built-in extractor.` : fc.why;
   }
   const base = wantsPdf ? PDF_FETCH_OPTS : wantsDoc ? DOC_FETCH_OPTS : { accept: "text/html,text/plain,*/*", acceptLanguage: opts.acceptLanguage };
-  const fetchOpts = { ...base, maxDocumentBytes: PDF_FETCH_OPTS.maxBytes, headers: opts.headers, authorizeUrl: opts.authorizeUrl };
+  const fetchOpts = { ...base, maxDocumentBytes: PDF_FETCH_OPTS.maxBytes, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs };
   let res = await httpGet(url, fetchOpts);
   // A brand that identifies itself honestly gets refused by some hosts. Retry
   // once wearing a browser UA before giving up — but only for a brand that had
@@ -975,7 +985,7 @@ export async function fetchAndExtract(
     // httpGet keeps the raw bytes of anything the origin labelled a PDF, so a
     // content-type-only PDF (no .pdf in the URL) is not downloaded twice. The
     // refetch is only for a response that somehow arrived without them.
-    const bytes = res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl })).bytes;
+    const bytes = res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
     // The ladder tries pdf-inspector, then an already-running Firecrawl, then
     // pdftotext, then the built-in reader — and refuses rather than hand back
     // text no extractor could vouch for. Firecrawl is injected as a callback so
@@ -1009,7 +1019,7 @@ export async function fetchAndExtract(
   if (docFmt) {
     // Same as the PDF path: the bytes of a content-type-only document are
     // already here; the refetch is the fallback, not the rule.
-    const bytes = res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl })).bytes;
+    const bytes = res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
     const got = bytes
       ? await extractDocument(bytes, docFmt, {
           firecrawl: async () => {

@@ -69,6 +69,16 @@ async function run(argv: string[]): Promise<number> {
   }
 }
 
+/** A fetch that never answers, and rejects only once the caller's signal fires. */
+function hangingFetch() {
+  return vi.fn(
+    (_input: unknown, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" })));
+      }),
+  );
+}
+
 // The article exceeds 30% of the visible page, so main-content isolation wins.
 const articlePage = (consent = "") =>
   `<nav><a href="/">Home</a> <a href="/about">About</a></nav><article><h1>Rate limiting</h1><p>Token buckets smooth bursts. This sentence pads the article so the region is not tiny.</p>${consent}<p>Second paragraph with more words to pass the size gate of extractMainHtml.</p></article><footer>© Example</footer>`;
@@ -330,6 +340,24 @@ describe("fetch argument handling", () => {
     }
   });
 
+  it("gives up on a silent host after --timeout, and says so", async () => {
+    vi.stubGlobal("fetch", hangingFetch());
+    try {
+      expect(await run(["fetch", "https://blackhole.test/page", "--timeout", "5"])).toBe(1);
+      expect(stderr()).toMatch(/timed out after 5 ms/);
+      err = [];
+      expect(await run(["changed", "https://blackhole.test/page", "--etag", '"a"', "--timeout", "5"])).toBe(1);
+      expect(stderr()).toMatch(/timed out after 5 ms/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("refuses a --timeout that is not a positive whole number", async () => {
+    expect(await run(["fetch", "https://x.test/page", "--timeout", "0"])).toBe(2);
+    expect(await run(["fetch", "https://x.test/page", "--timeout", "soon"])).toBe(2);
+  });
+
   it("refuses a non-http argument rather than guessing", async () => {
     expect(await run(["fetch", "example.com"])).toBe(1);
     expect(stderr()).toMatch(/http\(s\) URL/);
@@ -510,6 +538,18 @@ describe("the MCP tools", () => {
     expect(r.text).toContain("token buckets");
     expect(r.text).toMatch(/extractor: \w+$/);
     vi.unstubAllGlobals();
+  });
+
+  it("lets an agent shorten the fetch timeout", async () => {
+    const tool = adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_fetch")!;
+    expect(tool.inputSchema.properties.timeoutMs?.type).toBe("number");
+    expect(tool.inputSchema.required).not.toContain("timeoutMs");
+    vi.stubGlobal("fetch", hangingFetch());
+    try {
+      await expect(adapter.callTool("webindex_fetch", { url: "https://blackhole.test/p", timeoutMs: 5 })).rejects.toThrow(/timed out after 5 ms/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("refuses a non-http url as a tool error, not a crash", async () => {
