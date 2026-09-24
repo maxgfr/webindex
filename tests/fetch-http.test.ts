@@ -532,6 +532,26 @@ describe("looksLikeJunkExtraction", () => {
     const article = "This article explains HTTP cookies in depth. We use cookies as an example. " + "x ".repeat(1200);
     expect(looksLikeJunkExtraction(article)).toBeUndefined();
   });
+
+  it("does not take a short page that merely uses a wall's words for a wall", () => {
+    // Each was flagged on one bare phrase, and rescueViaWayback then threw the
+    // good archived page away.
+    const mysql =
+      "# Fix ERROR 1045 (28000): Access denied for user root@localhost\nThis error means the server rejected the credentials the client sent.\nCheck the user's host part with SELECT user, host FROM mysql.user.\nThen reset the password with ALTER USER and flush the privileges again.";
+    expect(looksLikeJunkExtraction(mysql)).toBeUndefined();
+    expect(looksLikeJunkExtraction("# widget\nInstall with npm install widget. To verify you are on Node 18 or later, run node -v.")).toBeUndefined();
+    expect(looksLikeJunkExtraction("## Cookie policy\nThis library parses the Set-Cookie header into a jar you can query.")).toBeUndefined();
+    expect(looksLikeJunkExtraction("## Handling unusual traffic\nAutoscaling absorbs a spike before the queue backs up.")).toBeUndefined();
+  });
+
+  it("still flags the interstitials those phrases come from", () => {
+    expect(
+      looksLikeJunkExtraction("Access Denied\nYou don't have permission to access this resource on this server.\nReference #18.4d2f3b17.1726000000.1a2b3c"),
+    ).toMatch(/anti-bot/);
+    expect(looksLikeJunkExtraction("Verifying you are human. This may take a few seconds.")).toMatch(/anti-bot/);
+    expect(looksLikeJunkExtraction("Our systems have detected unusual traffic from your computer network.")).toMatch(/anti-bot/);
+    expect(looksLikeJunkExtraction("Cookie settings\nWe use cookies to personalise content.\nAccept all\nReject all")).toMatch(/cookie/);
+  });
 });
 
 describe("rescueViaWayback", () => {
