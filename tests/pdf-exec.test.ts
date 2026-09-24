@@ -1,8 +1,16 @@
+import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runWithInput, binaryName } from "../src/pdf/exec.js";
+
+// Real spawns, except where a case stands in for Windows: there the call spawn
+// receives is what is under test, and nothing is actually run.
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 
 // `node` itself is the one binary guaranteed to exist wherever these tests run,
 // so every case drives it rather than a tool that may or may not be installed
@@ -103,5 +111,42 @@ describe("binaryName", () => {
     expect(binaryName("npx")).toBe("npx.cmd");
     expect(binaryName("pdftotext")).toBe("pdftotext"); // a real .exe needs no shim
     setPlatform(platform);
+  });
+});
+
+// Since the CVE-2024-27980 fix (Node 18.20.2 / 20.12.2 / 22.x), spawn refuses
+// a .cmd or .bat without a shell: EINVAL. runWithInput turned that into a
+// failed run, so both npx rungs were marked unavailable on every Windows run.
+describe("the npx shim on Windows", () => {
+  const platform = process.platform;
+  const setPlatform = (p: string) => Object.defineProperty(process, "platform", { value: p, configurable: true });
+  const spawnMock = vi.mocked(spawn);
+
+  /** What runWithInput asked spawn for, on a pretend Windows — the spawn itself is refused. */
+  async function spawnedOnWindows(cmd: string, args: string[]) {
+    spawnMock.mockImplementationOnce(() => {
+      throw new Error("not really spawning");
+    });
+    setPlatform("win32");
+    try {
+      await runWithInput(cmd, args, Buffer.alloc(0), 1000);
+    } finally {
+      setPlatform(platform);
+    }
+    return spawnMock.mock.calls.at(-1)!;
+  }
+
+  it("runs npx.cmd through a shell, with every argument quoted for cmd.exe", async () => {
+    const [file, args, opts] = await spawnedOnWindows("npx", ["-y", "--prefer-offline", "@firecrawl/anydoc@0.1", "-", 'say "hi"']);
+    expect(file).toBe('"npx.cmd"');
+    expect(args).toEqual(['"-y"', '"--prefer-offline"', '"@firecrawl/anydoc@0.1"', '"-"', '"say ""hi"""']);
+    expect(opts).toMatchObject({ shell: true });
+  });
+
+  it("spawns a real executable directly, with its arguments untouched", async () => {
+    const [file, args, opts] = await spawnedOnWindows("pdftotext", ["-layout", "-", "-"]);
+    expect(file).toBe("pdftotext");
+    expect(args).toEqual(["-layout", "-", "-"]);
+    expect(opts).not.toMatchObject({ shell: true });
   });
 });

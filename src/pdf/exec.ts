@@ -63,7 +63,18 @@ export function runWithInput(cmd: string, args: string[], input: Buffer, timeout
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(binaryName(cmd), args, { stdio: ["pipe", "pipe", "pipe"], ...(opts.env ? { env: opts.env } : {}) });
+      const bin = binaryName(cmd);
+      // Since the CVE-2024-27980 fix (Node 18.20.2, 20.12.2, 22.x) spawn refuses
+      // a .cmd or .bat without a shell — EINVAL, which cost Windows both npx
+      // rungs. Through cmd.exe every argument is quoted; they are constants of
+      // this engine (the document travels on stdin), never text from a URL.
+      const viaShell = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(bin);
+      const quote = (s: string) => `"${s.replace(/"/g, '""')}"`;
+      child = spawn(viaShell ? quote(bin) : bin, viaShell ? args.map(quote) : args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        ...(viaShell ? { shell: true, windowsHide: true } : {}),
+        ...(opts.env ? { env: opts.env } : {}),
+      });
     } catch (e) {
       resolve({ ok: false, stdout: "", error: (e as Error).message });
       return;
