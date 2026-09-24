@@ -197,6 +197,122 @@ describe("extractTables", () => {
   it("reads several tables from one document", () => {
     expect(extractTables("<table><tr><td>1</td></tr></table><table><tr><td>2</td></tr></table>")).toHaveLength(2);
   });
+
+  it("survives a numeric reference out of Unicode's range instead of losing every table", () => {
+    // One `&#99999999;` used to throw RangeError out of the whole call —
+    // `webindex tables` exited 1 and the MCP tool returned a -32603.
+    const t = extractTables("<table><tr><td>&#99999999;</td><td>&#x110000;</td><td>ok</td></tr></table>");
+    expect(t[0]?.rows[0]?.[2]).toBe("ok");
+  });
+
+  it("decodes entities once, with the full named table", () => {
+    const t = extractTables("<table><tr><td>&#38;lt;b&#38;gt;</td><td>&mdash; &euro;5 &copy; &hellip;</td></tr></table>");
+    expect(t[0]?.rows[0]).toEqual(["&lt;b&gt;", "— €5 © …"]);
+  });
+
+  it("reads a table whose </td> and </tr> are omitted, which is valid HTML", () => {
+    expect(extractTables("<table><tr><th>Name<th>Age<tr><td>Ann<td>31<tr><td>Bob<td>42</table>")).toEqual([
+      {
+        headers: ["Name", "Age"],
+        rows: [
+          ["Ann", "31"],
+          ["Bob", "42"],
+        ],
+      },
+    ]);
+  });
+
+  it("keeps the outer table whole around a nested one, and reports both", () => {
+    const html =
+      "<table><tr><th>Plan</th><th>Details</th></tr><tr><td>Pro</td><td><table><tr><td>seats</td><td>10</td></tr></table></td></tr><tr><td>Team</td><td>50 seats</td></tr></table>";
+    expect(extractTables(html)).toEqual([
+      {
+        headers: ["Plan", "Details"],
+        rows: [
+          ["Pro", "seats 10"],
+          ["Team", "50 seats"],
+        ],
+      },
+      { headers: [], rows: [["seats", "10"]] },
+    ]);
+  });
+
+  it("takes headers from <thead> even when its cells are <td>", () => {
+    const html = "<table><thead><tr><td>Name</td><td>Age</td></tr></thead><tbody><tr><td>Ann</td><td>31</td></tr></tbody></table>";
+    expect(extractTables(html)[0]).toEqual({ headers: ["Name", "Age"], rows: [["Ann", "31"]] });
+  });
+
+  it("reads a matrix header whose corner cell is an empty <td>", () => {
+    const html = "<table><tr><td></td><th>2019</th><th>2020</th></tr><tr><th>Revenue</th><td>1</td><td>2</td></tr></table>";
+    expect(extractTables(html)[0]).toEqual({ headers: ["", "2019", "2020"], rows: [["Revenue", "1", "2"]] });
+  });
+
+  it("keeps block content in a cell as separate words", () => {
+    const html = "<table><tr><td><ul><li>x64</li><li>arm64</li></ul></td><td><p>One</p><p>Two</p></td><td>12<small>ms</small></td></tr></table>";
+    expect(extractTables(html)[0]?.rows[0]).toEqual(["x64 arm64", "One Two", "12ms"]);
+  });
+
+  it("does not leak a quoted '>' from an attribute into the cell", () => {
+    expect(extractTables('<table><tr><td title="a>b">val</td></tr></table>')[0]?.rows[0]).toEqual(["val"]);
+  });
+
+  it("ignores tables inside comments and markup inside scripts", () => {
+    expect(extractTables("<!-- <table><tr><td>old</td></tr></table> -->")).toEqual([]);
+    expect(extractTables('<table><tr><td>a<script>var t = "<td>b</td>";</script></td></tr></table>')[0]?.rows).toEqual([["a"]]);
+  });
+
+  it("reads colspan, not data-colspan", () => {
+    expect(extractTables('<table><tr><td data-colspan="3">x</td><td>y</td></tr></table>')[0]?.rows[0]).toEqual(["x", "y"]);
+  });
+
+  describe("in linear time on hostile or merely large tables", () => {
+    const within = (ms: number, fn: () => unknown) => {
+      const started = performance.now();
+      fn();
+      expect(performance.now() - started).toBeLessThan(ms);
+    };
+
+    it("20k rows with their end tags omitted", () => {
+      within(2000, () => expect(extractTables(`<table>${"<tr><td>a<td>b".repeat(20_000)}</table>`)[0]?.rows).toHaveLength(20_000));
+    });
+
+    it("one row of 20k unclosed cells", () => {
+      within(2000, () => extractTables(`<table><tr>${"<td>x".repeat(20_000)}</table>`));
+    });
+
+    it("100k unclosed <table> openers", () => {
+      within(2000, () => extractTables("<table><tr><td>x ".repeat(100_000)));
+    });
+
+    it("5k tables nested inside each other's cells", () => {
+      within(2000, () => extractTables(`${"<table><tr><td>x".repeat(5_000)}${"</td></tr></table>".repeat(5_000)}`));
+    });
+
+    it("3k cells that each span a hundred rows and a hundred columns", () => {
+      // Each asks for 10k slots; the old expansion kept every one in a Map and
+      // padded every row to the widest — tens of millions of cells.
+      within(2000, () => expect(extractTables(`<table>${"<tr><td rowspan=100 colspan=100>x".repeat(3_000)}</table>`)).toEqual([]));
+    });
+
+    it("one row 50k cells wide above 50k rows of one cell", () => {
+      // Padding every row to the widest is rows × width: 2.5 billion slots.
+      within(2000, () => extractTables(`<table><tr>${"<td>x".repeat(50_000)}${"<tr><td>y".repeat(50_000)}</table>`));
+    });
+  });
+
+  it("reads tables nested past the depth limit as text of the cell that holds them", () => {
+    const deep = `${"<table><tr><td>x".repeat(12)}${"</td></tr></table>".repeat(12)}`;
+    const t = extractTables(deep);
+    expect(t).toHaveLength(8);
+    expect(t[0]?.rows[0]?.[0]).toBe(Array.from({ length: 12 }, () => "x").join(" "));
+    expect(t[7]?.rows[0]?.[0]).toBe("x x x x x");
+    // The buried tables' </tr> and </td> did not close the cell they sit in.
+    expect(extractTables(`<table><tr><td>${deep}</td><td>after</td></tr></table>`)[0]?.rows[0]?.[1]).toBe("after");
+  });
+
+  it("reads a table inside <noscript>, which a reader without scripts renders", () => {
+    expect(extractTables("<noscript><table><tr><td>a</td></tr></table></noscript>")).toHaveLength(1);
+  });
 });
 
 describe("tableToMarkdown", () => {
@@ -223,5 +339,11 @@ describe("tableToMarkdown", () => {
   it("round-trips a spanned table into a rectangular markdown one", () => {
     const [t] = extractTables("<table><tr><th>a</th><th>b</th></tr><tr><td colspan='2'>wide</td></tr></table>");
     expect(tableToMarkdown(t as never).split("\n")[2]).toBe("| wide | wide |");
+  });
+
+  it("renders a table of two hundred thousand rows", () => {
+    // Math.max(...rows) overflowed the call stack at this size.
+    const md = tableToMarkdown({ headers: ["n"], rows: Array.from({ length: 200_000 }, (_, i) => [String(i)]) });
+    expect(md.split("\n")).toHaveLength(200_002);
   });
 });
