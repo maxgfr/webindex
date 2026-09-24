@@ -392,6 +392,7 @@ describe("HTML scans stay linear on hostile markup", () => {
     ["unclosed <pre> openers", "<pre>x ".repeat(150_000)],
     ["unclosed <script> openers", "<p>a</p><script>x ".repeat(100_000)],
     ["adjacent inline elements", "<a>x</a>".repeat(150_000)],
+    ["a heading anchor holding a long run of whitespace", `<h2><a href="#x">${" ".repeat(300_000)}x</a></h2>`],
   ])("htmlToText: %s", (_label, html) => {
     within(2000, () => htmlToText(html));
   });
@@ -403,6 +404,10 @@ describe("HTML scans stay linear on hostile markup", () => {
   it("extractMainHtml: deeply nested content containers", () => {
     const n = 20_000;
     within(2000, () => extractMainHtml(`${'<div class="post"><p>word word</p>'.repeat(n)}${"</div>".repeat(n)}`));
+  });
+
+  it("extractMainHtml: one opening tag holding a long unbroken attribute run", () => {
+    within(2000, () => extractMainHtml(`<div ${"a".repeat(300_000)}><p>text</p></div>`));
   });
 
   it("extractMainHtml: many unclosed <main>/<article> openers", () => {
