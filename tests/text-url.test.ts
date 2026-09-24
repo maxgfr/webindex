@@ -24,6 +24,28 @@ describe("canonicalizeUrl", () => {
     expect(canonicalizeUrl("https://x.test/p?utm_source=nl&b=2&a=1&fbclid=zz")).toBe("https://x.test/p?a=1&b=2");
   });
 
+  it("keeps ?ref=, which selects a branch or tag on forge and raw-file APIs", () => {
+    // The fetch cache is keyed on this: two versions of one file used to share
+    // an entry, and one was served for the other.
+    const main = canonicalizeUrl("https://gitlab.test/api/v4/projects/1/repository/files/README.md/raw?ref=main");
+    expect(main).not.toBe(canonicalizeUrl("https://gitlab.test/api/v4/projects/1/repository/files/README.md/raw?ref=v1.0"));
+    expect(canonicalizeUrl("https://x.test/p?ref=v1.2")).toBe("https://x.test/p?ref=v1.2");
+    expect(canonicalizeUrl("https://x.test/p?ref_src=twsrc&ref_url=y")).toBe("https://x.test/p");
+  });
+
+  it("strips the ad and social click ids it used to keep", () => {
+    expect(canonicalizeUrl("https://x.test/p?msclkid=1&gclsrc=2&_gl=3&dclid=5&yclid=6&twclid=7&ttclid=8&li_fat_id=9&mkt_tok=a&igsh=b&id=42")).toBe(
+      "https://x.test/p?id=42",
+    );
+  });
+
+  it("strips a share link's si only where it is one", () => {
+    expect(canonicalizeUrl("https://youtu.be/dQw4w9WgXcQ?si=AbC")).toBe("https://youtu.be/dQw4w9WgXcQ");
+    expect(canonicalizeUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=AbC")).toBe("https://youtube.com/watch?v=dQw4w9WgXcQ");
+    expect(canonicalizeUrl("https://open.spotify.com/track/1?si=xyz")).toBe("https://open.spotify.com/track/1");
+    expect(canonicalizeUrl("https://units.test/convert?si=kg")).toBe("https://units.test/convert?si=kg");
+  });
+
   it("re-encodes values, so an encoded delimiter cannot become one", () => {
     expect(canonicalizeUrl("https://x.test/p?q=a%26b=c")).toBe("https://x.test/p?q=a%26b%3Dc");
   });
