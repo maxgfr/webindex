@@ -354,7 +354,7 @@ interface HttpResult {
     lastModified?: string;
     /** True on an explicit 429, or a 403 that carries an exhausted quota header. */
     rateLimited?: boolean;
-    /** Retry-After, parsed and capped, when the server sent one. */
+    /** Retry-After in ms, when the server sent one — its own number, not capped to what httpGet waits out. */
     retryAfterMs?: number;
 }
 declare function sleep(ms: number): Promise<void>;
@@ -387,6 +387,7 @@ declare function readCapped(res: Response, max: number): Promise<string>;
 /** Same streaming cap as `readCapped`, returning the raw bytes. */
 declare function readCappedBytes(res: Response, max: number): Promise<Buffer>;
 declare function httpGet(url: string, opts?: {
+    /** Network budget per attempt, in ms. Default `<PREFIX>_TIMEOUT_MS` (20 s); a timed-out attempt is not retried. */
     timeoutMs?: number;
     accept?: string;
     acceptLanguage?: string;
@@ -492,6 +493,16 @@ interface ExtractResult {
     html?: string;
     etag?: string;
     lastModified?: string;
+    /** The response overran the byte cap, so `text` is a prefix of the page, not all of it. */
+    truncated?: boolean;
+    /** On a failed fetch: the origin throttled it (429, or a 403 with an exhausted quota). */
+    rateLimited?: boolean;
+    /**
+     * On a failed fetch: how long the origin asked callers to wait (its
+     * Retry-After, in ms), so a caller with a queue can back the whole host off
+     * rather than learn the same answer once per URL.
+     */
+    retryAfterMs?: number;
 }
 declare function fetchAndExtract(url: string, opts?: {
     acceptLanguage?: string;
@@ -502,6 +513,8 @@ declare function fetchAndExtract(url: string, opts?: {
     headers?: Record<string, string>;
     /** Check the initial URL and each redirect; disables remote extraction. */
     authorizeUrl?: (url: string) => Promise<boolean>;
+    /** Network budget for the built-in fetch, in ms (see httpGet). Firecrawl keeps its own. */
+    timeoutMs?: number;
     /**
      * Drop consent-banner lines from the extracted text.
      *
@@ -1337,7 +1350,13 @@ declare function resolvePackage(name: string, opts?: {
 declare function charsetFromContentType(contentType: string): string | undefined;
 /**
  * The charset a document declares about itself: `<meta charset>` or the older
- * `<meta http-equiv="content-type">`.
+ * `<meta http-equiv="content-type">`, the first one found winning.
+ *
+ * Read attribute by attribute, as the WHATWG prescan does: `charset=` counts in
+ * a meta tag's own `charset`, or in its `content` when the tag is a
+ * content-type pragma — never anywhere else. A description reading "how to set
+ * charset=utf-16" is prose, and used to outrank the real `<meta charset>` after
+ * it. A declared UTF-16 resolves to UTF-8 (see UTF16_LABELS).
  *
  * Only the first 4 KB is scanned. The spec requires the declaration inside the
  * first 1024 bytes, and reading further would mean decoding the body to find out
@@ -1346,26 +1365,31 @@ declare function charsetFromContentType(contentType: string): string | undefined
 declare function charsetFromHtml(head: string): string | undefined;
 /**
  * Decode response bytes into text, honouring — in order — a BOM, the
- * Content-Type header, and the document's own `<meta charset>`.
+ * Content-Type header, an XML declaration, and (for a body that may be HTML) the
+ * document's own `<meta charset>`; with none of those naming a non-UTF-8
+ * encoding, UTF-8 when the bytes are valid and Windows-1252 when they are not.
  *
  * Precedence follows what actually helps: a BOM cannot be wrong, a header is
  * usually right, and a meta tag is the last resort because a page served as
  * UTF-8 while declaring latin1 in its markup is almost always a stale template
- * rather than a truthful declaration.
+ * rather than a truthful declaration. The final rescue is what an undeclared
+ * Latin-1 page — or one whose meta sits past the sniff window behind a large
+ * inline script — needs; only a header's explicit UTF-8 is trusted over it.
  *
  * Falls back to UTF-8 on an unknown or unsupported label, so a nonsense charset
  * degrades to today's behaviour rather than failing the fetch.
  */
 declare function decodeBody(bytes: Buffer, contentType?: string): string;
 /**
- * Decode bytes read from disk: BOM, then `<meta charset>`, then a UTF-8 validity
- * rescue. A local file has no transport header to trust, and a stale template
- * declaring UTF-8 over Latin-1 bytes is common. Without a BOM or a non-UTF-8
- * declaration, trust UTF-8 only when the bytes are valid; otherwise use
- * Windows-1252 so accents and typographic punctuation survive.
+ * Decode bytes read from disk: BOM, then an XML declaration or `<meta charset>`,
+ * then a UTF-8 validity rescue. A local file has no transport header to trust,
+ * and a stale template declaring UTF-8 over Latin-1 bytes is common. Without a
+ * BOM or a non-UTF-8 declaration, trust UTF-8 only when the bytes are valid;
+ * otherwise use Windows-1252 so accents and typographic punctuation survive.
  *
  * `sniffHtmlCharset: false` skips the meta step — for a file the caller already
- * knows is plain text, where a `<meta charset>` can only be quoted markup.
+ * knows is plain text, where a `<meta charset>` can only be quoted markup. An
+ * XML declaration is still honoured: it has to open the file to count.
  */
 declare function decodeLocal(bytes: Buffer, opts?: {
     sniffHtmlCharset?: boolean;
@@ -1763,9 +1787,16 @@ interface CacheEntry extends Extract {
     cachedAt: number;
     etag?: string;
     lastModified?: string;
+    /**
+     * Set on built-in text written while Firecrawl was up but failed on this page.
+     * Lookups that predict Firecrawl read it too; otherwise every call for the
+     * TTL paid for the same failed scrape plus a fresh download.
+     */
+    fallbackFrom?: "firecrawl";
 }
 declare function cacheDir(): string;
-declare function cachePath(url: string, acceptLanguage?: string, extractor?: CacheNamespace): string;
+declare function cachePath(url: string, acceptLanguage?: string, extractor?: CacheNamespace, variant?: CacheVariant): string;
+type CacheVariant = "" | "consent" | "full";
 declare const PDF_CACHE_NS: "pdf";
 declare const DOC_CACHE_NS: "doc";
 type CacheNamespace = ExtractorId | typeof PDF_CACHE_NS | typeof DOC_CACHE_NS;
@@ -1808,6 +1839,8 @@ declare function cachedFetchAndExtract(url: string, opts?: {
     acceptLanguage?: string;
     firecrawl?: string;
     stripConsent?: boolean;
+    fullPage?: boolean;
+    timeoutMs?: number;
 }, enabled?: boolean, now?: number): Promise<Extract & {
     cached?: boolean;
 }>;
@@ -1835,7 +1868,10 @@ declare function cacheStats(now?: number): CacheStats;
  *
  * Nothing else ever removes anything: before this, the only eviction was the TTL
  * deciding not to READ an entry, so a long-lived cache directory grew without
- * bound and kept bodies for pages nobody would look at again.
+ * bound and kept bodies for pages nobody would look at again. The same sweep
+ * takes this module's own debris — a body whose metadata never landed, a
+ * killed writer's temp file — immediately with `all`, and once it is old
+ * enough to be abandoned otherwise. Nothing it did not write is touched.
  */
 declare function cacheClean(all?: boolean, now?: number): number;
 
@@ -1943,13 +1979,15 @@ interface Fingerprint {
     /** The strong validator, when the server sent one. */
     etag?: string;
     lastModified?: string;
-    /** SHA-256 of the body, when one was read. */
+    /** SHA-256 of the body's bytes as received — before any character decoding — when all of it was read. */
     contentHash?: string;
     /** Bytes read. 0 on a 304, which is the whole point of a 304. */
     bytes: number;
     status: number;
     /** ISO timestamp of the observation, so a caller can age its own record. */
     fetchedAt: string;
+    /** Why no complete body was read, when none was: a baseline without a hash is no baseline. */
+    error?: string;
 }
 /** SHA-256 of a body, hex. Exported because a caller holding bytes from elsewhere wants the same digest. */
 declare function contentHash(body: string | Buffer): string;
@@ -1959,6 +1997,7 @@ declare function contentHash(body: string | Buffer): string;
  * Always reads the body, because that is what makes the hash available for the
  * many servers that send neither an ETag nor a Last-Modified. Use `hasChanged`
  * when a validator is already in hand — that is the path that costs nothing.
+ * `error` says why there is no hash, when there is none.
  */
 declare function fingerprint(url: string, opts?: {
     timeoutMs?: number;
