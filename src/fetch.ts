@@ -596,8 +596,86 @@ export function cleanInline(s: string): string {
 // drop script/style/head/nav/footer, turn block tags into newlines, keep
 // heading structure as markdown markers, decode common entities, collapse
 // whitespace. Good enough to ground a report in a page's prose without a DOM.
+
 // Tags whose opening or closing marks a line break in the extracted text.
-const BLOCK_TAGS = new Set(["p", "div", "section", "article", "li", "tr", "td", "th", "ul", "ol", "pre", "blockquote", "table"]);
+const BLOCK_TAGS: ReadonlySet<string> = new Set([
+  "p",
+  "div",
+  "section",
+  "article",
+  "li",
+  "tr",
+  "td",
+  "th",
+  "ul",
+  "ol",
+  "pre",
+  "blockquote",
+  "table",
+  "caption",
+  "dl",
+  "dt",
+  "dd",
+  "header",
+  "footer",
+  "nav",
+  "aside",
+  "main",
+  "search",
+  "figure",
+  "figcaption",
+  "details",
+  "summary",
+  "address",
+  "form",
+  "fieldset",
+  "legend",
+  "hgroup",
+  "center",
+  "dialog",
+  "menu",
+]);
+
+// Phrasing elements, which a browser renders with no whitespace of their own:
+// H<sub>2</sub>O is "H2O", and "Perry White</a>, said" has no space before the
+// comma. Anything neither block nor inline (img, input, button, an unknown or
+// custom element) still becomes a space, the safe default.
+const INLINE_TAGS: ReadonlySet<string> = new Set([
+  "a",
+  "abbr",
+  "acronym",
+  "b",
+  "bdi",
+  "bdo",
+  "big",
+  "cite",
+  "code",
+  "data",
+  "del",
+  "dfn",
+  "em",
+  "font",
+  "i",
+  "ins",
+  "kbd",
+  "label",
+  "mark",
+  "nobr",
+  "q",
+  "s",
+  "samp",
+  "small",
+  "span",
+  "strike",
+  "strong",
+  "sub",
+  "sup",
+  "time",
+  "tt",
+  "u",
+  "var",
+  "wbr",
+]);
 
 // One tag, opening or closing. A `>` inside a quoted attribute value does not
 // end it. The unquoted runs exclude `<` as well as `>`, and that is what keeps
@@ -608,6 +686,8 @@ const TAG_RE = /<[a-zA-Z!/?][^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/g;
 // The fallback for a tag whose quotes never balance. Stops at the next `<` for
 // the same reason.
 const LOOSE_TAG_RE = /<[a-zA-Z!/?][^<>]*>/g;
+
+const tagName = (tag: string): string => /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
 
 // `</name>` regexes, compiled once per element name.
 const CLOSE_TAG_RE = new Map<string, RegExp>();
@@ -665,18 +745,112 @@ function dropElements(html: string, names: readonly string[], toEof: ReadonlySet
   return last === 0 ? html : out + html.slice(last);
 }
 
-// Never prose, whatever the page: dropped with everything inside.
-const HIDDEN_ELEMENTS = ["script", "style", "noscript", "head", "svg", "template"];
+// Never prose, whatever the page: dropped with everything inside. A <select>'s
+// options are a form widget — a size picker, a list of every country — and
+// read as a run-on sentence of noise.
+const HIDDEN_ELEMENTS = ["script", "style", "noscript", "head", "svg", "template", "select", "datalist"];
 // Page chrome, dropped too unless the caller asked for the whole page.
 const CHROME_ELEMENTS = ["nav", "footer"];
+// Raw-text elements run to the end of the document when their close never
+// comes. Not <head>: omitting </head> is legal and common.
+const RAW_TEXT_ELEMENTS: ReadonlySet<string> = new Set(["script", "style"]);
+
+// A placeholder line that carries a <pre> block past the whitespace cleanup:
+// NUL, the block's index, NUL. No page text can forge one, because htmlToText
+// first turns the page's own NULs into U+FFFD, as a browser does.
+const NUL = "\u0000";
+const PRE_SLOT = (i: number) => `\n${NUL}${i}${NUL}\n`;
+function preSlotIndex(line: string): number | undefined {
+  if (line.length < 3 || line[0] !== NUL || line[line.length - 1] !== NUL) return undefined;
+  const i = Number(line.slice(1, -1));
+  return Number.isInteger(i) ? i : undefined;
+}
+
+/**
+ * Every `<pre>…</pre>` replaced by a placeholder line, its text kept aside
+ * verbatim: indentation and blank lines are the meaning of a Python, YAML or
+ * TOML sample, and the line cleanup would destroy both. Inner tags are syntax
+ * highlighting (Prism, Pygments, GitHub's pl-* spans) and go without a trace.
+ */
+function setAsidePre(html: string, blocks: string[]): string {
+  const open = /<pre(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
+  const close = closeTagRe("pre");
+  let out = "";
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = open.exec(html))) {
+    close.lastIndex = open.lastIndex;
+    const c = close.exec(html);
+    if (!c) break; // no </pre> anywhere after: the tag pass handles the rest
+    const inner = html.slice(open.lastIndex, c.index);
+    const text = decodeEntities(inner.replace(/<br\s*\/?>/gi, "\n").replace(LOOSE_TAG_RE, ""))
+      .replace(/\r\n?/g, "\n")
+      .replace(/^\n/, "") // the newline right after <pre> is not content, per the spec
+      .trimEnd();
+    blocks.push(text);
+    out += html.slice(last, m.index) + PRE_SLOT(blocks.length - 1);
+    last = open.lastIndex = c.index + c[0].length;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
+
+// A heading ends at its own close or at the next heading tag of ANY level —
+// where a browser ends it too — so a stray </h3> after <h2> cannot drag the
+// article into the heading line.
+const HEADING_OPEN = /<h([1-6])(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
+const HEADING_BOUNDARY = /<\/h[1-6]\s*>|<h[1-6](?=[\s/>])/gi;
+// A permalink anchor whose whole text is a glyph (Sphinx's ¶ or #, or GitHub's
+// icon-only anchor once its SVG is gone). Not part of the title.
+const PERMALINK = /<a\b[^<>]*>\s*(?:¶|#|§|🔗|&para;|&#182;|&#x[bB]6;|&sect;)?\s*<\/a\s*>/gi;
+
+/**
+ * Each closed heading as ONE line, `## text`.
+ *
+ * Emitting the marker at the opening tag and letting the text follow put the
+ * marker on a line of its own whenever a template pretty-printed the heading,
+ * and `nearestHeading` — which needs `## text` — then lost the section title of
+ * every excerpt below it. An unclosed heading is left to the tag pass.
+ */
+function flattenHeadings(html: string): string {
+  let out = "";
+  let last = 0;
+  let m: RegExpExecArray | null;
+  HEADING_OPEN.lastIndex = 0;
+  while ((m = HEADING_OPEN.exec(html))) {
+    HEADING_BOUNDARY.lastIndex = HEADING_OPEN.lastIndex;
+    const b = HEADING_BOUNDARY.exec(html);
+    if (!b) break; // no heading tag of any kind after this one
+    if (b[0][1] !== "/") continue; // the next heading opens first: unclosed
+    const text = html
+      .slice(HEADING_OPEN.lastIndex, b.index)
+      .replace(PERMALINK, "")
+      .replace(TAG_RE, (tag) => (INLINE_TAGS.has(tagName(tag)) ? "" : " "))
+      .replace(/\s+/g, " ")
+      .trim();
+    out += html.slice(last, m.index) + (text ? `\n${"#".repeat(Number(m[1]))} ${text}\n` : "\n");
+    last = HEADING_OPEN.lastIndex = b.index + b[0].length;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
 
 export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): string {
   // Whole-page callers need navigation and footer text even without a main region.
-  let s = dropElements(html, opts.fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS]);
-  s = s.replace(TAG_RE, (tag) => {
-    const name = /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
+  const hidden = opts.fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
+  let s = dropElements(html.includes(NUL) ? html.split(NUL).join("\uFFFD") : html, hidden, RAW_TEXT_ELEMENTS);
+  const pre: string[] = [];
+  s = flattenHeadings(setAsidePre(s, pre));
+  let prevEnd = -1;
+  let prevClosed = false;
+  s = s.replace(TAG_RE, (tag: string, at: number) => {
+    const closing = tag[1] === "/";
+    // Two elements back to back (`</a><a>`): a stylesheet almost always spaces
+    // them apart — tag lists, nav links, breadcrumbs — so they keep a space.
+    const adjacent = at === prevEnd && prevClosed && !closing;
+    prevEnd = at + tag.length;
+    prevClosed = closing;
+    const name = tagName(tag);
     if (/^h[1-6]$/.test(name)) {
-      return tag.startsWith("</") ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
+      return closing ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
     }
     // Break on OPENING block tags too, not only closing ones. Unclosed `<li>` and
     // `<td>` are valid HTML and extremely common, and with closing tags alone a
@@ -684,6 +858,7 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
     // single sentence to anything scoring lines against a question. Headings
     // return above so their markdown markers are never doubled.
     if (BLOCK_TAGS.has(name) || name === "br" || name === "hr") return "\n";
+    if (INLINE_TAGS.has(name)) return adjacent ? " " : "";
     return " ";
   });
   // Malformed attributes must not leave tag markup in the extracted prose.
@@ -692,7 +867,11 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
   s = s.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n");
   return s
     .split("\n")
-    .map((l) => l.trim())
+    .map((l) => {
+      const t = l.trim();
+      const slot = preSlotIndex(t);
+      return slot === undefined ? t : (pre[slot] ?? t);
+    })
     .filter((l) => l.length > 0)
     .join("\n");
 }
@@ -1132,6 +1311,10 @@ export async function fetchAndExtract(
   const title = isHtml ? htmlTitle(res.body) : undefined;
   const canonical = isHtml ? htmlCanonicalUrl(res.body) : undefined;
   const metaDescription = isHtml ? metaDescriptionOf(res.body) : undefined;
+  // A page cut at the response cap still extracts — usually the article comes
+  // first and the megabytes of hydration state after it — but a reader citing
+  // it should know the text may stop short.
+  const cutNote = res.truncated ? `Fetched only the first ${sizeLabel(res.bytesRead ?? res.body.length)} of ${url}; the extract may be incomplete.` : undefined;
   return {
     text: consent.text,
     consentDropped: consent.dropped,
@@ -1141,9 +1324,14 @@ export async function fetchAndExtract(
     ...(opts.keepHtml && isHtml ? { html: res.body } : {}),
     finalUrl: res.url,
     status: res.status,
-    note: firecrawlNote,
+    note: [firecrawlNote, cutNote].filter(Boolean).join(" ") || undefined,
     ...validators,
   };
+}
+
+// "4 MB", "512 KB": a size for a note a person reads.
+function sizeLabel(bytes: number): string {
+  return bytes >= 1024 * 1024 ? `${Math.round(bytes / (1024 * 1024))} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
 // Statuses where the origin is gone/blocked and a live re-fetch will never

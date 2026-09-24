@@ -128,6 +128,69 @@ describe("htmlToText", () => {
     expect(text).not.toContain("var x");
     expect(text).not.toContain("copyright");
   });
+
+  it("keeps a pretty-printed heading's text on its marker line", () => {
+    // Templated HTML puts the text on its own line inside <hN>. The marker used
+    // to land alone ("##"), and nearestHeading — which needs "## text" — lost
+    // the section title for every excerpt under it.
+    expect(htmlToText("<h2>\n      What happens next\n  </h2><p>May.</p>")).toBe("## What happens next\nMay.");
+    expect(htmlToText("<h2>\n  Multi\n  line\n</h2>")).toBe("## Multi line");
+    expect(htmlToText('<h1><span class="mw-page-title-main">Water</span></h1>')).toBe("# Water");
+    expect(htmlToText("<h3>Setup <div>guide</div></h3>")).toBe("### Setup guide");
+  });
+
+  it("drops a permalink glyph from a heading, but not a heading's own '#'", () => {
+    expect(htmlToText('<h2>Options<a class="headerlink" href="#options" title="Permalink">¶</a></h2>')).toBe("## Options");
+    expect(htmlToText('<h2>Options<a class="headerlink" href="#options">#</a></h2>')).toBe("## Options");
+    expect(htmlToText("<h2>Learn C#</h2>")).toBe("## Learn C#");
+  });
+
+  it("ends a heading at the next heading tag, as a browser does", () => {
+    // A mismatched close must not pull the article into the heading line.
+    expect(htmlToText("<h2>Title</h3><p>Body text.</p><h2>Next</h2>")).toBe("## Title\nBody text.\n## Next");
+    expect(htmlToText("<h2>Unclosed<p>Body text.</p>")).toBe("## Unclosed\nBody text.");
+  });
+
+  it("adds no whitespace around inline elements", () => {
+    expect(htmlToText("<p>un<em>believ</em>able</p>")).toBe("unbelievable");
+    expect(htmlToText("<p>H<sub>2</sub>O and g/cm<sup>3</sup></p>")).toBe("H2O and g/cm3");
+    expect(htmlToText('<p>By <a href="/lois">Lois Lane</a>, <time>March 4</time>.</p>')).toBe("By Lois Lane, March 4.");
+    expect(htmlToText("<p><a href='/e'>Earth</a>'s hydrosphere</p>")).toBe("Earth's hydrosphere");
+  });
+
+  it("still separates adjacent inline elements and non-inline tags", () => {
+    expect(htmlToText('<a class="topic-tag">widgets</a><a class="topic-tag">ui</a>')).toBe("widgets ui");
+    expect(htmlToText("<span>Home</span><span>About</span>")).toBe("Home About");
+    expect(htmlToText('left<img src="x.png">right')).toBe("left right");
+  });
+
+  it("keeps <pre> blocks verbatim: indentation, blank lines, highlighted tokens", () => {
+    expect(htmlToText("<pre><code>def f():\n    return 1\n\n\n\nx = 2</code></pre>")).toBe("def f():\n    return 1\n\n\n\nx = 2");
+    const toml =
+      '<p>Example:</p><pre><span class="k">[widget]</span>\n<span class="n">timeout</span> = 60\n\n<span class="k">[widget.proxy]</span>\n<span class="w">    </span><span class="n">url</span> = <span class="s">&quot;http://proxy:3128&quot;</span>\n</pre><p>After.</p>';
+    expect(htmlToText(toml)).toBe('Example:\n[widget]\ntimeout = 60\n\n[widget.proxy]\n    url = "http://proxy:3128"\nAfter.');
+    expect(htmlToText("<pre>\nfirst line<br>second &lt;b&gt;</pre>")).toBe("first line\nsecond <b>");
+    // The page's own NULs cannot pose as the placeholder a <pre> block rides in.
+    expect(htmlToText("<pre>code</pre><p>\u00000\u0000</p>")).toBe("code\n�0�");
+  });
+
+  it("drops an unclosed script or style to the end of the page, as a browser does", () => {
+    // A page cut by the response cap inside a __NEXT_DATA__ blob used to hand
+    // back megabytes of raw JSON as prose.
+    expect(htmlToText("<p>before</p><script>var x = '<p>not</p>';")).toBe("before");
+    expect(htmlToText("<p>before</p><style>.a{content:'<p>not</p>'}")).toBe("before");
+  });
+
+  it("puts definition-list terms and descriptions on their own lines", () => {
+    expect(htmlToText("<dl><dt>Term</dt><dd>Definition</dd><dt>T2</dt><dd>D2</dd></dl>")).toBe("Term\nDefinition\nT2\nD2");
+    expect(htmlToText("<figure><img src=x><figcaption>A cyclist</figcaption></figure>Photo: J. Olsen")).toBe("A cyclist\nPhoto: J. Olsen");
+  });
+
+  it("drops <select> option lists, which are form widgets rather than prose", () => {
+    const html = "<label>Ship to</label><select><option>Afghanistan</option><option>Albania</option></select><p>Free returns.</p>";
+    expect(htmlToText(html)).toBe("Ship to\nFree returns.");
+    expect(htmlToText(html, { fullPage: true })).toBe("Ship to\nFree returns.");
+  });
 });
 
 describe("decodeEntities", () => {
@@ -208,6 +271,24 @@ describe("fetchAndExtract", () => {
     const r = await fetchAndExtract("https://example.com/x");
     expect(r.text).toBe("");
     expect(r.note).toMatch(/Could not fetch/);
+  });
+
+  it("says so when an HTML page was cut at the size cap, and keeps the cut script out of the text", async () => {
+    // A Next.js page whose __NEXT_DATA__ runs past the 4 MB cap: the script
+    // never closes, and its JSON used to come back as megabytes of "prose"
+    // with nothing saying the page was incomplete.
+    const article = `<div class="wrap"><h1>Launch notes</h1><p>${"The release ships a new scheduler. ".repeat(30)}</p></div>`;
+    const body = `<html><body>${article}<script id="__NEXT_DATA__" type="application/json">{"payload":"${"PAYLOADTOKEN ".repeat(420_000)}"}</script></body></html>`;
+    installFetchMock(routes([["x.test/huge", { body, contentType: "text/html" }]]));
+    const r = await fetchAndExtract("https://x.test/huge");
+    expect(r.text).toContain("The release ships a new scheduler.");
+    expect(r.text).not.toContain("PAYLOADTOKEN");
+    expect(r.note).toMatch(/Fetched only the first 4 MB of https:\/\/x\.test\/huge; the extract may be incomplete/);
+  });
+
+  it("adds no truncation note to a page that arrived whole", async () => {
+    installFetchMock(routes([["x.test/small", { body: "<p>whole</p>", contentType: "text/html" }]]));
+    expect((await fetchAndExtract("https://x.test/small")).note).toBeUndefined();
   });
 
   it("extracts a content-type-only PDF (no .pdf in the URL) from the bytes it already has — one download, not two", async () => {
@@ -306,6 +387,11 @@ describe("HTML scans stay linear on hostile markup", () => {
     ["unclosed comment openers", "<!-- x ".repeat(150_000)],
     ["unclosed <svg> openers", "<svg>x ".repeat(150_000)],
     ["an unterminated attribute quote per tag", '<a title="x '.repeat(80_000)],
+    ["unclosed <h2> openers", "<h2>x ".repeat(150_000)],
+    ["headings closed only at the very end", `${"<h2>x ".repeat(150_000)}</h2>`],
+    ["unclosed <pre> openers", "<pre>x ".repeat(150_000)],
+    ["unclosed <script> openers", "<p>a</p><script>x ".repeat(100_000)],
+    ["adjacent inline elements", "<a>x</a>".repeat(150_000)],
   ])("htmlToText: %s", (_label, html) => {
     within(2000, () => htmlToText(html));
   });

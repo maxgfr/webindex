@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import { extractMainHtml, htmlToText, looksLikeJunkExtraction, stripConsentBoilerplate } from "../src/fetch.js";
 import { pdfToText } from "../src/pdf.js";
+import { excerptWindows } from "../src/text.js";
 
 describe("looksLikeJunkExtraction (consent / anti-bot detection)", () => {
   it("flags a short cookie-consent wall", () => {
@@ -157,6 +158,49 @@ describe("extraction on realistic pages", () => {
     const text = extract("news");
     expect(text).toContain("The city council voted");
     expect(text).not.toMatch(/We use cookies|Accept all|Manage preferences|The Daily Planet\. All rights/);
+  });
+
+  it("news page: headings on their marker lines, no space before punctuation", () => {
+    const text = extract("news");
+    expect(text).toContain("# City council approves new bike lanes\n");
+    expect(text).toContain("## What happens next\n");
+    expect(text).toContain("By Lois Lane, March 4, 2025");
+    expect(text).toContain("Councillor Perry White, will cost");
+    expect(text).toContain("along Main Street and River Road, begins in May.");
+    expect(text).not.toMatch(/ ,|^#+$/m);
+    // The section title now reaches the excerpt that sits under it.
+    expect(excerptWindows(text, "when does construction begin on Main Street")[0]?.heading).toBe("What happens next");
+  });
+
+  it("MediaWiki: formulas and links read as rendered", () => {
+    const text = extract("wiki");
+    expect(text).toContain("chemical formula H2O.");
+    expect(text).toContain("odorless,[1] and nearly colorless chemical substance, and");
+    expect(text).toContain("Earth's hydrosphere");
+    expect(text).toContain("0.997 g/cm3");
+  });
+
+  it("Sphinx docs: the code sample keeps its indentation and blank line", () => {
+    const text = extract("docs");
+    expect(text).toContain('retries = 5\n\n[widget.proxy]\n    url = "http://proxy:3128"');
+    expect(text).toContain("# Configuration\n");
+    expect(text).toContain("## Options\n");
+    expect(text).toContain("timeout\nSeconds before a request is abandoned. Defaults to 30.");
+    expect(text).not.toContain("¶");
+  });
+
+  it("GitHub README: highlighted code reads as code, topics stay apart", () => {
+    const text = extract("readme");
+    expect(text).toContain('import { widget } from "widget";\n\nconst w = widget({\n  size: 3,\n  color: "red",\n});');
+    expect(text).toContain("widgets ui");
+    expect(text).toContain("Supports Node 18+ and every evergreen browser.");
+  });
+
+  it("shop page: no option lists, and spec terms apart from their values", () => {
+    const text = extract("product");
+    expect(text).toContain("The Trail Runner 3 is built for technical terrain.");
+    expect(text).toContain("Stack height\n30 mm / 24 mm");
+    expect(text).not.toMatch(/Afghanistan|Bolivia|EU 44/);
   });
 
   it("MediaWiki: the article body under role=main, without the side panel", () => {
