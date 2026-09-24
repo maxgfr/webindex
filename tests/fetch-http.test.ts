@@ -438,6 +438,29 @@ describe("cache validators and throttling signals", () => {
     expect(ms).toBeLessThanOrEqual(5000);
   });
 
+  it("does not retry through a Retry-After longer than it is willing to wait, and reports the real value", async () => {
+    // Retrying after 5 s knowingly sent a request the server had said not to
+    // send for an hour, and the clamped 5000 hid the hour from every caller.
+    const spy = installFetchMock(() => ({ status: 429, body: "", headers: { "retry-after": "3600" } }));
+    const r = await httpGet("https://api.test/limited", { retries: 2 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(r).toMatchObject({ ok: false, status: 429, rateLimited: true, retryAfterMs: 3_600_000 });
+  });
+
+  it("still waits out a short Retry-After and tries again", async () => {
+    let calls = 0;
+    installFetchMock(() => (++calls === 1 ? { status: 503, body: "", headers: { "retry-after": "0" } } : { body: "back" }));
+    expect(await httpGet("https://api.test/busy", { retries: 1 })).toMatchObject({ ok: true, body: "back" });
+    expect(calls).toBe(2);
+  });
+
+  it("carries the throttle up through fetchAndExtract so a caller can back off", async () => {
+    installFetchMock(() => ({ status: 429, body: "", headers: { "retry-after": "3600" } }));
+    const r = await fetchAndExtract("https://api.test/limited");
+    expect(r).toMatchObject({ text: "", status: 429, rateLimited: true, retryAfterMs: 3_600_000 });
+    expect(r.note).toMatch(/rate-limited \(HTTP 429, retry after 3600 s\)/);
+  });
+
   it("detectRateLimited separates an exhausted quota from a plain refusal", () => {
     expect(detectRateLimited(429, new Headers())).toBe(true);
     expect(detectRateLimited(403, new Headers({ "x-ratelimit-remaining": "0" }))).toBe(true);

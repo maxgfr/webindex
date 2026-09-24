@@ -107,7 +107,7 @@ export interface HttpResult {
   lastModified?: string;
   /** True on an explicit 429, or a 403 that carries an exhausted quota header. */
   rateLimited?: boolean;
-  /** Retry-After, parsed and capped, when the server sent one. */
+  /** Retry-After in ms, when the server sent one — its own number, not capped to what httpGet waits out. */
   retryAfterMs?: number;
 }
 
@@ -142,10 +142,17 @@ export function parseRetryAfter(headers: Headers, capMs = 5000): number | undefi
   return undefined;
 }
 
-// How long to wait before a retry: honor Retry-After (seconds or HTTP-date)
-// clamped to 5s, else a small fixed backoff.
-function retryDelayMs(headers: Headers): number {
-  return parseRetryAfter(headers) ?? defaultRetryMs();
+// The longest Retry-After a request waits out itself before trying again.
+const RETRY_AFTER_CAP_MS = 5000;
+
+// How long to wait before a retry: the server's Retry-After (seconds or
+// HTTP-date), else a small fixed backoff. Undefined — do not retry — when the
+// server asked for longer than the cap. Retrying after 5 s anyway knowingly
+// sent the request it had been told not to send for an hour; the caller gets
+// the real ask in `retryAfterMs` instead, for a queue (crawlSite) to honour.
+function retryDelayMs(retryAfterMs: number | undefined): number | undefined {
+  if (retryAfterMs === undefined) return defaultRetryMs();
+  return retryAfterMs <= RETRY_AFTER_CAP_MS ? retryAfterMs : undefined;
 }
 
 // Total attempts for a call: the caller's `retries` (extra tries on top of the
@@ -372,7 +379,7 @@ export async function httpGet(
         etag: res.headers.get("etag") ?? undefined,
         lastModified: res.headers.get("last-modified") ?? undefined,
         rateLimited: detectRateLimited(res.status, res.headers),
-        retryAfterMs: parseRetryAfter(res.headers),
+        retryAfterMs: parseRetryAfter(res.headers, Number.POSITIVE_INFINITY),
       };
       const max = opts.maxBytes ?? (isBinaryDocument(meta.contentType) ? opts.maxDocumentBytes : undefined) ?? DEFAULT_MAX_RESPONSE_BYTES;
 
@@ -410,9 +417,10 @@ export async function httpGet(
         truncated,
         ...meta,
       };
-      if (RETRY_STATUS.has(res.status) && attempt < attempts - 1) {
+      const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(meta.retryAfterMs) : undefined;
+      if (wait !== undefined) {
         last = result;
-        await sleep(retryDelayMs(res.headers));
+        await sleep(wait);
         continue;
       }
       return result;
@@ -496,9 +504,10 @@ export async function httpJson(
         data = text;
       }
       const result = { ok: res.ok, status: res.status, data, bytesRead, truncated };
-      if (RETRY_STATUS.has(res.status) && attempt < attempts - 1) {
+      const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(parseRetryAfter(res.headers, Number.POSITIVE_INFINITY)) : undefined;
+      if (wait !== undefined) {
         last = result;
-        await sleep(retryDelayMs(res.headers));
+        await sleep(wait);
         continue;
       }
       return result;
@@ -886,6 +895,14 @@ export interface ExtractResult {
   // origin validators — an entry written there simply re-downloads when stale.
   etag?: string;
   lastModified?: string;
+  /** On a failed fetch: the origin throttled it (429, or a 403 with an exhausted quota). */
+  rateLimited?: boolean;
+  /**
+   * On a failed fetch: how long the origin asked callers to wait (its
+   * Retry-After, in ms), so a caller with a queue can back the whole host off
+   * rather than learn the same answer once per URL.
+   */
+  retryAfterMs?: number;
 }
 
 // Fetch a URL and return its readable text + a title. HTML goes to Firecrawl
@@ -962,7 +979,10 @@ export async function fetchAndExtract(
   // once wearing a browser UA before giving up — but only for a brand that had
   // actually chosen the polite one, since retrying a browser UA with the same
   // browser UA is a wasted round-trip. A 304 is a success and never lands here.
-  if (!res.ok && brand().defaultUa === "contact" && (res.status === 403 || res.status === 429)) {
+  // A server that named a wait longer than httpGet would sleep through meant
+  // it, whatever the UA; asking again at once would be ducking the limit.
+  const toldToWait = (res.retryAfterMs ?? 0) > RETRY_AFTER_CAP_MS;
+  if (!res.ok && !toldToWait && brand().defaultUa === "contact" && (res.status === 403 || res.status === 429)) {
     res = await httpGet(url, { ...fetchOpts, userAgent: browserUa(), acceptLanguage: opts.acceptLanguage ?? "en-US,en;q=0.9" });
   }
   // 304 is a SUCCESS with no body: the caller sent validators and the origin
@@ -972,8 +992,16 @@ export async function fetchAndExtract(
     return { text: "", finalUrl: res.url, status: 304, etag: res.etag ?? opts.headers?.["if-none-match"], lastModified: res.lastModified };
   }
   if (!res.ok) {
-    const why = res.status === 429 ? "rate-limited (HTTP 429)" : `status ${res.status}${res.error ? ", " + res.error : ""}`;
-    return { text: "", finalUrl: res.url, status: res.status, note: `Could not fetch ${url} (${why}).` };
+    const wait = res.retryAfterMs !== undefined ? `, retry after ${Math.ceil(res.retryAfterMs / 1000)} s` : "";
+    const why = res.status === 429 ? `rate-limited (HTTP 429${wait})` : `status ${res.status}${res.error ? ", " + res.error : ""}${wait}`;
+    return {
+      text: "",
+      finalUrl: res.url,
+      status: res.status,
+      note: `Could not fetch ${url} (${why}).`,
+      ...(res.rateLimited ? { rateLimited: true } : {}),
+      ...(res.retryAfterMs !== undefined ? { retryAfterMs: res.retryAfterMs } : {}),
+    };
   }
   // Only materialised when the origin actually sent one, so an entry written for
   // a validator-less server keeps exactly the shape it had before.

@@ -154,6 +154,11 @@ unknown verdict in that case. Document MIME types receive the 16 MB extraction
 budget even when the URL has no file extension, and explicit HTTP byte limits
 remain authoritative.
 
+A `Retry-After` of up to 5 s is waited out and retried once; a longer one is
+not slept through and not retried early — the call returns at once with the
+server's own `retryAfterMs` (and `rateLimited`), which `fetchAndExtract` carries
+on its result and `crawlSite` turns into a back-off for the whole host.
+
 The crawler checks its origin and robots restrictions before each redirected
 request, including sitemap requests, and resolves links against the final URL.
 The origin boundary also applies to robots.txt redirects.
