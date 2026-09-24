@@ -400,6 +400,14 @@ describe("the byte cap is a cap on the download, not on the value", () => {
     expect(produced).toBe(0); // not a single byte of body was pulled
   });
 
+  it("refuses an over-long answer to a Range request unread, since the range was ignored", async () => {
+    let produced = 0;
+    installFetchMock(() => ({ body: "z".repeat(8192), headers: { "content-length": "8192" }, onPull: (n) => void (produced += n) }));
+    const r = await httpGet("https://huge.test/tail", { maxBytes: 1024, headers: { Range: "bytes=-1024" } });
+    expect(r).toMatchObject({ ok: false, truncated: true });
+    expect(produced).toBe(0);
+  });
+
   it("reads the capped prefix of a text body whatever its Content-Length says", async () => {
     // The same page used to fail outright with a Content-Length and come back
     // as a prefix when chunked — readable or not on an irrelevant header.

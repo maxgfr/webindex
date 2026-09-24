@@ -150,7 +150,8 @@ The CLI and MCP fetch tool do not automatically substitute an archived page.
 
 `httpGet` reports `bytesRead` and `truncated` for capped responses. A text body
 over the cap is read as its capped prefix whether or not the server declared its
-length — only a document declared over its cap is refused unread — and
+length — only a document, or the answer to a Range request, declared over its
+cap is refused unread — and
 `fetchAndExtract` marks such a prefix with `truncated: true` and a note. A truncated
 body cannot establish a complete content fingerprint; `hasChanged` returns an
 unknown verdict in that case. Document MIME types receive the 16 MB extraction

@@ -383,14 +383,16 @@ export async function httpGet(
       };
       const max = opts.maxBytes ?? (isBinaryDocument(meta.contentType) ? opts.maxDocumentBytes : undefined) ?? DEFAULT_MAX_RESPONSE_BYTES;
 
-      // Refuse a document the server has already declared too big, before a
-      // single byte of it is read. Not retried: the size will be the same next
-      // time. Only a document, because only a document is useless as a prefix:
-      // a text body reads its capped prefix below, exactly as it does when the
-      // same bytes arrive chunked — whether a long article is readable must not
-      // depend on whether the server sent a Content-Length.
+      // Refuse a body the server has already declared too big, before a single
+      // byte of it is read, when its prefix is useless: a document, or the
+      // answer to a Range request (declared that large, the range was ignored
+      // and the prefix is not the part asked for). Not retried: the size will
+      // be the same next time. Any other text body reads its capped prefix
+      // below, exactly as it does when the same bytes arrive chunked — whether
+      // a long article is readable must not depend on a Content-Length.
       const declared = Number(res.headers.get("content-length"));
-      if (Number.isFinite(declared) && declared > max && (opts.binary || isBinaryDocument(meta.contentType))) {
+      const prefixUseless = opts.binary || isBinaryDocument(meta.contentType) || Object.keys(opts.headers ?? {}).some((k) => k.toLowerCase() === "range");
+      if (Number.isFinite(declared) && declared > max && prefixUseless) {
         ctrl.abort();
         return { ok: false, status: res.status, body: "", bytesRead: 0, truncated: true, ...meta, error: `response too large: ${declared} bytes > ${max} cap` };
       }
