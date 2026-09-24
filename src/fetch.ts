@@ -3,14 +3,18 @@ import { decodeBody } from "./charset.js";
 import { decodeEntities } from "./entities.js";
 import {
   BLOCK_TAGS,
+  balancedRegions,
   CHROME_ELEMENTS,
+  CHROME_ROLES,
   closeTagRe,
   dropElements,
+  dropLandmarks,
   HIDDEN_ELEMENTS,
   htmlAttributes,
   INLINE_TAGS,
   LOOSE_TAG_RE,
   RAW_TEXT_ELEMENTS,
+  type Region,
   TAG_RE,
   tagName,
 } from "./html.js";
@@ -667,6 +671,9 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
   // Whole-page callers need navigation and footer text even without a main region.
   const hidden = opts.fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
   let s = dropElements(html.includes(NUL) ? html.split(NUL).join("\uFFFD") : html, hidden, RAW_TEXT_ELEMENTS);
+  // The same chrome marked up as ARIA landmarks: a breadcrumb, a wiki's table
+  // of contents, a docs theme's prev/next bar.
+  if (!opts.fullPage) s = dropLandmarks(s, CHROME_ROLES);
   const pre: string[] = [];
   s = flattenHeadings(setAsidePre(s, pre));
   let prevEnd = -1;
@@ -801,41 +808,6 @@ function absoluteCanonical(href: string | undefined, base: string): string | und
 // input unchanged, so we never extract LESS than the previous behaviour. The
 // strongest matching tier wins: <main> or role="main", then <article>, then
 // common content containers.
-
-interface Region {
-  /** Just past the opening tag. */
-  start: number;
-  /** At the matching close tag. */
-  end: number;
-  /** The opening tag itself. */
-  open: string;
-}
-
-/**
- * Every `<tag>` element whose opening tag passes `isCandidate`, as the span
- * between its opening tag and its MATCHING close.
- *
- * One pass with a stack: push on open, pop on close. A lazy `[\s\S]*?</tag>`
- * truncates a container at its first nested close, and re-scanning forward from
- * each candidate to balance it by hand costs a pass per candidate — quadratic
- * on a page of thousands of unclosed ones. An element that never closes yields
- * no region.
- */
-function balancedRegions(html: string, tag: string, isCandidate: (open: string) => boolean): Region[] {
-  const re = new RegExp(`<${tag}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>|</${tag}\\s*>`, "gi");
-  const stack: { start: number; open?: string }[] = [];
-  const out: Region[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html))) {
-    if (m[0][1] === "/") {
-      const top = stack.pop();
-      if (top?.open) out.push({ start: top.start, end: m.index, open: top.open });
-    } else {
-      stack.push({ start: re.lastIndex, open: isCandidate(m[0]) ? m[0] : undefined });
-    }
-  }
-  return out;
-}
 
 // Length of the text a reader would see: tags out, whitespace collapsed.
 const visibleLength = (h: string) =>

@@ -175,6 +175,75 @@ export function dropElements(html: string, names: readonly string[], toEof: Read
   return last === 0 ? html : out + html.slice(last);
 }
 
+export interface Region {
+  /** Just past the opening tag. */
+  start: number;
+  /** At the matching close tag. */
+  end: number;
+  /** At the opening tag. */
+  from: number;
+  /** Just past the matching close tag. */
+  to: number;
+  /** The opening tag itself. */
+  open: string;
+}
+
+/**
+ * Every `<tag>` element whose opening tag passes `isCandidate`, as the span
+ * between its opening tag and its MATCHING close.
+ *
+ * One pass with a stack: push on open, pop on close. A lazy `[\s\S]*?</tag>`
+ * truncates a container at its first nested close, and re-scanning forward from
+ * each candidate to balance it by hand costs a pass per candidate — quadratic
+ * on a page of thousands of unclosed ones. An element that never closes yields
+ * no region.
+ */
+export function balancedRegions(html: string, tag: string, isCandidate: (open: string) => boolean): Region[] {
+  const re = new RegExp(`<${tag}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>|</${tag}\\s*>`, "gi");
+  const stack: { start: number; from: number; open?: string }[] = [];
+  const out: Region[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    if (m[0][1] === "/") {
+      const top = stack.pop();
+      if (top?.open) out.push({ start: top.start, end: m.index, from: top.from, to: re.lastIndex, open: top.open });
+    } else {
+      stack.push({ start: re.lastIndex, from: m.index, open: isCandidate(m[0]) ? m[0] : undefined });
+    }
+  }
+  return out;
+}
+
+/**
+ * Remove every element whose ARIA `role` is one of `roles`, content and all.
+ *
+ * The names of the elements carrying such a role are found first, then each
+ * name is balanced in one stack pass, so a `<div role="navigation">` holding
+ * nested divs ends at its own close. Where such elements nest, the outermost
+ * goes. One whose close never comes is left in place: guessing where it ends
+ * could take the article with it.
+ */
+export function dropLandmarks(html: string, roles: readonly string[]): string {
+  const role = `\\srole\\s*=\\s*["']?(?:${roles.join("|")})(?=["'\\s/>])`;
+  const hasRole = new RegExp(role, "i");
+  const names = new Set<string>();
+  for (const m of html.matchAll(new RegExp(`<([a-zA-Z][a-zA-Z0-9-]*)(?=[\\s/>])[^<>]*${role}`, "gi"))) names.add(m[1]!.toLowerCase());
+  if (!names.size) return html;
+  const regions = [...names].flatMap((name) => balancedRegions(html, name, (open) => hasRole.test(open))).sort((a, b) => a.from - b.from);
+  let out = "";
+  let last = 0;
+  for (const r of regions) {
+    if (r.from < last) continue; // inside one already dropped
+    out += `${html.slice(last, r.from)} `;
+    last = r.to;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
+
+// ARIA landmarks that mark page chrome, as <nav> and <footer> do by name: the
+// site's navigation, its header and its footer.
+export const CHROME_ROLES: readonly string[] = ["navigation", "banner", "contentinfo"];
+
 // Never prose, whatever the page: dropped with everything inside. A <select>'s
 // options are a form widget — a size picker, a list of every country — and
 // read as a run-on sentence of noise.

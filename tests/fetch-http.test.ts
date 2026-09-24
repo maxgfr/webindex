@@ -193,6 +193,17 @@ describe("htmlToText", () => {
     expect(htmlToText(html)).toBe("Ship to\nFree returns.");
     expect(htmlToText(html, { fullPage: true })).toBe("Ship to\nFree returns.");
   });
+
+  it("drops navigation, banner and contentinfo landmarks as it drops <nav> and <footer>", () => {
+    // A breadcrumb, a wiki's table of contents, a docs theme's prev/next bar:
+    // marked up as ARIA landmarks rather than <nav>, and read as prose.
+    const html =
+      '<div role="banner"><a>Site</a></div><div class="crumbs" role="navigation"><ul><li><a>Docs</a> »</li><li><div>Configuration</div></li></ul></div><p>Body text.</p><div role="contentinfo">© Site</div>';
+    expect(htmlToText(html)).toBe("Body text.");
+    expect(htmlToText(html, { fullPage: true })).toContain("Configuration");
+    // An article's own <header> and a role on something else stay.
+    expect(htmlToText('<article><header><h1>Title</h1></header><p role="note">Kept.</p></article>')).toBe("# Title\nKept.");
+  });
 });
 
 describe("decodeEntities", () => {
@@ -515,6 +526,8 @@ describe("HTML scans stay linear on hostile markup", () => {
     ["unclosed <pre> openers", "<pre>x ".repeat(150_000)],
     ["unclosed <script> openers", "<p>a</p><script>x ".repeat(100_000)],
     ["adjacent inline elements", "<a>x</a>".repeat(150_000)],
+    ["unclosed navigation landmarks", '<div role="navigation"><p>x</p>'.repeat(50_000)],
+    ["nested navigation landmarks", `${'<div role="navigation"><div>x'.repeat(20_000)}${"</div>".repeat(40_000)}`],
     ["a heading anchor holding a long run of whitespace", `<h2><a href="#x">${" ".repeat(300_000)}x</a></h2>`],
   ])("htmlToText: %s", (_label, html) => {
     within(2000, () => htmlToText(html));

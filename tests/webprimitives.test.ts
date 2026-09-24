@@ -449,6 +449,13 @@ describe("structured metadata", () => {
     expect(extractJsonLd(html)).toEqual([]);
     expect(performance.now() - started).toBeLessThan(2000);
   });
+
+  it("reads meta tags in linear time on a page of unterminated ones", () => {
+    // `<meta ` x 40k (240 KB) took 4 s: each opener read to the end of the page.
+    const started = performance.now();
+    expect(pageMetadata(`${"<meta ".repeat(40_000)}${'<meta content="x ">'.repeat(20_000)}`).authors).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
 });
 
 describe("feeds", () => {
