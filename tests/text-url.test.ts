@@ -133,6 +133,22 @@ describe("keywords", () => {
   it("deduplicates case-insensitively while keeping the original spelling", () => {
     expect(keywords("Retry retry RETRY")).toEqual(["Retry"]);
   });
+
+  it("keeps the distinctive term in C++, C#, .NET and HTTP/2", () => {
+    // Splitting on every non-letter left the question without its subject, and
+    // rankedKeywords fed narrow search APIs the rest.
+    expect(keywords("What is the C++ equivalent of Python's list comprehension?")).toContain("C++");
+    expect(keywords("How to use C# async/await?")).toContain("C#");
+    expect(keywords("What is .NET 8?")).toContain(".NET");
+    expect(keywords("Is HTTP/2 multiplexing faster than HTTP/1.1?")).toEqual(expect.arrayContaining(["HTTP/2", "HTTP/1.1", "multiplexing"]));
+    // A '+' between words is still a separator.
+    expect(keywords("a+b tuning")).toEqual(["tuning"]);
+  });
+
+  it("drops 'vs' and German question scaffolding", () => {
+    expect(keywords("node.js vs deno performance")).not.toContain("vs");
+    expect(keywords("Wie funktioniert die Datenschutz-Grundverordnung?")).toEqual(["funktioniert", "Datenschutz", "Grundverordnung"]);
+  });
 });
 
 describe("rankedKeywords", () => {
@@ -170,6 +186,32 @@ describe("buildMatcher", () => {
   it("counts each keyword once, however many variants hit", () => {
     const m = buildMatcher("retry");
     expect(m.matchLine("retry retry retries").size).toBe(1);
+  });
+
+  it("matches a short keyword as a word, not inside one", () => {
+    // "go" hit "algorithm" and "Google", and every such line outscored the
+    // passage that answered the question.
+    const m = buildMatcher("Go generics");
+    expect(m.matchLine("a sorting algorithm").size).toBe(0);
+    expect(m.matchLine("Google announced it").size).toBe(0);
+    expect(m.matchLine("Go 1.18 added type parameters").size).toBe(1);
+    expect(m.matchLine("go1.18 release notes").size).toBe(1);
+    expect(buildMatcher("js api").matchLine("parse json with jsonapi").size).toBe(0);
+    expect(buildMatcher("js api").matchLine("the JS APIs").size).toBe(2);
+  });
+
+  it("matches C++ and C# as written", () => {
+    expect(buildMatcher("C++ templates").matchLine("templates in C++20").size).toBe(2);
+    expect(buildMatcher("C# records").matchLine("C# 9 introduced records").size).toBe(2);
+    expect(buildMatcher("C# records").matchLine("CSS records").size).toBe(1);
+  });
+
+  it("folds the œ, æ and ß ligatures both ways", () => {
+    expect(buildMatcher("cœur réforme").matchLine("le coeur de la reforme").size).toBe(2);
+    expect(buildMatcher("coeur").matchLine("le cœur").size).toBe(1);
+    expect(buildMatcher("straße").matchLine("Strasse 5").size).toBe(1);
+    expect(buildMatcher("strasse").matchLine("Straße 5").size).toBe(1);
+    expect(buildMatcher("encyclopaedia").matchLine("encyclopædia").size).toBe(1);
   });
 });
 

@@ -168,6 +168,38 @@ const STOPWORDS = new Set([
   "aux",
   "si",
   "ne",
+  "vs",
+  // German question scaffolding: the locale layer targets DE as well as FR.
+  "der",
+  "die",
+  "das",
+  "und",
+  "ist",
+  "sind",
+  "wie",
+  "ein",
+  "eine",
+  "einen",
+  "einem",
+  "einer",
+  "mit",
+  "für",
+  "von",
+  "zu",
+  "den",
+  "dem",
+  "im",
+  "auf",
+  "nicht",
+  "sich",
+  "oder",
+  "warum",
+  "wann",
+  "welche",
+  "welcher",
+  "welches",
+  "kann",
+  "wird",
 ]);
 
 /**
@@ -190,11 +222,16 @@ export function isStopword(term: string): boolean {
   return extra ? extra.some((w) => w.toLowerCase() === t) : false;
 }
 
+// One question token: a run of letters, digits and underscores. Splitting on
+// everything else took the subject out of "C++", "C#", ".NET" and "HTTP/2",
+// so a run keeps a trailing `+`/`#` pair (C++, C#, F#, C++20), a `/2` or
+// `/1.1` version, and .NET its leading dot.
+const TOKEN_RE = /(?<![\p{L}\p{N}_])\.net(?![\p{L}\p{N}_])|[\p{L}\p{N}_]+(?:[+#]{1,2}\d*(?![\p{L}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{N}_./]))?/giu;
+
 export function keywords(question: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const raw of question.split(/[^\p{L}\p{N}_]+/u)) {
-    if (!raw) continue;
+  for (const [raw] of question.matchAll(TOKEN_RE)) {
     const lower = raw.toLowerCase();
     if (raw.length < 2) continue;
     if (isStopword(lower)) continue;
@@ -337,11 +374,35 @@ export function expandTokens(tokens: string[], max = 8): ExpandedKeyword[] {
   return [...byCanonical.values()];
 }
 
+// Ligatures a writer spells either way — "cœur"/"coeur", "Straße"/"Strasse",
+// "encyclopædia"/"encyclopaedia" — which no accent class can express, since
+// one side is two letters.
+const LIGATURE_SPELLING: Record<string, string> = { œ: "oe", æ: "ae", ß: "ss" };
+const LIGATURE_OF: Record<string, string> = { oe: "œ", ae: "æ", ss: "ß" };
+
+function charPattern(ch: string): string {
+  const cls = ACCENT_CLASSES[baseChar(ch)];
+  return cls ? `[${cls}]` : escapeRegExp(ch);
+}
+
 export function accentPattern(text: string): string {
+  const chars = [...text];
   let out = "";
-  for (const ch of text) {
-    const cls = ACCENT_CLASSES[baseChar(ch)];
-    out += cls ? `[${cls}]` : escapeRegExp(ch);
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i]!;
+    const spelled = LIGATURE_SPELLING[ch.toLowerCase()];
+    if (spelled) {
+      out += `(?:${escapeRegExp(ch)}|${charPattern(spelled[0]!)}${charPattern(spelled[1]!)})`;
+      continue;
+    }
+    const next = chars[i + 1];
+    const ligature = next && LIGATURE_OF[(ch + next).toLowerCase()];
+    if (ligature) {
+      out += `(?:${charPattern(ch)}${charPattern(next)}|${ligature})`;
+      i++;
+      continue;
+    }
+    out += charPattern(ch);
   }
   return out;
 }
@@ -364,19 +425,35 @@ export interface KeywordMatcher {
   matchLine(line: string): Set<string>;
 }
 
-function makeMatcher(expanded: ExpandedKeyword[]): KeywordMatcher {
-  const regexes: { re: RegExp; canonical: string }[] = [];
-  for (const ek of expanded) {
-    for (const v of ek.variants) {
-      regexes.push({ re: new RegExp(accentPattern(v.text), "i"), canonical: ek.canonical });
+// A keyword this short matches inside unrelated words — "go" in "algorithm"
+// and "Google", "js" in "json" — and every such line outscored the passage
+// that answered the question. So it must stand as a word: no letter or digit
+// before it, no letter after it but a plural "s" (a digit may follow: "go1.18",
+// "C++20").
+const SHORT_VARIANT = 3;
+
+function lineRegex(source: string, text: string): RegExp {
+  if ([...text].length <= SHORT_VARIANT) {
+    try {
+      return new RegExp(`(?<![\\p{L}\\p{N}])(?:${source})s?(?!\\p{L})`, "iu");
+    } catch {
+      /* a caller's raw token that is no valid Unicode-mode pattern: match it as before */
     }
   }
-  const patterns = expanded.flatMap((ek) => ek.variants.map((v) => ({ source: accentPattern(v.text), canonical: ek.canonical })));
+  return new RegExp(source, "i");
+}
+
+function makeMatcher(expanded: ExpandedKeyword[]): KeywordMatcher {
+  const variants = expanded.flatMap((ek) => ek.variants.map((v) => ({ text: v.text, source: accentPattern(v.text), canonical: ek.canonical })));
+  const regexes = variants.map(({ text, source, canonical }) => ({ re: lineRegex(source, text), canonical }));
+  // Compiled once, not per call: canonicalOf runs per span an external scanner
+  // reports, and compiling a pattern each time was 20x the matching.
+  const anchored = variants.map(({ source, canonical }) => ({ re: new RegExp(`^(?:${source})$`, "i"), canonical }));
   return {
     expanded,
     canonicals: expanded.map((e) => e.canonical),
-    patterns,
-    canonicalOf: (span) => regexes.find(({ re }) => new RegExp(`^(?:${re.source})$`, "i").test(span))?.canonical,
+    patterns: variants.map(({ source, canonical }) => ({ source, canonical })),
+    canonicalOf: (span) => anchored.find(({ re }) => re.test(span))?.canonical,
     matchLine: (line) => {
       const hit = new Set<string>();
       for (const { re, canonical } of regexes) {
