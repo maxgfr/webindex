@@ -405,6 +405,10 @@ describe("structured metadata", () => {
     });
     // Without a base, a relative URL is reported as written rather than guessed.
     expect(pageMetadata(html).canonicalUrl).toBe("/real");
+    // What resolves to no web address is not reported as one.
+    expect(pageMetadata('<link rel="canonical" href="javascript:void(0)">', { baseUrl: "https://x.test/" })).not.toHaveProperty("canonicalUrl");
+    // A news publisher's Organization subtype still names the site.
+    expect(pageMetadata(ld({ "@type": "NewsMediaOrganization", name: "The Planet" })).siteName).toBe("The Planet");
   });
 
   it("keeps every author a page lists in its own tag", () => {

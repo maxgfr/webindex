@@ -278,14 +278,14 @@ export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): Pag
     set("siteName", names(n.publisher)[0]);
     if (!out.authors.length) out.authors.push(...new Set(names(n.author)));
   }
-  const nameOfA = (type: string) => nodes.filter((n) => typesOf(n).includes(type)).flatMap((n) => names(n.name))[0];
+  const nameOfA = (...types: string[]) => nodes.filter((n) => typesOf(n).some((t) => types.includes(t))).flatMap((n) => names(n.name))[0];
   set("siteName", nameOfA("WebSite"));
 
   set("title", meta.get("og:title") ?? meta.get("twitter:title"));
   set("description", meta.get("og:description") ?? meta.get("description") ?? meta.get("twitter:description"));
   set("type", meta.get("og:type"));
   set("siteName", meta.get("og:site_name"));
-  set("siteName", nameOfA("Organization"));
+  set("siteName", nameOfA("Organization", "NewsMediaOrganization", "Corporation"));
   set("publishedAt", meta.get("article:published_time") ?? meta.get("datepublished") ?? meta.get("citation_publication_date"));
   set("modifiedAt", meta.get("article:modified_time") ?? meta.get("datemodified"));
   set("imageUrl", meta.get("og:image") ?? meta.get("twitter:image"));
@@ -299,15 +299,18 @@ export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): Pag
   set("title", htmlTitle(html));
 
   if (opts.baseUrl) {
-    out.canonicalUrl = resolveUrl(out.canonicalUrl, opts.baseUrl);
-    out.imageUrl = resolveUrl(out.imageUrl, opts.baseUrl);
+    for (const k of ["canonicalUrl", "imageUrl"] as const) {
+      if (out[k] === undefined) continue;
+      const abs = resolveUrl(out[k], opts.baseUrl);
+      if (abs) out[k] = abs;
+      else delete out[k];
+    }
   }
   return out;
 }
 
 /** `url` made absolute against `base`; undefined when that yields no http(s) URL. */
-function resolveUrl(url: string | undefined, base: string): string | undefined {
-  if (!url) return undefined;
+function resolveUrl(url: string, base: string): string | undefined {
   try {
     const abs = new URL(url, base);
     return abs.protocol === "http:" || abs.protocol === "https:" ? abs.href : undefined;
