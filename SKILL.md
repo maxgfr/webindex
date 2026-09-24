@@ -62,6 +62,7 @@ boundaries and a concrete MCP example.
 ```
 webindex search <query> [--engine ddg|ddglite|mojeek|off] [--limit n] [--lang tag]
 webindex fetch <url> [--full-page]    # HTML main content, consent banners dropped; --full-page keeps all page text via the built-in reader
+webindex fetch <url> --cache          # reuse a fresh copy for the TTL, revalidate a stale one (a 304 when unchanged); --refresh, --offline
 webindex extract <file> [--full-page] # the same on disk; --full-page keeps navigation and consent banners too
 webindex rank --query <q> --docs <f> # BM25F + near-dup collapse + MMR
 webindex repo|issues|prs|releases <ref>

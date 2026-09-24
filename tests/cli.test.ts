@@ -11,6 +11,7 @@ import { STACK_SERVICES } from "../src/stack.js";
 import { installFetchMock, routes } from "./fetchmock.js";
 import { envName } from "../src/brand.js";
 import { resetOllamaProbe } from "../src/embed.js";
+import { resetCacheMode } from "../src/cache.js";
 
 // Every stack service the engine knows, except `all` — the CLI spells that one
 // `stack`. Derived rather than typed out, because a hand-written list is exactly
@@ -45,6 +46,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  // `fetch --refresh/--offline` set process-wide cache switches.
+  resetCacheMode();
   rmSync(dir, { recursive: true, force: true });
 });
 afterAll(() => vi.restoreAllMocks());
@@ -353,6 +356,56 @@ describe("fetch argument handling", () => {
     }
   });
 
+  it("reuses a cached page only when asked to with --cache", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "cache");
+    const spy = installFetchMock(routes([["x.test/page", { body: articlePage(), contentType: "text/html" }]]));
+    try {
+      expect(await run(["fetch", "https://x.test/page"])).toBe(0);
+      expect(await run(["fetch", "https://x.test/page"])).toBe(0);
+      expect(spy).toHaveBeenCalledTimes(2); // opt-in: no flag, no cache
+      expect(await run(["fetch", "https://x.test/page", "--cache"])).toBe(0);
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--cache", "--json"])).toBe(0);
+      expect(spy).toHaveBeenCalledTimes(3);
+      expect(JSON.parse(stdout())).toMatchObject({ cached: true });
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--refresh", "--json"])).toBe(0);
+      expect(spy).toHaveBeenCalledTimes(4);
+      expect(JSON.parse(stdout())).toMatchObject({ cached: false });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("serves only what the cache holds with --offline", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "cache");
+    const spy = installFetchMock(routes([["x.test/page", { body: articlePage(), contentType: "text/html" }]]));
+    try {
+      expect(await run(["fetch", "https://x.test/other", "--offline"])).toBe(1);
+      expect(stderr()).toMatch(/not in the cache/);
+      expect(spy).not.toHaveBeenCalled();
+      expect(await run(["fetch", "https://x.test/page", "--cache"])).toBe(0);
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--offline"])).toBe(0);
+      expect(stdout()).toContain("Token buckets");
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(await run(["fetch", "https://x.test/page", "--offline", "--refresh"])).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("says where the text came from after redirects, and what the page calls itself", async () => {
+    const body = `<html><head><link rel="canonical" href="https://x.test/canonical"></head><body>${articlePage()}</body></html>`;
+    installFetchMock(() => ({ body, contentType: "text/html", url: "https://x.test/final" }));
+    try {
+      expect(await run(["fetch", "https://x.test/start", "--json"])).toBe(0);
+      expect(JSON.parse(stdout())).toMatchObject({ url: "https://x.test/start", finalUrl: "https://x.test/final", canonical: "https://x.test/canonical" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("refuses a --timeout that is not a positive whole number", async () => {
     expect(await run(["fetch", "https://x.test/page", "--timeout", "0"])).toBe(2);
     expect(await run(["fetch", "https://x.test/page", "--timeout", "soon"])).toBe(2);
@@ -538,6 +591,35 @@ describe("the MCP tools", () => {
     expect(r.text).toContain("token buckets");
     expect(r.text).toMatch(/extractor: \w+$/);
     vi.unstubAllGlobals();
+  });
+
+  it("lets an agent opt into the revalidating cache", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "cache");
+    const tool = adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_fetch")!;
+    expect(tool.inputSchema.properties.cache?.type).toBe("boolean");
+    const spy = installFetchMock(routes([["x.test/page", { body: articlePage(), contentType: "text/html" }]]));
+    try {
+      await adapter.callTool("webindex_fetch", { url: "https://x.test/page", cache: true });
+      const again = await adapter.callTool("webindex_fetch", { url: "https://x.test/page", cache: true });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(again.text).toMatch(/\ncached: true\n/);
+      await adapter.callTool("webindex_fetch", { url: "https://x.test/page" });
+      expect(spy).toHaveBeenCalledTimes(2); // off unless asked
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("names the final URL and any note in the trailer, above the extractor", async () => {
+    installFetchMock(() => ({ body: articlePage(), contentType: "text/html", url: "https://x.test/final" }));
+    try {
+      const r = await adapter.callTool("webindex_fetch", { url: "https://x.test/start" });
+      const trailer = r.text.slice(r.text.lastIndexOf("\n---\n"));
+      expect(trailer).toMatch(/^url: https:\/\/x\.test\/final$/m);
+      expect(trailer).toMatch(/extractor: native$/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("lets an agent shorten the fetch timeout", async () => {
