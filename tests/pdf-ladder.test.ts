@@ -1,12 +1,30 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Env names are resolved through the brand, exactly as the engine resolves them
 // — so these tests stay correct whichever prefix a consumer configures.
 import { envName } from "../src/brand.js";
 import { assessPdfText, extractPdf, enabledExtractors, resetPdfLadderCache } from "../src/pdf.js";
+import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC, runWithInput } from "../src/pdf/exec.js";
+
+// The subprocess layer runs for real unless a case scripts it: the rungs that
+// shell out are exercised against an empty PATH below, and the availability
+// cases script what npx or a tool answered.
+vi.mock("../src/pdf/exec.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/pdf/exec.js")>();
+  return { ...actual, runWithInput: vi.fn(actual.runWithInput) };
+});
+const runMock = vi.mocked(runWithInput);
+const { runWithInput: realRunWithInput } = await vi.importActual<typeof import("../src/pdf/exec.js")>("../src/pdf/exec.js");
+
+// A block, not an expression: a function returned from beforeEach is run as
+// its teardown, and mockImplementation returns the mock itself.
+beforeEach(() => {
+  runMock.mockImplementation(realRunWithInput);
+});
 
 afterEach(() => {
   vi.unstubAllEnvs();
   resetPdfLadderCache();
+  runMock.mockReset();
 });
 
 // Text long enough to clear the shape-check floor, so the ratio checks are what
@@ -153,5 +171,107 @@ describe("extractPdf", () => {
     // Firecrawl is the exception — its own client memoises the probe, and it can
     // legitimately fail on one URL and work on the next, so it IS retried.
     expect(firecrawl).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Every failed run used to mark its rung "unavailable" for the rest of the
+// process. pdf-inspector exits 1 on any PDF it cannot parse and anydoc on any
+// scan, so ONE truncated download or login page at a .pdf URL disabled the best
+// rungs for every later document — for the MCP server, until it restarted.
+describe("rung availability", () => {
+  const GOOD = Buffer.from(`%PDF-1.4\nstream\nBT (${PROSE}) Tj ET\nendstream\n`, "latin1");
+  const TRUNCATED = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Length 9", "latin1");
+  const SCANNED = Buffer.from("%PDF-1.4\nstream\n/Image only, no text operators\nendstream\n", "latin1");
+  const npxCalls = (spec: string) => runMock.mock.calls.filter(([cmd, args]) => cmd === "npx" && args.includes(spec));
+
+  /** A stand-in for a working tool: it reads GOOD and rejects everything else the way pdf-inspector does. */
+  function workingTool() {
+    runMock.mockImplementation(async (_cmd, _args, input) =>
+      input.equals(GOOD)
+        ? { ok: true, stdout: `# Paper\n\n${PROSE}` }
+        : { ok: false, stdout: "", error: "exit 1", stderr: "Error: process_pdf: Invalid cross-reference table\n    at main (index.js:1:1)\n" },
+    );
+  }
+
+  it("keeps a rung that failed on one document for the next one", async () => {
+    workingTool();
+    const engines = ["pdf-inspector", "native"] as const;
+    expect((await extractPdf(GOOD, { engines: [...engines] })).via).toBe("pdf-inspector");
+    expect((await extractPdf(TRUNCATED, { engines: [...engines] })).text).toBe("");
+    expect((await extractPdf(GOOD, { engines: [...engines] })).via).toBe("pdf-inspector");
+  });
+
+  it("gives the tool's own words for a document it rejected", async () => {
+    workingTool();
+    const r = await extractPdf(TRUNCATED, { engines: ["pdf-inspector"] });
+    expect(r.reason).toContain("pdf-inspector: Error: process_pdf: Invalid cross-reference table");
+    expect(r.reason).not.toContain("at main"); // one line, not the stack
+  });
+
+  it("marks the npx rungs unavailable when npm cannot reach its registry, and says how to skip them", async () => {
+    runMock.mockResolvedValue({ ok: false, stdout: "", error: "exit 1", stderr: "npm error code ECONNREFUSED\nnpm error syscall connect\n" });
+    const r = await extractPdf(SCANNED, { engines: ["pdf-inspector", "anydoc", "native"] });
+    expect(r.reason).toMatch(/no text layer/);
+    expect(r.reason).toMatch(/pdf-inspector could not be installed \(npm error ECONNREFUSED — offline\?\)/);
+    expect(r.reason).toContain(`${envName("NO_NPX")}=1`);
+    // The same registry serves anydoc: it is not asked to fail the same way.
+    expect(npxCalls(ANYDOC_SPEC)).toHaveLength(0);
+    // …and neither is asked again for the next document, which still hears why.
+    runMock.mockClear();
+    const again = await extractPdf(SCANNED, { engines: ["pdf-inspector", "anydoc", "native"] });
+    expect(runMock).not.toHaveBeenCalled();
+    expect(again.reason).toMatch(/could not be installed/);
+  });
+
+  it("gives up on an npx rung that timed out before it ever worked", async () => {
+    runMock.mockResolvedValue({ ok: false, stdout: "", error: "timed out after 90s" });
+    await extractPdf(GOOD, { engines: ["pdf-inspector", "native"] });
+    await extractPdf(GOOD, { engines: ["pdf-inspector", "native"] });
+    expect(npxCalls(PDF_INSPECTOR_SPEC)).toHaveLength(1);
+  });
+
+  it("keeps an npx rung that worked before and then timed out on one large document", async () => {
+    workingTool();
+    await extractPdf(GOOD, { engines: ["pdf-inspector", "native"] });
+    runMock.mockResolvedValueOnce({ ok: false, stdout: "", error: "timed out after 90s" });
+    await extractPdf(SCANNED, { engines: ["pdf-inspector", "native"] });
+    expect((await extractPdf(GOOD, { engines: ["pdf-inspector", "native"] })).via).toBe("pdf-inspector");
+  });
+
+  // npm's defaults (two retries, 10 s → 60 s back-off) made an unreachable
+  // registry cost ~70 s per rung, twice per PDF, on every CLI invocation.
+  it("runs npx with a fail-fast network policy unless npm was configured", async () => {
+    runMock.mockResolvedValue({ ok: false, stdout: "", error: "not installed" });
+    await extractPdf(GOOD, { engines: ["pdf-inspector"] });
+    const env = runMock.mock.calls[0]![4]?.env;
+    expect(env).toMatchObject({ npm_config_fetch_retries: "1", npm_config_fetch_retry_mintimeout: "1000", npm_config_fetch_retry_maxtimeout: "2000" });
+
+    resetPdfLadderCache();
+    runMock.mockClear();
+    vi.stubEnv("npm_config_fetch_retries", "5");
+    await extractPdf(GOOD, { engines: ["pdf-inspector"] });
+    expect(runMock.mock.calls[0]![4]?.env?.npm_config_fetch_retries).toBe("5");
+  });
+
+  it("honours <PREFIX>_NPX_TIMEOUT_MS", async () => {
+    vi.stubEnv(envName("NPX_TIMEOUT_MS"), "5000");
+    runMock.mockResolvedValue({ ok: false, stdout: "", error: "not installed" });
+    await extractPdf(GOOD, { engines: ["pdf-inspector"] });
+    expect(runMock.mock.calls[0]![3]).toBe(5000);
+  });
+
+  // An HTML login page, an error body: the tools would all exit 1 and the
+  // native reader find nothing — and the note blamed a scanned PDF.
+  it("says 'not a PDF' for bytes without a PDF header, without running a tool", async () => {
+    const r = await extractPdf(Buffer.from("<!doctype html><title>Sign in</title>"), { engines: ["pdf-inspector", "native"] });
+    expect(r.reason).toMatch(/not a PDF/);
+    expect(runMock).not.toHaveBeenCalled();
+  });
+
+  it("says 'encrypted' rather than 'scanned' for an encrypted PDF nothing could read", async () => {
+    const encrypted = Buffer.concat([SCANNED, Buffer.from("trailer\n<< /Root 1 0 R /Encrypt 9 0 R >>\n%%EOF\n", "latin1")]);
+    const r = await extractPdf(encrypted, { engines: ["native"] });
+    expect(r.reason).toMatch(/encrypted PDF/);
+    expect(r.reason).not.toMatch(/scanned/);
   });
 });

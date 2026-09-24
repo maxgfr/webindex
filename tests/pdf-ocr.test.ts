@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 // — so these tests stay correct whichever prefix a consumer configures.
 import { envName } from "../src/brand.js";
 import { ocrPdf, ocrTools, ocrBudgetLeft, resetOcrBudget, resetOcrTools } from "../src/pdf/ocr.js";
+import { extractPdf, resetPdfLadderCache } from "../src/pdf.js";
 import { runWithInput } from "../src/pdf/exec.js";
 
 // OCR shells out to `copyable-pdf`, which shells out to tesseract and rasterises
@@ -163,5 +164,33 @@ describe("the per-process OCR budget", () => {
     toolsPresent();
     expect(await ocrPdf(PDF)).toBeUndefined();
     expect(runMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("the OCR rung in the ladder", () => {
+  const SCAN = Buffer.from("%PDF-1.4\nstream\n/Image only\nendstream\n", "latin1");
+
+  afterEach(() => resetPdfLadderCache());
+
+  // One pathological scan timed out, OCR was marked dead, and every healthy
+  // scan after it in the process went unread.
+  it("still OCRs the next scan after one conversion failed", async () => {
+    let conversions = 0;
+    runMock.mockImplementation(async (_cmd, args) => {
+      const i = args.indexOf("-o");
+      if (i < 0) return { ok: true, stdout: "" }; // the probes: both binaries present
+      if (++conversions === 1) return { ok: false, stdout: "", error: "timed out after 300s" };
+      writeFileSync(args[i + 1]!.replace(/\.pdf$/, ".md"), "Text recovered from the healthy scan.");
+      return { ok: true, stdout: "" };
+    });
+    expect((await extractPdf(SCAN, { engines: ["native", "ocr"] })).text).toBe("");
+    const second = await extractPdf(SCAN, { engines: ["native", "ocr"] });
+    expect(second).toMatchObject({ via: "ocr", text: "Text recovered from the healthy scan." });
+  });
+
+  it("says what would read a scan when the OCR tools are missing", async () => {
+    const r = await extractPdf(SCAN, { engines: ["native", "ocr"] });
+    expect(r.reason).toMatch(/no text layer/);
+    expect(r.reason).toMatch(/install copyable-pdf and tesseract to OCR it/);
   });
 });

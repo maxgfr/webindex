@@ -67,12 +67,15 @@ function scanRatios(t: string): { control: number; replacement: number } {
   return { control: control / t.length, replacement: replacement / t.length };
 }
 
+/** What an empty PDF extraction means — most often, a scan. The ladder sharpens it when it knows better. */
+export const NO_TEXT_LAYER = "no text layer (scanned or image-only PDF?)";
+
 /**
  * Judge extracted PDF text. Returns `{ ok: true }` when the text is safe to
  * cite, else a short reason the caller can put in a dossier note.
  */
 export function assessPdfText(text: string): PdfVerdict {
-  return assessExtractedText(text, "no text layer (scanned or image-only PDF?)");
+  return assessExtractedText(text, NO_TEXT_LAYER);
 }
 
 /**

@@ -186,6 +186,8 @@ ENVIRONMENT
   WEBINDEX_PDF_ENGINE    force one PDF rung: native|pdf-inspector|anydoc|firecrawl|pdftotext|ocr
   WEBINDEX_DOC_ENGINE    force one office rung, or "none" to disable
   WEBINDEX_NO_NPX        skip the rungs that would install through npx
+  WEBINDEX_NPX_TIMEOUT_MS  how long one npx rung may run, first download included
+                         (default 90000)
   WEBINDEX_OCR_MAX       documents this process may OCR (default 3)
   WEBINDEX_ENGINES       keyless engines to try: a comma list, or "off"  (default all)
   WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)

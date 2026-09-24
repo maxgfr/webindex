@@ -36,12 +36,17 @@ export interface RunResult {
   stdout: string;
   /** Short cause when `ok` is false: "not installed", "timed out", "exit 2"… */
   error?: string;
+  /** What the tool wrote to stderr — its first and last ~1 KB — when `ok` is false and it wrote any. */
+  stderr?: string;
 }
 
 // stdout is capped so a pathological tool can't balloon memory — the built-in
 // reader has been observed emitting 16 MB of garbage for a 12 MB PDF, and an
 // external one could do the same.
 const MAX_STDOUT_BYTES = 24 * 1024 * 1024;
+// stderr keeps its two ends: a tool states its error first, npm its error
+// code last, and a verbose one must not cost memory for the middle.
+const STDERR_END_CHARS = 1024;
 
 /** Windows ships npx as a .cmd shim, which `spawn` won't resolve on its own. */
 export function binaryName(name: string): string {
@@ -51,13 +56,14 @@ export function binaryName(name: string): string {
 /**
  * Spawn `cmd args…`, write `input` to its stdin, resolve with its stdout.
  * Never throws and never leaves a child behind: a missing binary, a non-zero
- * exit and a timeout all come back as `{ ok: false, error }`.
+ * exit and a timeout all come back as `{ ok: false, error }` — with the tail
+ * of stderr, when the tool wrote one, so a caller can say WHY.
  */
-export function runWithInput(cmd: string, args: string[], input: Buffer, timeoutMs: number): Promise<RunResult> {
+export function runWithInput(cmd: string, args: string[], input: Buffer, timeoutMs: number, opts: { env?: NodeJS.ProcessEnv } = {}): Promise<RunResult> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(binaryName(cmd), args, { stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(binaryName(cmd), args, { stdio: ["pipe", "pipe", "pipe"], ...(opts.env ? { env: opts.env } : {}) });
     } catch (e) {
       resolve({ ok: false, stdout: "", error: (e as Error).message });
       return;
@@ -65,6 +71,13 @@ export function runWithInput(cmd: string, args: string[], input: Buffer, timeout
 
     const chunks: Buffer[] = [];
     let size = 0;
+    let stderrHead = "";
+    let stderrTail = "";
+    let stderrCut = false;
+    const withStderr = (r: RunResult): RunResult => {
+      const stderr = (stderrCut ? `${stderrHead}\n…\n${stderrTail}` : stderrHead + stderrTail).trim();
+      return stderr ? { ...r, stderr } : r;
+    };
     let settled = false;
     const done = (r: RunResult) => {
       if (settled) return;
@@ -77,7 +90,7 @@ export function runWithInput(cmd: string, args: string[], input: Buffer, timeout
       // The whole tree: npx runs the real tool as a grandchild, copyable-pdf
       // spawns pdftoppm and tesseract (see ../process-tree.ts).
       killTree(child);
-      done({ ok: false, stdout: "", error: `timed out after ${Math.round(timeoutMs / 1000)}s` });
+      done(withStderr({ ok: false, stdout: "", error: `timed out after ${Math.round(timeoutMs / 1000)}s` }));
     }, timeoutMs);
 
     child.stdout?.on("data", (d: Buffer) => {
@@ -85,18 +98,32 @@ export function runWithInput(cmd: string, args: string[], input: Buffer, timeout
       size += d.length;
       chunks.push(d);
     });
-    // Drain stderr so a chatty tool can't deadlock on a full pipe. We don't
-    // report it: every failure here is already described by exit code or errno.
-    child.stderr?.on("data", () => {});
+    // Drained so a chatty tool can't deadlock on a full pipe, and its tail kept:
+    // an exit code says THAT a tool failed, and its stderr says why — "PDF has
+    // no extractable text", "malformed document", `npm error code ENOTFOUND`.
+    // The difference between those is the difference between "this input" and
+    // "this tool", which the ladders must not confuse.
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      let rest = chunk;
+      if (stderrHead.length < STDERR_END_CHARS) {
+        const room = STDERR_END_CHARS - stderrHead.length;
+        stderrHead += rest.slice(0, room);
+        rest = rest.slice(room);
+      }
+      const tail = stderrTail + rest;
+      if (tail.length > STDERR_END_CHARS) stderrCut = true;
+      stderrTail = tail.slice(-STDERR_END_CHARS);
+    });
 
     child.on("error", (e: NodeJS.ErrnoException) => {
       done({ ok: false, stdout: "", error: e.code === "ENOENT" ? "not installed" : e.message });
     });
 
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       const stdout = Buffer.concat(chunks).subarray(0, MAX_STDOUT_BYTES).toString("utf8");
       if (code === 0) done({ ok: true, stdout });
-      else done({ ok: false, stdout, error: `exit ${code}` });
+      else done(withStderr({ ok: false, stdout, error: code === null ? `killed by ${signal}` : `exit ${code}` }));
     });
 
     // EPIPE is normal here: a tool that rejects the input closes stdin early.

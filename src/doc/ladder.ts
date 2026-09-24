@@ -1,5 +1,6 @@
 import { env, envFlag } from "../brand.js";
-import { runWithInput, ANYDOC_SPEC } from "../pdf/exec.js";
+import { ANYDOC_SPEC } from "../pdf/exec.js";
+import { failureDetail, resetNpxState, runNpx, skipNpxHint } from "../pdf/npx.js";
 import { assessExtractedText } from "../pdf/quality.js";
 import type { DocFormat } from "./formats.js";
 
@@ -51,18 +52,18 @@ export interface DocLadderOptions {
   engines?: DocExtractorId[];
 }
 
-// First run may download the anydoc binary; later runs are near-instant.
-// Generous, but paid at most once per process thanks to `dead` below.
-const NPX_TIMEOUT_MS = 90_000;
-
-// Rungs proven unavailable in this process (npm absent, Node too old for
-// anydoc, unsupported platform). Without this, a 40-source run would re-pay the
-// same 90s discovery for every single document.
-const dead = new Set<DocExtractorId>();
+// Rungs proven unavailable in this process (npm absent or offline, unsupported
+// platform), with what is worth repeating about them. Without this, a
+// 40-source run would re-pay the same failed discovery for every single
+// document. A converter that REJECTED a document never lands here: anydoc exits
+// 1 on any malformed file, and one truncated .docx used to cost every later
+// document its converter — see ../pdf/npx.ts.
+const dead = new Map<DocExtractorId, { failure?: string }>();
 
 /** Test seam: forget which rungs were found unavailable. */
 export function resetDocLadderCache(): void {
   dead.clear();
+  resetNpxState();
 }
 
 /**
@@ -84,51 +85,62 @@ export function enabledDocExtractors(engines?: DocExtractorId[]): DocExtractorId
   return DOC_EXTRACTORS;
 }
 
-async function viaAnydoc(bytes: Buffer, format?: string): Promise<string | undefined> {
-  // `-` reads the document from stdin. `--prefer-offline` keeps the steady state
-  // at one local cache hit instead of a registry round-trip per run; `-y` stops
-  // npx asking to install. No user input reaches argv — the document travels on
-  // stdin, and `format` comes from the table in ./formats.ts, never from a URL.
-  const args = ["-y", "--prefer-offline", ANYDOC_SPEC, "-"];
+/** What anydoc made of the document: its Markdown, or why there is none. */
+async function viaAnydoc(bytes: Buffer, format?: string): Promise<{ text?: string; failure?: string; unavailable?: boolean }> {
+  // `-` reads the document from stdin. No user input reaches argv — the
+  // document travels on stdin, and `format` comes from the table in
+  // ./formats.ts, never from a URL.
+  const args = ["-"];
   if (format) args.push("--format", format);
-  const r = await runWithInput("npx", args, bytes, NPX_TIMEOUT_MS);
-  return r.ok ? r.stdout : undefined;
+  const r = await runNpx(ANYDOC_SPEC, args, bytes);
+  if (r.ok) return { text: r.stdout };
+  // npx missing is the ordinary state of a machine without npm, not news.
+  if (r.unavailable === "not installed") return { unavailable: true };
+  if (r.unavailable) return { unavailable: true, failure: `anydoc ${r.unavailable}; ${skipNpxHint()}` };
+  return { failure: `anydoc: ${failureDetail(r)}` };
 }
 
 /**
  * Convert an office document to Markdown, trying each enabled rung in order and
  * returning the first result that the quality gate accepts.
  *
- * Never throws. When every rung fails, returns empty text plus the reason, so
- * the caller can say why the source is unusable instead of silently citing
- * nothing — or, worse, citing the raw bytes.
+ * Never throws. When every rung fails, returns empty text plus the reason — the
+ * gate's verdict, or what the converter itself said, or why it could not run —
+ * so the caller can say why the source is unusable instead of silently citing
+ * nothing, or, worse, citing the raw bytes.
  */
 export async function extractDocument(bytes: Buffer, fmt: DocFormat, opts: DocLadderOptions = {}): Promise<DocExtraction> {
   let lastReason: string | undefined;
+  const failures: string[] = [];
 
   for (const id of enabledDocExtractors(opts.engines)) {
-    if (dead.has(id)) continue;
-
-    let text: string | undefined;
-    try {
-      if (id === "anydoc") text = await viaAnydoc(bytes, fmt.format);
-      else text = opts.firecrawl ? await opts.firecrawl() : undefined;
-    } catch {
-      text = undefined; // a rung must never take the run down
-    }
-
-    if (text === undefined) {
-      // Tool missing / errored / no container. Never ask again this process —
-      // except Firecrawl, whose own client already memoises its availability
-      // probe and which can legitimately fail on one URL and work on the next.
-      if (id !== "firecrawl") dead.add(id);
+    const known = dead.get(id);
+    if (known) {
+      if (known.failure) failures.push(known.failure);
       continue;
     }
 
-    const verdict = assessExtractedText(text, "the converter produced no text");
-    if (verdict.ok) return { text: text.trim(), via: id };
+    let got: { text?: string; failure?: string; unavailable?: boolean };
+    try {
+      if (id === "anydoc") got = await viaAnydoc(bytes, fmt.format);
+      // Never remembered as unavailable: Firecrawl's own client memoises its
+      // probe, and it can legitimately fail on one URL and work on the next.
+      else got = { text: opts.firecrawl ? await opts.firecrawl() : undefined };
+    } catch {
+      got = {}; // a rung must never take the run down
+    }
+
+    if (got.text === undefined) {
+      if (got.unavailable) dead.set(id, { failure: got.failure });
+      if (got.failure) failures.push(got.failure);
+      continue;
+    }
+
+    const verdict = assessExtractedText(got.text, "the converter produced no text");
+    if (verdict.ok) return { text: got.text.trim(), via: id };
     lastReason = verdict.reason;
   }
 
-  return { text: "", reason: lastReason ?? "no document converter available" };
+  const reason = [lastReason, ...failures].filter(Boolean).join("; ");
+  return { text: "", reason: reason || "no document converter available" };
 }

@@ -3,6 +3,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 // — so these tests stay correct whichever prefix a consumer configures.
 import { envName } from "../src/brand.js";
 import { extractDocument, enabledDocExtractors, resetDocLadderCache } from "../src/doc.js";
+import { extractPdf, resetPdfLadderCache } from "../src/pdf.js";
 import { runWithInput, ANYDOC_SPEC } from "../src/pdf/exec.js";
 
 // The anydoc rung spawns `npx`, which on a cold machine is a network download —
@@ -25,6 +26,7 @@ const BYTES = Buffer.from("PK pretend this is a .docx", "latin1");
 afterEach(() => {
   vi.unstubAllEnvs();
   resetDocLadderCache();
+  resetPdfLadderCache();
   runMock.mockReset();
   runMock.mockResolvedValue({ ok: false, stdout: "", error: "not installed" });
 });
@@ -155,5 +157,52 @@ describe("extractDocument", () => {
     await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
     await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
     expect(runMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// anydoc exits 1 on any malformed office file. Taken as "not installed", one
+// truncated .docx made every later office document in the process unreadable
+// — and the note blamed a missing converter while anydoc had said exactly
+// what was wrong.
+describe("a document the converter rejects", () => {
+  const TRUNCATED = BYTES.subarray(0, 8);
+
+  function workingAnydoc() {
+    runMock.mockImplementation(async (_cmd, _args, input) =>
+      input.equals(BYTES)
+        ? { ok: true, stdout: "# Quarterly report\n\nReal prose from the converter.\n" }
+        : { ok: false, stdout: "", error: "exit 1", stderr: "malformed document: not a PDF: file appears to be a ZIP archive\n" },
+    );
+  }
+
+  it("does not cost the next document its converter", async () => {
+    workingAnydoc();
+    expect((await extractDocument(BYTES, BINARY, { engines: ["anydoc"] })).via).toBe("anydoc");
+    expect((await extractDocument(TRUNCATED, BINARY, { engines: ["anydoc"] })).text).toBe("");
+    expect((await extractDocument(BYTES, BINARY, { engines: ["anydoc"] })).via).toBe("anydoc");
+  });
+
+  it("says what the converter said, not that there is none", async () => {
+    workingAnydoc();
+    const r = await extractDocument(TRUNCATED, BINARY, { engines: ["anydoc"] });
+    expect(r.reason).toBe("anydoc: malformed document: not a PDF: file appears to be a ZIP archive");
+  });
+
+  it("says anydoc could not be installed, and how to skip it, when npm is offline", async () => {
+    runMock.mockResolvedValue({ ok: false, stdout: "", error: "exit 1", stderr: "npm error code ENOTFOUND\nnpm error network request failed\n" });
+    const r = await extractDocument(BYTES, BINARY, { engines: ["anydoc", "firecrawl"] });
+    expect(r.reason).toMatch(/anydoc could not be installed \(npm error ENOTFOUND — offline\?\)/);
+    expect(r.reason).toContain(`${envName("NO_NPX")}=1`);
+  });
+
+  // pdf-inspector and anydoc come from the same registry: once it is known to
+  // be unreachable, a PDF's failed install spares the office ladder its own.
+  it("does not ask npm for anydoc once the PDF ladder found the registry unreachable", async () => {
+    runMock.mockResolvedValue({ ok: false, stdout: "", error: "exit 1", stderr: "npm error code ECONNREFUSED\n" });
+    await extractPdf(Buffer.from("%PDF-1.4\n"), { engines: ["pdf-inspector"] });
+    runMock.mockClear();
+    const r = await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
+    expect(runMock).not.toHaveBeenCalled();
+    expect(r.reason).toMatch(/anydoc could not be installed/);
   });
 });

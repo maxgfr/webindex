@@ -168,6 +168,17 @@ web page it is, with a note saying so; images, audio, video, fonts and archives
 return no text and a note, never their bytes. `webindex extract` sniffs the same
 way, so an extension-less or misnamed file is read for what it is.
 
+The extraction ladders tell a tool that cannot run here from one that rejected a
+document. A rung is set aside for the rest of the process only when its binary or
+npx is missing, npm could not install its package, or its first run never finished
+— never because one truncated PDF or one scan made it exit 1 — and a refusal names
+what the tool itself said. The npx rungs run with a fail-fast npm network policy
+(`npm_config_fetch_retries=1`, a 1–2 s back-off, a 30 s fetch timeout) unless those
+keys are already set in the environment, so an offline machine falls through in
+seconds rather than ~70 s per rung; once the registry proved unreachable the other
+npx rung is not asked, and the note says `WEBINDEX_NO_NPX=1` skips them.
+`WEBINDEX_NPX_TIMEOUT_MS` bounds one npx run (default 90000, first download included).
+
 A `Retry-After` of up to 5 s is waited out and retried once; a longer one is
 not slept through and not retried early — the call returns at once with the
 server's own `retryAfterMs` (and `rateLimited`), which `fetchAndExtract` carries
