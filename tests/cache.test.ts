@@ -158,6 +158,52 @@ describe("cachedFetchAndExtract (--cache)", () => {
     expect(fcHit.text).toContain("firecrawl markdown");
   });
 
+  it("serves the built-in text for a page Firecrawl failed on, instead of re-scraping it every call", async () => {
+    const base = "http://fc-fails.test";
+    let origin = 0;
+    let scrapes = 0;
+    installFetchMock((url) => {
+      if (url.includes("/scrape")) {
+        scrapes++;
+        return { status: 500, body: "{}", contentType: "application/json" };
+      }
+      if (url === `${base}/`) return { status: 200, body: "{}" };
+      origin++;
+      return PAGE;
+    });
+    const first = await cachedFetchAndExtract(URL, { firecrawl: base }, true, 1000);
+    expect(first.note).toMatch(/Firecrawl could not scrape/);
+    const [scrapesAfterFirst, originAfterFirst] = [scrapes, origin];
+    for (const t of [1100, 1200]) {
+      const again = await cachedFetchAndExtract(URL, { firecrawl: base }, true, t);
+      expect(again).toMatchObject({ cached: true, text: first.text });
+      // The note described that run's failed scrape, not this cache hit.
+      expect(again.note).toBeUndefined();
+    }
+    expect([scrapes, origin]).toEqual([scrapesAfterFirst, originAfterFirst]);
+  });
+
+  it("keys consent stripping and full-page reads apart, since they change the text", async () => {
+    const body = `<html><body><article><h1>Rate limiting</h1><p>${"Token buckets smooth bursts. ".repeat(20)}</p><p>Accept all cookies</p></article><nav>Home About</nav></body></html>`;
+    const spy = installFetchMock(() => ({ body }));
+    const raw = await cachedFetchAndExtract(URL, {}, true, 1000);
+    const stripped = await cachedFetchAndExtract(URL, { stripConsent: true }, true, 1100);
+    const full = await cachedFetchAndExtract(URL, { fullPage: true }, true, 1200);
+    expect(raw.text).toContain("Accept all cookies");
+    expect(stripped.cached).toBeUndefined();
+    expect(stripped.text).not.toContain("Accept all cookies");
+    expect(full.cached).toBeUndefined();
+    expect(full.text).toContain("Home About");
+    expect(spy).toHaveBeenCalledTimes(3);
+    // Each is then a hit for its own kind of request only.
+    expect(await cachedFetchAndExtract(URL, { stripConsent: true }, true, 1300)).toMatchObject({ cached: true, text: stripped.text });
+    expect(await cachedFetchAndExtract(URL, { fullPage: true }, true, 1300)).toMatchObject({ cached: true, text: full.text });
+    expect(await cachedFetchAndExtract(URL, {}, true, 1300)).toMatchObject({ cached: true, text: raw.text });
+    expect(spy).toHaveBeenCalledTimes(3);
+    // The default key is unchanged, so entries written before the split still hit.
+    expect(cachePath(URL, "", "native")).toBe(cachePath(URL));
+  });
+
   it("marks a disk hit as cached so a run can report its freshness", async () => {
     installFetchMock(() => PAGE);
     const miss = await cachedFetchAndExtract(URL, {}, true, 1000);
@@ -246,6 +292,47 @@ describe("revalidating a stale entry instead of re-downloading it", () => {
     const hit = await cachedFetchAndExtract(URL, {}, true, 2100);
     expect(hit.cached).toBe(true);
     expect(hit.text).toContain("leaky buckets");
+  });
+
+  it("asks a failing origin once, not a probe and then a full refetch", async () => {
+    // Each call is its own retry loop, so a stale entry on a down origin cost
+    // four requests (and four timeouts on a hung one) before the stale copy.
+    process.env[envName("CACHE_TTL_MS")] = "1000";
+    let calls = 0;
+    installFetchMock(() => (++calls === 1 ? VALIDATED : { status: 503, body: "" }));
+    await cachedFetchAndExtract(URL, {}, true, 1000);
+    const stale = await cachedFetchAndExtract(URL, {}, true, 2001);
+    expect(stale).toMatchObject({ cached: true });
+    expect(stale.note).toMatch(/returned 503; served the cached copy/);
+    expect(calls).toBe(3); // the first 200, then one probe and its single retry
+  });
+
+  it("refetches unconditionally when the origin refuses the validators themselves", async () => {
+    process.env[envName("CACHE_TTL_MS")] = "1000";
+    const spy = installFetchMock((_url, init) => {
+      const h = (init?.headers ?? {}) as Record<string, string>;
+      if (!h["if-none-match"]) return { ...VALIDATED, body: "<html><body><article><p>fresh prose about leaky buckets</p></article></body></html>" };
+      return { status: 412, body: "" };
+    });
+    writeFileSync(cachePath(URL), JSON.stringify({ text: "old prose", finalUrl: URL, status: 200, etag: '"v0"', cachedAt: 1000 }));
+    const r = await cachedFetchAndExtract(URL, {}, true, 2001);
+    expect(r.text).toContain("leaky buckets");
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("stores the validators a 304 hands back, so the next revalidation still matches", async () => {
+    process.env[envName("CACHE_TTL_MS")] = "1000";
+    const sent: (string | undefined)[] = [];
+    installFetchMock((_url, init) => {
+      const inm = ((init?.headers ?? {}) as Record<string, string>)["if-none-match"];
+      sent.push(inm);
+      if (!inm) return { ...PAGE, headers: { etag: '"a"' } };
+      return { status: 304, body: "", headers: { etag: '"b"' } };
+    });
+    await cachedFetchAndExtract(URL, {}, true, 1000);
+    await cachedFetchAndExtract(URL, {}, true, 2001);
+    await cachedFetchAndExtract(URL, {}, true, 3002);
+    expect(sent).toEqual([undefined, '"a"', '"b"']);
   });
 
   it("re-downloads normally when the origin sent no validators", async () => {

@@ -27,6 +27,12 @@ export interface CacheEntry extends Extract {
   // revalidation costs a request header and a 304 with no body at all.
   etag?: string;
   lastModified?: string;
+  /**
+   * Set on built-in text written while Firecrawl was up but failed on this page.
+   * Lookups that predict Firecrawl read it too; otherwise every call for the
+   * TTL paid for the same failed scrape plus a fresh download.
+   */
+  fallbackFrom?: "firecrawl";
 }
 
 // 24h default; override with `<PREFIX>_CACHE_TTL_MS` (0 = always stale → refetch).
@@ -64,12 +70,31 @@ function userScoped(name: string): string {
 // Firecrawl up would be a no-op for a whole TTL: every page an earlier native
 // run cached would be served from disk and shadow the better extraction.
 //
+// A consent-stripped or full-page read is keyed apart as well (the optional
+// `variant`): the built-in reader extracts different text for the same page
+// under each, and whichever setting wrote the entry used to be served to both
+// for the whole TTL. A plain read adds nothing to the key, so its path is what
+// it always was.
+//
 // Entries written under an older key simply miss and get overwritten — no
 // migration needed.
-export function cachePath(url: string, acceptLanguage = "", extractor: CacheNamespace = "native"): string {
+export function cachePath(url: string, acceptLanguage = "", extractor: CacheNamespace = "native", variant: CacheVariant = ""): string {
   const canon = canonicalizeUrl(url);
   const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
-  return join(cacheDir(), `${domain}-${fnv1a64(`${canon}\u0000${acceptLanguage}\u0000${extractor}`).toString(16)}.json`);
+  const key = `${canon}\u0000${acceptLanguage}\u0000${extractor}${variant ? `\u0000${variant}` : ""}`;
+  return join(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
+}
+
+// Only the built-in reader applies these: Firecrawl's markdown skips both, and a
+// document has no banner to strip — so only the "native" namespace is split by
+// them (see entryPaths), and one PDF entry serves every kind of request.
+type CacheVariant = "" | "consent" | "full";
+const VARIANTS: readonly CacheVariant[] = ["", "consent", "full"];
+const PLAIN: readonly CacheVariant[] = [""];
+
+function variantOf(opts: { stripConsent?: boolean; fullPage?: boolean }): CacheVariant {
+  // fullPage wins, as it does in fetchAndExtract: it turns the consent filter off.
+  return opts.fullPage ? "full" : opts.stripConsent ? "consent" : "";
 }
 
 // The cache-key namespace a fetch made RIGHT NOW would use: Firecrawl when one
@@ -91,9 +116,11 @@ const PDF_CACHE_NS = "pdf" as const;
 const DOC_CACHE_NS = "doc" as const;
 type CacheNamespace = ExtractorId | typeof PDF_CACHE_NS | typeof DOC_CACHE_NS;
 
-async function currentExtractor(opts: { firecrawl?: string }, url: string): Promise<CacheNamespace> {
+async function currentExtractor(opts: { firecrawl?: string; fullPage?: boolean }, url: string): Promise<CacheNamespace> {
   if (looksLikePdfUrl(url)) return PDF_CACHE_NS;
   if (docFormatForUrl(url)) return DOC_CACHE_NS;
+  // A full-page read never goes to Firecrawl, so it must never be served Firecrawl's text.
+  if (opts.fullPage) return "native";
   const base = firecrawlBase(opts);
   return base && (await probeFirecrawl(base, firecrawlIsExplicit(opts))) ? "firecrawl" : "native";
 }
@@ -117,13 +144,25 @@ function namespaceFor(result: Extract, predicted: CacheNamespace): CacheNamespac
  * which extractor produced it would defeat the point of the switch. So offline
  * looks everywhere and serves the freshest thing it finds.
  */
-function readAnyNamespace(url: string, acceptLanguage: string, namespaces = WRITTEN_NAMESPACES): CacheEntry | undefined {
+function readAnyNamespace(
+  url: string,
+  acceptLanguage: string,
+  namespaces = WRITTEN_NAMESPACES,
+  variants: readonly CacheVariant[] = PLAIN,
+): CacheEntry | undefined {
   let best: CacheEntry | undefined;
   for (const ns of namespaces) {
-    const hit = readCache(url, acceptLanguage, ns);
-    if (hit && (!best || hit.cachedAt > best.cachedAt)) best = hit;
+    for (const variant of ns === "native" ? variants : PLAIN) {
+      const hit = readCache(url, acceptLanguage, ns, variant);
+      if (hit && (!best || hit.cachedAt > best.cachedAt)) best = hit;
+    }
   }
   return best;
+}
+
+/** The requested read of the page if the cache has one, else any read of it — better than a hole. */
+function readAnyRead(url: string, acceptLanguage: string, variant: CacheVariant): CacheEntry | undefined {
+  return readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, [variant]) ?? readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, VARIANTS);
 }
 
 function ttlMs(): number {
@@ -209,8 +248,8 @@ export function revalidationHeaders(entry: Pick<CacheEntry, "etag" | "lastModifi
 // memory, paid on a code path whose entire purpose is to be cheaper than the
 // network. The text is also the one field nothing ever inspects without wanting
 // all of it, so it gains nothing from living in the structured half.
-function entryPaths(url: string, acceptLanguage: string, extractor: CacheNamespace): { meta: string; body: string } {
-  const meta = cachePath(url, acceptLanguage, extractor);
+function entryPaths(url: string, acceptLanguage: string, extractor: CacheNamespace, variant: CacheVariant): { meta: string; body: string } {
+  const meta = cachePath(url, acceptLanguage, extractor, extractor === "native" ? variant : "");
   return { meta, body: meta.replace(/\.json$/, ".body") };
 }
 
@@ -218,8 +257,8 @@ function entryPaths(url: string, acceptLanguage: string, extractor: CacheNamespa
 // a stale entry is no longer worthless, because its validators can turn the
 // refetch into a 304. Still undefined for missing / corrupt / empty-text
 // entries, which carry nothing worth revalidating.
-function readCache(url: string, acceptLanguage = "", extractor: CacheNamespace = "native"): CacheEntry | undefined {
-  const { meta, body } = entryPaths(url, acceptLanguage, extractor);
+function readCache(url: string, acceptLanguage = "", extractor: CacheNamespace = "native", variant: CacheVariant = ""): CacheEntry | undefined {
+  const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
   if (!existsSync(meta)) return undefined;
   try {
     const entry = JSON.parse(readFileSync(meta, "utf8")) as CacheEntry;
@@ -236,7 +275,7 @@ function readCache(url: string, acceptLanguage = "", extractor: CacheNamespace =
   }
 }
 
-function writeCache(url: string, res: Extract, now: number, acceptLanguage = "", extractor: CacheNamespace = "native"): void {
+function writeCache(url: string, res: Extract, now: number, acceptLanguage = "", extractor: CacheNamespace = "native", variant: CacheVariant = ""): void {
   // Under no-write the cache degrades to READ-only rather than being disabled:
   // a plan-phase run is still served by whatever an earlier normal run left
   // here, it just never leaves a trace of its own. Deliberately not routed
@@ -244,8 +283,12 @@ function writeCache(url: string, res: Extract, now: number, acceptLanguage = "",
   // streamed back to them.
   if (isNoWrite()) return;
   const dir = cacheDir();
-  const { meta, body } = entryPaths(url, acceptLanguage, extractor);
-  const { text, ...rest } = res as CacheEntry;
+  const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
+  // The note is not stored: it describes the run that fetched the page (a
+  // Firecrawl fallback, say), and replaying it on every hit for a day misreports
+  // a run that did no such thing. What it said about the content is kept as a
+  // field (`truncated`) and restated when the entry is served.
+  const { text, note: _note, ...rest } = res as CacheEntry;
   const write = () => {
     ensureDir(dir);
     // Body first: a reader that catches the pair mid-write sees either the old
@@ -288,8 +331,8 @@ function ensureDir(dir: string): void {
  * from the old single-blob shape has no body file yet, and touching only the
  * metadata would strand it with neither an inline text nor a sidecar.
  */
-function touchCache(url: string, entry: CacheEntry, now: number, acceptLanguage = "", extractor: CacheNamespace = "native"): void {
-  writeCache(url, entry, now, acceptLanguage, extractor);
+function touchCache(url: string, entry: CacheEntry, now: number, acceptLanguage = "", extractor: CacheNamespace = "native", variant: CacheVariant = ""): void {
+  writeCache(url, entry, now, acceptLanguage, extractor, variant);
 }
 
 // fetchAndExtract with an optional on-disk cache in front. `enabled` false ⇒
@@ -298,7 +341,7 @@ function touchCache(url: string, entry: CacheEntry, now: number, acceptLanguage 
 // the clock.
 export async function cachedFetchAndExtract(
   url: string,
-  opts: { acceptLanguage?: string; firecrawl?: string; stripConsent?: boolean; timeoutMs?: number } = {},
+  opts: { acceptLanguage?: string; firecrawl?: string; stripConsent?: boolean; fullPage?: boolean; timeoutMs?: number } = {},
   enabled = false,
   now = Date.now(),
 ): Promise<Extract & { cached?: boolean }> {
@@ -308,49 +351,70 @@ export async function cachedFetchAndExtract(
   // nothing at all, which is never what an operator meant.
   if (!enabled && !offline) return fetchAndExtract(url, opts);
   const lang = opts.acceptLanguage ?? "";
+  const variant = variantOf(opts);
   const served = (entry: CacheEntry, note?: string): Extract & { cached?: boolean } => {
     countFetch(Buffer.byteLength(entry.text), true);
-    return { ...entry, cached: true, ...(note ? { note } : {}) };
+    // A note stored by an older engine is dropped for the reason writeCache
+    // no longer stores one.
+    const { note: _stored, ...rest } = entry;
+    const about = note ?? (entry.truncated ? `The cached text of ${url} is a prefix: the page overran the response size cap.` : undefined);
+    return { ...rest, cached: true, ...(about ? { note: about } : {}) };
   };
 
   if (offline) {
-    const stored = readAnyNamespace(url, lang);
+    const stored = readAnyRead(url, lang, variant);
     if (stored) return served(stored);
     return { text: "", finalUrl: url, status: 0, note: `Offline: ${url} is not in the cache (drop --offline, or warm it with a normal run).` };
   }
 
   const ns = await currentExtractor(opts, url);
+  // Cache successes only, filed under the extractor that ACTUALLY produced the
+  // text — a Firecrawl run that fell back to the built-in reader for one page
+  // must not leave that page sitting in Firecrawl's namespace. PDFs keep the
+  // shared namespace resolved above, for the reason documented there. The
+  // fallback is marked, so the next lookup — still predicting Firecrawl — can
+  // find it instead of paying for the same failed scrape again.
+  const store = (result: Extract): void => {
+    const target = namespaceFor(result, ns);
+    const entry = ns === "firecrawl" && target === "native" ? { ...result, fallbackFrom: "firecrawl" as const } : result;
+    writeCache(url, entry, now, lang, target, variant);
+  };
   // --refresh does not read, but it still writes: the point is to replace what
   // is there, not to stop caching for the run.
-  const hit = refresh ? undefined : readAnyNamespace(url, lang, [...new Set([ns, ...DOCUMENT_NAMESPACES])]);
+  const hit = refresh ? undefined : lookup(url, lang, ns, variant);
   if (hit && isCacheFresh(hit, now)) return served(hit);
 
   // Stale but revalidatable: ask the origin whether anything changed. A 304
   // answers with headers and no body, which is the entire point — the previous
   // behaviour re-downloaded the full page every time the TTL rolled over, even
   // for a document that had not moved in a year.
+  let res: Extract | undefined;
   const revalidate = hit ? revalidationHeaders(hit) : {};
   if (hit && Object.keys(revalidate).length) {
     const probe = await fetchAndExtract(url, { ...opts, headers: revalidate });
     if (probe.status === 304) {
-      touchCache(url, hit, now, lang, namespaceFor(hit, ns));
-      return served(hit);
+      // A 304 may carry fresh validators (RFC 9110). Restamping the old ones
+      // made the next revalidation miss and download the whole page again.
+      const renewed: CacheEntry = { ...hit, etag: probe.etag ?? hit.etag, lastModified: probe.lastModified ?? hit.lastModified };
+      touchCache(url, renewed, now, lang, namespaceFor(hit, ns), variant);
+      return served(renewed);
     }
     // Changed (or the origin ignored the validators) — the body we just pulled
     // IS the fresh one, so use it rather than paying for a second request.
     if (probe.text?.trim()) {
-      writeCache(url, probe, now, lang, namespaceFor(probe, ns));
+      store(probe);
       return probe;
     }
+    // Only an unconditional refetch can do better after a 412 (the validators
+    // themselves were refused) or a 2xx with nothing readable. A 5xx, a 429, a
+    // 404 or a timeout would come back the same, and asking again doubled the
+    // load on a struggling origin and the wait before the stale copy below.
+    if (probe.status !== 412 && !(probe.status >= 200 && probe.status < 300)) res = probe;
   }
 
-  const res = await fetchAndExtract(url, opts);
-  // Cache successes only, filed under the extractor that ACTUALLY produced the
-  // text — a Firecrawl run that fell back to the built-in reader for one page
-  // must not leave that page sitting in Firecrawl's namespace. PDFs keep the
-  // shared namespace resolved above, for the reason documented there.
+  res ??= await fetchAndExtract(url, opts);
   if (res.text?.trim()) {
-    writeCache(url, res, now, lang, namespaceFor(res, ns));
+    store(res);
     return res;
   }
   // The origin gave us nothing. A stale copy of the page beats a hole in the
@@ -358,9 +422,19 @@ export async function cachedFetchAndExtract(
   // is, which it cannot do with an empty string. Looked up across namespaces
   // because the copy we hold may have been written by the other extractor, and
   // it is still this page's text.
-  const stale = hit ?? readAnyNamespace(url, lang);
+  const stale = hit ?? readAnyRead(url, lang, variant);
   if (stale) return served(stale, `${url} returned ${res.status || "no response"}; served the cached copy from ${new Date(stale.cachedAt).toISOString()}.`);
   return res;
+}
+
+// The entry a lookup made now may serve: its own namespace (or a document's),
+// and — when Firecrawl is predicted — the built-in text of a page Firecrawl
+// failed on, which is still the best this page has.
+function lookup(url: string, acceptLanguage: string, ns: CacheNamespace, variant: CacheVariant): CacheEntry | undefined {
+  const best = readAnyNamespace(url, acceptLanguage, [...new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
+  if (ns !== "firecrawl") return best;
+  const fallback = readCache(url, acceptLanguage, "native", variant);
+  return fallback?.fallbackFrom === "firecrawl" && (!best || fallback.cachedAt > best.cachedAt) ? fallback : best;
 }
 
 export interface CacheStats {
