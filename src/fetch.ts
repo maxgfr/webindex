@@ -734,14 +734,16 @@ export function htmlCanonicalUrl(html: string): string | undefined {
 // Dependency-free and CONSERVATIVE — when it can't confidently find a main
 // region (or that region looks too small versus the whole page) it returns the
 // input unchanged, so we never extract LESS than the previous behaviour. The
-// strongest matching tier wins: <main>/<article> first, then common content
-// containers.
+// strongest matching tier wins: <main> or role="main", then <article>, then
+// common content containers.
 
 interface Region {
   /** Just past the opening tag. */
   start: number;
   /** At the matching close tag. */
   end: number;
+  /** The opening tag itself. */
+  open: string;
 }
 
 /**
@@ -756,15 +758,15 @@ interface Region {
  */
 function balancedRegions(html: string, tag: string, isCandidate: (open: string) => boolean): Region[] {
   const re = new RegExp(`<${tag}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>|</${tag}\\s*>`, "gi");
-  const stack: { start: number; candidate: boolean }[] = [];
+  const stack: { start: number; open?: string }[] = [];
   const out: Region[] = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(html))) {
     if (m[0][1] === "/") {
-      const open = stack.pop();
-      if (open?.candidate) out.push({ start: open.start, end: m.index });
+      const top = stack.pop();
+      if (top?.open) out.push({ start: top.start, end: m.index, open: top.open });
     } else {
-      stack.push({ start: re.lastIndex, candidate: isCandidate(m[0]) });
+      stack.push({ start: re.lastIndex, open: isCandidate(m[0]) ? m[0] : undefined });
     }
   }
   return out;
@@ -777,38 +779,109 @@ const visibleLength = (h: string) =>
     .replace(/\s+/g, " ")
     .trim().length;
 
-const CONTENT_CONTAINER = /\b(?:id|class)="[^"]*\b(?:content|article|post|entry|story|markdown-body|main|prose)\b[^"]*"/i;
+// The ARIA landmark for the main region. Sphinx/Read the Docs, MediaWiki,
+// Discourse and many CMS themes mark it this way instead of with <main>.
+const ROLE_MAIN = /\srole\s*=\s*["']?main(?=["'\s/>])/i;
+// The element names that carry it on this page, so each can be balanced by name.
+const ROLE_MAIN_TAG = /<([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>])[^<>]*\srole\s*=\s*["']?main(?=["'\s/>])/g;
 
+// Words in an id or class that mark a content container, and words that mark
+// the chrome around one. `entry-content` and `main-outlet` are content;
+// `main-nav` and `sidebar-content` are not, though a bare `\bmain\b` or
+// `\bcontent\b` test matched both.
+const CONTENT_WORDS = new Set(["content", "article", "post", "entry", "story", "main", "prose"]);
+const CHROME_WORDS = new Set([
+  "nav",
+  "navbar",
+  "navigation",
+  "menu",
+  "header",
+  "footer",
+  "sidebar",
+  "breadcrumb",
+  "breadcrumbs",
+  "banner",
+  "cookie",
+  "consent",
+  "comment",
+  "comments",
+  "related",
+  "share",
+  "social",
+  "toolbar",
+  "widget",
+  "meta",
+  "ad",
+  "ads",
+  "promo",
+]);
+
+function isContentContainer(open: string): boolean {
+  const attrs = htmlAttributes(open);
+  for (const token of `${attrs.get("id") ?? ""} ${attrs.get("class") ?? ""}`.toLowerCase().split(/\s+/)) {
+    if (token === "markdown-body") return true;
+    const words = token.split(/\W+/);
+    if (words.some((w) => CONTENT_WORDS.has(w)) && !words.some((w) => CHROME_WORDS.has(w))) return true;
+  }
+  return false;
+}
+
+// What makes two candidates the same KIND of block: tag name and first class,
+// digits ignored so WordPress's `post-123` and `post-456` agree.
+function blockKind(open: string): string {
+  const tag = /^<([a-zA-Z][a-zA-Z0-9-]*)/.exec(open)?.[1]?.toLowerCase() ?? "";
+  const firstClass = (htmlAttributes(open).get("class") ?? "").trim().split(/\s+/)[0]!;
+  return `${tag} ${firstClass.replace(/\d+/g, "0")}`;
+}
+
+/**
+ * The main content region of `html`, or `html` itself when none is found with
+ * confidence.
+ *
+ * Candidates are found and measured on the page WITHOUT its comments, scripts,
+ * styles, templates and SVGs, and a region is returned from that cleaned page.
+ * Inline scripts count as characters but are not text: a sidebar holding a chat
+ * widget's JSON outscored the article, and a `__NEXT_DATA__` blob outside
+ * `<main>` inflated the page until the size gate refused the real region.
+ */
 export function extractMainHtml(html: string): string {
+  const clean = dropElements(html, ["script", "style", "template", "svg"]);
+  const roleMainTags = new Set(["main"]);
+  for (const m of clean.matchAll(ROLE_MAIN_TAG)) roleMainTags.add(m[1]!.toLowerCase());
   // Strongest tier first; the first tier with a candidate decides.
   const tiers: { tags: string[]; isCandidate: (open: string) => boolean }[] = [
-    { tags: ["main"], isCandidate: () => true },
+    { tags: [...roleMainTags], isCandidate: (open) => /^<main[\s/>]/i.test(open) || ROLE_MAIN.test(open) },
     { tags: ["article"], isCandidate: () => true },
-    { tags: ["div", "section"], isCandidate: (open) => CONTENT_CONTAINER.test(open) },
+    { tags: ["div", "section"], isCandidate: isContentContainer },
   ];
   for (const tier of tiers) {
-    const regions = tier.tags.flatMap((tag) => balancedRegions(html, tag, tier.isCandidate)).sort((a, b) => a.start - b.start);
+    const regions = tier.tags.flatMap((tag) => balancedRegions(clean, tag, tier.isCandidate)).sort((a, b) => a.start - b.start);
     if (!regions.length) continue;
     // Only an outermost candidate can win — a nested one never has more text
     // than the candidate around it — so only those are measured. They are
     // disjoint, which keeps the measuring linear however deep the nesting goes.
-    let best: Region | undefined;
-    let bestLen = -1;
+    const outer: (Region & { len: number })[] = [];
     let reach = -1;
     for (const r of regions) {
       if (r.start < reach) continue;
       reach = r.end;
-      const len = visibleLength(html.slice(r.start, r.end));
-      if (len > bestLen) {
-        best = r;
-        bestLen = len;
-      }
+      outer.push({ ...r, len: visibleLength(clean.slice(r.start, r.end)) });
     }
+    let best = outer[0]!;
+    for (const r of outer) if (r.len > best.len) best = r;
+    // Repeated siblings — the posts of a thread, the entries of a blog index —
+    // are the content between them. Keeping only the longest dropped the rest
+    // of the thread, very often the question itself. A story beside its
+    // comments is two kinds of block and still keeps just the story.
+    const kind = blockKind(best.open);
+    const kept = outer.filter((r) => r === best || blockKind(r.open) === kind);
+    const keptLen = kept.reduce((n, r) => n + r.len, 0);
     // Size gate: a tiny region (short absolutely AND a small share of the page)
     // is probably a wrong match — fall back to the full document. The whole
     // page is only measured when the region is short enough for it to matter.
-    if (bestLen < 500 && bestLen < visibleLength(html) * 0.3) return html;
-    return html.slice(best!.start, best!.end);
+    if (keptLen < 500 && keptLen < visibleLength(clean) * 0.3) return html;
+    if (kept.length === 1) return clean.slice(best.start, best.end);
+    return kept.map((r) => `<div>${clean.slice(r.start, r.end)}</div>`).join("\n");
   }
   return html;
 }

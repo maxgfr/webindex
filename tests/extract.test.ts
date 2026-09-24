@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { deflateSync } from "node:zlib";
-import { extractMainHtml, looksLikeJunkExtraction } from "../src/fetch.js";
+import { extractMainHtml, htmlToText, looksLikeJunkExtraction } from "../src/fetch.js";
 import { pdfToText } from "../src/pdf.js";
 
 describe("looksLikeJunkExtraction (consent / anti-bot detection)", () => {
@@ -49,6 +51,105 @@ describe("extractMainHtml (readability-lite)", () => {
   it("falls back when the matched region is tiny relative to the page", () => {
     const html = `<main>x</main><div>${"lots of real body content here ".repeat(200)}</div>`;
     expect(extractMainHtml(html)).toBe(html);
+  });
+
+  it("keeps every post of a thread, not just the longest one", () => {
+    // A page without <main> listing repeated <article>s: an index, a forum
+    // thread. Keeping only the longest dropped the question and kept the answer.
+    const post = (who: string, words: number) => `<article class="message message--post"><h4>${who}</h4><p>${`${who}-said `.repeat(words)}</p></article>`;
+    const html = `<nav>${"menu ".repeat(40)}</nav><h1>Thread</h1>${post("asker", 40)}${post("answerer", 120)}${post("thanks", 5)}<footer>f</footer>`;
+    const text = htmlToText(extractMainHtml(html));
+    expect(text).toContain("asker-said");
+    expect(text).toContain("answerer-said");
+    expect(text).toContain("thanks-said");
+    expect(text).not.toContain("menu");
+  });
+
+  it("still keeps just the story when its siblings are a different kind of block", () => {
+    const html = `<article class="story"><p>${"The council voted on the lanes. ".repeat(30)}</p></article><article class="teaser"><p>Unrelated teaser</p></article>`;
+    const text = htmlToText(extractMainHtml(html));
+    expect(text).toContain("The council voted");
+    expect(text).not.toContain("Unrelated teaser");
+  });
+
+  it("does not count inline scripts as the text of a region", () => {
+    const pricing = `<p>${"Every plan includes backups and SSL. ".repeat(9)}</p>`;
+    const chat = `<p>Chat with sales</p><script>window.__CHAT__=${JSON.stringify({ greeting: "Hi! ".repeat(800) })}</script>`;
+    const html = `<div class="content">${pricing}</div><div class="chat-content">${chat}</div>`;
+    const text = htmlToText(extractMainHtml(html));
+    expect(text).toContain("Every plan includes backups");
+    expect(text).not.toContain("Chat with sales");
+  });
+
+  it("is not talked out of a real region by a data blob outside it", () => {
+    // A 200 KB __NEXT_DATA__ outside <main> used to count as page text, so the
+    // size gate saw a ~450-char region as a sliver of the page and refused it.
+    const html = `<header>${"Product Pricing Docs ".repeat(5)}</header><aside>${"Related link ".repeat(10)}</aside><main><p>${"Pricing starts at ten euros. ".repeat(15)}</p></main><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ copy: "lorem ipsum ".repeat(17_000) })}</script>`;
+    const text = htmlToText(extractMainHtml(html));
+    expect(text).toContain("Pricing starts at ten euros.");
+    expect(text).not.toMatch(/Related link|Product Pricing Docs/);
+  });
+
+  it("isolates role=main ahead of a wider content wrapper holding the sidebar", () => {
+    const sidebar = Array.from({ length: 40 }, (_, i) => `<li><a href="/p${i}">Sidebar page ${i}</a></li>`).join("");
+    const html = `<div class="page-content"><div class="sphinxsidebar" role="navigation"><ul>${sidebar}</ul></div><div role="main"><h1>API reference</h1><p>${"The client exposes a single request method. ".repeat(10)}</p></div></div>`;
+    const text = htmlToText(extractMainHtml(html));
+    expect(text).toContain("API reference");
+    expect(text).not.toContain("Sidebar page 7");
+  });
+
+  it("does not take navigation for content because its class starts with main-", () => {
+    const html = `<div class="main-nav">${"<a>Section link</a> ".repeat(80)}</div><main-nav>${"<a>Custom nav link</a> ".repeat(80)}</main-nav><div class="entry-content"><p>${"Entry prose about lanes. ".repeat(30)}</p></div>`;
+    const text = htmlToText(extractMainHtml(html));
+    expect(text).toContain("Entry prose about lanes.");
+    expect(text).not.toMatch(/Section link|Custom nav link/);
+  });
+});
+
+// Realistic page shapes, each reduced from a real template (news CMS, Sphinx,
+// XenForo, Discourse, GitHub, a shop, MediaWiki, a Next.js app, consent
+// managers). Every assertion is a substring a reader would quote or a piece of
+// chrome that must not be quoted instead.
+describe("extraction on realistic pages", () => {
+  const page = (name: string) => readFileSync(join(__dirname, "fixtures", "html", `${name}.html`), "utf8");
+  const extract = (name: string) => htmlToText(extractMainHtml(page(name)));
+
+  it("blog index: keeps every post preview", () => {
+    const text = extract("blogindex");
+    for (const title of ["How we rebuilt our rate limiter", "Upgrading to Postgres 16 with zero downtime", "What we changed about on-call"])
+      expect(text).toContain(title);
+    expect(text).not.toMatch(/Careers|© Acme/);
+  });
+
+  it("forum thread: keeps the question, the answer and the follow-up", () => {
+    const text = extract("forum");
+    for (const marker of ["QUESTION-MARKER", "ANSWER-MARKER", "FOLLOWUP-MARKER"]) expect(text).toContain(marker);
+    expect(text).not.toMatch(/What's new|XenForo/);
+  });
+
+  it("Discourse crawler view: the posts inside <noscript> still come through", () => {
+    const text = extract("discourse");
+    expect(text).toContain("What am I doing wrong?");
+    expect(text).toContain("setInterval is not a clock.");
+    expect(text).not.toMatch(/Log In|Categories|JavaScript is required/);
+  });
+
+  it("Next.js app: the pricing copy, not the chat widget or the data blob", () => {
+    const text = extract("nextjs");
+    expect(text).toContain("Start free, pay as you grow.");
+    expect(text).not.toMatch(/Chat with sales|lorem ipsum|Cloudy Product/);
+  });
+
+  it("Sphinx docs: the article, without the sidebar or the breadcrumb", () => {
+    const text = extract("docs");
+    expect(text).toContain("Widget reads its settings from");
+    expect(text).not.toMatch(/Installation|API reference|Docs »|Built with Sphinx/);
+  });
+
+  it("MediaWiki: the article body under role=main, without the side panel", () => {
+    const text = extract("wiki");
+    expect(text).toContain("inorganic compound");
+    expect(text).not.toMatch(/Random article|About Wikipedia/);
   });
 });
 
