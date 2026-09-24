@@ -129,7 +129,7 @@ function decodeUtf8OrCp1252(bytes: Buffer): string {
     // a Latin-1 page ending on an accented letter. UTF-8 elsewhere in the body
     // settles it; without any, the text before the tail is ASCII, which cp1252
     // reads identically, and cp1252 also reads the tail right.
-    return /[^\x00-\x7f]/.test(text) ? text : decodeCp1252(bytes);
+    return /[\x80-\uffff]/.test(text) ? text : decodeCp1252(bytes);
   }
 }
 
@@ -180,8 +180,7 @@ export function decodeLocal(bytes: Buffer, opts: { sniffHtmlCharset?: boolean } 
   const bom = bomEncoding(bytes);
   if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
 
-  const own =
-    charsetFromXmlDeclaration(bytes) ?? (opts.sniffHtmlCharset === false ? undefined : charsetFromHtml(bytes.subarray(0, 4096).toString("latin1")));
+  const own = charsetFromXmlDeclaration(bytes) ?? (opts.sniffHtmlCharset === false ? undefined : charsetFromHtml(bytes.subarray(0, 4096).toString("latin1")));
   if (own && !isUtf8Label(own)) return decodeWith(bytes, own);
 
   try {

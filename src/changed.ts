@@ -55,8 +55,7 @@ function read(url: string, opts: { timeoutMs?: number; maxBytes?: number }, head
 
 function observation(url: string, res: HttpResult): Fingerprint {
   const complete = res.ok && !res.truncated;
-  const error =
-    res.status === 304 || complete ? undefined : !res.ok ? (res.error ?? `status ${res.status}`) : "response truncated at the byte cap";
+  const error = res.status === 304 || complete ? undefined : !res.ok ? (res.error ?? `status ${res.status}`) : "response truncated at the byte cap";
   return {
     url,
     ...(res.etag ? { etag: res.etag } : {}),

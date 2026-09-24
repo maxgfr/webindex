@@ -1019,7 +1019,8 @@ export async function fetchAndExtract(
     // httpGet keeps the raw bytes of anything the origin labelled a PDF, so a
     // content-type-only PDF (no .pdf in the URL) is not downloaded twice. The
     // refetch is only for a response that somehow arrived without them.
-    const bytes = res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
+    const bytes =
+      res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
     // The ladder tries pdf-inspector, then an already-running Firecrawl, then
     // pdftotext, then the built-in reader — and refuses rather than hand back
     // text no extractor could vouch for. Firecrawl is injected as a callback so
@@ -1053,7 +1054,8 @@ export async function fetchAndExtract(
   if (docFmt) {
     // Same as the PDF path: the bytes of a content-type-only document are
     // already here; the refetch is the fallback, not the rule.
-    const bytes = res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
+    const bytes =
+      res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
     const got = bytes
       ? await extractDocument(bytes, docFmt, {
           firecrawl: async () => {

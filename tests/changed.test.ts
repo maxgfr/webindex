@@ -123,7 +123,14 @@ describe("hasChanged", () => {
     installFetchMock(() => ({ status: 304, body: "", headers: { etag: '"v2"' } }));
     const v = await hasChanged(URL_A, stored);
     expect(v).toMatchObject({ changed: false, via: "not-modified" });
-    expect(v.fingerprint).toMatchObject({ url: URL_A, etag: '"v2"', lastModified: stored.lastModified, contentHash: stored.contentHash, status: 304, bytes: 0 });
+    expect(v.fingerprint).toMatchObject({
+      url: URL_A,
+      etag: '"v2"',
+      lastModified: stored.lastModified,
+      contentHash: stored.contentHash,
+      status: 304,
+      bytes: 0,
+    });
     expect(v.fingerprint.fetchedAt).not.toBe(stored.fetchedAt);
     expect(v.fingerprint.error).toBeUndefined();
   });
@@ -131,7 +138,12 @@ describe("hasChanged", () => {
   it("decides by the content hash on a 200 when both observations have one", async () => {
     // A per-node ETag (or a Last-Modified stamped with the current time) on a
     // byte-identical body used to read as "changed" on every check…
-    installFetchMock(() => ({ status: 200, body: "same", contentType: "text/html", headers: { etag: '"node-2"', "last-modified": "Thu, 22 Oct 2015 07:28:00 GMT" } }));
+    installFetchMock(() => ({
+      status: 200,
+      body: "same",
+      contentType: "text/html",
+      headers: { etag: '"node-2"', "last-modified": "Thu, 22 Oct 2015 07:28:00 GMT" },
+    }));
     const prev = { etag: '"node-1"', lastModified: "Wed, 21 Oct 2015 07:28:00 GMT", contentHash: contentHash("same") };
     expect(await hasChanged(URL_A, prev)).toMatchObject({ changed: false, via: "hash" });
     // …and a stale ETag hid a real change.
