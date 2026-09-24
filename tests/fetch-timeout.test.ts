@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { describe, it, expect, afterEach, vi } from "vitest";
 // Env names resolve through the brand, exactly as the engine resolves them.
 import { envName } from "../src/brand.js";
@@ -17,15 +19,14 @@ afterEach(() => {
 // blackholed host — and means these tests would hang, not fail, if the abort
 // were ever dropped.
 function installHangingFetch() {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn((_input: unknown, init?: RequestInit) => {
-      return new Promise((_resolve, reject) => {
-        const signal = init?.signal;
-        signal?.addEventListener("abort", () => reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" })));
-      });
-    }),
-  );
+  const spy = vi.fn((_input: unknown, init?: RequestInit) => {
+    return new Promise((_resolve, reject) => {
+      const signal = init?.signal;
+      signal?.addEventListener("abort", () => reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" })));
+    });
+  });
+  vi.stubGlobal("fetch", spy);
+  return spy;
 }
 
 describe("request timeouts", () => {
@@ -45,5 +46,77 @@ describe("request timeouts", () => {
     expect(r.ok).toBe(false);
     expect(r.status).toBe(0);
     expect(r.error).toBeTruthy();
+  });
+});
+
+// undici reports every network failure as "fetch failed" and keeps the reason
+// on `cause`. These stubs throw exactly that shape.
+function failingFetch(cause: Error & { code?: string }) {
+  const spy = vi.fn(async () => {
+    throw Object.assign(new TypeError("fetch failed"), { cause });
+  });
+  vi.stubGlobal("fetch", spy);
+  return spy;
+}
+const withCode = (message: string, code?: string) => Object.assign(new Error(message), code ? { code } : {});
+
+describe("network failure reporting", () => {
+  it("names the cause undici hides behind 'fetch failed'", async () => {
+    failingFetch(withCode("connect ECONNREFUSED 127.0.0.1:9", "ECONNREFUSED"));
+    expect((await httpGet("https://refused.test/x", { retries: 0 })).error).toBe("connect ECONNREFUSED 127.0.0.1:9");
+    failingFetch(withCode("", "ECONNRESET"));
+    expect((await httpGet("https://reset.test/x", { retries: 0 })).error).toBe("ECONNRESET");
+    failingFetch(withCode("socket hang up", "UND_ERR_SOCKET"));
+    expect((await httpJson("GET", "https://reset.test/j", undefined, { retries: 0 })).error).toBe("UND_ERR_SOCKET: socket hang up");
+  });
+
+  it("says a timeout was a timeout, and how long it waited", async () => {
+    installHangingFetch();
+    vi.stubEnv(envName("MAX_ATTEMPTS"), "1");
+    expect((await httpGet("https://blackhole.test/x", { timeoutMs: 5 })).error).toBe("timed out after 5 ms");
+    expect((await httpJson("GET", "https://blackhole.test/j", undefined, { timeoutMs: 5 })).error).toBe("timed out after 5 ms");
+  });
+
+  it.each([
+    ["a redirect loop", withCode("redirect count exceeded")],
+    ["an unknown host", withCode("getaddrinfo ENOTFOUND nowhere.invalid", "ENOTFOUND")],
+    ["a redirect to another scheme", withCode("URL scheme must be a HTTP(S) scheme")],
+    ["a blocked port", withCode("bad port")],
+    ["an expired certificate", withCode("certificate has expired", "CERT_HAS_EXPIRED")],
+  ])("does not retry %s, which fails the same way every time", async (_label, cause) => {
+    const spy = failingFetch(cause);
+    const r = await httpGet("https://permanent.test/x", { retries: 2 });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain(cause.message);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const json = failingFetch(cause);
+    await httpJson("GET", "https://permanent.test/j", undefined, { retries: 2 });
+    expect(json).toHaveBeenCalledTimes(1);
+  });
+
+  it("still retries a transient failure", async () => {
+    const spy = failingFetch(withCode("read ECONNRESET", "ECONNRESET"));
+    await httpGet("https://flaky.test/x", { retries: 1 });
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("walks a real redirect loop once, not once per attempt", async () => {
+    // Against real undici rather than a stub, so the shape of `cause` is the
+    // runtime's own and not this suite's guess at it.
+    let hits = 0;
+    const server = createServer((req, res) => {
+      hits++;
+      res.writeHead(302, { location: req.url === "/a" ? "/b" : "/a" }).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const r = await httpGet(`http://127.0.0.1:${port}/a`, { retries: 1 });
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(/redirect/i);
+      expect(hits).toBe(21);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });
