@@ -1384,6 +1384,43 @@ describe("audit regressions", () => {
     if (json) expect(JSON.parse(stdout()).queryTerms).toEqual([]);
   });
 
+  // extractLocal routed office files by extension only: an extension-less or
+  // misnamed .docx came back as 37 KB of `PK\u0003\u0004…`, extractor "plain",
+  // exit 0.
+  it.each(["report", "report.txt", "report.bin"])("reads a local office document named %s by its bytes", async (name) => {
+    const file = join(dir, name);
+    writeFileSync(file, readFileSync(join(__dirname, "fixtures", "docs", "sample.docx")));
+    expect(await run(["extract", file, "--json"])).toBe(1);
+    const result = JSON.parse(stdout());
+    expect(result.text).toBe("");
+    expect(result.extractor).toBe("none");
+    expect(result.reason).toMatch(/no document converter available/);
+  });
+
+  it("reads a local PDF with no extension through the PDF ladder", async () => {
+    const file = join(dir, "paper");
+    writeFileSync(file, "%PDF-1.4\n1 0 obj\n<< /Length 30 >>\nstream\nBT (Local PDF text) Tj ET\nendstream\nendobj\n");
+    expect(await run(["extract", file, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ text: "Local PDF text", extractor: "native" });
+  });
+
+  // `.csv` went to the converter before the plain-text list was consulted, and
+  // with no converter (NO_NPX, offline, DOC_ENGINE=none) a CSV was refused.
+  it("falls back to the plain text of a local CSV when no converter is available", async () => {
+    const file = join(dir, "data.csv");
+    writeFileSync(file, "region,q1,q2\nEMEA,1.2,1.5\n");
+    expect(await run(["extract", file, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ text: "region,q1,q2\nEMEA,1.2,1.5\n", extractor: "plain" });
+  });
+
+  it("refuses a local binary file instead of printing its bytes", async () => {
+    const file = join(dir, "photo.png");
+    writeFileSync(file, Buffer.from("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10", "latin1"));
+    expect(await run(["extract", file, "--json"])).toBe(1);
+    expect(JSON.parse(stdout())).toMatchObject({ text: "", extractor: "none" });
+    expect(JSON.parse(stdout()).reason).toMatch(/binary/);
+  });
+
   it.each([false, true])("fails an empty local extraction consistently (json=%s)", async (json) => {
     const file = join(dir, "empty.txt");
     writeFileSync(file, "");

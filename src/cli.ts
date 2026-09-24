@@ -19,7 +19,7 @@ import { pathToFileURL } from "node:url";
 import { configure } from "./brand.js";
 import { decodeLocal } from "./charset.js";
 import { ENGINE_VERSION } from "./version.js";
-import { docFormatForUrl, extractDocument, enabledDocExtractors } from "./doc.js";
+import { docFormatForUrl, extractDocument, enabledDocExtractors, sniffDocument } from "./doc.js";
 import { enabledExtractors, extractPdf, ocrTools } from "./pdf.js";
 import { extractMainHtml, htmlToText, httpGet, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
 import { firecrawlBase, probeFirecrawl } from "./firecrawl.js";
@@ -107,7 +107,9 @@ COMMANDS
              then Firecrawl. Prints what it found, or says which backend was
              missing and how to start it — those are different answers.
   fetch      Fetch a URL and print the extracted text. Routes PDFs and office
-             documents to their ladders automatically. Uses Firecrawl when
+             documents to their ladders automatically — by URL, content-type,
+             download filename or the bytes themselves; images, media and
+             archives get a note, never their bytes. Uses Firecrawl when
              available, with built-in extraction as fallback. HTML is reduced
              to main content with consent banners dropped. Caching is opt-in:
              --cache reuses a fresh copy for the TTL (24 h) and revalidates a
@@ -115,9 +117,10 @@ COMMANDS
              304; --refresh re-fetches and rewrites the entry; --offline
              serves only what the cache holds. --json adds finalUrl (after
              redirects), canonical, documentType and cached.
-  extract    Same extraction, on a file already on disk. For both, --full-page
-             keeps the whole HTML page through the built-in reader: navigation,
-             footer and consent banners included.
+  extract    Same extraction, on a file already on disk, recognised by its bytes
+             when its name says otherwise. For both, --full-page keeps the
+             whole HTML page through the built-in reader: navigation, footer
+             and consent banners included.
   rank       Order candidate documents against a question — BM25F, then a
              near-duplicate collapse, then MMR so the top says several
              different things. Reads a JSON array of {url,title,text} from
@@ -311,13 +314,20 @@ async function extractLocal(path: string, fullPage = false): Promise<{ text: str
   }
   const asUrl = pathToFileURL(path).href;
 
-  if (looksLikePdfUrl(asUrl) || bytes.subarray(0, 5).toString("latin1") === "%PDF-") {
+  // The bytes before the name: an extension-less download or a .docx saved as
+  // .txt is still a document, and read by its name it came back as the ZIP's
+  // bytes under extractor "plain".
+  const sniffed = sniffDocument(bytes);
+  if (sniffed === "pdf" || (!sniffed && looksLikePdfUrl(asUrl))) {
     const r = await extractPdf(bytes);
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
-  const fmt = docFormatForUrl(asUrl);
+  const fmt = sniffed ?? docFormatForUrl(asUrl);
   if (fmt) {
     const r = await extractDocument(bytes, fmt);
+    // A format that is already text (CSV) is read as text when nothing could
+    // convert it, as fetchAndExtract does — refusing it helped no one.
+    if (!r.text && fmt.textFallback) return { text: decodeLocal(bytes, { sniffHtmlCharset: false }), extractor: "plain", consentDropped: 0 };
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
   const extension = extname(path).toLowerCase();
@@ -325,6 +335,9 @@ async function extractLocal(path: string, fullPage = false): Promise<{ text: str
   // A Markdown file quoting `<meta charset="iso-8859-1">` as an example is not
   // declaring its own encoding: only a document that may be HTML gets sniffed.
   const raw = decodeLocal(bytes, { sniffHtmlCharset: !explicitText });
+  // Decoded text keeps no NUL (a UTF-16 BOM is honoured above); binary data —
+  // an image, an archive — always has one early. Never print its bytes.
+  if (raw.slice(0, 1024).includes("\u0000")) return { text: "", extractor: "none", reason: "binary data, not a text document", consentDropped: 0 };
   const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
   const text = looksHtml ? htmlToText(fullPage ? raw : extractMainHtml(raw), { fullPage }) : raw;
   const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text) : { text, dropped: 0 };

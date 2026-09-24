@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect } from "vitest";
-import { docFormatForUrl, docFormatForContentType, DOC_EXTENSIONS } from "../src/doc.js";
+import { docFormatForUrl, docFormatForContentType, DOC_EXTENSIONS, sniffDocument } from "../src/doc.js";
 import { looksLikePdfUrl } from "../src/fetch.js";
 import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "../src/pdf/exec.js";
 
@@ -94,5 +96,39 @@ describe("the text-fallback policy", () => {
     expect(docFormatForUrl("https://x.test/a.xlsx")?.textFallback).toBe(false);
     expect(docFormatForUrl("https://x.test/a.epub")?.textFallback).toBe(false);
     expect(docFormatForUrl("https://x.test/a.csv")?.textFallback).toBe(true);
+  });
+});
+
+// Download routes answer `application/octet-stream` (or nothing at all) for
+// PDFs and office files as often as they name the type. Routing on the URL
+// and the header alone decoded those bytes as prose; the bytes themselves are
+// what can be trusted.
+describe("sniffDocument", () => {
+  const fixture = (name: string) => readFileSync(join(__dirname, "fixtures", "docs", name));
+
+  it("recognises a PDF by its header, even after up to 1 KB of junk", () => {
+    expect(sniffDocument(Buffer.from("%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj", "latin1"))).toBe("pdf");
+    expect(sniffDocument(Buffer.from(`${"\r\n".repeat(200)}%PDF-1.4\n`, "latin1"))).toBe("pdf");
+    expect(sniffDocument(Buffer.from(`${" ".repeat(2000)}%PDF-1.4\n`, "latin1"))).toBeUndefined();
+  });
+
+  it("recognises OOXML, OpenDocument, legacy OLE and RTF as office documents", () => {
+    for (const name of ["sample.docx", "notes.odt", "legacy.xls"]) {
+      expect(sniffDocument(fixture(name)), name).toEqual({ textFallback: false });
+    }
+    expect(sniffDocument(Buffer.from("{\\rtf1\\ansi Hello}", "latin1"))).toEqual({ textFallback: false });
+  });
+
+  // A ZIP is only an office document when it carries a package manifest: a
+  // source archive routed to the converter would be refused as unreadable
+  // when it should be reported as an archive.
+  it("leaves a ZIP without a package manifest alone", () => {
+    expect(sniffDocument(Buffer.from("PK\x03\x04\x14\x00\x00\x00\x08\x00src/index.ts", "latin1"))).toBeUndefined();
+  });
+
+  it("leaves text, HTML and empty bodies alone", () => {
+    expect(sniffDocument(Buffer.from("<!doctype html><title>Login</title>"))).toBeUndefined();
+    expect(sniffDocument(Buffer.from("region,q1\nEMEA,1.2\n"))).toBeUndefined();
+    expect(sniffDocument(Buffer.alloc(0))).toBeUndefined();
   });
 });

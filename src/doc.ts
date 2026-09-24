@@ -5,9 +5,11 @@
 // rather than cite what nothing could read).
 //
 // Callers want `docFormatForUrl` / `docFormatForContentType` to decide whether a
-// response is an office document, then `extractDocument` to convert it.
+// response is an office document — `sniffDocument` when neither the URL nor the
+// header says, which is how download routes answer — then `extractDocument` to
+// convert it.
 
-export { docFormatForUrl, docFormatForContentType, DOC_EXTENSIONS, type DocFormat } from "./doc/formats.js";
+export { docFormatForUrl, docFormatForContentType, DOC_EXTENSIONS, sniffDocument, type DocFormat } from "./doc/formats.js";
 export {
   extractDocument,
   enabledDocExtractors,
