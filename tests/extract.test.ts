@@ -203,6 +203,16 @@ describe("extraction on realistic pages", () => {
     expect(text).not.toMatch(/Afghanistan|Bolivia|EU 44/);
   });
 
+  it("FR/DE and wiki pages: named references read as letters, soft hyphens vanish", () => {
+    const de = extract("cookie_de");
+    expect(de).toContain("# Neue Regeln für Einwilligungsbanner");
+    expect(de).toContain("Die Datenschutzkonferenz");
+    expect(extract("cookie_fr")).toContain("Le cœur de la réforme");
+    const wiki = extract("wiki");
+    expect(wiki).not.toMatch(/&[a-z]+;/);
+    expect(wiki).toContain("(εr). The Greek letter α is often used for thermal diffusivity, and μ for viscosity (about 0.89 mPa·s");
+  });
+
   it("MediaWiki: the article body under role=main, without the side panel", () => {
     const text = extract("wiki");
     expect(text).toContain("inorganic compound");

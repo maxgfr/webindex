@@ -20,7 +20,7 @@
 // implied-end rules a browser applies: a new cell closes the open cell, a new
 // row closes the open row, and a table's end closes everything inside it.
 
-import { decodeEntities } from "./fetch.js";
+import { decodeEntities } from "./entities.js";
 import { dropElements, htmlAttributes, INLINE_TAGS, LOOSE_TAG_RE, RAW_TEXT_ELEMENTS, TAG_RE, tagName } from "./html.js";
 
 export interface Table {

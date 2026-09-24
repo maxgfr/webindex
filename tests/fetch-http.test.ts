@@ -197,6 +197,39 @@ describe("decodeEntities", () => {
   it("decodes named, decimal and hex references", () => {
     expect(decodeEntities("a &amp; b &#39;x&#39; &#x27;y&#x27;")).toBe("a & b 'x' 'y'");
   });
+
+  it("reads numeric references 128–159 as Windows-1252, as the HTML spec does", () => {
+    // Word exports and legacy CMSes write their curly quotes and dashes this way;
+    // taken literally they are invisible C1 controls and the punctuation vanishes.
+    expect(decodeEntities("don&#146;t")).toBe("don’t");
+    expect(decodeEntities("&#147;quoted&#148; 1&#150;2 &#128;5 &#x85;")).toBe("“quoted” 1–2 €5 …");
+    // The five cp1252 leaves undefined stay what they are.
+    expect(decodeEntities("&#129;")).toBe("\u0081");
+  });
+
+  it("turns NUL, surrogates and out-of-range references into U+FFFD", () => {
+    expect(decodeEntities("a&#0;b")).toBe("a�b");
+    expect(decodeEntities("&#xD800;&#xDFFF;")).toBe("��");
+    expect(decodeEntities("&#99999999;&#x110000;&#99999999999999999999999;")).toBe("���");
+  });
+
+  it("knows HTML's named references beyond the common ones", () => {
+    expect(decodeEntities("Le c&oelig;ur, &OElig;uvre, na&iuml;f")).toBe("Le cœur, Œuvre, naïf");
+    expect(decodeEntities("&alpha; &beta; &Omega; &epsilon;")).toBe("α β Ω ε");
+    expect(decodeEntities("x &le; y &ge; z &ne; &minus;1 &infin; &sum; &radic;")).toBe("x ≤ y ≥ z ≠ −1 ∞ ∑ √");
+    expect(decodeEntities("&larr; &rarr; &rArr; &harr;")).toBe("← → ⇒ ↔");
+    expect(decodeEntities("a&ensp;b&emsp;c&thinsp;d")).toBe("a b c d");
+    expect(decodeEntities("&AMP; &LT; &GT; &QUOT; &COPY; &REG;")).toBe('& < > " © ®');
+  });
+
+  it("drops soft hyphens and invisible joiners, which split words for anything searching the text", () => {
+    expect(decodeEntities("Einwilligungs&shy;banner Daten&#173;schutz&#xAD;konferenz")).toBe("Einwilligungsbanner Datenschutzkonferenz");
+    expect(decodeEntities("a&zwnj;b&zwj;c&lrm;d&rlm;e")).toBe("abcde");
+  });
+
+  it("is still single-pass and still case-sensitive", () => {
+    expect(decodeEntities("&amp;shy; &#38;oelig; &Dagger; &dagger; &Amp; &unknown;")).toBe("&shy; &oelig; ‡ † &Amp; &unknown;");
+  });
 });
 
 describe("htmlTitle", () => {

@@ -1,5 +1,6 @@
 import { brand, countFetch, env, envFlag, envInt } from "./brand.js";
 import { decodeBody } from "./charset.js";
+import { decodeEntities } from "./entities.js";
 import {
   BLOCK_TAGS,
   CHROME_ELEMENTS,
@@ -541,138 +542,8 @@ export async function httpJson(
   return last;
 }
 
-const ENTITIES: Record<string, string> = {
-  "&amp;": "&",
-  "&lt;": "<",
-  "&gt;": ">",
-  "&quot;": '"',
-  "&#39;": "'",
-  "&apos;": "'",
-  "&nbsp;": " ",
-  "&mdash;": "—",
-  "&ndash;": "–",
-  "&hellip;": "…",
-  "&copy;": "©",
-  // Typographic punctuation CMSes emit as named refs (WordPress "smart" text) —
-  // otherwise a curly quote/apostrophe leaks into the report prose verbatim.
-  "&lsquo;": "‘",
-  "&rsquo;": "’",
-  "&sbquo;": "‚",
-  "&ldquo;": "“",
-  "&rdquo;": "”",
-  "&bdquo;": "„",
-  "&bull;": "•",
-  "&middot;": "·",
-  "&laquo;": "«",
-  "&raquo;": "»",
-  "&deg;": "°",
-  "&plusmn;": "±",
-  "&times;": "×",
-  "&divide;": "÷",
-  "&frac12;": "½",
-  "&frac14;": "¼",
-  "&frac34;": "¾",
-  "&sup2;": "²",
-  "&sup3;": "³",
-  "&micro;": "µ",
-  "&trade;": "™",
-  "&reg;": "®",
-  "&sect;": "§",
-  "&para;": "¶",
-  "&dagger;": "†",
-  "&Dagger;": "‡",
-  "&prime;": "′",
-  "&Prime;": "″",
-  "&iexcl;": "¡",
-  "&iquest;": "¿",
-  "&cent;": "¢",
-  "&pound;": "£",
-  "&curren;": "¤",
-  "&yen;": "¥",
-  "&euro;": "€",
-  // Latin-1 accented letters — pervasive in non-English titles/snippets.
-  "&agrave;": "à",
-  "&aacute;": "á",
-  "&acirc;": "â",
-  "&atilde;": "ã",
-  "&auml;": "ä",
-  "&aring;": "å",
-  "&aelig;": "æ",
-  "&ccedil;": "ç",
-  "&egrave;": "è",
-  "&eacute;": "é",
-  "&ecirc;": "ê",
-  "&euml;": "ë",
-  "&igrave;": "ì",
-  "&iacute;": "í",
-  "&icirc;": "î",
-  "&iuml;": "ï",
-  "&ntilde;": "ñ",
-  "&ograve;": "ò",
-  "&oacute;": "ó",
-  "&ocirc;": "ô",
-  "&otilde;": "õ",
-  "&ouml;": "ö",
-  "&oslash;": "ø",
-  "&ugrave;": "ù",
-  "&uacute;": "ú",
-  "&ucirc;": "û",
-  "&uuml;": "ü",
-  "&yacute;": "ý",
-  "&yuml;": "ÿ",
-  "&szlig;": "ß",
-  "&Agrave;": "À",
-  "&Aacute;": "Á",
-  "&Acirc;": "Â",
-  "&Auml;": "Ä",
-  "&Aring;": "Å",
-  "&AElig;": "Æ",
-  "&Ccedil;": "Ç",
-  "&Egrave;": "È",
-  "&Eacute;": "É",
-  "&Ecirc;": "Ê",
-  "&Euml;": "Ë",
-  "&Iacute;": "Í",
-  "&Ntilde;": "Ñ",
-  "&Oacute;": "Ó",
-  "&Ouml;": "Ö",
-  "&Oslash;": "Ø",
-  "&Uacute;": "Ú",
-  "&Uuml;": "Ü",
-};
-
-// The table above, keyed by bare name, for the single-pass decoder below.
-const ENTITY_BY_NAME = new Map(Object.entries(ENTITIES).map(([k, v]) => [k.slice(1, -1), v]));
-const ENTITY_RE = /&(#[xX][0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g;
-
-/**
- * Decode the common named entities plus decimal/hex numeric references, in ONE
- * non-rescanning pass.
- *
- * The pass count is the whole design. Decoding numeric refs and then walking the
- * named table with split/join re-reads its own output, so `&amp;lt;` — which is
- * how a document writes the literal text "&lt;" — becomes "&lt;" and then "<".
- * The page said one thing and the extract says another, which for a page
- * documenting markup is most of its content. One pass cannot do that: each
- * reference is replaced exactly once, from the original text.
- *
- * Names are matched case-SENSITIVELY, because case is meaningful here: `&dagger;`
- * is † and `&Dagger;` is ‡. An unknown name is left exactly as written rather
- * than guessed at or blanked.
- */
-export function decodeEntities(s: string): string {
-  return s.replace(ENTITY_RE, (m, ref: string) => {
-    if (ref[0] === "#") {
-      const n = ref[1] === "x" || ref[1] === "X" ? Number.parseInt(ref.slice(2), 16) : Number(ref.slice(1));
-      try {
-        return Number.isFinite(n) ? String.fromCodePoint(n) : " ";
-      } catch {
-        return " "; // out of range — a space beats throwing on one bad codepoint
-      }
-    }
-    return ENTITY_BY_NAME.get(ref) ?? m;
-  });
-}
+// The decoder lives with the shared markup primitives; this is its public name.
+export { decodeEntities };
 
 // Clean a backend-provided inline field (a title or one-line snippet) that may
 // carry escaped or literal markup: decode entities FIRST (so escaped tags like
