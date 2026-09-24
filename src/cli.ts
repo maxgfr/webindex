@@ -21,7 +21,7 @@ import { decodeLocal } from "./charset.js";
 import { ENGINE_VERSION } from "./version.js";
 import { docFormatForUrl, extractDocument, enabledDocExtractors } from "./doc.js";
 import { enabledExtractors, extractPdf, ocrTools } from "./pdf.js";
-import { extractMainHtml, fetchAndExtract, htmlToText, httpGet, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
+import { extractMainHtml, htmlToText, httpGet, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
 import { firecrawlBase, probeFirecrawl } from "./firecrawl.js";
 import { embedModel, ensureComposeMaterialized, STACK_SERVICES, stackControl } from "./stack.js";
 import { ollamaBase, probeOllama } from "./embed.js";
@@ -33,7 +33,7 @@ import { fingerprint, hasChanged } from "./changed.js";
 import { auditEngineUsage, auditSkillBundle, checkPins, readSkillConfig, scaffoldSkill, vendorEngine, type CliSurface } from "./skillkit/index.js";
 import { isKeylessEngine, KEYLESS_ENGINES, type KeylessEngine } from "./engines.js";
 import { probeSearxng, search, searxngBase } from "./search.js";
-import { cacheClean, cacheDir, cacheStats } from "./cache.js";
+import { cacheClean, cacheDir, cachedFetchAndExtract, cacheStats, setCacheMode } from "./cache.js";
 import { fetchRobots, isAllowed } from "./robots.js";
 import { discoverFeeds, fetchFeed, fetchSitemap, parseFeed } from "./feed.js";
 import { pageMetadata } from "./structured.js";
@@ -55,7 +55,7 @@ import {
   positionalText,
   UsageError,
 } from "./cli-kit.js";
-import { ensureDir, writeArtifact } from "./no-write.js";
+import { ensureDir, isNoWrite, writeArtifact } from "./no-write.js";
 import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
@@ -71,6 +71,7 @@ USAGE
   webindex search <query> [--json] [--limit <n>] [--pages <n>] [--lang <tag>]
                           [--engine ddg|ddglite|mojeek|off] [--searxng <base>|off]
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>] [--full-page]
+                       [--cache] [--refresh] [--offline] [--timeout <ms>]
   webindex extract <file> [--json] [--full-page]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--json]
   webindex repo <ref> [--json]
@@ -92,7 +93,8 @@ USAGE
   webindex tables <url> [--markdown] [--json]
   webindex embed <text> [--json]
   webindex hybrid --query <q> [--docs <file.json|->] [--limit <n>] [--json]
-  webindex changed <url> [--etag <v>] [--hash <sha256>] [--json]
+  webindex changed <url> [--etag <v>] [--last-modified <date>] [--hash <sha256>]
+                         [--timeout <ms>] [--json]
   webindex skill     check|bundle|copy|doctor [--root <dir>] [--json]
   webindex skill     vendor [--engine <name>] --ref <tag> | --check
   webindex skill     init <name> [--root <dir>]
@@ -107,7 +109,12 @@ COMMANDS
   fetch      Fetch a URL and print the extracted text. Routes PDFs and office
              documents to their ladders automatically. Uses Firecrawl when
              available, with built-in extraction as fallback. HTML is reduced
-             to main content with consent banners dropped.
+             to main content with consent banners dropped. Caching is opt-in:
+             --cache reuses a fresh copy for the TTL (24 h) and revalidates a
+             stale one with a conditional GET, so an unchanged page costs a
+             304; --refresh re-fetches and rewrites the entry; --offline
+             serves only what the cache holds. --json adds finalUrl (after
+             redirects), canonical, documentType and cached.
   extract    Same extraction, on a file already on disk. For both, --full-page
              keeps the whole HTML page through the built-in reader: navigation,
              footer and consent banners included.
@@ -138,7 +145,8 @@ COMMANDS
   stack      Everything at once; 'path' prints where the compose file was
              written. The stack is EMBEDDED in this binary — no checkout needed.
   cache      What the on-disk fetch cache holds, and how to evict it. 'clean'
-             drops stale entries, '--all' drops every one.
+             drops stale entries, '--all' drops every one. Both only ever
+             count or remove files the cache itself wrote.
   crawl      Walk a site from a seed, breadth-first, honouring robots.txt at
              every hop. --max is REQUIRED: following one citation is not
              crawling and needs no permission, but enumerating a site is, and
@@ -156,6 +164,9 @@ COMMANDS
   changed    Whether a URL changed since a fingerprint you already hold. A 304
              costs one round trip and no body; the answer says how it was
              decided, because etag and content-hash are different evidence.
+             With no --etag, --last-modified or --hash it prints a baseline
+             (etag, last-modified, hash of the raw bytes, status), and fails
+             rather than print one it could not read.
   skill      The packaging toolchain for a repository built ON this engine,
              driven by its skill.json. 'vendor' pins an engine by tag and
              sha256 (--check re-verifies offline, and fails a pin older than
@@ -177,7 +188,10 @@ ENVIRONMENT
   WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
   WEBINDEX_QDRANT        vector store base URL, or "off"      (default http://localhost:6333)
   WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
-  WEBINDEX_CACHE_DIR     where the fetch cache lives
+  WEBINDEX_TIMEOUT_MS    how long a request may stay silent before it is abandoned,
+                         not retried (default 20000; --timeout overrides it per call)
+  WEBINDEX_CACHE_DIR     where the fetch cache lives (default <tmp>/webindex-<uid>/cache)
+  WEBINDEX_CACHE_TTL_HOURS  how long a cached page stays fresh (default 24; fractions allowed)
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
   WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
   WEBINDEX_UA            override the browser User-Agent
@@ -200,6 +214,7 @@ export const VALUE_FLAGS = [
   "engine",
   "depth",
   "etag",
+  "last-modified",
   "hash",
   "limit",
   "pages",
@@ -216,8 +231,9 @@ export const VALUE_FLAGS = [
   "version",
   "terms",
   "max",
+  "timeout",
 ];
-export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page"];
+export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page", "cache", "refresh", "offline"];
 export const COMMANDS = [
   "search",
   "fetch",
@@ -266,6 +282,23 @@ function fail(msg: string): never {
 function usage(msg: string): never {
   process.stderr.write(`webindex: ${msg}\n`);
   process.exit(EXIT_USAGE);
+}
+
+/** `--timeout <ms>`: a positive whole number of milliseconds, or absent for the default. */
+function argTimeout(args: CommandArgs): number | undefined {
+  const ms = argInt(args, "timeout");
+  if (ms !== undefined && ms < 1) throw new UsageError(`--timeout expects a positive number of milliseconds, got "${ms}"`);
+  return ms;
+}
+
+/**
+ * The MCP fetch tool's `timeoutMs`. Clamped rather than refused: an agent's
+ * odd value should cost it a default, not the call — but never an unbounded
+ * wait on a server other clients share.
+ */
+function toolTimeoutMs(value: unknown): number | undefined {
+  const n = typeof value === "string" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(300_000, Math.max(1, Math.round(n))) : undefined;
 }
 
 /** Extraction over bytes already in hand — the shared half of `extract`. */
@@ -407,7 +440,7 @@ export function webindexAdapter(): McpAdapter {
         title: "Fetch a URL as clean text",
         description:
           "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR) and office documents, " +
-          "and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text plus which rung produced it — never raw bytes. " +
+          "and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text, then a trailer with the final URL after redirects, the page's canonical URL and title, any note, and which rung produced it — never raw bytes. " +
           "Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
         inputSchema: {
           type: "object",
@@ -415,6 +448,11 @@ export function webindexAdapter(): McpAdapter {
             url: { type: "string", description: "The http(s) URL to fetch." },
             lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." },
             fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
+            timeoutMs: { type: "number", description: "Give up on a silent host after this many ms (default 20000). A timed-out request is not retried." },
+            cache: {
+              type: "boolean",
+              description: "Use the on-disk cache: a fresh copy is reused for its TTL (24 h by default), a stale one revalidated with a conditional GET.",
+            },
           },
           required: ["url"],
         },
@@ -615,9 +653,25 @@ export function webindexAdapter(): McpAdapter {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
         const fullPage = args.fullPage === true;
-        const r = await fetchAndExtract(url, { acceptLanguage: args.lang ? String(args.lang) : undefined, fullPage, stripConsent: !fullPage });
+        const r = await cachedFetchAndExtract(
+          url,
+          { acceptLanguage: args.lang ? String(args.lang) : undefined, fullPage, stripConsent: !fullPage, timeoutMs: toolTimeoutMs(args.timeoutMs) },
+          args.cache === true,
+        );
         if (!r.text) throw new ToolError(`Nothing readable at ${url}${r.note ? ` — ${r.note}` : ""}.`);
-        return { text: `${r.text}\n\n---\nextractor: ${r.extractor ?? "native"}` };
+        // Provenance a citation needs — where the text came from after
+        // redirects, what the page calls itself — plus anything the fetch had
+        // to say. The extractor stays the last line, as it always was.
+        const trailer = [
+          `url: ${r.finalUrl}`,
+          ...(r.canonical && r.canonical !== r.finalUrl ? [`canonical: ${r.canonical}`] : []),
+          ...(r.title ? [`title: ${r.title}`] : []),
+          ...(r.documentType ? [`document: ${r.documentType}`] : []),
+          ...(r.cached ? ["cached: true"] : []),
+          ...(r.note ? [`note: ${r.note}`] : []),
+          `extractor: ${r.extractor ?? "native"}`,
+        ];
+        return { text: `${r.text}\n\n---\n${trailer.join("\n")}` };
       }
       if (name === "webindex_search") {
         const q = String(args.query ?? "").trim();
@@ -819,20 +873,37 @@ async function dispatch(argv: string[]): Promise<void> {
     if (!url) usage("usage: webindex fetch <url>");
     if (!/^https?:\/\//i.test(url)) fail("fetch needs an http(s) URL");
     const fullPage = argBool(args, "full-page");
-    const r = await fetchAndExtract(url, {
-      acceptLanguage: argValue(args, "lang"),
-      firecrawl: argValue(args, "firecrawl"),
-      fullPage,
-      stripConsent: !fullPage,
-    });
+    const refresh = argBool(args, "refresh");
+    const offline = argBool(args, "offline");
+    if (refresh && offline) usage("--refresh and --offline contradict each other: one always fetches, the other never does");
+    // Set both switches every time, so a value from an earlier call in the same
+    // process can never leak into this one.
+    setCacheMode({ refresh, offline });
+    const r = await cachedFetchAndExtract(
+      url,
+      {
+        acceptLanguage: argValue(args, "lang"),
+        firecrawl: argValue(args, "firecrawl"),
+        fullPage,
+        stripConsent: !fullPage,
+        timeoutMs: argTimeout(args),
+      },
+      argBool(args, "cache") || refresh,
+    );
     if (argBool(args, "json")) {
       process.stdout.write(
         JSON.stringify(
           {
             url,
+            // Where the text actually came from — after redirects — and the
+            // address the page gives for itself: what a citation needs.
+            finalUrl: r.finalUrl,
+            canonical: r.canonical,
             title: r.title,
             extractor: r.extractor,
+            documentType: r.documentType,
             status: r.status,
+            cached: r.cached === true,
             chars: r.text.length,
             note: r.note,
             text: r.text,
@@ -1092,6 +1163,11 @@ async function dispatch(argv: string[]): Promise<void> {
     if (action !== "status" && action !== "clean") usage("usage: webindex cache status|clean [--all]");
     if (action === "clean") {
       const all = argBool(args, "all");
+      // "0 entries removed" would read as an empty cache, not a blocked clean.
+      if (isNoWrite()) {
+        process.stdout.write(`no-write mode: nothing removed from ${cacheDir()}\n`);
+        return;
+      }
       const removed = cacheClean(all);
       process.stdout.write(`${removed} entr${removed === 1 ? "y" : "ies"} removed (${all ? "all" : "stale only"}) from ${cacheDir()}\n`);
       return;
@@ -1198,16 +1274,29 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "changed") {
     const url = positionalText(args);
-    if (!url) usage("usage: webindex changed <url> [--etag <v>] [--hash <sha256>]");
+    if (!url) usage("usage: webindex changed <url> [--etag <v>] [--last-modified <date>] [--hash <sha256>]");
     if (!/^https?:\/\//i.test(url)) fail("changed needs an http(s) URL");
     const etag = argValue(args, "etag");
+    const lastModified = argValue(args, "last-modified");
     const hash = argValue(args, "hash");
-    if (!etag && !hash) {
-      const f = await fingerprint(url);
-      process.stdout.write(argBool(args, "json") ? jsonLine(f) : `etag ${f.etag ?? "-"}\nhash ${f.contentHash ?? "-"}\n`);
+    const timeoutMs = argTimeout(args);
+    if (!etag && !lastModified && !hash) {
+      const f = await fingerprint(url, { timeoutMs });
+      if (argBool(args, "json")) process.stdout.write(jsonLine(f));
+      else if (!f.error) {
+        const lines = [`etag ${f.etag ?? "-"}`, `last-modified ${f.lastModified ?? "-"}`, `hash ${f.contentHash ?? "-"}`, `status ${f.status}`];
+        process.stdout.write(lines.join("\n") + "\n");
+      }
+      // A baseline with no hash is no baseline: a watcher that stores it
+      // learns the page was unreadable only on its next run.
+      if (f.error) fail(`could not read ${url}: ${f.error}`);
       return;
     }
-    const v = await hasChanged(url, { ...(etag ? { etag } : {}), ...(hash ? { contentHash: hash } : {}) });
+    const v = await hasChanged(
+      url,
+      { ...(etag ? { etag } : {}), ...(lastModified ? { lastModified } : {}), ...(hash ? { contentHash: hash } : {}) },
+      { timeoutMs },
+    );
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(v));
     } else {

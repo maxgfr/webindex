@@ -11,6 +11,7 @@ import { STACK_SERVICES } from "../src/stack.js";
 import { installFetchMock, routes } from "./fetchmock.js";
 import { envName } from "../src/brand.js";
 import { resetOllamaProbe } from "../src/embed.js";
+import { resetCacheMode } from "../src/cache.js";
 
 // Every stack service the engine knows, except `all` — the CLI spells that one
 // `stack`. Derived rather than typed out, because a hand-written list is exactly
@@ -45,6 +46,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  // `fetch --refresh/--offline` set process-wide cache switches.
+  resetCacheMode();
   rmSync(dir, { recursive: true, force: true });
 });
 afterAll(() => vi.restoreAllMocks());
@@ -67,6 +70,16 @@ async function run(argv: string[]): Promise<number> {
   } finally {
     exit.mockRestore();
   }
+}
+
+/** A fetch that never answers, and rejects only once the caller's signal fires. */
+function hangingFetch() {
+  return vi.fn(
+    (_input: unknown, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" })));
+      }),
+  );
 }
 
 // The article exceeds 30% of the visible page, so main-content isolation wins.
@@ -330,6 +343,74 @@ describe("fetch argument handling", () => {
     }
   });
 
+  it("gives up on a silent host after --timeout, and says so", async () => {
+    vi.stubGlobal("fetch", hangingFetch());
+    try {
+      expect(await run(["fetch", "https://blackhole.test/page", "--timeout", "5"])).toBe(1);
+      expect(stderr()).toMatch(/timed out after 5 ms/);
+      err = [];
+      expect(await run(["changed", "https://blackhole.test/page", "--etag", '"a"', "--timeout", "5"])).toBe(1);
+      expect(stderr()).toMatch(/timed out after 5 ms/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reuses a cached page only when asked to with --cache", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "cache");
+    const spy = installFetchMock(routes([["x.test/page", { body: articlePage(), contentType: "text/html" }]]));
+    try {
+      expect(await run(["fetch", "https://x.test/page"])).toBe(0);
+      expect(await run(["fetch", "https://x.test/page"])).toBe(0);
+      expect(spy).toHaveBeenCalledTimes(2); // opt-in: no flag, no cache
+      expect(await run(["fetch", "https://x.test/page", "--cache"])).toBe(0);
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--cache", "--json"])).toBe(0);
+      expect(spy).toHaveBeenCalledTimes(3);
+      expect(JSON.parse(stdout())).toMatchObject({ cached: true });
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--refresh", "--json"])).toBe(0);
+      expect(spy).toHaveBeenCalledTimes(4);
+      expect(JSON.parse(stdout())).toMatchObject({ cached: false });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("serves only what the cache holds with --offline", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "cache");
+    const spy = installFetchMock(routes([["x.test/page", { body: articlePage(), contentType: "text/html" }]]));
+    try {
+      expect(await run(["fetch", "https://x.test/other", "--offline"])).toBe(1);
+      expect(stderr()).toMatch(/not in the cache/);
+      expect(spy).not.toHaveBeenCalled();
+      expect(await run(["fetch", "https://x.test/page", "--cache"])).toBe(0);
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--offline"])).toBe(0);
+      expect(stdout()).toContain("Token buckets");
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(await run(["fetch", "https://x.test/page", "--offline", "--refresh"])).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("says where the text came from after redirects, and what the page calls itself", async () => {
+    const body = `<html><head><link rel="canonical" href="https://x.test/canonical"></head><body>${articlePage()}</body></html>`;
+    installFetchMock(() => ({ body, contentType: "text/html", url: "https://x.test/final" }));
+    try {
+      expect(await run(["fetch", "https://x.test/start", "--json"])).toBe(0);
+      expect(JSON.parse(stdout())).toMatchObject({ url: "https://x.test/start", finalUrl: "https://x.test/final", canonical: "https://x.test/canonical" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("refuses a --timeout that is not a positive whole number", async () => {
+    expect(await run(["fetch", "https://x.test/page", "--timeout", "0"])).toBe(2);
+    expect(await run(["fetch", "https://x.test/page", "--timeout", "soon"])).toBe(2);
+  });
+
   it("refuses a non-http argument rather than guessing", async () => {
     expect(await run(["fetch", "example.com"])).toBe(1);
     expect(stderr()).toMatch(/http\(s\) URL/);
@@ -512,6 +593,47 @@ describe("the MCP tools", () => {
     vi.unstubAllGlobals();
   });
 
+  it("lets an agent opt into the revalidating cache", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "cache");
+    const tool = adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_fetch")!;
+    expect(tool.inputSchema.properties.cache?.type).toBe("boolean");
+    const spy = installFetchMock(routes([["x.test/page", { body: articlePage(), contentType: "text/html" }]]));
+    try {
+      await adapter.callTool("webindex_fetch", { url: "https://x.test/page", cache: true });
+      const again = await adapter.callTool("webindex_fetch", { url: "https://x.test/page", cache: true });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(again.text).toMatch(/\ncached: true\n/);
+      await adapter.callTool("webindex_fetch", { url: "https://x.test/page" });
+      expect(spy).toHaveBeenCalledTimes(2); // off unless asked
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("names the final URL and any note in the trailer, above the extractor", async () => {
+    installFetchMock(() => ({ body: articlePage(), contentType: "text/html", url: "https://x.test/final" }));
+    try {
+      const r = await adapter.callTool("webindex_fetch", { url: "https://x.test/start" });
+      const trailer = r.text.slice(r.text.lastIndexOf("\n---\n"));
+      expect(trailer).toMatch(/^url: https:\/\/x\.test\/final$/m);
+      expect(trailer).toMatch(/extractor: native$/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("lets an agent shorten the fetch timeout", async () => {
+    const tool = adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_fetch")!;
+    expect(tool.inputSchema.properties.timeoutMs?.type).toBe("number");
+    expect(tool.inputSchema.required).not.toContain("timeoutMs");
+    vi.stubGlobal("fetch", hangingFetch());
+    try {
+      await expect(adapter.callTool("webindex_fetch", { url: "https://blackhole.test/p", timeoutMs: 5 })).rejects.toThrow(/timed out after 5 ms/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("refuses a non-http url as a tool error, not a crash", async () => {
     // A ToolError comes back as a readable isError result; anything else would
     // surface as an internal error the model cannot act on.
@@ -577,6 +699,13 @@ describe("the fetch cache", () => {
     process.env[envName("CACHE_DIR")] = join(dir, "empty-cache");
     expect(await run(["cache", "clean", "--all"])).toBe(0);
     expect(stdout()).toMatch(/0 entries removed \(all\)/);
+  });
+
+  it("says a no-write run removed nothing, rather than reporting zero entries", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "empty-cache");
+    process.env[envName("NO_WRITE")] = "1";
+    expect(await run(["cache", "clean", "--all"])).toBe(0);
+    expect(stdout()).toMatch(/no-write mode: nothing removed/);
   });
 
   it("rejects an action it does not have", async () => {
@@ -1132,6 +1261,36 @@ describe("the new commands", () => {
     installFetchMock(() => ({ status: 200, body: "v2", contentType: "text/html", headers: { etag: '"b"' } }));
     expect(await run(["changed", "https://c.test/", "--etag", '"a"'])).toBe(0);
     expect(stdout()).toMatch(/^changed \(via etag\)/);
+  });
+
+  it("prints every validator and the status in a baseline", async () => {
+    installFetchMock(() => ({ status: 200, body: "v1", contentType: "text/html", headers: { "last-modified": "Wed, 21 Oct 2015 07:28:00 GMT" } }));
+    expect(await run(["changed", "https://c.test/"])).toBe(0);
+    expect(stdout()).toMatch(/^etag -$/m);
+    expect(stdout()).toMatch(/^last-modified Wed, 21 Oct 2015 07:28:00 GMT$/m);
+    expect(stdout()).toMatch(/^hash [0-9a-f]{64}$/m);
+    expect(stdout()).toMatch(/^status 200$/m);
+  });
+
+  it.each([false, true])("fails a baseline it could not read instead of printing an empty one (json=%s)", async (json) => {
+    // A watcher storing "etag - / hash -" stored nothing, and learned of the
+    // failure only on its next run.
+    installFetchMock(() => ({ status: 404, body: "gone", contentType: "text/html" }));
+    expect(await run(["changed", "https://c.test/missing", ...(json ? ["--json"] : [])])).toBe(1);
+    expect(stderr()).toMatch(/could not read https:\/\/c\.test\/missing: status 404/);
+    if (json) expect(JSON.parse(stdout())).toMatchObject({ status: 404, error: "status 404" });
+    else expect(stdout()).toBe("");
+  });
+
+  it("revalidates with --last-modified, for servers that send no ETag", async () => {
+    let sent: Record<string, string> = {};
+    installFetchMock((_url, init) => {
+      sent = (init?.headers ?? {}) as Record<string, string>;
+      return { status: 304, body: "" };
+    });
+    expect(await run(["changed", "https://c.test/", "--last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"])).toBe(0);
+    expect(sent["if-modified-since"]).toBe("Wed, 21 Oct 2015 07:28:00 GMT");
+    expect(stdout()).toMatch(/^unchanged \(via not-modified\)/);
   });
 
   it("exits non-zero when it could not tell whether a URL changed", async () => {

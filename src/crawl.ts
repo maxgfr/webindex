@@ -267,6 +267,8 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
 
   const fetchOne = async (item: Frontier): Promise<CrawledPage | string> => {
     const got = await fetchAndExtract(item.url, { keepHtml: item.depth < maxDepth, authorizeUrl });
+    // Capped at a minute: honoured literally, one "come back in an hour" would stall the walk silently for that hour.
+    if (got.retryAfterMs) backOffHost(got.finalUrl, Math.min(got.retryAfterMs, 60_000));
     if (!got.text) return `${item.url}: ${got.note ?? "nothing readable"}`;
     const page: CrawledPage = {
       url: got.finalUrl,

@@ -62,6 +62,7 @@ boundaries and a concrete MCP example.
 ```
 webindex search <query> [--engine ddg|ddglite|mojeek|off] [--limit n] [--lang tag]
 webindex fetch <url> [--full-page]    # HTML main content, consent banners dropped; --full-page keeps all page text via the built-in reader
+webindex fetch <url> --cache          # reuse a fresh copy for the TTL, revalidate a stale one (a 304 when unchanged); --refresh, --offline
 webindex extract <file> [--full-page] # the same on disk; --full-page keeps navigation and consent banners too
 webindex rank --query <q> --docs <f> # BM25F + near-dup collapse + MMR
 webindex repo|issues|prs|releases <ref>
@@ -71,7 +72,7 @@ webindex crawl <url> --max <n>       # bounded site walk, robots at every hop
 webindex tables <url>                # tables as data, not flattened prose
 webindex embed <text>                # local vectors, no key
 webindex hybrid --query <q>          # BM25F + dense, fused by RRF
-webindex changed <url> [--etag <v>]  # a 304 costs one round trip
+webindex changed <url> [--etag <v>] [--last-modified <d>]  # a 304 costs one round trip
 webindex cache status|clean [--all]
 webindex searxng|firecrawl|semantic|stack up|down|status
 webindex skill check|bundle|vendor|copy|doctor|init

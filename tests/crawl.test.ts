@@ -54,6 +54,22 @@ describe("per-host politeness", () => {
     expect(await awaitHostSlot("https://a.test/2", 1, 0)).toBe(300);
   });
 
+  it("backs the whole host off when a crawled page answers with Retry-After", async () => {
+    // httpGet honours Retry-After for the request that received it; the rest
+    // of the walk to that host must honour it too.
+    installFetchMock((url) => (url.includes("/robots.txt") ? undefined : { status: 429, body: "", headers: { "retry-after": "30" } }));
+    const r = await crawlSite("https://rl.test/", { maxPages: 1, useSitemap: false, ignoreRobots: true, delayMs: 0 });
+    expect(r.pages).toEqual([]);
+    vi.useFakeTimers();
+    try {
+      const waited = awaitHostSlot("https://rl.test/next", 1);
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(await waited).toBeGreaterThan(29_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("ignores a delay of zero and an unparseable URL", async () => {
     expect(await awaitHostSlot("https://a.test", 0, 0)).toBe(0);
     expect(await awaitHostSlot("not a url", 100, 0)).toBe(0);

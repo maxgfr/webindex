@@ -32,30 +32,122 @@ export function charsetFromContentType(contentType: string): string | undefined 
   return CHARSET_IN_CONTENT_TYPE.exec(contentType ?? "")?.[1]?.toLowerCase();
 }
 
+// Labels a byte-level prescan can never truthfully find. Reading the tag at all
+// means the bytes are ASCII-compatible, which UTF-16 is not, so the WHATWG
+// prescan resolves a declared UTF-16 to UTF-8 — and x-user-defined to
+// windows-1252. Honouring the label as written decoded an ordinary ASCII page
+// as UTF-16LE: every pair of characters fused into one CJK ideograph.
+const UTF16_LABELS = new Set(["utf-16", "utf-16le", "utf-16be", "unicode", "unicodefeff", "unicodefffe", "ucs-2", "csunicode", "iso-10646-ucs-2"]);
+
+function prescanLabel(label: string): string {
+  const lower = label.toLowerCase();
+  if (UTF16_LABELS.has(lower)) return "utf-8";
+  return lower === "x-user-defined" ? "windows-1252" : lower;
+}
+
+// One `<meta …>` at a time, quotes respected: a raw `<` or `>` is valid inside
+// a quoted value, so `content="Learn <meta charset=…>"` must not end the tag and
+// leak its prose out as a declaration. Every way through the pattern succeeds —
+// an unclosed quote or tag runs to the end of the window (`$`) — so nothing is
+// ever rescanned from a later `<meta`, and it stays linear. The value is optional
+// in the attribute pattern for the same reason: a name with no `=` is consumed
+// whole, not retried from each of its characters.
+const META_TAG = /<meta\b(?:[^>"']|"[^"]*(?:"|$)|'[^']*(?:'|$))*(?:>|$)/gi;
+const TAG_ATTRIBUTE = /([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)(?:"|$)|'([^']*)(?:'|$)|([^\s"'=<>`]+)))?/g;
+
+function metaAttributes(tag: string): Map<string, string> {
+  const attrs = new Map<string, string>();
+  for (const m of tag.slice(5).matchAll(TAG_ATTRIBUTE)) {
+    const value = m[2] ?? m[3] ?? m[4];
+    const name = m[1]!.toLowerCase();
+    if (value !== undefined && !attrs.has(name)) attrs.set(name, value);
+  }
+  return attrs;
+}
+
 /**
  * The charset a document declares about itself: `<meta charset>` or the older
- * `<meta http-equiv="content-type">`.
+ * `<meta http-equiv="content-type">`, the first one found winning.
+ *
+ * Read attribute by attribute, as the WHATWG prescan does: `charset=` counts in
+ * a meta tag's own `charset`, or in its `content` when the tag is a
+ * content-type pragma — never anywhere else. A description reading "how to set
+ * charset=utf-16" is prose, and used to outrank the real `<meta charset>` after
+ * it. A declared UTF-16 resolves to UTF-8 (see UTF16_LABELS).
  *
  * Only the first 4 KB is scanned. The spec requires the declaration inside the
  * first 1024 bytes, and reading further would mean decoding the body to find out
  * how to decode the body.
  */
 export function charsetFromHtml(head: string): string | undefined {
-  const window = head.slice(0, 4096);
-  const direct = /<meta[^>]+charset\s*=\s*["']?([a-z0-9_:.+-]+)/i.exec(window);
-  if (direct) return direct[1]!.toLowerCase();
-  const httpEquiv = /<meta[^>]+http-equiv\s*=\s*["']?content-type["']?[^>]*content\s*=\s*["'][^"']*charset\s*=\s*([a-z0-9_:.+-]+)/i.exec(window);
-  return httpEquiv?.[1]?.toLowerCase();
+  for (const [tag] of head.slice(0, 4096).matchAll(META_TAG)) {
+    const attrs = metaAttributes(tag);
+    const direct = attrs.get("charset")?.trim();
+    if (direct) return prescanLabel(direct);
+    if (attrs.get("http-equiv")?.trim().toLowerCase() !== "content-type") continue;
+    const pragma = charsetFromContentType(attrs.get("content") ?? "");
+    if (pragma) return prescanLabel(pragma);
+  }
+  return undefined;
+}
+
+// An XML declaration at the very start. Anchored and read from a short head, so
+// it costs nothing on a body that has none.
+const XML_DECLARATION = /^\s*<\?xml\b[^>]*?\bencoding\s*=\s*["']([A-Za-z0-9._:-]+)["']/;
+
+/**
+ * The encoding an XML document names in its `<?xml … encoding="…"?>`.
+ *
+ * RFC 7303 gives it the last word when the Content-Type carries no charset —
+ * the everyday case for an RSS or Atom feed in ISO-8859-1, every accented title
+ * of which used to come out as U+FFFD. Like a meta tag, a declared UTF-16 that
+ * an ASCII scan could read resolves to UTF-8.
+ */
+function charsetFromXmlDeclaration(bytes: Buffer): string | undefined {
+  const label = XML_DECLARATION.exec(bytes.subarray(0, 256).toString("latin1"))?.[1];
+  return label ? prescanLabel(label) : undefined;
+}
+
+const isUtf8Label = (label: string | undefined) => label === "utf-8" || label === "utf8";
+
+// The MIME types whose body may declare its own encoding in markup. Anything
+// else (text/plain, JSON, CSS…) that shows `<meta charset>` is only quoting one.
+const SNIFFABLE_MIME = new Set(["", "text/html", "application/xhtml+xml", "application/octet-stream"]);
+
+/** UTF-8 when the bytes are valid UTF-8, Windows-1252 when they are not. */
+function decodeUtf8OrCp1252(bytes: Buffer): string {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let text: string;
+  try {
+    text = decoder.decode(bytes, { stream: true });
+  } catch {
+    return decodeCp1252(bytes);
+  }
+  try {
+    return text + decoder.decode();
+  } catch {
+    // Everything but the last few bytes is valid, and those start a sequence
+    // that never finishes. A UTF-8 body cut at the byte cap mid-character looks
+    // exactly like this — and must not turn into cp1252 mojibake — but so does
+    // a Latin-1 page ending on an accented letter. UTF-8 elsewhere in the body
+    // settles it; without any, the text before the tail is ASCII, which cp1252
+    // reads identically, and cp1252 also reads the tail right.
+    return /[\x80-\uffff]/.test(text) ? text : decodeCp1252(bytes);
+  }
 }
 
 /**
  * Decode response bytes into text, honouring — in order — a BOM, the
- * Content-Type header, and the document's own `<meta charset>`.
+ * Content-Type header, an XML declaration, and (for a body that may be HTML) the
+ * document's own `<meta charset>`; with none of those naming a non-UTF-8
+ * encoding, UTF-8 when the bytes are valid and Windows-1252 when they are not.
  *
  * Precedence follows what actually helps: a BOM cannot be wrong, a header is
  * usually right, and a meta tag is the last resort because a page served as
  * UTF-8 while declaring latin1 in its markup is almost always a stale template
- * rather than a truthful declaration.
+ * rather than a truthful declaration. The final rescue is what an undeclared
+ * Latin-1 page — or one whose meta sits past the sniff window behind a large
+ * inline script — needs; only a header's explicit UTF-8 is trusted over it.
  *
  * Falls back to UTF-8 on an unknown or unsupported label, so a nonsense charset
  * degrades to today's behaviour rather than failing the fetch.
@@ -65,32 +157,34 @@ export function decodeBody(bytes: Buffer, contentType = ""): string {
   if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
 
   const declared = charsetFromContentType(contentType);
-  if (declared && declared !== "utf-8" && declared !== "utf8") return decodeWith(bytes, declared);
+  if (declared && !isUtf8Label(declared)) return decodeWith(bytes, declared);
   if (declared) return bytes.toString("utf8");
 
-  // No header charset. Sniff the markup — safe as ASCII, since every encoding
+  // No header charset. Sniff the document — safe as ASCII, since every encoding
   // this matters for is ASCII-compatible in the byte range a tag name uses.
-  const meta = charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
-  if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
-  return bytes.toString("utf8");
+  const mime = contentType.split(";")[0]!.trim().toLowerCase();
+  const own = charsetFromXmlDeclaration(bytes) ?? (SNIFFABLE_MIME.has(mime) ? charsetFromHtml(bytes.subarray(0, 4096).toString("latin1")) : undefined);
+  if (own && !isUtf8Label(own)) return decodeWith(bytes, own);
+  return decodeUtf8OrCp1252(bytes);
 }
 
 /**
- * Decode bytes read from disk: BOM, then `<meta charset>`, then a UTF-8 validity
- * rescue. A local file has no transport header to trust, and a stale template
- * declaring UTF-8 over Latin-1 bytes is common. Without a BOM or a non-UTF-8
- * declaration, trust UTF-8 only when the bytes are valid; otherwise use
- * Windows-1252 so accents and typographic punctuation survive.
+ * Decode bytes read from disk: BOM, then an XML declaration or `<meta charset>`,
+ * then a UTF-8 validity rescue. A local file has no transport header to trust,
+ * and a stale template declaring UTF-8 over Latin-1 bytes is common. Without a
+ * BOM or a non-UTF-8 declaration, trust UTF-8 only when the bytes are valid;
+ * otherwise use Windows-1252 so accents and typographic punctuation survive.
  *
  * `sniffHtmlCharset: false` skips the meta step — for a file the caller already
- * knows is plain text, where a `<meta charset>` can only be quoted markup.
+ * knows is plain text, where a `<meta charset>` can only be quoted markup. An
+ * XML declaration is still honoured: it has to open the file to count.
  */
 export function decodeLocal(bytes: Buffer, opts: { sniffHtmlCharset?: boolean } = {}): string {
   const bom = bomEncoding(bytes);
   if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
 
-  const meta = opts.sniffHtmlCharset === false ? undefined : charsetFromHtml(bytes.subarray(0, 4096).toString("latin1"));
-  if (meta && meta !== "utf-8" && meta !== "utf8") return decodeWith(bytes, meta);
+  const own = charsetFromXmlDeclaration(bytes) ?? (opts.sniffHtmlCharset === false ? undefined : charsetFromHtml(bytes.subarray(0, 4096).toString("latin1")));
+  if (own && !isUtf8Label(own)) return decodeWith(bytes, own);
 
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);

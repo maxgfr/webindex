@@ -79,6 +79,10 @@ const RETRY_STATUS = new Set([429, 503, 502, 504]);
 // fixed backoff, clamped to sane bounds.
 const maxAttempts = () => envInt("MAX_ATTEMPTS", 2, 1, 5);
 const defaultRetryMs = () => envInt("RETRY_MS", 600, 0, 5000);
+// How long one request may stay silent before it is abandoned, when the caller
+// names no budget of its own. A timed-out attempt is not retried (see httpGet),
+// so this is also the worst case a hung host costs.
+const defaultTimeoutMs = () => envInt("TIMEOUT_MS", 20_000, 1000, 300_000);
 
 /**
  * Polite pause between successive result-page fetches to the same web engine
@@ -116,7 +120,7 @@ export interface HttpResult {
   lastModified?: string;
   /** True on an explicit 429, or a 403 that carries an exhausted quota header. */
   rateLimited?: boolean;
-  /** Retry-After, parsed and capped, when the server sent one. */
+  /** Retry-After in ms, when the server sent one — its own number, not capped to what httpGet waits out. */
   retryAfterMs?: number;
 }
 
@@ -151,10 +155,17 @@ export function parseRetryAfter(headers: Headers, capMs = 5000): number | undefi
   return undefined;
 }
 
-// How long to wait before a retry: honor Retry-After (seconds or HTTP-date)
-// clamped to 5s, else a small fixed backoff.
-function retryDelayMs(headers: Headers): number {
-  return parseRetryAfter(headers) ?? defaultRetryMs();
+// The longest Retry-After a request waits out itself before trying again.
+const RETRY_AFTER_CAP_MS = 5000;
+
+// How long to wait before a retry: the server's Retry-After (seconds or
+// HTTP-date), else a small fixed backoff. Undefined — do not retry — when the
+// server asked for longer than the cap. Retrying after 5 s anyway knowingly
+// sent the request it had been told not to send for an hour; the caller gets
+// the real ask in `retryAfterMs` instead, for a queue (crawlSite) to honour.
+function retryDelayMs(retryAfterMs: number | undefined): number | undefined {
+  if (retryAfterMs === undefined) return defaultRetryMs();
+  return retryAfterMs <= RETRY_AFTER_CAP_MS ? retryAfterMs : undefined;
 }
 
 // Total attempts for a call: the caller's `retries` (extra tries on top of the
@@ -162,6 +173,48 @@ function retryDelayMs(headers: Headers): number {
 // retry count should cost one extra request, not a hundred.
 function attemptsFor(retries: number | undefined): number {
   return retries === undefined ? maxAttempts() : Math.min(4, Math.max(0, Math.trunc(retries))) + 1;
+}
+
+type NetworkError = { message?: unknown; code?: unknown; cause?: { message?: unknown; code?: unknown } };
+
+/**
+ * Why a request failed, as specifically as the runtime knows it.
+ *
+ * undici reports every network failure as "fetch failed" and keeps the reason —
+ * a refused connection, an unknown host, a redirect loop — on `cause`. Reading
+ * only `message` made a typo in a host name, a redirect loop and a dead server
+ * indistinguishable, which is the one thing a caller needs to tell apart.
+ */
+function networkFailure(e: unknown): string {
+  const err = e as NetworkError | undefined;
+  const code = typeof err?.cause?.code === "string" ? err.cause.code : undefined;
+  const detail = typeof err?.cause?.message === "string" && err.cause.message ? err.cause.message : code;
+  if (!detail) return typeof err?.message === "string" ? err.message : String(e);
+  return code && !detail.includes(code) ? `${code}: ${detail}` : detail;
+}
+
+// Failures a second attempt a few hundred ms later cannot change: the name does
+// not resolve, the redirect chain loops, the scheme or port is refused, the
+// certificate is wrong. Retrying them doubled the cost for the same answer — a
+// redirect loop was walked twice over, 42 requests to one server. Transient
+// socket errors (ECONNRESET, UND_ERR_SOCKET…) are deliberately absent.
+const PERMANENT_CODES = new Set([
+  "ENOTFOUND",
+  "ERR_INVALID_URL",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "CERT_HAS_EXPIRED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+]);
+const PERMANENT_MESSAGE = /redirect count exceeded|scheme must be|unknown scheme|bad port|invalid url|failed to parse url/i;
+
+function isPermanentFailure(e: unknown): boolean {
+  const err = e as NetworkError | undefined;
+  const code = err?.cause?.code ?? err?.code;
+  if (typeof code === "string" && PERMANENT_CODES.has(code)) return true;
+  return [err?.message, err?.cause?.message].some((m) => typeof m === "string" && PERMANENT_MESSAGE.test(m));
 }
 
 /**
@@ -262,6 +315,7 @@ async function authorizedGet(
 export async function httpGet(
   url: string,
   opts: {
+    /** Network budget per attempt, in ms. Default `<PREFIX>_TIMEOUT_MS` (20 s); a timed-out attempt is not retried. */
     timeoutMs?: number;
     accept?: string;
     acceptLanguage?: string;
@@ -284,11 +338,20 @@ export async function httpGet(
 ): Promise<HttpResult> {
   const attempts = attemptsFor(opts.retries);
   let last: HttpResult = { ok: false, status: 0, body: "", contentType: "", url };
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   for (let attempt = 0; attempt < attempts; attempt++) {
     const ctrl = new AbortController();
     let t: ReturnType<typeof setTimeout> | undefined;
-    let remainingMs = opts.timeoutMs ?? 20_000;
+    let remainingMs = timeoutMs;
     let startedAt = 0;
+    // Recorded rather than inferred from the rejection: an abort surfaces as
+    // "This operation was aborted" (or a body-stream error), which names
+    // neither a timeout nor how long was waited.
+    let timedOut = false;
+    const expire = () => {
+      timedOut = true;
+      ctrl.abort();
+    };
     const pauseTimeout = () => {
       if (t === undefined) return;
       clearTimeout(t);
@@ -297,8 +360,8 @@ export async function httpGet(
     };
     const resumeTimeout = () => {
       startedAt = performance.now();
-      if (remainingMs <= 0) ctrl.abort();
-      else t = setTimeout(() => ctrl.abort(), remainingMs);
+      if (remainingMs <= 0) expire();
+      else t = setTimeout(expire, remainingMs);
     };
     try {
       const headers: Record<string, string> = { "user-agent": opts.userAgent ?? defaultUa(), accept: opts.accept ?? "*/*" };
@@ -329,14 +392,20 @@ export async function httpGet(
         etag: res.headers.get("etag") ?? undefined,
         lastModified: res.headers.get("last-modified") ?? undefined,
         rateLimited: detectRateLimited(res.status, res.headers),
-        retryAfterMs: parseRetryAfter(res.headers),
+        retryAfterMs: parseRetryAfter(res.headers, Number.POSITIVE_INFINITY),
       };
       const max = opts.maxBytes ?? (isBinaryDocument(meta.contentType) ? opts.maxDocumentBytes : undefined) ?? DEFAULT_MAX_RESPONSE_BYTES;
 
       // Refuse a body the server has already declared too big, before a single
-      // byte of it is read. Not retried: the size will be the same next time.
+      // byte of it is read, when its prefix is useless: a document, or the
+      // answer to a Range request (declared that large, the range was ignored
+      // and the prefix is not the part asked for). Not retried: the size will
+      // be the same next time. Any other text body reads its capped prefix
+      // below, exactly as it does when the same bytes arrive chunked — whether
+      // a long article is readable must not depend on a Content-Length.
       const declared = Number(res.headers.get("content-length"));
-      if (Number.isFinite(declared) && declared > max) {
+      const prefixUseless = opts.binary || isBinaryDocument(meta.contentType) || Object.keys(opts.headers ?? {}).some((k) => k.toLowerCase() === "range");
+      if (Number.isFinite(declared) && declared > max && prefixUseless) {
         ctrl.abort();
         return { ok: false, status: res.status, body: "", bytesRead: 0, truncated: true, ...meta, error: `response too large: ${declared} bytes > ${max} cap` };
       }
@@ -367,14 +436,19 @@ export async function httpGet(
         truncated,
         ...meta,
       };
-      if (RETRY_STATUS.has(res.status) && attempt < attempts - 1) {
+      const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(meta.retryAfterMs) : undefined;
+      if (wait !== undefined) {
         last = result;
-        await sleep(retryDelayMs(res.headers));
+        await sleep(wait);
         continue;
       }
       return result;
     } catch (e) {
-      last = { ok: false, status: 0, body: "", contentType: "", url, error: (e as Error).message };
+      last = { ok: false, status: 0, body: "", contentType: "", url, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
+      // A timeout has spent the whole budget the caller granted, and a host
+      // silent for that long rarely answers a second time: retrying it made the
+      // real worst case attempts × timeout, twice what the caller asked for.
+      if (timedOut || isPermanentFailure(e)) break;
       if (attempt < attempts - 1) await sleep(defaultRetryMs());
     } finally {
       clearTimeout(t);
@@ -405,9 +479,14 @@ export async function httpJson(
 ): Promise<{ ok: boolean; status: number; data: any; error?: string; bytesRead?: number; truncated?: boolean }> {
   const attempts = attemptsFor(opts.retries);
   let last: { ok: boolean; status: number; data: any; error?: string } = { ok: false, status: 0, data: undefined };
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   for (let attempt = 0; attempt < attempts; attempt++) {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 20_000);
+    let timedOut = false;
+    const t = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, timeoutMs);
     try {
       const headers: Record<string, string> = {
         "content-type": "application/json",
@@ -444,14 +523,16 @@ export async function httpJson(
         data = text;
       }
       const result = { ok: res.ok, status: res.status, data, bytesRead, truncated };
-      if (RETRY_STATUS.has(res.status) && attempt < attempts - 1) {
+      const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(parseRetryAfter(res.headers, Number.POSITIVE_INFINITY)) : undefined;
+      if (wait !== undefined) {
         last = result;
-        await sleep(retryDelayMs(res.headers));
+        await sleep(wait);
         continue;
       }
       return result;
     } catch (e) {
-      last = { ok: false, status: 0, data: undefined, error: (e as Error).message };
+      last = { ok: false, status: 0, data: undefined, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
+      if (timedOut || isPermanentFailure(e)) break;
       if (attempt < attempts - 1) await sleep(defaultRetryMs());
     } finally {
       clearTimeout(t);
@@ -990,6 +1071,16 @@ export interface ExtractResult {
   // origin validators — an entry written there simply re-downloads when stale.
   etag?: string;
   lastModified?: string;
+  /** The response overran the byte cap, so `text` is a prefix of the page, not all of it. */
+  truncated?: boolean;
+  /** On a failed fetch: the origin throttled it (429, or a 403 with an exhausted quota). */
+  rateLimited?: boolean;
+  /**
+   * On a failed fetch: how long the origin asked callers to wait (its
+   * Retry-After, in ms), so a caller with a queue can back the whole host off
+   * rather than learn the same answer once per URL.
+   */
+  retryAfterMs?: number;
 }
 
 // Fetch a URL and return its readable text + a title. HTML goes to Firecrawl
@@ -1014,6 +1105,8 @@ export async function fetchAndExtract(
     headers?: Record<string, string>;
     /** Check the initial URL and each redirect; disables remote extraction. */
     authorizeUrl?: (url: string) => Promise<boolean>;
+    /** Network budget for the built-in fetch, in ms (see httpGet). Firecrawl keeps its own. */
+    timeoutMs?: number;
     /**
      * Drop consent-banner lines from the extracted text.
      *
@@ -1058,13 +1151,16 @@ export async function fetchAndExtract(
     firecrawlNote = fc.data ? `Firecrawl got HTTP ${fc.data.statusCode} for ${url} — fell back to the built-in extractor.` : fc.why;
   }
   const base = wantsPdf ? PDF_FETCH_OPTS : wantsDoc ? DOC_FETCH_OPTS : { accept: "text/html,text/plain,*/*", acceptLanguage: opts.acceptLanguage };
-  const fetchOpts = { ...base, maxDocumentBytes: PDF_FETCH_OPTS.maxBytes, headers: opts.headers, authorizeUrl: opts.authorizeUrl };
+  const fetchOpts = { ...base, maxDocumentBytes: PDF_FETCH_OPTS.maxBytes, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs };
   let res = await httpGet(url, fetchOpts);
   // A brand that identifies itself honestly gets refused by some hosts. Retry
   // once wearing a browser UA before giving up — but only for a brand that had
   // actually chosen the polite one, since retrying a browser UA with the same
   // browser UA is a wasted round-trip. A 304 is a success and never lands here.
-  if (!res.ok && brand().defaultUa === "contact" && (res.status === 403 || res.status === 429)) {
+  // A server that named a wait longer than httpGet would sleep through meant
+  // it, whatever the UA; asking again at once would be ducking the limit.
+  const toldToWait = (res.retryAfterMs ?? 0) > RETRY_AFTER_CAP_MS;
+  if (!res.ok && !toldToWait && brand().defaultUa === "contact" && (res.status === 403 || res.status === 429)) {
     res = await httpGet(url, { ...fetchOpts, userAgent: browserUa(), acceptLanguage: opts.acceptLanguage ?? "en-US,en;q=0.9" });
   }
   // 304 is a SUCCESS with no body: the caller sent validators and the origin
@@ -1074,8 +1170,16 @@ export async function fetchAndExtract(
     return { text: "", finalUrl: res.url, status: 304, etag: res.etag ?? opts.headers?.["if-none-match"], lastModified: res.lastModified };
   }
   if (!res.ok) {
-    const why = res.status === 429 ? "rate-limited (HTTP 429)" : `status ${res.status}${res.error ? ", " + res.error : ""}`;
-    return { text: "", finalUrl: res.url, status: res.status, note: `Could not fetch ${url} (${why}).` };
+    const wait = res.retryAfterMs !== undefined ? `, retry after ${Math.ceil(res.retryAfterMs / 1000)} s` : "";
+    const why = res.status === 429 ? `rate-limited (HTTP 429${wait})` : `status ${res.status}${res.error ? ", " + res.error : ""}${wait}`;
+    return {
+      text: "",
+      finalUrl: res.url,
+      status: res.status,
+      note: `Could not fetch ${url} (${why}).`,
+      ...(res.rateLimited ? { rateLimited: true } : {}),
+      ...(res.retryAfterMs !== undefined ? { retryAfterMs: res.retryAfterMs } : {}),
+    };
   }
   // Only materialised when the origin actually sent one, so an entry written for
   // a validator-less server keeps exactly the shape it had before.
@@ -1087,7 +1191,8 @@ export async function fetchAndExtract(
     // httpGet keeps the raw bytes of anything the origin labelled a PDF, so a
     // content-type-only PDF (no .pdf in the URL) is not downloaded twice. The
     // refetch is only for a response that somehow arrived without them.
-    const bytes = res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl })).bytes;
+    const bytes =
+      res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
     // The ladder tries pdf-inspector, then an already-running Firecrawl, then
     // pdftotext, then the built-in reader — and refuses rather than hand back
     // text no extractor could vouch for. Firecrawl is injected as a callback so
@@ -1121,7 +1226,8 @@ export async function fetchAndExtract(
   if (docFmt) {
     // Same as the PDF path: the bytes of a content-type-only document are
     // already here; the refetch is the fallback, not the rule.
-    const bytes = res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl })).bytes;
+    const bytes =
+      res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
     const got = bytes
       ? await extractDocument(bytes, docFmt, {
           firecrawl: async () => {
@@ -1157,10 +1263,9 @@ export async function fetchAndExtract(
   const title = isHtml ? htmlTitle(res.body) : undefined;
   const canonical = isHtml ? htmlCanonicalUrl(res.body) : undefined;
   const metaDescription = isHtml ? metaDescriptionOf(res.body) : undefined;
-  // A page cut at the response cap still extracts — usually the article comes
-  // first and the megabytes of hydration state after it — but a reader citing
-  // it should know the text may stop short.
-  const cutNote = res.truncated ? `Fetched only the first ${sizeLabel(res.bytesRead ?? res.body.length)} of ${url}; the extract may be incomplete.` : undefined;
+  // A prefix read at the byte cap is still worth having, but never silently: a
+  // caller quoting the page must be able to tell it did not see the rest.
+  const cut = res.truncated ? `Read only the first ${res.bytesRead} bytes of ${url} (the response size cap), so this text is a prefix.` : undefined;
   return {
     text: consent.text,
     consentDropped: consent.dropped,
@@ -1170,14 +1275,10 @@ export async function fetchAndExtract(
     ...(opts.keepHtml && isHtml ? { html: res.body } : {}),
     finalUrl: res.url,
     status: res.status,
-    note: [firecrawlNote, cutNote].filter(Boolean).join(" ") || undefined,
+    note: [firecrawlNote, cut].filter(Boolean).join(" ") || undefined,
+    ...(res.truncated ? { truncated: true } : {}),
     ...validators,
   };
-}
-
-// "4 MB", "512 KB": a size for a note a person reads.
-function sizeLabel(bytes: number): string {
-  return bytes >= 1024 * 1024 ? `${Math.round(bytes / (1024 * 1024))} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
 // Statuses where the origin is gone/blocked and a live re-fetch will never
