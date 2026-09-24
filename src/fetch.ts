@@ -683,27 +683,92 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
     .join("\n");
 }
 
-// Best-effort page title from an HTML document.
+// Never where a page names itself: an icon's <svg><title> ("Search icon")
+// was the title of every SPA shell whose <head> had none.
+const NOT_TITLE: readonly string[] = ["script", "style", "template", "svg"];
+
+/**
+ * The text of the first `<name>` element in `html`, markup out, entities
+ * decoded, whitespace collapsed. The close is searched once, forward from the
+ * opener, so an unclosed one costs one pass rather than a lazy regex's pass
+ * per opener.
+ */
+function firstElementText(html: string, name: string): string | undefined {
+  const open = new RegExp(`<${name}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>`, "i").exec(html);
+  if (!open) return undefined;
+  const close = closeTagRe(name);
+  close.lastIndex = open.index + open[0].length;
+  const c = close.exec(html);
+  if (!c) return undefined;
+  const inner = html.slice(open.index + open[0].length, c.index).replace(TAG_RE, (tag) => (INLINE_TAGS.has(tagName(tag)) ? "" : " "));
+  return decodeEntities(inner).replace(/\s+/g, " ").trim() || undefined;
+}
+
+// Best-effort page title from an HTML document: its `<title>`.
 export function htmlTitle(html: string): string | undefined {
-  const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
-  if (!m) return undefined;
-  const t = decodeEntities(m[1]!.replace(/\s+/g, " ").trim());
-  return t || undefined;
+  return firstElementText(dropElements(html, NOT_TITLE), "title");
+}
+
+// The first `<meta>` content among `keys` (name or property, lower-case), by
+// the order of `keys` rather than of the document.
+function metaContent(html: string, keys: readonly string[]): string | undefined {
+  const found = new Map<string, string>();
+  for (const m of html.matchAll(/<meta(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi)) {
+    const attrs = htmlAttributes(m[0]);
+    const key = (attrs.get("property") ?? attrs.get("name"))?.toLowerCase();
+    const value = attrs.get("content")?.trim();
+    if (key && value && keys.includes(key) && !found.has(key)) found.set(key, decodeEntities(value).replace(/\s+/g, " ").trim());
+  }
+  return keys.map((k) => found.get(k)).find(Boolean);
+}
+
+/**
+ * What to call a fetched page: its `<title>`, else what it tells social cards
+ * (`og:title`), else its first `<h1>`. A title-less page — an SPA shell, a
+ * generated doc — used to report none, although it names itself plainly.
+ */
+function pageTitle(html: string): string | undefined {
+  const clean = dropElements(html, NOT_TITLE);
+  return firstElementText(clean, "title") ?? metaContent(clean, ["og:title", "twitter:title"]) ?? firstElementText(clean, "h1");
 }
 
 // The URL a page declares for ITSELF — `<link rel="canonical">`, else the
 // OpenGraph `og:url`. Only meaningful when the URL we fetched is not itself
 // citable (an API endpoint, a redirector): the page names its own address, so
 // we don't have to guess one. Extraction strips <head>, hence reading it here.
+//
+// Read up to the end of <head>, wherever that is, with scripts, styles and
+// comments out of the way. A fixed window missed the canonical of every page
+// that inlines a large critical stylesheet first, as Next and Gatsby do.
 export function htmlCanonicalUrl(html: string): string | undefined {
-  const head = html.slice(0, 60_000); // <head> is at the top; don't scan a megabyte of body
-  const canonical = /<link\b[^>]*\brel=["']?canonical["']?[^>]*>/i.exec(head)?.[0];
-  const og = /<meta\b[^>]*\bproperty=["']?og:url["']?[^>]*>/i.exec(head)?.[0];
-  for (const tag of [canonical, og]) {
-    const href = tag && /\b(?:href|content)=["']([^"']+)["']/i.exec(tag)?.[1];
-    if (href?.trim()) return decodeEntities(href.trim());
+  const clean = dropElements(html, ["script", "style", "template"]);
+  const end = clean.search(/<\/head\s*>|<body(?=[\s/>])/i);
+  const head = end < 0 ? clean : clean.slice(0, end);
+  let og: string | undefined;
+  for (const m of head.matchAll(/<(link|meta)(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi)) {
+    const attrs = htmlAttributes(m[0]);
+    if (m[1]!.toLowerCase() === "link") {
+      const href = attrs.get("href")?.trim();
+      if (href && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("canonical")) return decodeEntities(href);
+    } else if (og === undefined && attrs.get("property")?.toLowerCase() === "og:url") {
+      og = attrs.get("content")?.trim() || undefined;
+    }
   }
-  return undefined;
+  return og && decodeEntities(og);
+}
+
+// A declared canonical made absolute against the address the page came from.
+// A relative one ("/blog/post-slug") is legal and common, and was reported as
+// written — which no citation check accepts. Anything that does not resolve
+// to http(s) is not an address to cite.
+function absoluteCanonical(href: string | undefined, base: string): string | undefined {
+  if (!href) return undefined;
+  try {
+    const u = new URL(href, base);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.href : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // Readability-lite: isolate the main content region of an HTML page so the
@@ -1131,8 +1196,8 @@ export async function fetchAndExtract(
     (ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(res.body));
   const stripped = isHtml ? htmlToText(opts.fullPage ? res.body : extractMainHtml(res.body), opts) : res.body;
   const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped) : { text: stripped, dropped: 0 };
-  const title = isHtml ? htmlTitle(res.body) : undefined;
-  const canonical = isHtml ? htmlCanonicalUrl(res.body) : undefined;
+  const title = isHtml ? pageTitle(res.body) : undefined;
+  const canonical = isHtml ? absoluteCanonical(htmlCanonicalUrl(res.body), res.url) : undefined;
   const metaDescription = isHtml ? metaDescriptionOf(res.body) : undefined;
   // A prefix read at the byte cap is still worth having, but never silently: a
   // caller quoting the page must be able to tell it did not see the rest.

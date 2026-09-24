@@ -15,6 +15,7 @@ import {
   parseRetryAfter,
   stripConsentBoilerplate,
   metaDescriptionOf,
+  htmlCanonicalUrl,
 } from "../src/fetch.js";
 import { installFetchMock, routes } from "./fetchmock.js";
 
@@ -237,6 +238,35 @@ describe("htmlTitle", () => {
     expect(htmlTitle("<title>Foo &amp; Bar</title>")).toBe("Foo & Bar");
     expect(htmlTitle("<body>no title</body>")).toBeUndefined();
   });
+
+  it("never takes an icon's <svg><title> for the page's", () => {
+    expect(htmlTitle("<svg><title>icon</title></svg><title>Real</title>")).toBe("Real");
+    expect(htmlTitle('<body><svg viewBox="0 0 1 1"><title>Search icon</title></svg><main>x</main></body>')).toBeUndefined();
+    expect(htmlTitle("<title>A&nbsp;\n  B</title>")).toBe("A B");
+  });
+
+  it("stays linear on a page of unclosed <title> openers", () => {
+    const started = performance.now();
+    expect(htmlTitle("<title>x ".repeat(100_000))).toBeUndefined();
+    expect(htmlCanonicalUrl("<link rel=canonical ".repeat(100_000))).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe("htmlCanonicalUrl", () => {
+  it("finds the canonical past a large inlined stylesheet", () => {
+    // Next/Gatsby inline their critical CSS in <head>; a fixed 60 KB window
+    // stopped before the <link> that followed it.
+    const css = `.a{color:red}`.repeat(6_000);
+    expect(htmlCanonicalUrl(`<head><style>${css}</style><link rel="canonical" href="https://x.test/real"></head>`)).toBe("https://x.test/real");
+  });
+
+  it("reads rel as a token list and ignores a commented-out canonical", () => {
+    expect(htmlCanonicalUrl('<!-- <link rel="canonical" href="https://x.test/old"> --><link href="https://x.test/new" rel="alternate canonical">')).toBe(
+      "https://x.test/new",
+    );
+    expect(htmlCanonicalUrl('<meta content="https://x.test/og" property="og:url">')).toBe("https://x.test/og");
+  });
 });
 
 describe("bestExcerpt", () => {
@@ -317,6 +347,33 @@ describe("fetchAndExtract", () => {
     expect(r.text).toContain("The release ships a new scheduler.");
     expect(r.text).not.toContain("PAYLOADTOKEN");
     expect(r.note).toMatch(/Read only the first \d+ bytes of https:\/\/x\.test\/huge \(the response size cap\), so this text is a prefix/);
+  });
+
+  it("resolves a relative canonical against the final URL, so it can be cited", async () => {
+    installFetchMock(routes([["x.test/blog/post", { body: '<link rel="canonical" href="/blog/post-slug"><p>Body</p>', contentType: "text/html" }]]));
+    expect((await fetchAndExtract("https://x.test/blog/post?utm_source=a")).canonical).toBe("https://x.test/blog/post-slug");
+  });
+
+  it("drops a canonical that resolves to no http(s) URL", async () => {
+    installFetchMock(routes([["x.test/p", { body: '<link rel="canonical" href="javascript:void(0)"><p>Body</p>', contentType: "text/html" }]]));
+    expect((await fetchAndExtract("https://x.test/p")).canonical).toBeUndefined();
+  });
+
+  it("titles a page without <title> from og:title, then its first <h1>, never from an icon", async () => {
+    installFetchMock(
+      routes([
+        [
+          "x.test/og",
+          { body: '<meta property="og:title" content="From OG"><svg><title>Search icon</title></svg><main><h1>Heading</h1></main>', contentType: "text/html" },
+        ],
+        [
+          "x.test/h1",
+          { body: '<svg><title>Search icon</title></svg><main><h1 class="t">\n  The <em>real</em> heading\n</h1><p>x</p></main>', contentType: "text/html" },
+        ],
+      ]),
+    );
+    expect((await fetchAndExtract("https://x.test/og")).title).toBe("From OG");
+    expect((await fetchAndExtract("https://x.test/h1")).title).toBe("The real heading");
   });
 
   it("adds no truncation note to a page that arrived whole", async () => {
