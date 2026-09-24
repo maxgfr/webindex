@@ -148,7 +148,10 @@ it. The engine decides reading order; it never sees an evidence model.
 `rescueViaWayback` is a library primitive callers invoke explicitly for a dead link.
 The CLI and MCP fetch tool do not automatically substitute an archived page.
 
-`httpGet` reports `bytesRead` and `truncated` for capped responses. A truncated
+`httpGet` reports `bytesRead` and `truncated` for capped responses. A text body
+over the cap is read as its capped prefix whether or not the server declared its
+length — only a document declared over its cap is refused unread — and
+`fetchAndExtract` marks such a prefix with `truncated: true` and a note. A truncated
 body cannot establish a complete content fingerprint; `hasChanged` returns an
 unknown verdict in that case. Document MIME types receive the 16 MB extraction
 budget even when the URL has no file extension, and explicit HTTP byte limits

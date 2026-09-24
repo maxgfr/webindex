@@ -264,6 +264,21 @@ describe("fetchAndExtract", () => {
     expect(calls).toBe(1);
   });
 
+  it("says when a page's text was cut at the response cap", async () => {
+    const page = Buffer.from(`<html><body><article><p>${"Token buckets refill at a steady rate. ".repeat(140_000)}</p></article></body></html>`);
+    for (const headers of [{ "content-length": String(page.length) }, undefined]) {
+      installFetchMock(() => ({ bytes: page, contentType: "text/html", headers, chunkSize: 256 * 1024 }));
+      const r = await fetchAndExtract("https://x.test/long-read");
+      expect(r.text).toContain("Token buckets refill");
+      expect(r.truncated).toBe(true);
+      expect(r.note).toMatch(/prefix/);
+    }
+    installFetchMock(() => ({ body: "<p>short</p>", contentType: "text/html" }));
+    const whole = await fetchAndExtract("https://x.test/short");
+    expect(whole.truncated).toBeUndefined();
+    expect(whole.note).toBeUndefined();
+  });
+
   it("returns a note when a PDF yields no extractable text", async () => {
     installFetchMock(routes([["x.test/scan.pdf", { body: "%PDF-1.4 no text operators here", contentType: "application/pdf" }]]));
     const r = await fetchAndExtract("https://x.test/scan.pdf");
@@ -365,10 +380,12 @@ describe("the byte cap is a cap on the download, not on the value", () => {
     expect(produced).toBeLessThan(512 * 1024);
   });
 
-  it("refuses a body the server already declared over the cap, without reading it", async () => {
+  it("refuses a document the server already declared over the cap, without reading it", async () => {
+    // A prefix of a PDF is useless, so there is nothing worth downloading.
     let produced = 0;
     installFetchMock(() => ({
       body: "y".repeat(8192),
+      contentType: "application/pdf",
       chunkSize: 256,
       headers: { "content-length": "8192" },
       onPull: (n) => {
@@ -376,11 +393,24 @@ describe("the byte cap is a cap on the download, not on the value", () => {
       },
     }));
 
-    const r = await httpGet("https://huge.test/page", { maxBytes: 1024 });
+    const r = await httpGet("https://huge.test/paper", { maxBytes: 1024 });
 
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/response too large: 8192 bytes > 1024 cap/);
     expect(produced).toBe(0); // not a single byte of body was pulled
+  });
+
+  it("reads the capped prefix of a text body whatever its Content-Length says", async () => {
+    // The same page used to fail outright with a Content-Length and come back
+    // as a prefix when chunked — readable or not on an irrelevant header.
+    for (const headers of [{ "content-length": "8192" }, undefined]) {
+      let produced = 0;
+      installFetchMock(() => ({ body: "y".repeat(8192), chunkSize: 256, headers, onPull: (n) => void (produced += n) }));
+      const r = await httpGet("https://huge.test/page", { maxBytes: 1024 });
+      expect(r).toMatchObject({ ok: true, truncated: true, bytesRead: 1024 });
+      expect(r.body).toBe("y".repeat(1024));
+      expect(produced).toBeLessThanOrEqual(1024 + 256); // still cancelled at the cap
+    }
   });
 
   it("caps binary bodies the same way", async () => {

@@ -383,10 +383,14 @@ export async function httpGet(
       };
       const max = opts.maxBytes ?? (isBinaryDocument(meta.contentType) ? opts.maxDocumentBytes : undefined) ?? DEFAULT_MAX_RESPONSE_BYTES;
 
-      // Refuse a body the server has already declared too big, before a single
-      // byte of it is read. Not retried: the size will be the same next time.
+      // Refuse a document the server has already declared too big, before a
+      // single byte of it is read. Not retried: the size will be the same next
+      // time. Only a document, because only a document is useless as a prefix:
+      // a text body reads its capped prefix below, exactly as it does when the
+      // same bytes arrive chunked — whether a long article is readable must not
+      // depend on whether the server sent a Content-Length.
       const declared = Number(res.headers.get("content-length"));
-      if (Number.isFinite(declared) && declared > max) {
+      if (Number.isFinite(declared) && declared > max && (opts.binary || isBinaryDocument(meta.contentType))) {
         ctrl.abort();
         return { ok: false, status: res.status, body: "", bytesRead: 0, truncated: true, ...meta, error: `response too large: ${declared} bytes > ${max} cap` };
       }
@@ -895,6 +899,8 @@ export interface ExtractResult {
   // origin validators — an entry written there simply re-downloads when stale.
   etag?: string;
   lastModified?: string;
+  /** The response overran the byte cap, so `text` is a prefix of the page, not all of it. */
+  truncated?: boolean;
   /** On a failed fetch: the origin throttled it (429, or a 403 with an exhausted quota). */
   rateLimited?: boolean;
   /**
@@ -1083,6 +1089,9 @@ export async function fetchAndExtract(
   const title = isHtml ? htmlTitle(res.body) : undefined;
   const canonical = isHtml ? htmlCanonicalUrl(res.body) : undefined;
   const metaDescription = isHtml ? metaDescriptionOf(res.body) : undefined;
+  // A prefix read at the byte cap is still worth having, but never silently: a
+  // caller quoting the page must be able to tell it did not see the rest.
+  const cut = res.truncated ? `Read only the first ${res.bytesRead} bytes of ${url} (the response size cap), so this text is a prefix.` : undefined;
   return {
     text: consent.text,
     consentDropped: consent.dropped,
@@ -1092,7 +1101,8 @@ export async function fetchAndExtract(
     ...(opts.keepHtml && isHtml ? { html: res.body } : {}),
     finalUrl: res.url,
     status: res.status,
-    note: firecrawlNote,
+    note: [firecrawlNote, cut].filter(Boolean).join(" ") || undefined,
+    ...(res.truncated ? { truncated: true } : {}),
     ...validators,
   };
 }
