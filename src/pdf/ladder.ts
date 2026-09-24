@@ -83,10 +83,43 @@ export function resetPdfLadderCache(): void {
   resetOcrTools();
 }
 
+const warnedEngineValues = new Set<string>();
+
 /**
- * The rungs to try, honouring `<PREFIX>_PDF_ENGINE` (force exactly one) and
- * `<PREFIX>_NO_NPX` (skip the rung that needs an implicit install), where
- * `<PREFIX>` is whatever the consuming skill declared via `configure()`.
+ * The rungs a `<PREFIX>_<NAME>` engine variable asks for: a comma list of rung
+ * names in the order to try them, any case, or `none` for no rung at all.
+ * Undefined when the variable is unset or names no known rung — the caller's
+ * cue to use its default ladder.
+ *
+ * Only an exact single name used to be honoured, so `pdftotext,native` (the
+ * natural way to say "no npx"), `Native` and `none` all silently selected
+ * every rung, including the network ones the user was avoiding. Unknown names
+ * are now said out loud, once per value.
+ */
+export function enginesFromEnv<T extends string>(name: string, known: readonly T[]): T[] | undefined {
+  const raw = env(name)?.trim();
+  if (!raw) return undefined;
+  const asked = raw
+    .toLowerCase()
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (asked.length === 1 && asked[0] === "none") return [];
+  const picked = [...new Set(asked.filter((s): s is T => (known as readonly string[]).includes(s)))];
+  const unknown = asked.filter((s) => !(known as readonly string[]).includes(s));
+  if (unknown.length && !warnedEngineValues.has(`${name}=${raw}`)) {
+    warnedEngineValues.add(`${name}=${raw}`);
+    const fallback = picked.length ? "" : " — using the full ladder";
+    process.emitWarning(`${envName(name)}: ignoring unknown rung ${unknown.map((u) => `"${u}"`).join(", ")} (known: ${known.join(", ")}, or none)${fallback}`);
+  }
+  return picked.length ? picked : undefined;
+}
+
+/**
+ * The rungs to try, honouring `<PREFIX>_PDF_ENGINE` (a comma list of rungs to
+ * run, in order, or `none`) and `<PREFIX>_NO_NPX` (skip the rungs that need an
+ * implicit install), where `<PREFIX>` is whatever the consuming skill declared
+ * via `configure()`.
  *
  * An explicit `engines` list wins over both: it is the most specific instruction
  * available, and it is how callers and tests drive the ladder deterministically
@@ -94,8 +127,8 @@ export function resetPdfLadderCache(): void {
  */
 export function enabledExtractors(engines?: PdfExtractorId[]): PdfExtractorId[] {
   if (engines) return engines;
-  const forced = env("PDF_ENGINE") as PdfExtractorId | undefined;
-  if (forced && (PDF_EXTRACTORS as string[]).includes(forced)) return [forced];
+  const chosen = enginesFromEnv("PDF_ENGINE", PDF_EXTRACTORS);
+  if (chosen) return chosen;
   // Both npx rungs go, not just the first: `anydoc` needs the same implicit
   // install, so leaving it in would defeat the point of the switch.
   if (envFlag("NO_NPX")) return PDF_EXTRACTORS.filter((e) => e !== "pdf-inspector" && e !== "anydoc");

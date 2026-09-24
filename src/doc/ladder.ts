@@ -1,5 +1,6 @@
-import { env, envFlag } from "../brand.js";
+import { envFlag } from "../brand.js";
 import { ANYDOC_SPEC } from "../pdf/exec.js";
+import { enginesFromEnv } from "../pdf/ladder.js";
 import { failureDetail, resetNpxState, runNpx, skipNpxHint } from "../pdf/npx.js";
 import { assessExtractedText } from "../pdf/quality.js";
 import type { DocFormat } from "./formats.js";
@@ -67,10 +68,10 @@ export function resetDocLadderCache(): void {
 }
 
 /**
- * The rungs to try, honouring `<PREFIX>_DOC_ENGINE` (force exactly one, or
- * `none` to disable the ladder) and `<PREFIX>_NO_NPX` (skip the rung that
- * needs an implicit install), where `<PREFIX>` is whatever the consuming skill
- * declared via `configure()`.
+ * The rungs to try, honouring `<PREFIX>_DOC_ENGINE` (a comma list of rungs to
+ * run, in order, or `none` to disable the ladder — parsed as `PDF_ENGINE` is)
+ * and `<PREFIX>_NO_NPX` (skip the rung that needs an implicit install), where
+ * `<PREFIX>` is whatever the consuming skill declared via `configure()`.
  *
  * An explicit `engines` list wins over both, exactly as in the PDF ladder: it is
  * the most specific instruction available, and it is how callers and tests drive
@@ -78,9 +79,8 @@ export function resetDocLadderCache(): void {
  */
 export function enabledDocExtractors(engines?: DocExtractorId[]): DocExtractorId[] {
   if (engines) return engines;
-  const forced = env("DOC_ENGINE");
-  if (forced === "none") return [];
-  if (forced && (DOC_EXTRACTORS as string[]).includes(forced)) return [forced as DocExtractorId];
+  const chosen = enginesFromEnv("DOC_ENGINE", DOC_EXTRACTORS);
+  if (chosen) return chosen;
   if (envFlag("NO_NPX")) return DOC_EXTRACTORS.filter((e) => e !== "anydoc");
   return DOC_EXTRACTORS;
 }

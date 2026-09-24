@@ -60,6 +60,13 @@ describe("enabledDocExtractors", () => {
     expect(enabledDocExtractors()).toEqual(["anydoc", "firecrawl"]);
   });
 
+  it("reads a comma list, whatever the case and spacing", () => {
+    vi.stubEnv(envName("DOC_ENGINE"), " Firecrawl , anydoc ");
+    expect(enabledDocExtractors()).toEqual(["firecrawl", "anydoc"]);
+    vi.stubEnv(envName("DOC_ENGINE"), "NONE");
+    expect(enabledDocExtractors()).toEqual([]);
+  });
+
   it("lets an explicit engines list win over the environment", () => {
     vi.stubEnv(envName("DOC_ENGINE"), "none");
     expect(enabledDocExtractors(["firecrawl"])).toEqual(["firecrawl"]);

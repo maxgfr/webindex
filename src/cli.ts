@@ -183,8 +183,10 @@ COMMANDS
 
 ENVIRONMENT
   WEBINDEX_FIRECRAWL     Firecrawl base URL, or "off"  (default http://localhost:3002)
-  WEBINDEX_PDF_ENGINE    force one PDF rung: native|pdf-inspector|anydoc|firecrawl|pdftotext|ocr
-  WEBINDEX_DOC_ENGINE    force one office rung, or "none" to disable
+  WEBINDEX_PDF_ENGINE    the PDF rungs to run, in order: a comma list of
+                         pdf-inspector|anydoc|firecrawl|pdftotext|native|ocr, or "none"
+  WEBINDEX_DOC_ENGINE    the office rungs to run, in order: a comma list of
+                         anydoc|firecrawl, or "none" to disable
   WEBINDEX_NO_NPX        skip the rungs that would install through npx
   WEBINDEX_NPX_TIMEOUT_MS  how long one npx rung may run, first download included
                          (default 90000)

@@ -120,6 +120,39 @@ describe("enabledExtractors", () => {
     vi.stubEnv(envName("PDF_ENGINE"), "nope");
     expect(enabledExtractors()).toEqual(["pdf-inspector", "anydoc", "firecrawl", "pdftotext", "native", "ocr"]);
   });
+
+  // Only an exact single name was honoured: `pdftotext,native` (the natural way
+  // to say "no npx"), `Native` and `none` all silently selected every rung —
+  // including the network ones the user was trying to avoid.
+  it("reads a comma list, in the order given, whatever the case and spacing", () => {
+    vi.stubEnv(envName("PDF_ENGINE"), "pdftotext, Native");
+    expect(enabledExtractors()).toEqual(["pdftotext", "native"]);
+    vi.stubEnv(envName("PDF_ENGINE"), "native,native");
+    expect(enabledExtractors()).toEqual(["native"]);
+  });
+
+  it("disables the ladder on none", () => {
+    vi.stubEnv(envName("PDF_ENGINE"), "none");
+    expect(enabledExtractors()).toEqual([]);
+  });
+
+  it("keeps the known names of a list and says which it ignored", () => {
+    const warn = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    vi.stubEnv(envName("PDF_ENGINE"), "pdftotext,pdfminer");
+    expect(enabledExtractors()).toEqual(["pdftotext"]);
+    expect(enabledExtractors()).toEqual(["pdftotext"]);
+    expect(warn).toHaveBeenCalledTimes(1); // once per value, not per document
+    expect(String(warn.mock.calls[0]![0])).toMatch(/pdfminer/);
+    warn.mockRestore();
+  });
+
+  it("says so when nothing in the value names a rung", () => {
+    const warn = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    vi.stubEnv(envName("PDF_ENGINE"), "nothing-real");
+    enabledExtractors();
+    expect(String(warn.mock.calls[0]![0])).toMatch(/full ladder/);
+    warn.mockRestore();
+  });
 });
 
 // The ladder is driven through `engines` + an injected Firecrawl callback, so
