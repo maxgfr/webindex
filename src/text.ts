@@ -9,6 +9,7 @@
 // accent-insensitive patterns. Deterministic, no LLM, no dependencies.
 
 import { brand } from "./brand.js";
+import { fnv1a64 } from "./url.js";
 
 export function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -524,15 +525,23 @@ export function excerptWindows(
  * `max` is a parameter because the two uses want different lengths — a repo
  * identity is short and a research question is not — and truncating a question
  * at a repo's length collides distinct runs.
+ *
+ * A slug that had to drop letters (anything outside ASCII) or be cut at `max`
+ * ends in eight hex digits of a hash of the whole input. Without them
+ * `file:///srv/git/项目` and `file:///srv/git/文档` were both `file-srv-git`,
+ * and the second repository was handed the first one's checkout. An ASCII
+ * input that fits keeps its readable name as it always had.
  */
 export function slugify(input: string, opts: { max?: number; fallback?: string } = {}): string {
-  const s = input
+  const max = opts.max ?? 120;
+  const normalized = input
     .toLowerCase()
     .replace(/^https?:\/\//, "")
     .replace(/^git@/, "")
-    .replace(/\.git$/, "")
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, opts.max ?? 120);
-  return s || (opts.fallback ?? "");
+    .replace(/\.git$/, "");
+  const s = normalized.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!/[\u0080-\uffff]/.test(normalized) && s.length <= max) return s || (opts.fallback ?? "");
+  const tag = fnv1a64(normalized).toString(16).padStart(16, "0").slice(0, 8);
+  const head = s.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");
+  return head ? `${head}-${tag}` : tag;
 }
