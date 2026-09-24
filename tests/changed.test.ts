@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { contentHash, fingerprint, hasChanged } from "../src/changed.js";
 import { extractTables, tableToMarkdown } from "../src/tables.js";
@@ -23,7 +24,32 @@ describe("fingerprint", () => {
 
   it("carries no hash for a response it could not read", async () => {
     installFetchMock(() => ({ status: 500, body: "", contentType: "text/plain" }));
-    expect((await fingerprint(URL_A)).contentHash).toBeUndefined();
+    const f = await fingerprint(URL_A);
+    expect(f.contentHash).toBeUndefined();
+    expect(f.error).toBe("status 500");
+  });
+
+  it("hashes the bytes as received, not their lossy decoding", async () => {
+    // Decoded, both bodies became U+FFFD×3 and shared one hash: a changed PDF
+    // or dataset reported "unchanged".
+    const a = Buffer.from([0x80, 0x81, 0x82]);
+    const b = Buffer.from([0xfe, 0x90, 0xa0]);
+    installFetchMock(() => ({ bytes: a, contentType: "application/octet-stream" }));
+    const fa = await fingerprint(URL_A);
+    installFetchMock(() => ({ bytes: b, contentType: "application/octet-stream" }));
+    const fb = await fingerprint(URL_A);
+    expect(fa.contentHash).toBe(createHash("sha256").update(a).digest("hex"));
+    expect(fa.contentHash).not.toBe(fb.contentHash);
+    // A BOM and a legacy charset are part of the bytes, so they are part of the digest.
+    const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from("héllo", "utf8")]);
+    installFetchMock(() => ({ bytes: bom, contentType: "text/html; charset=windows-1252" }));
+    expect((await fingerprint(URL_A)).contentHash).toBe(contentHash(bom));
+  });
+
+  it("fingerprints a document larger than the text cap", async () => {
+    const big = Buffer.alloc(5 * 1024 * 1024, 7);
+    installFetchMock(() => ({ bytes: big, contentType: "application/pdf", headers: { "content-length": String(big.length) } }));
+    expect((await fingerprint(URL_A)).contentHash).toBe(contentHash(big));
   });
 });
 
@@ -73,6 +99,44 @@ describe("hasChanged", () => {
     // The previous validators survive, so a caller can store the result as-is
     // and still revalidate next time.
     expect(v.fingerprint.etag).toBe('"v1"');
+  });
+
+  it("sees a change between two bodies that differ only in bytes invalid as UTF-8", async () => {
+    installFetchMock(() => ({ bytes: Buffer.from([0x41, 0x80, 0x42]), contentType: "application/octet-stream" }));
+    const before = await fingerprint(URL_A);
+    installFetchMock(() => ({ bytes: Buffer.from([0x41, 0x9f, 0x42]), contentType: "application/octet-stream" }));
+    expect(await hasChanged(URL_A, before)).toMatchObject({ changed: true, via: "hash" });
+  });
+
+  it("stores the 304's own observation: a fresh timestamp and any rotated validator", async () => {
+    // Spreading `previous` last handed back the OLD fetchedAt and url, and
+    // dropped the new ETag a 304 is allowed to send.
+    const stored = {
+      url: "https://old.test/",
+      etag: '"v1"',
+      lastModified: "Wed, 21 Oct 2015 07:28:00 GMT",
+      contentHash: contentHash("body"),
+      bytes: 4,
+      status: 200,
+      fetchedAt: "2020-01-01T00:00:00.000Z",
+    };
+    installFetchMock(() => ({ status: 304, body: "", headers: { etag: '"v2"' } }));
+    const v = await hasChanged(URL_A, stored);
+    expect(v).toMatchObject({ changed: false, via: "not-modified" });
+    expect(v.fingerprint).toMatchObject({ url: URL_A, etag: '"v2"', lastModified: stored.lastModified, contentHash: stored.contentHash, status: 304, bytes: 0 });
+    expect(v.fingerprint.fetchedAt).not.toBe(stored.fetchedAt);
+    expect(v.fingerprint.error).toBeUndefined();
+  });
+
+  it("decides by the content hash on a 200 when both observations have one", async () => {
+    // A per-node ETag (or a Last-Modified stamped with the current time) on a
+    // byte-identical body used to read as "changed" on every check…
+    installFetchMock(() => ({ status: 200, body: "same", contentType: "text/html", headers: { etag: '"node-2"', "last-modified": "Thu, 22 Oct 2015 07:28:00 GMT" } }));
+    const prev = { etag: '"node-1"', lastModified: "Wed, 21 Oct 2015 07:28:00 GMT", contentHash: contentHash("same") };
+    expect(await hasChanged(URL_A, prev)).toMatchObject({ changed: false, via: "hash" });
+    // …and a stale ETag hid a real change.
+    installFetchMock(() => ({ status: 200, body: "new", contentType: "text/html", headers: { etag: '"node-1"' } }));
+    expect(await hasChanged(URL_A, prev)).toMatchObject({ changed: true, via: "hash" });
   });
 
   it("compares etags when the server answers 200", async () => {

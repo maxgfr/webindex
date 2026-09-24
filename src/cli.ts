@@ -93,7 +93,8 @@ USAGE
   webindex tables <url> [--markdown] [--json]
   webindex embed <text> [--json]
   webindex hybrid --query <q> [--docs <file.json|->] [--limit <n>] [--json]
-  webindex changed <url> [--etag <v>] [--hash <sha256>] [--timeout <ms>] [--json]
+  webindex changed <url> [--etag <v>] [--last-modified <date>] [--hash <sha256>]
+                         [--timeout <ms>] [--json]
   webindex skill     check|bundle|copy|doctor [--root <dir>] [--json]
   webindex skill     vendor [--engine <name>] --ref <tag> | --check
   webindex skill     init <name> [--root <dir>]
@@ -157,6 +158,9 @@ COMMANDS
   changed    Whether a URL changed since a fingerprint you already hold. A 304
              costs one round trip and no body; the answer says how it was
              decided, because etag and content-hash are different evidence.
+             With no --etag, --last-modified or --hash it prints a baseline
+             (etag, last-modified, hash of the raw bytes, status), and fails
+             rather than print one it could not read.
   skill      The packaging toolchain for a repository built ON this engine,
              driven by its skill.json. 'vendor' pins an engine by tag and
              sha256 (--check re-verifies offline, and fails a pin older than
@@ -203,6 +207,7 @@ export const VALUE_FLAGS = [
   "engine",
   "depth",
   "etag",
+  "last-modified",
   "hash",
   "limit",
   "pages",
@@ -1226,17 +1231,29 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "changed") {
     const url = positionalText(args);
-    if (!url) usage("usage: webindex changed <url> [--etag <v>] [--hash <sha256>]");
+    if (!url) usage("usage: webindex changed <url> [--etag <v>] [--last-modified <date>] [--hash <sha256>]");
     if (!/^https?:\/\//i.test(url)) fail("changed needs an http(s) URL");
     const etag = argValue(args, "etag");
+    const lastModified = argValue(args, "last-modified");
     const hash = argValue(args, "hash");
     const timeoutMs = argTimeout(args);
-    if (!etag && !hash) {
+    if (!etag && !lastModified && !hash) {
       const f = await fingerprint(url, { timeoutMs });
-      process.stdout.write(argBool(args, "json") ? jsonLine(f) : `etag ${f.etag ?? "-"}\nhash ${f.contentHash ?? "-"}\n`);
+      if (argBool(args, "json")) process.stdout.write(jsonLine(f));
+      else if (!f.error) {
+        const lines = [`etag ${f.etag ?? "-"}`, `last-modified ${f.lastModified ?? "-"}`, `hash ${f.contentHash ?? "-"}`, `status ${f.status}`];
+        process.stdout.write(lines.join("\n") + "\n");
+      }
+      // A baseline with no hash is no baseline: a watcher that stores it
+      // learns the page was unreadable only on its next run.
+      if (f.error) fail(`could not read ${url}: ${f.error}`);
       return;
     }
-    const v = await hasChanged(url, { ...(etag ? { etag } : {}), ...(hash ? { contentHash: hash } : {}) }, { timeoutMs });
+    const v = await hasChanged(
+      url,
+      { ...(etag ? { etag } : {}), ...(lastModified ? { lastModified } : {}), ...(hash ? { contentHash: hash } : {}) },
+      { timeoutMs },
+    );
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(v));
     } else {

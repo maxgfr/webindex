@@ -1174,6 +1174,36 @@ describe("the new commands", () => {
     expect(stdout()).toMatch(/^changed \(via etag\)/);
   });
 
+  it("prints every validator and the status in a baseline", async () => {
+    installFetchMock(() => ({ status: 200, body: "v1", contentType: "text/html", headers: { "last-modified": "Wed, 21 Oct 2015 07:28:00 GMT" } }));
+    expect(await run(["changed", "https://c.test/"])).toBe(0);
+    expect(stdout()).toMatch(/^etag -$/m);
+    expect(stdout()).toMatch(/^last-modified Wed, 21 Oct 2015 07:28:00 GMT$/m);
+    expect(stdout()).toMatch(/^hash [0-9a-f]{64}$/m);
+    expect(stdout()).toMatch(/^status 200$/m);
+  });
+
+  it.each([false, true])("fails a baseline it could not read instead of printing an empty one (json=%s)", async (json) => {
+    // A watcher storing "etag - / hash -" stored nothing, and learned of the
+    // failure only on its next run.
+    installFetchMock(() => ({ status: 404, body: "gone", contentType: "text/html" }));
+    expect(await run(["changed", "https://c.test/missing", ...(json ? ["--json"] : [])])).toBe(1);
+    expect(stderr()).toMatch(/could not read https:\/\/c\.test\/missing: status 404/);
+    if (json) expect(JSON.parse(stdout())).toMatchObject({ status: 404, error: "status 404" });
+    else expect(stdout()).toBe("");
+  });
+
+  it("revalidates with --last-modified, for servers that send no ETag", async () => {
+    let sent: Record<string, string> = {};
+    installFetchMock((_url, init) => {
+      sent = (init?.headers ?? {}) as Record<string, string>;
+      return { status: 304, body: "" };
+    });
+    expect(await run(["changed", "https://c.test/", "--last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"])).toBe(0);
+    expect(sent["if-modified-since"]).toBe("Wed, 21 Oct 2015 07:28:00 GMT");
+    expect(stdout()).toMatch(/^unchanged \(via not-modified\)/);
+  });
+
   it("exits non-zero when it could not tell whether a URL changed", async () => {
     // A watcher script must never read an error as "nothing to do".
     installFetchMock(() => ({ status: 500, body: "", contentType: "text/plain" }));
