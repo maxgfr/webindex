@@ -543,6 +543,62 @@ describe("stripConsentBoilerplate", () => {
     const text = "# Title\n\nordinary prose\nmore prose";
     expect(stripConsentBoilerplate(text)).toEqual({ text, dropped: 0 });
   });
+
+  it.each([
+    // An article ABOUT cookie law names two topics per sentence. Two hits used
+    // to be enough on any line, so these were exactly the paragraphs removed.
+    "Under the GDPR, a site must obtain informed consent before it sets any cookie that is not strictly necessary, and it must let users withdraw that consent as easily as they gave it.",
+    "Legislation or regulations that cover the use of cookies include the General Data Privacy Regulation (GDPR) in the European Union and the California Consumer Privacy Act (CCPA).",
+    'That is why so many sites show a cookie banner with an "Accept all" and a "Reject all" button: the banner is the site\'s mechanism for recording consent.',
+    "Advertising partners frequently rely on third-party cookies and other tracking technologies to follow users across sites.",
+    // One topic word plus a generic verb, on a line far longer than a button.
+    "Allow the cookies to cool on the tray for 5 minutes.",
+    "Store cookies in an airtight tin; accept that they soften after a day.",
+    "Accept all incoming connections on port 443 and reject all others.",
+    "Informed consent: participants may opt out at any time.",
+  ])("keeps prose that merely talks about consent: %s", (line) => {
+    expect(stripConsentBoilerplate(line)).toEqual({ text: line, dropped: 0 });
+  });
+
+  it("still drops a long notice written in the banner's own voice", () => {
+    const text = [
+      'We use cookies and similar technologies to improve your experience and for advertising. By clicking "Accept all", you consent to our use of cookies.',
+      "We and our partners store and/or access information on a device, such as cookies, and process personal data.",
+      "By continuing to browse this site, you agree to the use of cookies.",
+      "Article prose.",
+    ].join("\n");
+    expect(stripConsentBoilerplate(text)).toEqual({ text: "Article prose.", dropped: 3 });
+  });
+
+  it("drops FR and DE banner notices and buttons, but not bare words", () => {
+    const banner = [
+      "Nous utilisons des cookies et des technologies similaires pour mesurer l'audience, personnaliser les contenus et la publicité. Vous pouvez accepter ou refuser ces cookies.",
+      "Accepter et fermer",
+      "Continuer sans accepter",
+      "Paramétrer les cookies",
+      "Tout accepter",
+      "Tout refuser",
+      "Wir verwenden Cookies und ähnliche Technologien, um Inhalte zu personalisieren und Werbung anzuzeigen. Mit „Alle akzeptieren“ stimmen Sie der Verarbeitung zu.",
+      "Alle akzeptieren",
+      "Alle ablehnen",
+      "Nur notwendige Cookies",
+      "Cookie-Einstellungen",
+    ];
+    const prose = [
+      "# Einstellungen",
+      "Die Datenschutzkonferenz hat neue Leitlinien für Cookie-Banner veröffentlicht.",
+      "Le cœur de la réforme reste la durée de cotisation.",
+    ];
+    const r = stripConsentBoilerplate([...banner, ...prose].join("\n"));
+    expect(r).toEqual({ text: prose.join("\n"), dropped: banner.length });
+  });
+
+  it("runs in linear time on a long line full of first-person words", () => {
+    const line = "we ".repeat(300_000) + "cookies";
+    const started = performance.now();
+    stripConsentBoilerplate(`${line}\n${"our us ".repeat(100_000)}`);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
 });
 
 describe("metaDescriptionOf", () => {

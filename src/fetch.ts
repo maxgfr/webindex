@@ -1216,6 +1216,12 @@ const CONSENT_PATTERNS = [
   /tracking technolog/i,
   /advertising partners/i,
   /legitimate interest/i,
+  // FR / DE: the locale layer targets those markets, and their consent
+  // managers (Didomi, Usercentrics, OneTrust) speak the local language.
+  /\bconsentement\b/i,
+  /\brgpd\b/i,
+  /\beinwilligung\b/i,
+  /\bdsgvo\b/i,
 ];
 
 // A short line needs a consent action or notice too — merely mentioning
@@ -1228,19 +1234,50 @@ const CONSENT_ACTIONS = [
   /\b(?:learn more|privacy policy|cookie policy)\b/i,
 ];
 
+// The banner speaking about ITSELF: first person using or storing cookies, or
+// the "by clicking / by continuing" clause. An article about cookies is written
+// in the third person ("a site must obtain consent"), which is what lets a long
+// line be judged at all. The gap is bounded so the scan stays linear on a line
+// full of "we".
+const BANNER_VOICE =
+  /\b(?:we|us|our)\b[^.]{0,60}?\b(?:cookies?|partners|consent|tracking)\b|\bby (?:clicking|continuing|using|browsing)\b|\bthis (?:site|website) uses cookies\b|\bnous (?:utilisons|et nos partenaires)\b|\ben cliquant sur\b|\bwir (?:verwenden|nutzen|setzen|und unsere partner)\b|\bmit (?:dem )?klick auf\b/i;
+
+// FR / DE button labels, matched as the WHOLE line. Only multi-word labels: a
+// bare "Einstellungen" or "Accepter" is just as likely a heading in the article.
+const BUTTON_LABEL =
+  /^(?:tout (?:accepter|refuser)|(?:accepter|refuser) tout|accepter et (?:fermer|continuer)|continuer sans accepter|(?:param[ée]trer|g[ée]rer|personnaliser|accepter|refuser) (?:les|mes) cookies|alle (?:cookies )?(?:akzeptieren|ablehnen)|nur (?:notwendige|essenzielle)(?: cookies)?|cookie-einstellungen|einstellungen verwalten|akzeptieren und schlie(?:ß|ss)en)$/i;
+
+// A line this short is a button or a label, not a sentence anyone would cite.
+const BUTTON_LENGTH = 40;
+// Banner voice is only trusted this far: a paragraph longer than a banner's own
+// notice is more likely prose that happens to use "we".
+const NOTICE_LENGTH = 400;
+
 /**
  * Drop consent-banner lines from extracted text, and say how many went.
  *
- * Deliberately conservative: a line goes only on two distinct pattern hits, or
- * on one hit when the line is short and reads as a consent action or notice
- * ("Accept all cookies"). Prose that merely mentions cookies once stays —
- * this must never quietly delete the paragraph someone wanted to cite.
+ * Deliberately conservative, because this must never quietly delete the
+ * paragraph someone wanted to cite. A line goes when it is:
+ *
+ * - a known FR/DE button label, the whole line;
+ * - button-length and either names two consent topics ("Accept all cookies")
+ *   or names one next to a consent action ("Cookie settings");
+ * - a notice in the banner's own voice ("We use cookies…", "By clicking…")
+ *   that names a consent topic.
+ *
+ * Counting topic words alone is not enough on a longer line: an article about
+ * the GDPR names two of them per sentence, and a recipe says "allow the cookies
+ * to cool".
  */
 export function stripConsentBoilerplate(text: string): { text: string; dropped: number } {
   let dropped = 0;
   const kept = text.split("\n").filter((line) => {
-    const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(line) ? 1 : 0), 0);
-    const isBanner = hits >= 2 || (hits === 1 && line.trim().length < 120 && CONSENT_ACTIONS.some((re) => re.test(line)));
+    const t = line.trim();
+    const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(t) ? 1 : 0), 0);
+    const isBanner =
+      BUTTON_LABEL.test(t) ||
+      (hits >= 1 && t.length <= BUTTON_LENGTH && (hits >= 2 || CONSENT_ACTIONS.some((re) => re.test(t)))) ||
+      (hits >= 1 && t.length < NOTICE_LENGTH && BANNER_VOICE.test(t));
     if (isBanner) dropped++;
     return !isBanner;
   });

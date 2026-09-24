@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
-import { extractMainHtml, htmlToText, looksLikeJunkExtraction } from "../src/fetch.js";
+import { extractMainHtml, htmlToText, looksLikeJunkExtraction, stripConsentBoilerplate } from "../src/fetch.js";
 import { pdfToText } from "../src/pdf.js";
 
 describe("looksLikeJunkExtraction (consent / anti-bot detection)", () => {
@@ -144,6 +144,19 @@ describe("extraction on realistic pages", () => {
     const text = extract("docs");
     expect(text).toContain("Widget reads its settings from");
     expect(text).not.toMatch(/Installation|API reference|Docs »|Built with Sphinx/);
+  });
+
+  it("cookie-law article: the consent filter keeps every paragraph", () => {
+    const r = stripConsentBoilerplate(extract("cookie_en_article"));
+    expect(r.dropped).toBe(0);
+    expect(r.text).toContain("Under the GDPR, a site must obtain informed consent");
+    expect(r.text).toContain("Advertising partners frequently rely on third-party cookies");
+  });
+
+  it("news page: the consent banner outside <main> never reaches the text", () => {
+    const text = extract("news");
+    expect(text).toContain("The city council voted");
+    expect(text).not.toMatch(/We use cookies|Accept all|Manage preferences|The Daily Planet\. All rights/);
   });
 
   it("MediaWiki: the article body under role=main, without the side panel", () => {
