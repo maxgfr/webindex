@@ -43,10 +43,26 @@ export function keylessEngines(opts: { engines?: KeylessEngine[] } = {}): Keyles
   const raw = env("ENGINES");
   if (raw === undefined) return KEYLESS_ENGINES;
   if (raw.toLowerCase() === "off") return [];
+  return engineNames(raw).filter(isKeylessEngine);
+}
+
+/**
+ * The names in `<PREFIX>_ENGINES` that are not engines — what `keylessEngines`
+ * skipped. Ignoring a typo is right; ignoring it SILENTLY is not: a list with
+ * no valid name removed the whole keyless rung, and the run then reported "no
+ * results" for a search nobody made.
+ */
+export function unknownEngines(opts: { engines?: KeylessEngine[] } = {}): string[] {
+  const raw = opts.engines ? undefined : env("ENGINES");
+  if (raw === undefined || raw.toLowerCase() === "off") return [];
+  return engineNames(raw).filter((s) => !isKeylessEngine(s));
+}
+
+function engineNames(raw: string): string[] {
   return raw
     .split(",")
     .map((s) => s.trim().toLowerCase())
-    .filter(isKeylessEngine);
+    .filter(Boolean);
 }
 
 export interface EngineHit {
@@ -71,11 +87,26 @@ export interface EngineResult {
    * was asked. Blocked implies throttled: it is worth retrying later too.
    */
   blocked?: boolean;
+  /**
+   * The engine served a result page and it was read — hits, or a genuinely
+   * empty page. Anything else (a refusal, an error status, a timeout, no
+   * connection) says nothing about the web, and a caller counting "no results"
+   * must not count it.
+   */
+  answered?: boolean;
+  /** When it did not answer: the HTTP status that ended it, 0 when no response came back at all. */
+  status?: number;
 }
 
-/** Tags out, entities decoded, whitespace collapsed. */
+// Tags that style a run of text without breaking it. The engines wrap every
+// matched term in one (<b> on DuckDuckGo, <strong> on Mojeek), often mid-word or
+// right before punctuation, so replacing them with a space like any other tag
+// turned "azure-dns.<strong>com</strong>" into "azure-dns. com".
+const INLINE_TAG = /<\/?(?:a|abbr|b|bdi|bdo|cite|code|em|i|kbd|mark|q|s|samp|small|span|strong|sub|sup|time|u|var|wbr)\b[^<>]*>/gi;
+
+/** Tags out, entities decoded, whitespace collapsed. Inline markup vanishes; a block or `<br>` leaves a space. */
 export function stripTags(s: string): string {
-  return decodeEntities(s.replace(/<[^>]+>/g, " "))
+  return decodeEntities(s.replace(INLINE_TAG, "").replace(/<[^<>]*>/g, " "))
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -104,8 +135,12 @@ export function ddgRedirectTarget(href: string): string {
  * again in a few minutes and the second will not, and a caller that reports the
  * wrong one sends its user down the wrong path. Repeated identically across six
  * backends before it lived here.
+ *
+ * `error` is the transport's own account of a request that got no status at
+ * all — "timed out after 12000 ms", "ENOTFOUND: …" — which says far more than
+ * "status 0".
  */
-export function throttleReason(status: number): { throttled: boolean; why: string } {
+export function throttleReason(status: number, error?: string): { throttled: boolean; why: string } {
   if (status === 429 || status === 503) return { throttled: true, why: `rate-limited (HTTP ${status})` };
   // A 403 from a SEARCH engine is a bot policy, not a broken host. Both of these
   // endpoints answer it after a few dozen queries — DuckDuckGo with a stub
@@ -114,6 +149,7 @@ export function throttleReason(status: number): { throttled: boolean; why: strin
   // fact, and the cascade then drops the note because it only keeps notes from
   // engines it considers throttled.
   if (status === 403) return { throttled: true, why: "blocked this client as automated traffic (HTTP 403)" };
+  if (status === 0) return { throttled: false, why: `unreachable (${error || "no response"})` };
   return { throttled: false, why: `unreachable (status ${status})` };
 }
 
@@ -146,59 +182,172 @@ export function looksLikeChallenge(body: string): boolean {
   );
 }
 
-// Shared block-parser: `anchorAttrs` matches the result anchor's attributes,
-// `snippetRe` pulls the snippet out of everything between this anchor and the
-// next, and `reject` drops the engine's own links.
-function parseBlocks(body: string, limit: number, blockRe: RegExp, snippetRe: RegExp, reject: RegExp, resolveHref: (href: string) => string): EngineHit[] {
+// One attribute of an opening tag, entity-decoded, in any of the three
+// spellings HTML allows. DuckDuckGo Lite quotes its classes with SINGLE quotes
+// (`class='result-snippet'`), and a double-quote-only pattern read every Lite
+// snippet as missing. Decoding matters as much: an href is HTML, so `&amp;` in
+// it is a plain `&`, and taken raw a second query parameter becomes `amp;t`.
+const attrPattern = (name: string) => new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'<>=\`]+))`, "i");
+const HREF_ATTR = attrPattern("href");
+const CLASS_ATTR = attrPattern("class");
+const NAME_ATTR = attrPattern("name");
+const TYPE_ATTR = attrPattern("type");
+const VALUE_ATTR = attrPattern("value");
+
+function attr(attrs: string, re: RegExp): string | undefined {
+  const m = re.exec(attrs);
+  return m ? decodeEntities(m[1] ?? m[2] ?? m[3] ?? "") : undefined;
+}
+
+// A class TOKEN, not a substring: `\btitle\b` also matched `sub-title`.
+function hasClass(attrs: string, cls: string): boolean {
+  return (attr(attrs, CLASS_ATTR) ?? "").split(/\s+/).includes(cls);
+}
+
+function hostIs(url: string, domain: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host === domain || host.endsWith(`.${domain}`);
+  } catch {
+    return false;
+  }
+}
+
+// An opening `<a …>`. The attribute scan stops at the next `<` as well as at
+// `>`: allowed to cross a `<`, it ran from EVERY `<a` of a broken body — a
+// captive portal, a page of unclosed anchors — to the end of it, which is
+// O(n²) (48 KB took 4.8 s). Bounded by the gap to the next tag, one pass over
+// the body is linear. None of these engines puts a raw `<` in an attribute.
+const OPEN_A = /<a\b([^<>]*)>/gi;
+
+interface BlockShape {
+  /** The class that marks a result's title anchor. */
+  anchor: string;
+  /** The element that carries the snippet, somewhere in the result's block. */
+  snippet: { open: RegExp; close: RegExp; cls: string };
+  /** The destination behind an href, or undefined when the link is the engine's own. */
+  resolve: (href: string) => string | undefined;
+}
+
+const element = (tag: string, cls: string) => ({ open: new RegExp(`<${tag}\\b([^<>]*)>`, "gi"), close: new RegExp(`</${tag}\\s*>`, "i"), cls });
+
+// Shared block-parser. One pass finds the result anchors; each result's block
+// then runs from its anchor to the next one, and holds its title (up to the
+// anchor's `</a>`) and its snippet. Every stretch of the body is read once.
+function parseBlocks(body: string, limit: number, shape: BlockShape): EngineHit[] {
+  const anchors: { start: number; end: number; attrs: string }[] = [];
+  for (const m of body.matchAll(OPEN_A)) {
+    if (hasClass(m[1]!, shape.anchor)) anchors.push({ start: m.index!, end: m.index! + m[0].length, attrs: m[1]! });
+  }
   const found: EngineHit[] = [];
-  let m: RegExpExecArray | null;
-  blockRe.lastIndex = 0;
-  while ((m = blockRe.exec(body)) && found.length < limit) {
-    const href0 = /\bhref="([^"]+)"/.exec(m[1]!);
-    if (!href0) continue;
-    const href = resolveHref(href0[1]!);
-    if (!/^https?:\/\//.test(href) || reject.test(href)) continue;
-    const snip = snippetRe.exec(m[3]!);
-    snippetRe.lastIndex = 0;
-    found.push({ url: href, title: stripTags(m[2]!) || href, snippet: snip ? stripTags(snip[1]!) : "" });
+  for (let i = 0; i < anchors.length && found.length < limit; i++) {
+    const a = anchors[i]!;
+    const block = body.slice(a.end, anchors[i + 1]?.start ?? body.length);
+    const close = /<\/a\s*>/i.exec(block);
+    const href = attr(a.attrs, HREF_ATTR);
+    if (!close || !href) continue;
+    const url = shape.resolve(href);
+    if (!url) continue;
+    const rest = block.slice(close.index + close[0].length);
+    found.push({ url, title: stripTags(block.slice(0, close.index)) || url, snippet: elementText(rest, shape.snippet) });
   }
   return found;
 }
 
+// The text of the first element carrying the class, up to its closing tag.
+function elementText(html: string, el: BlockShape["snippet"]): string {
+  for (const m of html.matchAll(el.open)) {
+    if (!hasClass(m[1]!, el.cls)) continue;
+    const inner = html.slice(m.index! + m[0].length);
+    const end = el.close.exec(inner);
+    return end ? stripTags(inner.slice(0, end.index)) : "";
+  }
+  return "";
+}
+
+// Where a DuckDuckGo result points. A destination unwrapped from the `uddg`
+// redirector IS the result, whatever its host: a query about DuckDuckGo's
+// privacy policy should find duckduckgo.com/privacy, and a Wayback snapshot of
+// duckduckgo.com is a snapshot. What still points at duckduckgo.com WITHOUT
+// that unwrap is DDG's own — an ad's `y.js` click-through, a navigation link.
+// Testing the whole string for "duckduckgo.com" dropped all of these.
+function ddgDestination(href: string): string | undefined {
+  const url = ddgRedirectTarget(href);
+  if (!/^https?:\/\//i.test(url)) return undefined;
+  const unwrapped = url !== (href.startsWith("//") ? `https:${href}` : href);
+  return unwrapped || !hostIs(url, "duckduckgo.com") ? url : undefined;
+}
+
 /** One page of `html.duckduckgo.com/html/`. */
 export function parseDdgHtml(body: string, limit = 50): EngineHit[] {
-  return parseBlocks(
-    body,
-    limit,
-    /<a\b([^>]*\bresult__a\b[^>]*)>([\s\S]*?)<\/a>([\s\S]*?)(?=<a\b[^>]*\bresult__a\b|$)/gi,
-    /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i,
-    /duckduckgo\.com/,
-    ddgRedirectTarget,
-  );
+  return parseBlocks(body, limit, { anchor: "result__a", snippet: element("a", "result__snippet"), resolve: ddgDestination });
 }
 
 /** One page of `lite.duckduckgo.com/lite/` — a flat table, simpler and steadier. */
 export function parseDdgLite(body: string, limit = 50): EngineHit[] {
-  return parseBlocks(
-    body,
-    limit,
-    /<a\b([^>]*\bresult-link\b[^>]*)>([\s\S]*?)<\/a>([\s\S]*?)(?=<a\b[^>]*\bresult-link\b|$)/gi,
-    /class="result-snippet"[^>]*>([\s\S]*?)<\/td>/i,
-    /duckduckgo\.com/,
-    ddgRedirectTarget,
-  );
+  return parseBlocks(body, limit, { anchor: "result-link", snippet: element("td", "result-snippet"), resolve: ddgDestination });
 }
 
 /** One page of `mojeek.com/search` — direct hrefs, no redirector. */
 export function parseMojeek(body: string, limit = 50): EngineHit[] {
-  return parseBlocks(
-    body,
-    limit,
-    /<a\b([^>]*\bclass="[^"]*\btitle\b[^"]*"[^>]*)>([\s\S]*?)<\/a>([\s\S]*?)(?=<a\b[^>]*\bclass="[^"]*\btitle\b|$)/gi,
-    /<p\b[^>]*\bclass="[^"]*\bs\b[^"]*"[^>]*>([\s\S]*?)<\/p>/i,
-    /mojeek\.com/,
-    (h) => (h.startsWith("//") ? `https:${h}` : h),
-  );
+  return parseBlocks(body, limit, {
+    anchor: "title",
+    snippet: element("p", "s"),
+    // Mojeek links its results directly, so its own links are the ones on its
+    // own host. Its blog, or a page ABOUT Mojeek, is a result like any other.
+    resolve: (h) => {
+      const url = h.startsWith("//") ? `https:${h}` : h;
+      return /^https?:\/\//i.test(url) && !/^https?:\/\/(?:www\.)?mojeek\.com(?:[:/?#]|$)/i.test(url) ? url : undefined;
+    },
+  });
+}
+
+const OPEN_FORM = /<form\b[^<>]*>/gi;
+const INPUT = /<input\b([^<>]*)>/gi;
+
+/**
+ * The fields DuckDuckGo's own "Next" form would submit, or undefined when the
+ * page has none — which is what its last page looks like.
+ *
+ * DDG pages by a result offset `s`, alongside a `dc` counter and a `vqd`
+ * session token, and the only source that knows all three is the page itself.
+ * Captured first pages of both endpoints carry 10 results and a form posting
+ * `s=10, dc=11`; the fixed "30 a page" this replaced asked for `s=30` and
+ * skipped results 11 to 30. A later page also carries a "Previous" form, so the
+ * form is chosen by its submit button, not by position.
+ */
+function ddgNextForm(body: string): Record<string, string> | undefined {
+  const forms = [...body.matchAll(OPEN_FORM)];
+  for (let i = 0; i < forms.length; i++) {
+    const chunk = body.slice(forms[i]!.index! + forms[i]![0].length, forms[i + 1]?.index ?? body.length);
+    const end = chunk.search(/<\/form\s*>/i);
+    const fields: Record<string, string> = {};
+    let next = false;
+    for (const m of (end < 0 ? chunk : chunk.slice(0, end)).matchAll(INPUT)) {
+      const value = attr(m[1]!, VALUE_ATTR) ?? "";
+      if (attr(m[1]!, TYPE_ATTR)?.toLowerCase() === "submit") next ||= /^\s*next\b/i.test(value);
+      else {
+        const name = attr(m[1]!, NAME_ATTR);
+        if (name) fields[name] = value;
+      }
+    }
+    if (next) return fields;
+  }
+  return undefined;
+}
+
+// The next DuckDuckGo page, as the page itself describes it. Sent as a GET: the
+// form posts, but the same page links the identical query string as a
+// `<a rel="next" href="/lite/?…">`, and httpGet is the polite, capped client.
+// Our own query and region win over the form's echo of them.
+function ddgNext(endpoint: string): EngineSpec["next"] {
+  return (body, q, kl, p) => {
+    const form = ddgNextForm(body);
+    if (!form) return null;
+    // `s` is the field the next page cannot do without. Only a form that lacks
+    // it falls back to arithmetic — 10 results a page, as both endpoints serve.
+    return `${endpoint}?${new URLSearchParams({ ...form, q, kl, s: form.s || String((p + 1) * 10) })}`;
+  };
 }
 
 interface EngineSpec {
@@ -206,6 +355,12 @@ interface EngineSpec {
   /** Build the URL for page `p` (0-based). `locale` is undefined when the caller asked for no particular one. */
   url: (query: string, p: number, kl: string, locale?: { lang: string; region: string }) => string;
   parse: (body: string, limit: number) => EngineHit[];
+  /**
+   * The URL of the page after page `p`, as that page names it, or null when it
+   * names none — the last page. Absent for an engine whose offset arithmetic
+   * holds, which then gets `url(p + 1)`.
+   */
+  next?: (body: string, query: string, kl: string, p: number) => string | null;
 }
 
 /**
@@ -223,20 +378,25 @@ interface EngineSpec {
  */
 function mojeekLocaleParams(locale?: { lang: string; region: string }): string {
   if (!locale) return "";
-  return `&lb=${encodeURIComponent(locale.lang)}&lbb=100&rb=${encodeURIComponent(locale.region)}&rbb=10`;
+  const lang = `&lb=${encodeURIComponent(locale.lang)}&lbb=100`;
+  // `--region wt` asks for no region, so there is no country to boost.
+  return locale.region === "WT" ? lang : `${lang}&rb=${encodeURIComponent(locale.region)}&rbb=10`;
 }
 
 const SPECS: Record<KeylessEngine, EngineSpec> = {
-  // `s` is a 0-based result offset, ~30 per page.
+  // Page one only: every later page is the one the previous page's own Next
+  // form names (see ddgNextForm).
   ddg: {
     label: "DuckDuckGo",
-    url: (q, p, kl) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}&kl=${encodeURIComponent(kl)}${p > 0 ? `&s=${p * 30}` : ""}`,
+    url: (q, _p, kl) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}&kl=${encodeURIComponent(kl)}`,
     parse: parseDdgHtml,
+    next: ddgNext("https://html.duckduckgo.com/html/"),
   },
   ddglite: {
     label: "DuckDuckGo Lite",
-    url: (q, p, kl) => `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}&kl=${encodeURIComponent(kl)}${p > 0 ? `&s=${p * 30}` : ""}`,
+    url: (q, _p, kl) => `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}&kl=${encodeURIComponent(kl)}`,
     parse: parseDdgLite,
+    next: ddgNext("https://lite.duckduckgo.com/lite/"),
   },
   // Mojeek's `s` is the 1-BASED index of the first result, 10 per page — so
   // page 2 starts at 11, not 10. Its own crawler and index, which is why it is
@@ -251,14 +411,26 @@ const SPECS: Record<KeylessEngine, EngineSpec> = {
 /**
  * Ask one keyless engine, walking `pages` result pages.
  *
- * Pagination stops as soon as a page adds no NEW canonical URL. An engine that
- * ignores the offset parameter and re-serves page one would otherwise be walked
- * to the requested depth, paying a request per page for the same ten results.
+ * Pagination stops at a page that names no next page, and as soon as a page
+ * adds no NEW canonical URL. An engine that ignores the offset parameter and
+ * re-serves page one would otherwise be walked to the requested depth, paying a
+ * request per page for the same ten results.
  */
 export async function searchViaKeyless(
   engine: KeylessEngine,
   query: string,
-  opts: { limit?: number; pages?: number; lang?: string; region?: string; timeoutMs?: number } = {},
+  opts: {
+    limit?: number;
+    pages?: number;
+    lang?: string;
+    region?: string;
+    /** Each request's timeout, in ms (default 12000). */
+    timeoutMs?: number;
+    /** The whole call's budget in ms, every page included: no page starts after it, and each request's timeout is capped to what is left. */
+    budgetMs?: number;
+    /** Checked before each page. A page already in flight finishes, within its timeout. */
+    signal?: AbortSignal;
+  } = {},
 ): Promise<EngineResult> {
   const spec = SPECS[engine];
   const q = query.trim();
@@ -266,24 +438,42 @@ export async function searchViaKeyless(
 
   const pages = Math.max(1, opts.pages ?? 1);
   const limit = Math.max(1, opts.limit ?? 10);
-  const kl = ddgRegion(opts.lang, opts.region);
-  const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
   // Only pass a locale on when the caller actually asked for one. `ddgRegion`
   // has a default to fall back on; a search-time preference does not need one,
   // and inventing "us-en" for a caller who said nothing would bias every
-  // unlocalised query toward American pages.
-  const locale = opts.lang || opts.region ? { lang: baseLang(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : undefined;
+  // unlocalised query toward American pages. `wt-wt` is DuckDuckGo's own
+  // "All Regions".
+  const localised = !!(opts.lang || opts.region);
+  const kl = localised ? ddgRegion(opts.lang, opts.region) : "wt-wt";
+  const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
+  const locale = localised ? { lang: baseLang(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : undefined;
 
   const seen = new Set<string>();
   const hits: EngineHit[] = [];
 
+  const deadline = opts.budgetMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + opts.budgetMs;
+  let url = spec.url(q, 0, kl, locale);
   for (let p = 0; p < pages && hits.length < limit; p++) {
-    const r = await httpGet(spec.url(q, p, kl, locale), { accept: "text/html", acceptLanguage, timeoutMs: opts.timeoutMs ?? 12000 });
-    if (!r.ok || !r.body) {
+    if (opts.signal?.aborted || Date.now() >= deadline) {
+      if (p > 0) break; // the pages already read stand
+      return { hits: [], note: `${spec.label} was not asked: ${opts.signal?.aborted ? "the search was cancelled" : "no time was left"}.` };
+    }
+    // No retry: in a cascade the next engine IS the retry, and asking an
+    // engine that just answered 429 again is how a throttle becomes a block.
+    const r = await httpGet(url, {
+      accept: "text/html",
+      acceptLanguage,
+      timeoutMs: Math.max(1, Math.min(opts.timeoutMs ?? 12000, deadline - Date.now())),
+      retries: 0,
+    });
+    if (!r.ok || !r.body.trim()) {
       // A later page failing is not a failure — page one's results stand.
       if (p > 0) break;
-      const { throttled, why } = throttleReason(r.status);
-      return { hits: [], note: `${spec.label} ${why}.`, throttled, ...(r.status === 403 ? { blocked: true } : {}) };
+      // A success with nothing in it is not an unreachable host: something
+      // answered, and said nothing.
+      if (r.ok) return { hits: [], note: `${spec.label} returned an empty page (HTTP ${r.status}).`, status: r.status };
+      const { throttled, why } = throttleReason(r.status, r.error);
+      return { hits: [], note: `${spec.label} ${why}.`, throttled, ...(r.status === 403 ? { blocked: true } : {}), status: r.status };
     }
     const before = hits.length;
     const parsed = spec.parse(r.body, limit * 2);
@@ -306,6 +496,7 @@ export async function searchViaKeyless(
         note: `${spec.label} served an anti-bot challenge (HTTP ${r.status}) instead of results — blocked, not empty.`,
         throttled: true,
         blocked: true,
+        status: r.status,
       };
     }
 
@@ -316,9 +507,14 @@ export async function searchViaKeyless(
       hits.push(f);
       if (hits.length >= limit) break;
     }
-    if (hits.length === before) break;
-    if (p < pages - 1 && pageDelayMs()) await sleep(pageDelayMs());
+    if (hits.length === before || p + 1 >= pages || hits.length >= limit) break;
+    // A page that names no next page was the last one: stopping here is exact,
+    // and a request cheaper than waiting for a page that adds nothing new.
+    const next = spec.next ? spec.next(r.body, q, kl, p) : spec.url(q, p + 1, kl, locale);
+    if (!next) break;
+    url = next;
+    if (pageDelayMs()) await sleep(pageDelayMs());
   }
 
-  return hits.length ? { hits } : { hits: [], note: `${spec.label} returned no results.` };
+  return hits.length ? { hits, answered: true } : { hits: [], note: `${spec.label} returned no results.`, answered: true };
 }

@@ -35,7 +35,7 @@ import { extractTables, tableToMarkdown } from "./tables.js";
 import { fingerprint, hasChanged } from "./changed.js";
 import { auditEngineUsage, auditSkillBundle, checkPins, readSkillConfig, scaffoldSkill, vendorEngine, type CliSurface } from "./skillkit/index.js";
 import { isKeylessEngine, KEYLESS_ENGINES, type KeylessEngine } from "./engines.js";
-import { probeSearxng, search, searxngBase } from "./search.js";
+import { probeSearxng, search, searxngBase, searxngIsExplicit } from "./search.js";
 import { cacheClean, cacheDir, cachedFetchAndExtract, cacheStats, setCacheMode } from "./cache.js";
 import { fetchRobots, isAllowed } from "./robots.js";
 import { discoverFeeds, fetchFeed, fetchSitemap, parseFeed } from "./feed.js";
@@ -73,7 +73,9 @@ documents — and serve that to an agent over MCP. Zero dependencies, no API key
 
 USAGE
   webindex search <query> [--json] [--limit <n>] [--pages <n>] [--lang <tag>]
-                          [--engine ddg|ddglite|mojeek|off] [--searxng <base>|off]
+                          [--region <cc>|wt] [--engine ddg|ddglite|mojeek|off]
+                          [--searxng <base>|off] [--firecrawl <base>|off]
+                          [--timeout <ms>]
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>] [--full-page]
                        [--cache] [--refresh] [--offline] [--timeout <ms>]
   webindex extract <file> [--json] [--full-page]
@@ -112,6 +114,11 @@ COMMANDS
              engines (DuckDuckGo, DDG Lite, Mojeek — no key, no container),
              then Firecrawl. Prints what it found, or says which backend was
              missing and how to start it — those are different answers.
+             --lang is the result language; --region a country overriding
+             the one it implies (fr + ca is Canadian French), or wt for none.
+             --timeout bounds the WHOLE cascade, every rung and page; the
+             rungs it never reached are named. --json adds each rung's
+             outcome (rungs) and whether anything answered (searched).
   fetch      Fetch a URL and print the extracted text. Routes PDFs and office
              documents to their ladders automatically — by URL, content-type,
              download filename or the bytes themselves; images, media and
@@ -265,6 +272,7 @@ export const VALUE_FLAGS = [
   "limit",
   "pages",
   "lang",
+  "region",
   "searxng",
   "firecrawl",
   "engine",
@@ -349,6 +357,11 @@ function toolTimeoutMs(value: unknown): number | undefined {
   const n = typeof value === "string" ? Number(value) : value;
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(300_000, Math.max(1, Math.round(n))) : undefined;
 }
+
+// The whole webindex_search cascade's budget: every rung and page within it.
+const SEARCH_TOOL_BUDGET_MS = 45_000;
+// The most result pages webindex_search walks per engine.
+const SEARCH_TOOL_MAX_PAGES = 5;
 
 const FORGE_KINDS: readonly ForgeKind[] = ["github", "gitlab", "gitea"];
 const isForgeKind = (v: string): v is ForgeKind => (FORGE_KINDS as readonly string[]).includes(v);
@@ -502,9 +515,12 @@ export function webindexAdapter(): McpAdapter {
             query: { type: "string", description: "What to search for." },
             limit: { type: "number", description: "How many hits to aim for (default 10)." },
             lang: { type: "string", description: "BCP-47 language tag, e.g. fr-FR." },
+            region: { type: "string", description: "Country code overriding the one `lang` implies, e.g. ca for fr + Canada; wt asks for no region." },
+            pages: { type: "number", description: `Result pages to walk per engine (default 1, at most ${SEARCH_TOOL_MAX_PAGES}).` },
             engine: {
               type: "string",
-              description: "Pin one keyless engine: ddg | ddglite | mojeek. Omit to let the cascade choose.",
+              description:
+                "Restrict the keyless rung to one engine: ddg | ddglite | mojeek (SearXNG and Firecrawl still run around it). Omit to try all three in turn.",
               enum: [...KEYLESS_ENGINES],
             },
           },
@@ -790,11 +806,25 @@ export function webindexAdapter(): McpAdapter {
         const r = await search(q, {
           limit: typeof args.limit === "number" ? args.limit : undefined,
           lang: args.lang ? String(args.lang) : undefined,
+          region: args.region ? String(args.region) : undefined,
+          // Clamped, not refused: every page is another request to an engine
+          // that rations them, and an agent's 50 should cost it a few pages,
+          // not the call.
+          pages:
+            typeof args.pages === "number" && Number.isFinite(args.pages) ? Math.min(SEARCH_TOOL_MAX_PAGES, Math.max(1, Math.trunc(args.pages))) : undefined,
+          // An MCP host gives up on a tool call long before a cascade of
+          // timeouts would: better a partial answer that says where it
+          // stopped than none at all.
+          timeoutMs: SEARCH_TOOL_BUDGET_MS,
           ...(engines ? { engines } : {}),
         });
-        if (!r.hits.length) throw new ToolError(r.notes.join(" ") || "No results.");
+        // The notes are prose; this line is the same facts in a form an agent
+        // can act on without parsing English — "blocked" is not "empty".
+        const rungs = r.rungs?.length ? `rungs: ${r.rungs.map((x) => `${x.rung}=${x.outcome}${x.hits ? `(${x.hits})` : ""}`).join(" ")}` : "";
+        if (!r.hits.length) throw new ToolError([r.notes.join(" ") || "No results.", rungs].filter(Boolean).join("\n"));
         const body = r.hits.map((h, i) => `${i + 1}. ${h.title}\n   ${h.url}${h.snippet ? `\n   ${h.snippet}` : ""}`).join("\n\n");
-        return { text: r.notes.length ? `${body}\n\n---\n${r.notes.join("\n")}` : body };
+        const trailer = [...r.notes, rungs].filter(Boolean);
+        return { text: trailer.length ? `${body}\n\n---\n${trailer.join("\n")}` : body };
       }
       if (name === "webindex_extract") {
         const r = await extractLocal(String(args.path ?? ""), args.fullPage === true);
@@ -978,8 +1008,11 @@ async function dispatch(argv: string[]): Promise<void> {
       limit: argInt(args, "limit"),
       pages: argInt(args, "pages"),
       lang: argValue(args, "lang"),
+      region: argValue(args, "region"),
       searxng: argValue(args, "searxng"),
       firecrawl: argValue(args, "firecrawl"),
+      // The budget for the whole cascade, not one request.
+      timeoutMs: argTimeout(args),
       ...(engine ? { engines: engine === "off" ? [] : [engine as KeylessEngine] } : {}),
     });
     if (argBool(args, "json")) {
@@ -1682,7 +1715,7 @@ async function dispatch(argv: string[]): Promise<void> {
       (pdfRungs as string[]).includes(id) || (docRungs as string[]).includes(id) ? npxCacheState(spec) : undefined;
     const [fc, sxUp, olUp, qdUp, inspectorCache, anydocCache, ocr] = await Promise.all([
       base ? probeFirecrawl(base) : false,
-      sx ? probeSearxng(sx) : false,
+      sx ? probeSearxng(sx, searxngIsExplicit()) : false,
       probeOllama(ol),
       probeQdrant(qd),
       cacheState("pdf-inspector", PDF_INSPECTOR_SPEC),

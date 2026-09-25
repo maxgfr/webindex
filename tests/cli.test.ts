@@ -14,6 +14,7 @@ import { envName } from "../src/brand.js";
 import { resetOllamaProbe } from "../src/embed.js";
 import { resetCacheMode } from "../src/cache.js";
 import { resetHaveCache } from "../src/exec.js";
+import { resetSearxngProbeCache } from "../src/search.js";
 
 // Every stack service the engine knows, except `all` — the CLI spells that one
 // `stack`. Derived rather than typed out, because a hand-written list is exactly
@@ -190,12 +191,37 @@ describe("search", () => {
     await run(["search", "q", "--json", "--searxng", "http://sxcli3.test"]);
     const parsed = JSON.parse(stdout());
     expect(parsed.hits[0]).toMatchObject({ url: "https://a.test/1", via: "searxng" });
+    // What each rung did, for a script that must tell "blocked" from "empty".
+    expect(parsed.searched).toBe(true);
+    expect(parsed.rungs[0]).toEqual({ rung: "searxng", outcome: "hits", hits: 1 });
   });
 
   it("exits non-zero when it found nothing, so a script can tell", async () => {
     up({ results: [] });
     expect(await run(["search", "q", "--searxng", "http://sxcli4.test"])).toBe(1);
     expect(stderr()).toContain("stack up");
+  });
+
+  it("takes --region, and hands SearXNG the language-region pair", async () => {
+    // locale.ts documents `--region wt` as the opt-out, and the CLI rejected
+    // --region as an unknown flag.
+    const spy = up({ results: [] });
+    expect(await run(["search", "q", "--lang", "fr", "--region", "ca", "--searxng", "http://sxcli5.test"])).toBe(1);
+    const asked = spy.mock.calls.map((c) => String(c[0])).find((u) => u.includes("/search?"))!;
+    expect(new URL(asked).searchParams.get("language")).toBe("fr-CA");
+  });
+
+  it("holds the whole search to --timeout", async () => {
+    vi.stubGlobal("fetch", hangingFetch());
+    const t0 = performance.now();
+    try {
+      expect(await run(["search", "q", "--engine", "ddg", "--timeout", "150"])).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(performance.now() - t0).toBeLessThan(3000); // not DuckDuckGo's 12 s
+    expect(stderr()).toMatch(/DuckDuckGo unreachable \(timed out after \d+ ms\)/);
+    expect(await run(["search", "q", "--timeout", "0"])).toBe(2);
   });
 
   it("asks for a query rather than searching for nothing", async () => {
@@ -466,6 +492,20 @@ describe("doctor", () => {
     expect(s).toMatch(/^ {14}builtin {8}built-in \(OOXML and OpenDocument\)$/m);
   });
 
+  it("does not report a notebook server on SearXNG's default port as SearXNG", async () => {
+    // 8888 is Jupyter's default port too. SearXNG's /healthz answers "OK".
+    process.env[envName("FIRECRAWL")] = "off";
+    delete process.env[envName("SEARXNG")];
+    installFetchMock(() => ({ status: 200, body: "<html><title>Jupyter Server</title></html>", contentType: "text/html" }));
+    try {
+      expect(await run(["doctor"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+      resetSearxngProbeCache();
+    }
+    expect(stdout()).toMatch(/searxng {5}not reachable at http:\/\/localhost:8888/);
+  });
+
   it("lists a rung the environment switched off, and which variable did it", async () => {
     process.env[envName("FIRECRAWL")] = "off";
     process.env[envName("NO_NPX")] = "1";
@@ -617,6 +657,50 @@ describe("the MCP tools", () => {
       }),
     );
     await expect(adapter.callTool("webindex_search", { query: "rate limiting" })).rejects.toThrow(/stack up/);
+  });
+
+  it("lets an agent walk more pages and set a region, within reason", async () => {
+    const tool = adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_search")!;
+    expect(tool.inputSchema.properties.pages?.type).toBe("number");
+    expect(tool.inputSchema.properties.region?.type).toBe("string");
+    expect(tool.inputSchema.required).toEqual(["query"]);
+    process.env[envName("SEARXNG")] = "http://sx-mcp-pages.test";
+    // Every page brings ten new results, so only the clamp stops the walk.
+    const spy = installFetchMock((url) => {
+      if (!url.includes("/search?")) return { body: "OK", contentType: "text/plain" };
+      const page = Number(new URL(url).searchParams.get("pageno") ?? "1");
+      const results = Array.from({ length: 10 }, (_, i) => ({ url: `https://a.test/${page}/${i}`, title: `r${i}` }));
+      return { body: JSON.stringify({ results }), contentType: "application/json" };
+    });
+    try {
+      await adapter.callTool("webindex_search", { query: "q", pages: 50, limit: 500, lang: "fr", region: "be" });
+    } finally {
+      vi.unstubAllGlobals();
+      process.env[envName("SEARXNG")] = "off";
+    }
+    const queries = spy.mock.calls.map((c) => String(c[0])).filter((u) => u.includes("/search?"));
+    expect(queries).toHaveLength(5);
+    expect(new URL(queries[0]!).searchParams.get("language")).toBe("fr-BE");
+  });
+
+  it("ends a search with one line saying what each rung did", async () => {
+    // The notes are English; the rung line is the same facts in a form an
+    // agent can read without parsing prose.
+    process.env[envName("SEARXNG")] = "http://sx-mcp.test";
+    installFetchMock(
+      routes([
+        ["/search", { body: JSON.stringify({ results: [{ url: "https://a.test/1", title: "A" }] }), contentType: "application/json" }],
+        ["/healthz", { body: "OK", contentType: "text/plain" }],
+      ]),
+    );
+    try {
+      const r = await adapter.callTool("webindex_search", { query: "q" });
+      expect(r.text.split("\n").at(-1)).toBe("rungs: searxng=hits(1) firecrawl=disabled");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    process.env[envName("SEARXNG")] = "off";
+    await expect(adapter.callTool("webindex_search", { query: "q" })).rejects.toThrow(/\nrungs: searxng=disabled firecrawl=disabled$/);
   });
 
   it("fetches a URL and says which rung produced the text", async () => {

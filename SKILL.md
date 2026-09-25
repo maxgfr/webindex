@@ -60,7 +60,7 @@ boundaries and a concrete MCP example.
 ## The commands
 
 ```
-webindex search <query> [--engine ddg|ddglite|mojeek|off] [--limit n] [--lang tag]
+webindex search <query> [--engine ddg|ddglite|mojeek|off] [--limit n] [--lang tag] [--region cc] [--timeout ms]
 webindex fetch <url> [--full-page]    # HTML main content, consent banners dropped; --full-page keeps all page text via the built-in reader
 webindex fetch <url> --cache          # reuse a fresh copy for the TTL, revalidate a stale one (a 304 when unchanged); --refresh, --offline
 webindex extract <file> [--full-page] # the same on disk; --full-page keeps navigation and consent banners too
