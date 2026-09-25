@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { brand, env, envInt } from "./brand.js";
@@ -79,16 +80,15 @@ export function resolveRepo(raw: string, opts: { kind?: ForgeKind } = {}): RepoR
   // you clone locally without the in-place semantics above. It has no host, so
   // the URL pattern below cannot match it, and it is NOT `isLocal`: a bare path
   // means "use this tree", a file:// URL means "clone from this tree".
-  const file = /^file:\/\/(\/.*)$/.exec(trimmed);
-  if (file) {
-    const p = file[1]!.replace(/\.git$/, "").replace(/\/+$/, "");
+  const p = filePath(trimmed);
+  if (p !== undefined) {
     return {
       raw: trimmed,
       host: "file",
       ...(basename(p) ? { repo: basename(p) } : {}),
       cloneUrl: trimmed,
       isLocal: false,
-      slug: `file-${slugify(p)}`,
+      slug: `file-${repoSlug(p)}`,
     };
   }
 
@@ -158,8 +158,49 @@ export function resolveRepo(raw: string, opts: { kind?: ForgeKind } = {}): RepoR
     cloneUrl,
     webUrl: `https://${host}/${path}`,
     isLocal: false,
-    slug: slugify(`${host}/${path}`),
+    slug: repoSlug(`${host}/${path}`),
   };
+}
+
+/** The repository path of a `file:///path(.git)` remote, or undefined for anything else. */
+function filePath(url: string): string | undefined {
+  const file = /^file:\/\/(\/.*)$/.exec(url);
+  return file ? file[1]!.replace(/\.git$/, "").replace(/\/+$/, "") : undefined;
+}
+
+/**
+ * The cache key for a repository path — one directory per repository.
+ *
+ * `slugify` folds "/" and "-" into the same "-", so `a-b/c` and `a/b-c` — two
+ * repositories, possibly one of them a squatter's — got one slug, and the
+ * second was handed the first one's checkout. A key slugify renders exactly (no
+ * "-", nothing else it folds) keeps its readable slug; when slugify already had
+ * to hash (non-ASCII, over-long), that hash covers the whole key; any other key
+ * gets a hash of its exact spelling, so the fold can no longer merge two.
+ */
+function repoSlug(key: string): string {
+  const k = key.toLowerCase();
+  const slug = slugify(k);
+  const folded = k.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (/^[a-z0-9._/]+$/.test(k) || slug !== folded) return slug;
+  return `${slugify(k, { max: 111 })}-${createHash("sha256").update(k).digest("hex").slice(0, 8)}`;
+}
+
+/**
+ * The slug a clone of `ref` was stored under before `repoSlug`, when it differs
+ * — so an existing checkout is found again rather than orphaned and re-fetched.
+ */
+function legacySlug(ref: RepoRef): string | undefined {
+  const p = ref.cloneUrl ? filePath(ref.cloneUrl) : undefined;
+  const old =
+    ref.host === "file"
+      ? p === undefined
+        ? undefined
+        : `file-${slugify(p)}`
+      : ref.repo
+        ? slugify(`${ref.host}/${[ref.owner, ref.repo].filter(Boolean).join("/")}`)
+        : undefined;
+  return old && old !== ref.slug ? old : undefined;
 }
 
 // A dot segment, spelled as a URL parser will read it: `%2e` is a dot to WHATWG
@@ -201,55 +242,136 @@ function repoSegments(host: string, rest: string, kind: ForgeKind | undefined): 
  * minutes. `ensureHistoryDepth` deepens it when a caller genuinely needs history.
  *
  * Never throws for a reason the caller cannot act on — a missing `git` says so
- * rather than reporting a clone failure.
+ * rather than reporting a clone failure, and a refresh that could not reach the
+ * remote says so rather than returning the old tree as if it were fresh.
+ *
+ * Each `branch` gets its own directory beside the default one: the cache is
+ * keyed by what was cloned, so asking for `v2` never answers with `main`.
  */
 export async function ensureClone(ref: RepoRef, opts: { refresh?: boolean; branch?: string } = {}): Promise<string> {
   if (ref.isLocal) return resolve(ref.raw);
   if (!ref.cloneUrl) throw new Error(`"${ref.raw}" does not name a repository that can be cloned`);
   if (!have("git")) throw new Error(`git is not installed or not on PATH — cannot clone ${ref.cloneUrl}`);
+  // git reads an argument that begins with "-" as an option, and no ref name
+  // may begin with one — so such a "branch" is refused before it reaches git.
+  if (opts.branch !== undefined && (!opts.branch.trim() || opts.branch.startsWith("-"))) throw new Error(`"${opts.branch}" is not a branch name`);
 
-  const dir = join(repoCacheRoot(), ref.slug);
-  const cloned = existsSync(join(dir, ".git"));
-  if (cloned && !opts.refresh) return dir;
+  const dir = join(repoCacheRoot(), opts.branch ? `${ref.slug}@${branchSlug(opts.branch)}` : ref.slug);
+  // One clone per directory at a time, in this process: concurrent callers all
+  // saw "not cloned yet", each ran `git clone` into the same directory, and the
+  // losers deleted the winner's half-written tree before retrying.
+  const pending = inflight.get(dir);
+  if (pending) return pending;
+  const work = obtainClone(ref, dir, opts).finally(() => {
+    if (inflight.get(dir) === work) inflight.delete(dir);
+  });
+  inflight.set(dir, work);
+  return work;
+}
 
-  if (cloned && opts.refresh) {
-    await shAsync("git", ["-C", dir, "fetch", "--depth", "1", "origin"], { timeoutMs: fetchTimeoutMs() });
-    await shAsync("git", ["-C", dir, "reset", "--hard", "FETCH_HEAD"], { timeoutMs: fetchTimeoutMs() });
-    return dir;
+const inflight = new Map<string, Promise<string>>();
+
+// A branch name is case-sensitive and may hold "/", so its slug always carries
+// a hash of the exact name: `Feature/x`, `feature/x` and `feature-x` are three.
+function branchSlug(branch: string): string {
+  return `${slugify(branch, { max: 40, fallback: "branch" })}-${createHash("sha256").update(branch).digest("hex").slice(0, 8)}`;
+}
+
+async function obtainClone(ref: RepoRef, dir: string, opts: { refresh?: boolean; branch?: string }): Promise<string> {
+  let target = dir;
+  if (!existsSync(join(dir, ".git")) && !opts.branch) {
+    // A clone made under the slug this repository had before `repoSlug` is
+    // still this repository's — when its origin says so. One whose origin names
+    // another repository is exactly the collision the new slug exists to end.
+    const old = legacySlug(ref);
+    const legacy = old ? join(repoCacheRoot(), old) : undefined;
+    const origin = legacy && existsSync(join(legacy, ".git")) ? originUrl(legacy) : undefined;
+    if (legacy && origin && resolveRepo(origin).slug === ref.slug) target = legacy;
   }
+  if (existsSync(join(target, ".git"))) return opts.refresh ? refreshClone(ref, target, opts.branch) : target;
+  return freshClone(ref, dir, opts.branch);
+}
 
-  mkdirSync(repoCacheRoot(), { recursive: true });
-  const args = ["clone", "--depth", "1", "--filter=blob:none", ...(opts.branch ? ["--branch", opts.branch] : []), ref.cloneUrl, dir];
-  const first = await shAsync("git", args, { timeoutMs: cloneTimeoutMs() });
+async function refreshClone(ref: RepoRef, dir: string, branch: string | undefined): Promise<string> {
+  // Whatever it was deepened to, the history verdict is about to be stale.
+  deepened.delete(dir);
+  // `--depth 1` only on a clone that is still shallow: on one ensureHistoryDepth
+  // unshallowed, it cut the history back to a single commit while the verdict
+  // above still said the full history was there.
+  const probe = await shAsync("git", ["-C", dir, "rev-parse", "--is-shallow-repository"], { timeoutMs: 10_000 });
+  const shallow = probe.stdout.trim() !== "false";
+  // The ref is named rather than left to the configured refspec, so FETCH_HEAD
+  // is unambiguously the one this directory holds: its branch, or the remote's HEAD.
+  const fetched = await shAsync("git", ["-C", dir, "fetch", "--quiet", ...(shallow ? ["--depth", "1"] : []), "origin", branch ?? "HEAD"], {
+    timeoutMs: fetchTimeoutMs(),
+  });
+  if (!fetched.ok) {
+    throw new Error(`refresh failed for ${ref.cloneUrl}: ${fetched.stderr.trim() || `exit ${fetched.status}`} (the cached tree at ${dir} is unchanged)`);
+  }
+  const reset = await shAsync("git", ["-C", dir, "reset", "--quiet", "--hard", "FETCH_HEAD"], { timeoutMs: fetchTimeoutMs() });
+  if (!reset.ok) throw new Error(`refresh of ${dir} fetched ${ref.cloneUrl} but could not check it out: ${reset.stderr.trim() || `exit ${reset.status}`}`);
+  return dir;
+}
 
-  if (!first.ok) {
-    // A failed clone can leave a partial, non-empty directory, and git refuses
-    // to clone into one — so the retry would fail for the wrong reason and the
-    // error would name the wrong problem.
-    if (existsSync(dir)) {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch (e) {
-        throw new Error(`could not remove the partial clone at ${dir} before retrying: ${(e as Error).message} — delete it and re-run`);
-      }
+// A crashed clone leaves its staging directory behind. One this old is nobody's
+// clone in progress.
+const STALE_STAGING_MS = 24 * 60 * 60 * 1000;
+
+function sweepStaging(staging: string): void {
+  try {
+    for (const name of readdirSync(staging)) {
+      const at = join(staging, name);
+      if (Date.now() - statSync(at).mtimeMs > STALE_STAGING_MS) rmSync(at, { recursive: true, force: true });
     }
+  } catch {
+    /* housekeeping only: a sweep that fails costs disk, not the clone */
+  }
+}
+
+async function freshClone(ref: RepoRef, dir: string, branch: string | undefined): Promise<string> {
+  // Cloned into a staging directory and renamed into place, so `dir` only ever
+  // appears complete. That is what makes a second PROCESS safe too: it either
+  // sees no clone yet, or a whole one — never a tree still being written.
+  const staging = join(repoCacheRoot(), ".partial");
+  mkdirSync(staging, { recursive: true });
+  sweepStaging(staging);
+  const attempt = async (filter: boolean) => {
+    const tmp = join(staging, `${basename(dir)}-${process.pid}-${randomBytes(4).toString("hex")}`);
+    const args = ["clone", "--depth", "1", ...(filter ? ["--filter=blob:none"] : []), ...(branch ? ["--branch", branch] : []), "--", ref.cloneUrl!, tmp];
+    const r = await shAsync("git", args, { timeoutMs: cloneTimeoutMs() });
+    if (!r.ok) rmSync(tmp, { recursive: true, force: true });
+    return { r, tmp };
+  };
+
+  let done = await attempt(true);
+  if (!done.r.ok) {
     // Some servers reject partial-clone filters outright. Retry without.
-    const retry = await shAsync("git", ["clone", "--depth", "1", ...(opts.branch ? ["--branch", opts.branch] : []), ref.cloneUrl, dir], {
-      timeoutMs: cloneTimeoutMs(),
-    });
-    if (!retry.ok) {
+    const first = done.r;
+    done = await attempt(false);
+    if (!done.r.ok) {
       // Both attempts can fail differently. Report each, labelled, instead of
       // whichever stderr happened to be non-empty.
       throw new Error(
         [
           `git clone failed for ${ref.cloneUrl}`,
           `  attempt 1 (--filter=blob:none): ${first.stderr.trim() || `exit ${first.status}`}`,
-          `  attempt 2 (no filter):          ${retry.stderr.trim() || `exit ${retry.status}`}`,
+          `  attempt 2 (no filter):          ${done.r.stderr.trim() || `exit ${done.r.status}`}`,
         ].join("\n"),
       );
     }
   }
-  if (!existsSync(dir) || readdirSync(dir).length === 0) throw new Error(`clone produced an empty tree at ${dir}`);
+  if (!existsSync(done.tmp) || readdirSync(done.tmp).length === 0) throw new Error(`clone produced an empty tree for ${ref.cloneUrl}`);
+
+  // A directory with no .git is what an interrupted clone of an older version
+  // left behind — never a clone in progress, which now lives in staging.
+  if (existsSync(dir) && !existsSync(join(dir, ".git"))) rmSync(dir, { recursive: true, force: true });
+  try {
+    renameSync(done.tmp, dir);
+  } catch (e) {
+    rmSync(done.tmp, { recursive: true, force: true });
+    // Another process finished the same clone first: theirs is as good as ours.
+    if (!existsSync(join(dir, ".git"))) throw new Error(`could not move the clone of ${ref.cloneUrl} into ${dir}: ${(e as Error).message}`);
+  }
   return dir;
 }
 

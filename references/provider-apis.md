@@ -110,7 +110,11 @@ dropped the moment a redirect leaves the API's origin.
 
 `resolveRepo` parses every identifier shape — a URL in any scheme, `git@host:…`,
 `host/owner/repo`, the bare `owner/repo` shorthand, or a local directory — onto
-one ref with a stable slug, so all of them share one on-disk clone.
+one ref with a stable slug, so all of them share one on-disk clone. Two
+repositories never share one: `a-b/c` and `a/b-c` get different slugs. A named
+branch gets its own clone beside the default one; concurrent callers share one
+clone in flight; and `refresh` keeps a deepened history deep and throws, naming
+the remote, when it cannot fetch — rather than returning the old tree as fresh.
 
 `ensureClone` is shallow and blobless (`--depth 1 --filter=blob:none`): reading a
 repository's current state needs neither its history nor every past version of

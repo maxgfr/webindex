@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +8,7 @@ import { fetchFeed, fetchSitemap } from "../src/feed.js";
 import { listTags } from "../src/forge.js";
 import { lookupPackage } from "../src/registry.js";
 import { ensureClone, ensureHistoryDepth, headCommit, originUrl, repoCacheRoot, resetHistoryDepthCache, resolveRepo, sameCommit } from "../src/repo.js";
+import { slugify } from "../src/text.js";
 import { installFetchMock } from "./fetchmock.js";
 
 afterEach(() => {
@@ -751,5 +752,113 @@ describe("cloning, against a real local repository", () => {
     expect(r.ok).toBe(true);
     // Two commits reachable once it is no longer shallow.
     expect(sh("git", ["-C", dir, "rev-list", "--count", "HEAD"]).stdout.trim()).toBe("2");
+  });
+
+  /** A second origin repository at `rel` under a fresh parent, saying who it is. */
+  function originAt(parent: string, rel: string): string {
+    const at = join(parent, rel);
+    mkdirSync(at, { recursive: true });
+    sh("git", ["-C", at, "init", "-q", "-b", "main"]);
+    sh("git", ["-C", at, "config", "user.email", "t@t.test"]);
+    sh("git", ["-C", at, "config", "user.name", "T"]);
+    writeFileSync(join(at, "WHO"), `I am ${rel}\n`);
+    sh("git", ["-C", at, "add", "-A"]);
+    sh("git", ["-C", at, "commit", "-q", "-m", "who"]);
+    return at;
+  }
+
+  it("gives two repositories whose names differ only in '/' versus '-' two clones", async () => {
+    // slugify folds both to "-": a-b/c and a/b-c shared one cache directory,
+    // and the second was handed the first one's tree — a squatter's too.
+    expect(resolveRepo("github.com/a-b/c").slug).not.toBe(resolveRepo("github.com/a/b-c").slug);
+    expect(resolveRepo("gitlab.com/g/sub/p").slug).not.toBe(resolveRepo("gitlab.com/g-sub/p").slug);
+    // A name slugify keeps exactly stays readable and unsuffixed.
+    expect(resolveRepo("github.com/expressjs/express").slug).toBe("github.com-expressjs-express");
+
+    const parent = mkdtempSync(join(tmpdir(), "wi-twins-"));
+    try {
+      const one = resolveRepo(`file://${originAt(parent, "a-b/c")}`);
+      const two = resolveRepo(`file://${originAt(parent, "a/b-c")}`);
+      const d1 = await ensureClone(one);
+      const d2 = await ensureClone(two);
+      expect(d1).not.toBe(d2);
+      expect(readFileSync(join(d2, "WHO"), "utf8")).toBe("I am a/b-c\n");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps using a clone made under the old slug when its origin is this repository", async () => {
+    // Otherwise every existing checkout of a hyphenated repository is orphaned
+    // and fetched again.
+    const ref = resolveRepo(`file://${origin}`);
+    const legacy = join(cacheDir, `file-${slugify(origin)}`);
+    expect(legacy).not.toBe(join(cacheDir, ref.slug));
+    sh("git", ["clone", "-q", "--depth", "1", ref.cloneUrl!, legacy]);
+    writeFileSync(join(legacy, "MARKER"), "old");
+    expect(await ensureClone(ref)).toBe(legacy);
+
+    // A legacy directory holding ANOTHER repository is not adopted.
+    rmSync(legacy, { recursive: true, force: true });
+    const parent = mkdtempSync(join(tmpdir(), "wi-other-"));
+    try {
+      sh("git", ["clone", "-q", `file://${originAt(parent, "other")}`, legacy]);
+      const dir = await ensureClone(ref);
+      expect(dir).toBe(join(cacheDir, ref.slug));
+      expect(existsSync(join(dir, "README.md"))).toBe(true);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("clones a named branch beside the default one, not in place of it", async () => {
+    sh("git", ["-C", origin, "checkout", "-q", "-b", "side"]);
+    writeFileSync(join(origin, "SIDE.md"), "s\n");
+    sh("git", ["-C", origin, "add", "-A"]);
+    sh("git", ["-C", origin, "commit", "-q", "-m", "side"]);
+    sh("git", ["-C", origin, "checkout", "-q", "main"]);
+
+    const ref = resolveRepo(`file://${origin}`);
+    const main = await ensureClone(ref);
+    // The cache used to answer any branch with whatever clone it already had.
+    const side = await ensureClone(ref, { branch: "side" });
+    expect(side).not.toBe(main);
+    expect(existsSync(join(side, "SIDE.md"))).toBe(true);
+    expect(existsSync(join(main, "SIDE.md"))).toBe(false);
+    await expect(ensureClone(ref, { branch: "--upload-pack=touch /tmp/x" })).rejects.toThrow(/not a branch name/);
+  });
+
+  it("refreshes a deepened clone without cutting its history back to one commit", async () => {
+    writeFileSync(join(origin, "b.md"), "b\n");
+    sh("git", ["-C", origin, "add", "-A"]);
+    sh("git", ["-C", origin, "commit", "-q", "-m", "second"]);
+    const ref = resolveRepo(`file://${origin}`);
+    const dir = await ensureClone(ref);
+    expect(await ensureHistoryDepth(dir)).toEqual({ ok: true });
+
+    writeFileSync(join(origin, "c.md"), "c\n");
+    sh("git", ["-C", origin, "add", "-A"]);
+    sh("git", ["-C", origin, "commit", "-q", "-m", "third"]);
+    await ensureClone(ref, { refresh: true });
+    expect(existsSync(join(dir, "c.md"))).toBe(true);
+    expect(sh("git", ["-C", dir, "rev-parse", "--is-shallow-repository"]).stdout.trim()).toBe("false");
+    expect(sh("git", ["-C", dir, "rev-list", "--count", "HEAD"]).stdout.trim()).toBe("3");
+  });
+
+  it("says a refresh failed instead of returning the stale tree as fresh", async () => {
+    const ref = resolveRepo(`file://${origin}`);
+    const dir = await ensureClone(ref);
+    rmSync(origin, { recursive: true, force: true });
+    await expect(ensureClone(ref, { refresh: true })).rejects.toThrow(/refresh failed for .*unchanged/s);
+    expect(existsSync(join(dir, "README.md"))).toBe(true);
+  });
+
+  it("clones once when several callers ask at the same moment", async () => {
+    // Each one used to run its own `git clone` into the same directory; the
+    // losers failed, deleted the winner's half-written tree and retried.
+    const ref = resolveRepo(`file://${origin}`);
+    const dirs = await Promise.all([ensureClone(ref), ensureClone(ref), ensureClone(ref)]);
+    expect(new Set(dirs).size).toBe(1);
+    expect(existsSync(join(dirs[0]!, "README.md"))).toBe(true);
   });
 });
