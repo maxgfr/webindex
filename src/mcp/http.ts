@@ -228,7 +228,7 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
   if (single?.id !== undefined && token?.progressToken !== undefined && accept.includes("text/event-stream")) {
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", ...corsHeaders(origin) });
     const event = (m: JsonRpcMessage) => {
-      if (!res.writableEnded) res.write(`event: message\ndata: ${JSON.stringify(m)}\n\n`);
+      if (!res.writableEnded && !res.destroyed) res.write(`event: message\ndata: ${JSON.stringify(m)}\n\n`);
     };
     await mcp.handle(single, event, { signal: lost.signal, notify: event });
     res.end();
