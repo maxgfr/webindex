@@ -145,6 +145,101 @@ describe("concurrency", () => {
   });
 });
 
+describe("a busy server still listens", () => {
+  // Four slow tool calls hold every slot. The read loop used to wait for one
+  // of them before reading the next line, so a ping, and above all the
+  // notifications/cancelled meant for those very calls, sat unread until a
+  // call finished on its own.
+  function harness() {
+    const input = new PassThrough();
+    const frames: Record<string, unknown>[] = [];
+    let partial = "";
+    const output = new Writable({
+      write(chunk, _enc, cb) {
+        partial += String(chunk);
+        const lines = partial.split("\n");
+        partial = lines.pop()!;
+        for (const l of lines) if (l) frames.push(JSON.parse(l));
+        cb();
+      },
+    });
+    const releases: (() => void)[] = [];
+    let started = 0;
+    const adapter = testAdapter({
+      async callTool(_name, args) {
+        started++;
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return { text: String(args.text) };
+      },
+    });
+    const done = runStdioServer(adapter, { input, output, captureStdout: true });
+    const send = (m: unknown) => input.write(JSON.stringify(m) + "\n");
+    const tick = () => new Promise((r) => setTimeout(r, 20));
+    return { input, frames, releases, started: () => started, done, send, tick };
+  }
+  const toolCall = (id: number) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "probe_echo", arguments: { text: `t${id}` } } });
+
+  it("answers a ping while every slot is held", async () => {
+    const h = harness();
+    for (const id of [1, 2, 3, 4]) h.send(toolCall(id));
+    await h.tick();
+    h.send({ jsonrpc: "2.0", id: 99, method: "ping" });
+    await h.tick();
+    expect(h.frames).toEqual([{ jsonrpc: "2.0", id: 99, result: {} }]);
+    for (const r of h.releases.splice(0)) r();
+    h.input.end();
+    await h.done;
+    expect(h.frames).toHaveLength(5);
+  });
+
+  it("drops a call cancelled while it waited for a slot, without running it", async () => {
+    const h = harness();
+    for (const id of [1, 2, 3, 4, 5]) h.send(toolCall(id));
+    await h.tick();
+    h.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 5 } });
+    await h.tick();
+    expect(h.started()).toBe(4);
+    for (const r of h.releases.splice(0)) r();
+    await h.tick();
+    h.input.end();
+    await h.done;
+    expect(h.started()).toBe(4);
+    expect(h.frames.map((f) => f.id).sort()).toEqual([1, 2, 3, 4]);
+  });
+
+  it("drops a running call cancelled while every slot was busy", async () => {
+    const h = harness();
+    for (const id of [1, 2, 3, 4]) h.send(toolCall(id));
+    await h.tick();
+    h.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 2 } });
+    await h.tick();
+    for (const r of h.releases.splice(0)) r();
+    h.input.end();
+    await h.done;
+    expect(h.frames.map((f) => f.id).sort()).toEqual([1, 3, 4]);
+  });
+});
+
+describe("batches", () => {
+  it("answers an empty batch with one invalid-request error, as JSON-RPC says", async () => {
+    const out = await run(["[]"]);
+    expect(out).toEqual([{ jsonrpc: "2.0", id: null, error: expect.objectContaining({ code: -32600 }) }]);
+  });
+
+  it("answers a batch on a revision that still has them", async () => {
+    const out = await run([rpc(1, "initialize", { protocolVersion: "2025-03-26" }), JSON.stringify([JSON.parse(rpc(2, "ping")), JSON.parse(rpc(3, "ping"))])]);
+    expect(out[1]).toEqual([
+      { jsonrpc: "2.0", id: 2, result: {} },
+      { jsonrpc: "2.0", id: 3, result: {} },
+    ]);
+  });
+
+  it("refuses a batch once the client negotiated 2025-06-18 or later, which removed them", async () => {
+    const out = await run([rpc(1, "initialize", { protocolVersion: "2025-06-18" }), JSON.stringify([JSON.parse(rpc(2, "ping"))])]);
+    expect(out[1]).toMatchObject({ id: null, error: { code: -32600, message: expect.stringMatching(/batch/) } });
+  });
+});
+
 describe("stdout hygiene", () => {
   it("leaves process.stdout untouched when the caller supplies a stream", async () => {
     // The guard exists because a stray console.log inside a tool would corrupt

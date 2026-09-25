@@ -1,7 +1,7 @@
 import { brand } from "../brand.js";
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { createServer as createMcpServer, type JsonRpcMessage, type McpAdapter, type ServerOptions } from "./server.js";
-import { ASSUMED_HTTP_PROTOCOL, isOriginAllowed, isProtocolVersion, type ProtocolVersion } from "./protocol.js";
+import { createServer as createMcpServer, ERR_INVALID_REQUEST, type JsonRpcMessage, type McpAdapter, type ServerOptions } from "./server.js";
+import { ASSUMED_HTTP_PROTOCOL, batchRefusal, isOriginAllowed, isProtocolVersion, type ProtocolVersion } from "./protocol.js";
 
 // The Streamable HTTP transport, in its stateless form: one endpoint, POST,
 // JSON in and JSON out.
@@ -20,6 +20,7 @@ import { ASSUMED_HTTP_PROTOCOL, isOriginAllowed, isProtocolVersion, type Protoco
 
 const MCP_PATH = "/mcp";
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
+const REQUEST_TIMEOUT_MS = 60_000;
 const CORS_HEADERS = "content-type, accept, mcp-protocol-version, mcp-session-id, authorization, last-event-id";
 
 export interface HttpOptions extends ServerOptions {
@@ -63,10 +64,12 @@ export function startHttpServer(adapter: McpAdapter, opts: HttpOptions = {}): Pr
     });
   });
 
-  // A cold documentation build runs for minutes. Node's default 300s request timeout
-  // would cut the socket with no JSON-RPC error, which the client reports as a
-  // crashed server rather than a slow tool.
-  server.requestTimeout = 0;
+  // How long a client may take to SEND one request. Node's requestTimeout ends
+  // once the request has arrived — a tool call that computes for minutes is
+  // not cut by it — so switching it off (as this did, to protect slow tools)
+  // protected nothing and let a body trickled a byte at a time hold its
+  // connection for ever. A minute is 4 MB at 70 KB/s.
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
   server.headersTimeout = 60_000;
   server.keepAliveTimeout = 120_000;
 
@@ -121,14 +124,13 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
   // GET would open the server→client SSE stream; there isn't one, and 405 is
   // the spec's way of saying so. DELETE terminates a session; there are none.
   if (req.method === "GET" || req.method === "DELETE") {
-    res.writeHead(405, { allow: "POST, OPTIONS", ...corsHeaders(origin) });
-    res.end(JSON.stringify({ error: `${req.method} is not supported: this server is stateless and offers no server-initiated stream` }));
+    const why = `${req.method} is not supported: this server is stateless and offers no server-initiated stream`;
+    sendJson(res, 405, { error: why }, origin, { allow: "POST, OPTIONS" });
     return;
   }
 
   if (req.method !== "POST") {
-    res.writeHead(405, { allow: "POST, OPTIONS", ...corsHeaders(origin) });
-    res.end(JSON.stringify({ error: `${req.method} is not supported` }));
+    sendJson(res, 405, { error: `${req.method} is not supported` }, origin, { allow: "POST, OPTIONS" });
     return;
   }
 
@@ -174,6 +176,16 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
   } catch {
     sendJson(res, 200, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }, origin);
     return;
+  }
+
+  if (Array.isArray(parsed)) {
+    // Only a client that named its revision can have named one without
+    // batches; one that sent no header is read as 2025-03-26, which has them.
+    const refusal = batchRefusal(parsed, declared as ProtocolVersion | undefined);
+    if (refusal) {
+      sendJson(res, 400, { jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: refusal } }, origin);
+      return;
+    }
   }
 
   // A server instance per request. Stateless means the negotiated version

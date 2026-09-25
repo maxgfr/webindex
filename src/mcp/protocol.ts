@@ -29,6 +29,25 @@ export const ASSUMED_HTTP_PROTOCOL: ProtocolVersion = "2025-03-26";
 export const ANNOTATIONS_SINCE = "2025-03-26";
 export const RICH_TOOLS_SINCE = "2025-06-18";
 
+// JSON-RPC batches: 2025-03-26 spelled them out, 2025-06-18 removed them.
+export const BATCHES_REMOVED_IN = "2025-06-18";
+
+/**
+ * Why a JSON-RPC batch cannot be served, or undefined when it can.
+ *
+ * `negotiated` is the revision the client agreed to, and undefined before it
+ * agreed to any: a batch is then read the way JSON-RPC reads one rather than
+ * refused over a revision nobody named. An empty array is invalid in every
+ * revision — JSON-RPC answers it with one error, not with silence.
+ */
+export function batchRefusal(batch: readonly unknown[], negotiated: ProtocolVersion | undefined): string | undefined {
+  if (batch.length === 0) return "invalid request: an empty batch";
+  if (negotiated !== undefined && negotiated >= BATCHES_REMOVED_IN) {
+    return `invalid request: JSON-RPC batches are not part of MCP ${negotiated} (removed in ${BATCHES_REMOVED_IN}) — send one message at a time`;
+  }
+  return undefined;
+}
+
 // A tool result larger than this is withheld rather than sent as a truncated
 // payload — see capResponse.
 export const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;

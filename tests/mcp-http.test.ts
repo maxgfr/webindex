@@ -71,6 +71,26 @@ describe("JSON-RPC over POST", () => {
     expect(body).toHaveLength(2);
   });
 
+  it("refuses a batch from a client on 2025-06-18 or later, which removed them", async () => {
+    const res = await post([rpc(1, "ping")], { "mcp-protocol-version": "2025-06-18" });
+    expect(res.status).toBe(400);
+    expect(await json(res)).toMatchObject({ id: null, error: { code: -32600 } });
+  });
+
+  it("answers an empty batch with an invalid-request error, not a 202", async () => {
+    const res = await post([]);
+    expect(res.status).toBe(400);
+    expect(await json(res)).toMatchObject({ id: null, error: { code: -32600 } });
+  });
+
+  it("bounds how long a request may take to arrive, and nothing else", async () => {
+    // A slow-trickled body held its connection forever with the timeout off.
+    // Node's requestTimeout only covers receiving the request — a response that
+    // takes minutes to compute is not cut by it — so switching it off bought
+    // nothing but that.
+    expect(running.server.requestTimeout).toBeGreaterThan(0);
+  });
+
   it("answers a parse error rather than a 500", async () => {
     const res = await post("{not json");
     expect(res.status).toBe(200);
