@@ -190,6 +190,16 @@ describe("the presentation reader", () => {
     });
     expect(officeToText(pptx)).toBe("## Slide 1: Numbers\n\nBody text\n\n| K | V |\n| --- | --- |\n| x | 42 |");
   });
+
+  // The same shape as a .pptx: the title heads its slide, the notes follow.
+  it("reads an OpenDocument presentation's titles and speaker notes", () => {
+    const frame = (cls: string, text: string) => `<draw:frame presentation:class="${cls}"><draw:text-box><text:p>${text}</text:p></draw:text-box></draw:frame>`;
+    const page = (title: string, body: string, notes: string) =>
+      `<draw:page draw:name="p">${frame("title", title)}${frame("outline", body)}<presentation:notes><draw:page-thumbnail/>${frame("notes", notes)}</presentation:notes></draw:page>`;
+    const content = `<office:document-content><office:body><office:presentation>${page("Plan", "Ship it", "Say thanks")}${page("Risks", "Bombs", "")}</office:presentation></office:body></office:document-content>`;
+    const odp = zip({ mimetype: { data: "application/vnd.oasis.opendocument.presentation", method: 0 }, "content.xml": content });
+    expect(officeToText(odp)).toBe("## Slide 1: Plan\n\nShip it\n\nNotes: Say thanks\n\n## Slide 2: Risks\n\nBombs");
+  });
 });
 
 describe("limits", () => {

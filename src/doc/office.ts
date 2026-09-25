@@ -777,8 +777,15 @@ function openDocumentText(xml: string, budget: Budget): string {
   const tables: (Table & { repeatRow: number; repeatCell: number })[] = [];
   let skip = 0; // footnotes, comments: not the body's text
   let listItem = false;
-  let slide = 0;
   let spreadsheet = false;
+  // A presentation's slides, read as a .pptx's are: the title frame heads the
+  // slide, and its speaker notes follow it.
+  let slide = 0;
+  let heading = -1; // the current slide's heading, in blocks
+  let titleFrame = 0;
+  let inNotes = 0;
+  const title: string[] = [];
+  const notes: string[] = [];
 
   const add = (p: Paragraph | undefined, s: string) => {
     if (p && budget.take(s.length)) p.text += s;
@@ -786,6 +793,8 @@ function openDocumentText(xml: string, budget: Budget): string {
   const emit = (block: string) => {
     const table = tables[tables.length - 1];
     if (table?.cell) table.cell.push(block);
+    else if (titleFrame) title.push(block);
+    else if (inNotes) notes.push(block);
     else if (block.trim()) blocks.push(block);
   };
   const repeat = (attrs: string, name: string) => Math.min(MAX_REPEAT, Math.max(1, Number(attr(attrs, name)) || 1));
@@ -805,7 +814,12 @@ function openDocumentText(xml: string, budget: Budget): string {
       else if (name === "text:tab") add(p, "\t");
       else if (name === "text:line-break") add(p, "\n");
       else if (name === "office:spreadsheet") spreadsheet = true;
-      else if (name === "draw:page") emit(`## Slide ${++slide}`);
+      else if (name === "draw:page") {
+        heading = blocks.push(`## Slide ${++slide}`) - 1;
+        title.length = 0;
+        notes.length = 0;
+      } else if (name === "presentation:notes") inNotes++;
+      else if (name === "draw:frame" && (titleFrame || attr(attrs, "presentation:class") === "title")) titleFrame++;
       else if (name === "table:table") {
         const sheet = attr(attrs, "table:name");
         tables.push({ rows: [], repeatRow: 1, repeatCell: 1 });
@@ -848,6 +862,12 @@ function openDocumentText(xml: string, budget: Budget): string {
       } else if (name === "table:table") {
         const done = tables.pop();
         if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows));
+      } else if (name === "draw:frame" && titleFrame) titleFrame--;
+      else if (name === "presentation:notes") inNotes = Math.max(0, inNotes - 1);
+      else if (name === "draw:page" && heading >= 0) {
+        if (title.length) blocks[heading] = `## Slide ${slide}: ${title.join(" ")}`;
+        if (notes.length) blocks.push(`Notes: ${notes.join(" ")}`);
+        heading = -1;
       }
     },
     text(s) {
