@@ -73,9 +73,15 @@ export interface EngineResult {
   blocked?: boolean;
 }
 
-/** Tags out, entities decoded, whitespace collapsed. */
+// Tags that style a run of text without breaking it. The engines wrap every
+// matched term in one (<b> on DuckDuckGo, <strong> on Mojeek), often mid-word or
+// right before punctuation, so replacing them with a space like any other tag
+// turned "azure-dns.<strong>com</strong>" into "azure-dns. com".
+const INLINE_TAG = /<\/?(?:a|abbr|b|bdi|bdo|cite|code|em|i|kbd|mark|q|s|samp|small|span|strong|sub|sup|time|u|var|wbr)\b[^<>]*>/gi;
+
+/** Tags out, entities decoded, whitespace collapsed. Inline markup vanishes; a block or `<br>` leaves a space. */
 export function stripTags(s: string): string {
-  return decodeEntities(s.replace(/<[^>]+>/g, " "))
+  return decodeEntities(s.replace(INLINE_TAG, "").replace(/<[^<>]*>/g, " "))
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -146,59 +152,121 @@ export function looksLikeChallenge(body: string): boolean {
   );
 }
 
-// Shared block-parser: `anchorAttrs` matches the result anchor's attributes,
-// `snippetRe` pulls the snippet out of everything between this anchor and the
-// next, and `reject` drops the engine's own links.
-function parseBlocks(body: string, limit: number, blockRe: RegExp, snippetRe: RegExp, reject: RegExp, resolveHref: (href: string) => string): EngineHit[] {
+// One attribute of an opening tag, entity-decoded, in any of the three
+// spellings HTML allows. DuckDuckGo Lite quotes its classes with SINGLE quotes
+// (`class='result-snippet'`), and a double-quote-only pattern read every Lite
+// snippet as missing. Decoding matters as much: an href is HTML, so `&amp;` in
+// it is a plain `&`, and taken raw a second query parameter becomes `amp;t`.
+const attrPattern = (name: string) => new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'<>=\`]+))`, "i");
+const HREF_ATTR = attrPattern("href");
+const CLASS_ATTR = attrPattern("class");
+
+function attr(attrs: string, re: RegExp): string | undefined {
+  const m = re.exec(attrs);
+  return m ? decodeEntities(m[1] ?? m[2] ?? m[3] ?? "") : undefined;
+}
+
+// A class TOKEN, not a substring: `\btitle\b` also matched `sub-title`.
+function hasClass(attrs: string, cls: string): boolean {
+  return (attr(attrs, CLASS_ATTR) ?? "").split(/\s+/).includes(cls);
+}
+
+function hostIs(url: string, domain: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host === domain || host.endsWith(`.${domain}`);
+  } catch {
+    return false;
+  }
+}
+
+// An opening `<a …>`. The attribute scan stops at the next `<` as well as at
+// `>`: allowed to cross a `<`, it ran from EVERY `<a` of a broken body — a
+// captive portal, a page of unclosed anchors — to the end of it, which is
+// O(n²) (48 KB took 4.8 s). Bounded by the gap to the next tag, one pass over
+// the body is linear. None of these engines puts a raw `<` in an attribute.
+const OPEN_A = /<a\b([^<>]*)>/gi;
+
+interface BlockShape {
+  /** The class that marks a result's title anchor. */
+  anchor: string;
+  /** The element that carries the snippet, somewhere in the result's block. */
+  snippet: { open: RegExp; close: RegExp; cls: string };
+  /** The destination behind an href, or undefined when the link is the engine's own. */
+  resolve: (href: string) => string | undefined;
+}
+
+const element = (tag: string, cls: string) => ({ open: new RegExp(`<${tag}\\b([^<>]*)>`, "gi"), close: new RegExp(`</${tag}\\s*>`, "i"), cls });
+
+// Shared block-parser. One pass finds the result anchors; each result's block
+// then runs from its anchor to the next one, and holds its title (up to the
+// anchor's `</a>`) and its snippet. Every stretch of the body is read once.
+function parseBlocks(body: string, limit: number, shape: BlockShape): EngineHit[] {
+  const anchors: { start: number; end: number; attrs: string }[] = [];
+  for (const m of body.matchAll(OPEN_A)) {
+    if (hasClass(m[1]!, shape.anchor)) anchors.push({ start: m.index!, end: m.index! + m[0].length, attrs: m[1]! });
+  }
   const found: EngineHit[] = [];
-  let m: RegExpExecArray | null;
-  blockRe.lastIndex = 0;
-  while ((m = blockRe.exec(body)) && found.length < limit) {
-    const href0 = /\bhref="([^"]+)"/.exec(m[1]!);
-    if (!href0) continue;
-    const href = resolveHref(href0[1]!);
-    if (!/^https?:\/\//.test(href) || reject.test(href)) continue;
-    const snip = snippetRe.exec(m[3]!);
-    snippetRe.lastIndex = 0;
-    found.push({ url: href, title: stripTags(m[2]!) || href, snippet: snip ? stripTags(snip[1]!) : "" });
+  for (let i = 0; i < anchors.length && found.length < limit; i++) {
+    const a = anchors[i]!;
+    const block = body.slice(a.end, anchors[i + 1]?.start ?? body.length);
+    const close = /<\/a\s*>/i.exec(block);
+    const href = attr(a.attrs, HREF_ATTR);
+    if (!close || !href) continue;
+    const url = shape.resolve(href);
+    if (!url) continue;
+    const rest = block.slice(close.index + close[0].length);
+    found.push({ url, title: stripTags(block.slice(0, close.index)) || url, snippet: elementText(rest, shape.snippet) });
   }
   return found;
 }
 
+// The text of the first element carrying the class, up to its closing tag.
+function elementText(html: string, el: BlockShape["snippet"]): string {
+  for (const m of html.matchAll(el.open)) {
+    if (!hasClass(m[1]!, el.cls)) continue;
+    const inner = html.slice(m.index! + m[0].length);
+    const end = el.close.exec(inner);
+    return end ? stripTags(inner.slice(0, end.index)) : "";
+  }
+  return "";
+}
+
+// Where a DuckDuckGo result points. A destination unwrapped from the `uddg`
+// redirector IS the result, whatever its host: a query about DuckDuckGo's
+// privacy policy should find duckduckgo.com/privacy, and a Wayback snapshot of
+// duckduckgo.com is a snapshot. What still points at duckduckgo.com WITHOUT
+// that unwrap is DDG's own — an ad's `y.js` click-through, a navigation link.
+// Testing the whole string for "duckduckgo.com" dropped all of these.
+function ddgDestination(href: string): string | undefined {
+  const url = ddgRedirectTarget(href);
+  if (!/^https?:\/\//i.test(url)) return undefined;
+  const unwrapped = url !== (href.startsWith("//") ? `https:${href}` : href);
+  return unwrapped || !hostIs(url, "duckduckgo.com") ? url : undefined;
+}
+
 /** One page of `html.duckduckgo.com/html/`. */
 export function parseDdgHtml(body: string, limit = 50): EngineHit[] {
-  return parseBlocks(
-    body,
-    limit,
-    /<a\b([^>]*\bresult__a\b[^>]*)>([\s\S]*?)<\/a>([\s\S]*?)(?=<a\b[^>]*\bresult__a\b|$)/gi,
-    /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i,
-    /duckduckgo\.com/,
-    ddgRedirectTarget,
-  );
+  return parseBlocks(body, limit, { anchor: "result__a", snippet: element("a", "result__snippet"), resolve: ddgDestination });
 }
 
 /** One page of `lite.duckduckgo.com/lite/` — a flat table, simpler and steadier. */
 export function parseDdgLite(body: string, limit = 50): EngineHit[] {
-  return parseBlocks(
-    body,
-    limit,
-    /<a\b([^>]*\bresult-link\b[^>]*)>([\s\S]*?)<\/a>([\s\S]*?)(?=<a\b[^>]*\bresult-link\b|$)/gi,
-    /class="result-snippet"[^>]*>([\s\S]*?)<\/td>/i,
-    /duckduckgo\.com/,
-    ddgRedirectTarget,
-  );
+  return parseBlocks(body, limit, { anchor: "result-link", snippet: element("td", "result-snippet"), resolve: ddgDestination });
 }
 
 /** One page of `mojeek.com/search` — direct hrefs, no redirector. */
 export function parseMojeek(body: string, limit = 50): EngineHit[] {
-  return parseBlocks(
-    body,
-    limit,
-    /<a\b([^>]*\bclass="[^"]*\btitle\b[^"]*"[^>]*)>([\s\S]*?)<\/a>([\s\S]*?)(?=<a\b[^>]*\bclass="[^"]*\btitle\b|$)/gi,
-    /<p\b[^>]*\bclass="[^"]*\bs\b[^"]*"[^>]*>([\s\S]*?)<\/p>/i,
-    /mojeek\.com/,
-    (h) => (h.startsWith("//") ? `https:${h}` : h),
-  );
+  return parseBlocks(body, limit, {
+    anchor: "title",
+    snippet: element("p", "s"),
+    // Mojeek links its results directly, so its own links are the ones on its
+    // own host. Its blog, or a page ABOUT Mojeek, is a result like any other.
+    resolve: (h) => {
+      const url = h.startsWith("//") ? `https:${h}` : h;
+      return /^https?:\/\//i.test(url) && !/^https?:\/\/(?:www\.)?mojeek\.com(?:[:/?#]|$)/i.test(url) ? url : undefined;
+    },
+  });
 }
 
 interface EngineSpec {

@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
 import { ddgRedirectTarget, keylessEngines, parseDdgHtml, parseDdgLite, parseMojeek, searchViaKeyless, stripTags, throttleReason } from "../src/engines.js";
@@ -28,13 +31,17 @@ const DDG_HTML = `
   </div>
 </div>`;
 
-const DDG_LITE = `
-<table>
-  <tr><td><a class="result-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fa.test%2Fone">First result</a></td></tr>
-  <tr><td class="result-snippet">Snippet for the first one.</td></tr>
-  <tr><td><a class="result-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fb.test%2Ftwo">Second result</a></td></tr>
-  <tr><td class="result-snippet">Snippet for the second.</td></tr>
-</table>`;
+// Real result pages, captured from the live endpoints and trimmed to their first
+// few results (the region list cut to three entries). Hand-written fixtures are
+// not enough on their own: the DDG Lite one spelled `class="result-snippet"`
+// with double quotes, the real page uses single ones, and every Lite snippet
+// came back empty while this suite stayed green.
+const here = dirname(fileURLToPath(import.meta.url));
+const capture = (name: string) => readFileSync(join(here, "fixtures", "engines", name), "utf8");
+const DDG_LITE = capture("ddg-lite.html");
+const DDG_HTML_PAGE = capture("ddg-html.html");
+const MOJEEK_PAGE = capture("mojeek.html");
+const LITE_URLS = ["https://www.speedtest.net/", "https://fast.com/", "https://www.highspeedinternet.com/tools/speed-test"];
 
 const MOJEEK = `
 <ul class="results-standard">
@@ -77,6 +84,15 @@ describe("stripTags", () => {
   it("removes markup, decodes entities and collapses whitespace", () => {
     expect(stripTags("<b>RFC 6585</b> &amp;\n  friends")).toBe("RFC 6585 & friends");
   });
+
+  it("keeps a highlighted word whole", () => {
+    // The engines wrap matched terms in <b>/<strong>, often mid-word or right
+    // before punctuation. Inline markup is not a word break; a block is.
+    expect(stripTags("&quot;<b>Foo</b> was here&quot;")).toBe('"Foo was here"');
+    expect(stripTags("Holman&#x27;s <b>foo</b>.")).toBe("Holman's foo.");
+    expect(stripTags("hostmaster.<strong>microsoft</strong>.<strong>com</strong>")).toBe("hostmaster.microsoft.com");
+    expect(stripTags("one<br>two</p><p>three")).toBe("one two three");
+  });
 });
 
 describe("ddgRedirectTarget", () => {
@@ -118,10 +134,99 @@ describe("result-block parsers", () => {
     expect(hits[1]!.snippet).toBe("A bucket refills at a fixed rate.");
   });
 
-  it("reads DuckDuckGo Lite's flat table", () => {
+  it("reads DuckDuckGo Lite's flat table, snippets included", () => {
+    // The real page quotes its classes with SINGLE quotes (`class='result-snippet'`).
     const hits = parseDdgLite(DDG_LITE);
-    expect(hits.map((h) => h.url)).toEqual(["https://a.test/one", "https://b.test/two"]);
-    expect(hits[1]!.snippet).toBe("Snippet for the second.");
+    expect(hits.map((h) => h.url)).toEqual(LITE_URLS);
+    expect(hits.every((h) => h.snippet.length > 40)).toBe(true);
+    expect(hits[1]!.title).toBe("Internet Speed Test | Fast.com");
+    expect(hits[1]!.snippet).toMatch(/^Download speed is most relevant for people/);
+    expect(hits[1]!.snippet).toContain('When you click the "Show more info" button');
+  });
+
+  it("reads a real DuckDuckGo HTML page", () => {
+    const hits = parseDdgHtml(DDG_HTML_PAGE);
+    expect(hits.map((h) => h.url)).toEqual([
+      "https://en.wikipedia.org/wiki/Foo_Fighters",
+      "https://www.dictionary.com/e/tech-science/foo/",
+      "https://www.britannica.com/topic/Foo-Fighters",
+    ]);
+    expect(hits[1]!.title).toBe("foo | Meaning & Origin - Dictionary.com");
+    expect(hits[1]!.snippet).toMatch(/^"Foo was here" was a popular piece of graffiti/);
+  });
+
+  it("reads a real Mojeek page", () => {
+    const hits = parseMojeek(MOJEEK_PAGE);
+    expect(hits).toHaveLength(6);
+    expect(hits[0]).toMatchObject({
+      url: "https://learn.microsoft.com/en-us/azure/dns/dns-delegate-domain-azure-dns",
+      title: "Tutorial: Host your domain in Azure DNS | Microsoft Learn",
+    });
+    // Mojeek bolds the matched terms mid-word: a space per tag used to turn
+    // this into "azure-dns. com" and "hostmaster. microsoft . com".
+    expect(hits[0]!.snippet).toContain("primary name server = ns1-37.azure-dns.com responsible mail addr = azuredns-hostmaster.microsoft.com serial");
+    // The "see more results from this site" line is Mojeek's, not the snippet.
+    expect(hits.every((h) => !/See more results/.test(h.snippet))).toBe(true);
+  });
+
+  it("decodes the entities in an href before reading it", () => {
+    // An href is HTML: `&amp;` in it is a plain `&`. Taken raw, the second
+    // parameter became `amp;t`, and a DDG redirector whose `uddg` is not first
+    // was not unwrapped at all, so the result was dropped as a DDG link.
+    expect(parseMojeek(`<a class="title" href="https://www.youtube.com/watch?v=abc&amp;t=10">Video</a><p class="s">x</p>`)[0]!.url).toBe(
+      "https://www.youtube.com/watch?v=abc&t=10",
+    );
+    const ddg = `<a class="result__a" href="//duckduckgo.com/l/?kh=-1&amp;uddg=https%3A%2F%2Fexample.org%2Fok&amp;rut=x">ok</a><a class="result__snippet">s</a>`;
+    expect(parseDdgHtml(ddg).map((h) => h.url)).toEqual(["https://example.org/ok"]);
+  });
+
+  it("drops only the engine's own links, not results that mention it", () => {
+    // A query about DuckDuckGo's privacy policy should find duckduckgo.com's
+    // privacy policy. What is DDG's own is what STAYS on duckduckgo.com after
+    // the redirector is unwrapped: an ad's click-through.
+    const ddg = [
+      `<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fduckduckgo.com%2Fprivacy&amp;rut=x">Privacy</a><a class="result__snippet">a</a>`,
+      `<a class="result__a" href="//duckduckgo.com/y.js?ad_domain=shop.test&amp;u3=https%3A%2F%2Fwww.bing.com%2Faclick">Sponsored</a><a class="result__snippet">b</a>`,
+      `<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fweb.archive.org%2Fweb%2F2020%2Fhttps%3A%2F%2Fduckduckgo.com%2F">Archived</a><a class="result__snippet">c</a>`,
+      `<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2F%3Fref%3Dduckduckgo.com">Ref</a><a class="result__snippet">d</a>`,
+    ].join("\n");
+    expect(parseDdgHtml(ddg).map((h) => h.url)).toEqual([
+      "https://duckduckgo.com/privacy",
+      "https://web.archive.org/web/2020/https://duckduckgo.com/",
+      "https://example.org/?ref=duckduckgo.com",
+    ]);
+    const mojeek = [
+      `<a class="title" href="https://blog.mojeek.com/2024/01/x.html">Mojeek blog</a><p class="s">a</p>`,
+      `<a class="title" href="https://www.mojeek.com/search?q=site%3Aexample.org">More from example.org</a><p class="s">b</p>`,
+      `<a class="title" href="https://en.wikipedia.org/wiki/Mojeek">Mojeek - Wikipedia</a><p class="s">c</p>`,
+    ].join("\n");
+    expect(parseMojeek(mojeek).map((h) => h.url)).toEqual(["https://blog.mojeek.com/2024/01/x.html", "https://en.wikipedia.org/wiki/Mojeek"]);
+  });
+
+  it("matches a class as a whole token, so `sub-title` is not a result", () => {
+    const mj = `<a class="title" href="https://a.test/1">A</a><p class="s">a</p><a class="sub-title" href="https://nav.test/">Nav</a><a class="title" href="https://b.test/2">B</a><p class="s">b</p>`;
+    expect(parseMojeek(mj).map((h) => h.url)).toEqual(["https://a.test/1", "https://b.test/2"]);
+  });
+
+  it("parses a hostile body in linear time", () => {
+    // Every result anchor used to scan `[^>]*` to the end of the body when no
+    // `>` followed, so a page of unclosed anchors cost O(n²): 48 KB took 4.8 s.
+    // These bodies are 200-600 KB, and the bound is generous on purpose: linear
+    // work finishes in milliseconds, the quadratic kind in minutes.
+    const hostile = [
+      `<a class="title" href="https://x.test/">t</a>${'<a class="'.repeat(40_000)}`,
+      `<a class="result__a" href="https://x.test/">t</a>${"<a ".repeat(100_000)}`,
+      `<a class='result-link' href='https://x.test/'>${"<".repeat(300_000)}</a>`,
+      `<a class="title" href="https://x.test/">t</a>${'<p class="s">'.repeat(40_000)}`,
+      `<a class="result__a" href="https://x.test/">t</a>${'<a class="result__a" href="https://y.test/">'.repeat(10_000)}`,
+    ];
+    for (const body of hostile) {
+      for (const parse of [parseDdgHtml, parseDdgLite, parseMojeek]) {
+        const t0 = performance.now();
+        parse(body);
+        expect(performance.now() - t0).toBeLessThan(1500);
+      }
+    }
   });
 
   it("reads Mojeek's direct hrefs and upgrades protocol-relative ones", () => {
@@ -146,7 +251,7 @@ describe("searchViaKeyless", () => {
   it("queries the engine and returns its hits", async () => {
     const spy = installFetchMock(() => ({ body: DDG_LITE }));
     const r = await searchViaKeyless("ddglite", "token bucket");
-    expect(r.hits.map((h) => h.url)).toEqual(["https://a.test/one", "https://b.test/two"]);
+    expect(r.hits.map((h) => h.url)).toEqual(LITE_URLS);
     expect(String(spy.mock.calls[0]![0])).toContain("lite.duckduckgo.com");
     expect(String(spy.mock.calls[0]![0])).toContain("q=token%20bucket");
   });
@@ -170,7 +275,7 @@ describe("searchViaKeyless", () => {
     const spy = installFetchMock(() => ({ body: DDG_LITE }));
     const r = await searchViaKeyless("ddglite", "x", { pages: 5, limit: 50 });
     expect(spy).toHaveBeenCalledTimes(2); // page 1, page 2 adds nothing, stop
-    expect(r.hits).toHaveLength(2);
+    expect(r.hits).toHaveLength(3);
   });
 
   it("keeps page one's results when a later page fails", async () => {
@@ -180,7 +285,7 @@ describe("searchViaKeyless", () => {
       return n === 1 ? { body: DDG_LITE } : { status: 500, body: "" };
     });
     const r = await searchViaKeyless("ddglite", "x", { pages: 3, limit: 50 });
-    expect(r.hits).toHaveLength(2);
+    expect(r.hits).toHaveLength(3);
     expect(r.note).toBeUndefined();
   });
 
@@ -247,9 +352,10 @@ describe("an engine that refuses to answer says so, rather than reporting an emp
     // markup. Reporting "blocked" over a page full of results would be a worse
     // bug than the one this detector fixes, because it would throw away answers
     // we actually got.
-    installFetchMock(() => ({ status: 202, body: `${DDG_LITE}<form action="//duckduckgo.com/anomaly.js?sv=html"></form>` }));
+    // (The marker leads the body: the detector only reads its head.)
+    installFetchMock(() => ({ status: 202, body: `<form action="//duckduckgo.com/anomaly.js?sv=html"></form>${DDG_LITE}` }));
     const r = await searchViaKeyless("ddglite", "token bucket");
-    expect(r.hits.map((h) => h.url)).toEqual(["https://a.test/one", "https://b.test/two"]);
+    expect(r.hits.map((h) => h.url)).toEqual(LITE_URLS);
     expect(r.blocked).toBeFalsy();
     expect(r.note).toBeUndefined();
   });
@@ -343,8 +449,8 @@ describe("the search cascade", () => {
     // "no Docker on this machine" case the keyless rung exists for.
     installFetchMock(() => ({ body: DDG_LITE }));
     const r = await search("token bucket", { engines: ["ddglite"] });
-    expect(r.hits.map((h) => h.via)).toEqual(["ddglite", "ddglite"]);
-    expect(r.hits[0]!.url).toBe("https://a.test/one");
+    expect(r.hits.map((h) => h.via)).toEqual(["ddglite", "ddglite", "ddglite"]);
+    expect(r.hits[0]!.url).toBe(LITE_URLS[0]);
   });
 
   it("tries each engine in order and stops at the first with hits", async () => {

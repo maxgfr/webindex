@@ -39,8 +39,12 @@ result anchor to the next rather than zipping two parallel lists by index —
 because when a row is skipped (an ad, the engine's own domain), an index-zip
 shifts every snippet onto the wrong result and the output still looks plausible.
 
-Fixtures in `tests/engines.test.ts` are the canary. When an engine changes its
-markup, that suite fails loudly instead of the engine quietly returning nothing.
+Real result pages captured from each engine (`tests/fixtures/engines/`, trimmed
+to a few results) are the canary in `tests/engines.test.ts`. When an engine
+changes its markup, that suite fails loudly instead of the engine quietly
+returning nothing. They have to be real captures: a hand-written DDG Lite
+fixture quoted `class="result-snippet"` with double quotes, the live page uses
+single ones, and every Lite snippet came back empty while the suite stayed green.
 
 ## Politeness
 
