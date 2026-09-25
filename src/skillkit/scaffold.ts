@@ -106,6 +106,11 @@ coverage/
 *.tsbuildinfo
 `;
 
+/** Why `name` cannot name a skill — it becomes a command, a directory and an env prefix — or undefined. */
+export function skillNameProblem(name: string): string | undefined {
+  return /^[a-z][a-z0-9-]*$/.test(name) ? undefined : `"${name}" is not a usable skill name — lower-case letters, digits and hyphens, starting with a letter.`;
+}
+
 /**
  * Write the shape a skill repository needs, into `root`.
  *
@@ -120,9 +125,8 @@ export function scaffoldSkill(
   opts: { engineRepo?: string; minRef?: string; exists?: (path: string) => boolean } = {},
 ): ScaffoldResult {
   const errors: string[] = [];
-  if (!/^[a-z][a-z0-9-]*$/.test(name)) {
-    return { written: [], errors: [`"${name}" is not a usable skill name — lower-case letters, digits and hyphens, starting with a letter.`] };
-  }
+  const badName = skillNameProblem(name);
+  if (badName) return { written: [], errors: [badName] };
 
   const prefix = name.toUpperCase().replace(/-/g, "_");
   const files: Record<string, string> = {

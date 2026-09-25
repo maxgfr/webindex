@@ -47,6 +47,10 @@ describe("parseArgs", () => {
   it("answers --help mid-command, which is when a reader actually types it", () => {
     expect(parseArgs(["search", "--help"], SPEC).kind).toBe("help");
     expect(parseArgs(["search", "-h"], SPEC).kind).toBe("help");
+    // …and says which command it was asked about, so the answer can be that
+    // command's help rather than every command's.
+    expect(parseArgs(["search", "q", "--help"], SPEC)).toEqual({ kind: "help", command: "search" });
+    expect(parseArgs(["--help"], SPEC)).toEqual({ kind: "help" });
   });
 
   it("lets a declared flag beat the built-in shorthand", () => {
@@ -144,6 +148,25 @@ describe("reading what was parsed", () => {
     // abc` would silently mean "no limit" — the opposite of what was asked.
     expect(() => argInt(cmd(["search", "--limit", "abc"]), "limit")).toThrow(/whole number/);
     expect(() => argInt(cmd(["search", "--limit", "2.5"]), "limit")).toThrow(/whole number/);
+  });
+
+  it("refuses an empty value rather than reading it as zero", () => {
+    // Number("") is 0, so `--limit=` passed as a budget of nothing.
+    expect(() => argInt(cmd(["search", "--limit="]), "limit")).toThrow(/whole number, got ""/);
+    expect(() => argInt(cmd(["search", "--limit= "]), "limit")).toThrow(/whole number/);
+  });
+
+  it("holds an integer to the range the caller gives it", () => {
+    // A library clamping `--limit 0` to one result, or `--depth -1` to zero,
+    // answers a question nobody asked. The range says so at the door.
+    const limit = (v: string) => argInt(cmd(["search", "--limit", v]), "limit", { min: 1 });
+    expect(limit("3")).toBe(3);
+    expect(() => limit("0")).toThrow(/--limit expects a whole number of at least 1, got "0"/);
+    expect(() => limit("-1")).toThrow(UsageError);
+    const port = (v: string) => argInt(cmd(["search", "--limit", v]), "limit", { min: 0, max: 65535 });
+    expect(port("0")).toBe(0);
+    expect(() => port("65536")).toThrow(/from 0 to 65535/);
+    expect(() => argInt(cmd(["search", "--limit", "9"]), "limit", { max: 5 })).toThrow(/at most 5/);
   });
 
   it("splits a list, trimming and dropping empties", () => {

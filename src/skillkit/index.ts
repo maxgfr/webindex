@@ -17,4 +17,4 @@ export { compareTags, DEFAULT_FILES, readSkillConfig, SKILL_CONFIG, type ConfigR
 export { auditEngineUsage, engineExports, walkSources, type UsageReport } from "./usage.js";
 export { checkPins, sha256, vendorEngine, type PinFile, type PinStatus, type VendorResult } from "./vendor.js";
 export { auditSkillBundle, DESC_MAX, type BundleCheck, type CliSurface } from "./bundle.js";
-export { scaffoldSkill, type ScaffoldResult } from "./scaffold.js";
+export { scaffoldSkill, skillNameProblem, type ScaffoldResult } from "./scaffold.js";

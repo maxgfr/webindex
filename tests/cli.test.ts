@@ -109,6 +109,26 @@ describe("help and version", () => {
     expect(new Set(shapes).size).toBe(1);
   });
 
+  it("answers `<command> --help` with that command's usage and description", async () => {
+    expect(await run(["fetch", "--help"])).toBe(0);
+    const help = stdout();
+    expect(help).toMatch(/^\s+webindex fetch <url>/m);
+    expect(help).toMatch(/Fetch a URL and print the extracted text/);
+    // Not every other command's, and not the environment table.
+    expect(help).not.toMatch(/webindex search </);
+    expect(help).not.toMatch(/ENVIRONMENT/);
+    expect(help).toMatch(/webindex --help/);
+  });
+
+  it("gives every command a help of its own", async () => {
+    for (const cmd of [...SERVICE_ROUTES, "search", "prs", "stack", "skill", "doctor", "hybrid"]) {
+      out = [];
+      expect(await run([cmd, "--help"]), cmd).toBe(0);
+      expect(stdout(), cmd).toMatch(new RegExp(`^\\s+webindex ${cmd}\\b`, "m"));
+      expect(stdout().split("\n").length, cmd).toBeLessThan(40);
+    }
+  });
+
   it("prints a bare semver for version", async () => {
     await run(["version"]);
     expect(stdout().trim()).toMatch(/^\d+\.\d+\.\d+$/);
@@ -570,14 +590,57 @@ describe("unknown input", () => {
     expect(await run(["robots", "https://r.test/public/x"])).toBe(0);
   });
 
+  // A value outside a flag's set is the same mistake as an unknown flag: the
+  // invocation is wrong, and nothing ran. These exited 1 — "ran, and the
+  // answer is a failure" — while --registry and --forge already exited 2.
   it("rejects an unknown mcp transport", async () => {
-    expect(await run(["mcp", "--transport", "carrier-pigeon"])).toBe(1);
+    expect(await run(["mcp", "--transport", "carrier-pigeon"])).toBe(2);
     expect(stderr()).toMatch(/unknown transport/);
   });
 
   it("rejects an out-of-range port", async () => {
-    expect(await run(["mcp", "--transport", "http", "--port", "99999"])).toBe(1);
-    expect(stderr()).toMatch(/invalid --port/);
+    expect(await run(["mcp", "--transport", "http", "--port", "99999"])).toBe(2);
+    expect(stderr()).toMatch(/--port expects a whole number from 0 to 65535/);
+  });
+
+  it("rejects an engine it does not know as a usage error", async () => {
+    expect(await run(["search", "q", "--engine", "altavista"])).toBe(2);
+    expect(stderr()).toMatch(/unknown --engine "altavista"/);
+  });
+
+  it.each([
+    [["search", "q", "--limit", "0"], /--limit expects a whole number of at least 1/],
+    [["search", "q", "--limit", "-1"], /--limit expects a whole number of at least 1/],
+    [["search", "q", "--pages", "0"], /--pages expects a whole number of at least 1/],
+    [["search", "q", "--limit="], /--limit expects a whole number, got ""/],
+    [["rank", "--query", "q", "--limit", "0"], /--limit expects a whole number of at least 1/],
+    [["hybrid", "--query", "q", "--limit", "-2"], /--limit expects a whole number of at least 1/],
+    [["releases", "o/r", "--limit", "0"], /--limit expects a whole number of at least 1/],
+    [["sitemap", "https://s.test/", "--max", "0"], /--max expects a whole number of at least 1/],
+    [["crawl", "https://c.test/", "--max", "5", "--depth", "-1"], /--depth expects a whole number of at least 0/],
+  ])("refuses a budget of nothing rather than quietly answering another question: %j", async (argv, message) => {
+    // The libraries clamp — `--limit 0` came back as one result, `--depth -1`
+    // as the seed alone, `--limit 0` on rank as every document — so each of
+    // these ran to success answering something other than what was asked.
+    expect(await run(argv)).toBe(2);
+    expect(stderr()).toMatch(message);
+  });
+
+  it.each([
+    [["fetch", "https://a.test/", "https://b.test/"], /unexpected argument "https:\/\/b\.test\/"/],
+    [["extract", "a.html", "b.html"], /unexpected argument "b\.html"/],
+    [["tables", "https://a.test/", "https://b.test/"], /unexpected argument/],
+    [["package", "hono", "express"], /unexpected argument "express"/],
+    [["issues", "o/r", "rate", "limit"], /--terms/],
+    [["rank", "rate", "limiting", "--query", "q"], /--query/],
+    [["stack", "path", "extra"], /unexpected argument "extra"/],
+    [["doctor", "now"], /unexpected argument "now"/],
+  ])("refuses an argument it would otherwise drop or glue onto another: %j", async (argv, message) => {
+    // `fetch a b` fetched a and dropped b; `tables a b` fetched the URL
+    // "a b"; `rank rate limiting --query q` ranked against q and ignored the
+    // words that looked like the question.
+    expect(await run(argv)).toBe(2);
+    expect(stderr()).toMatch(message);
   });
 });
 
@@ -1130,7 +1193,7 @@ describe("the forge, registry and page-metadata commands", () => {
   });
 
   it("refuses free text rather than inventing a repository", async () => {
-    expect(await run(["repo", "some", "words"])).toBe(1);
+    expect(await run(["repo", "some words"])).toBe(1);
     expect(stderr()).toMatch(/does not name a repository/);
   });
 
@@ -1475,6 +1538,23 @@ describe("webindex skill", () => {
   it("asks for a name rather than scaffolding an unnamed skill", async () => {
     expect(await run(["skill", "init", "--root", repo])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex skill init/);
+  });
+
+  it("refuses a name it cannot use as a usage error, and prints no empty report", async () => {
+    expect(await run(["skill", "init", "Bad_Name", "--root", repo])).toBe(2);
+    expect(stderr()).toMatch(/not a usable skill name/);
+    expect(stdout()).toBe("");
+  });
+
+  it("names the actions it knows before looking for a skill.json", async () => {
+    // With no skill.json, `webindex skill` and `webindex skill frobnicate`
+    // answered "no readable skill.json" — the wrong problem, and exit 1.
+    for (const argv of [["skill"], ["skill", "frobnicate"]]) {
+      err = [];
+      expect(await run([...argv, "--root", repo]), argv.join(" ")).toBe(2);
+      expect(stderr()).toMatch(/usage: webindex skill /);
+      expect(stderr()).not.toMatch(/skill\.json/);
+    }
   });
 
   it("refuses to run any gate without a readable skill.json", async () => {

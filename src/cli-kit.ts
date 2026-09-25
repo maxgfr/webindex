@@ -72,8 +72,11 @@ export interface CommandArgs {
  * What an argv turned out to be. `--help` and `--version` are outcomes rather
  * than commands because every CLI answers them the same way and none of them
  * wants a case in its command switch for it.
+ *
+ * A help asked for mid-command (`search --help`) carries that `command`, so the
+ * answer can be the one command's usage rather than a wall of every command's.
  */
-export type ParsedArgs = { kind: "help" } | { kind: "version" } | ({ kind: "command" } & CommandArgs);
+export type ParsedArgs = { kind: "help"; command?: string } | { kind: "version" } | ({ kind: "command" } & CommandArgs);
 
 /**
  * Parse an argv against a spec.
@@ -138,7 +141,7 @@ export function parseArgs(argv: readonly string[], spec: CliSpec): ParsedArgs {
     // here they only apply to names nobody claimed. `webindex search --help`
     // is what a reader types once they are already mid-command, and it works.
     if (!boolFlags.has(key) && !valueFlags.has(key)) {
-      if (isHelpWord(arg)) return { kind: "help" };
+      if (isHelpWord(arg)) return { kind: "help", command };
       if (isVersionWord(arg)) return { kind: "version" };
     }
 
@@ -196,14 +199,25 @@ export function argBool(p: CommandArgs, name: string): boolean {
  * Throws UsageError on a value that is not one, rather than returning NaN. A
  * NaN budget propagates into a comparison that is false whichever way it is
  * written, so `--limit abc` would silently mean "no limit" — the opposite of
- * what was asked.
+ * what was asked. A blank value is not one either: `Number("")` is 0, so
+ * `--limit=` read as a budget of nothing.
+ *
+ * `range` bounds it, inclusively, and refuses what falls outside rather than
+ * clamping. Engine functions clamp — a limit of 0 becomes one result, a depth
+ * of -1 the seed alone — which is right for a library call and wrong at a
+ * command line, where the command then succeeds at a question nobody asked.
  */
-export function argInt(p: CommandArgs, name: string): number | undefined {
+export function argInt(p: CommandArgs, name: string, range: { min?: number; max?: number } = {}): number | undefined {
   const raw = p.values[name];
   if (raw === undefined) return undefined;
-  const n = Number(raw);
+  const n = raw.trim() ? Number(raw) : Number.NaN;
   if (!Number.isFinite(n) || !Number.isInteger(n)) {
     throw new UsageError(`--${name} expects a whole number, got "${raw}"`);
+  }
+  const { min, max } = range;
+  if ((min !== undefined && n < min) || (max !== undefined && n > max)) {
+    const bound = min !== undefined && max !== undefined ? `from ${min} to ${max}` : min !== undefined ? `of at least ${min}` : `of at most ${max}`;
+    throw new UsageError(`--${name} expects a whole number ${bound}, got "${raw}"`);
   }
   return n;
 }

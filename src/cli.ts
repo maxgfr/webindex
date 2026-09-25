@@ -33,7 +33,16 @@ import { embed } from "./embed.js";
 import { crawlSite } from "./crawl.js";
 import { extractTables, tableToMarkdown } from "./tables.js";
 import { fingerprint, hasChanged } from "./changed.js";
-import { auditEngineUsage, auditSkillBundle, checkPins, readSkillConfig, scaffoldSkill, vendorEngine, type CliSurface } from "./skillkit/index.js";
+import {
+  auditEngineUsage,
+  auditSkillBundle,
+  checkPins,
+  readSkillConfig,
+  scaffoldSkill,
+  skillNameProblem,
+  vendorEngine,
+  type CliSurface,
+} from "./skillkit/index.js";
 import { isKeylessEngine, KEYLESS_ENGINES, type KeylessEngine } from "./engines.js";
 import { probeSearxng, search, searxngBase, searxngIsExplicit } from "./search.js";
 import { cacheClean, cacheDir, cachedFetchAndExtract, cacheStats, setCacheMode } from "./cache.js";
@@ -104,8 +113,12 @@ USAGE
   webindex hybrid --query <q> [--docs <file.json|->] [--limit <n>] [--json]
   webindex changed <url> [--etag <v>] [--last-modified <date>] [--hash <sha256>]
                          [--timeout <ms>] [--json]
-  webindex skill     check|bundle|copy|doctor [--root <dir>] [--json]
+  webindex skill     check [--engine <name>] [--root <dir>] [--json]
+  webindex skill     bundle|copy|doctor [--root <dir>] [--json]
   webindex skill     vendor [--engine <name>] --ref <tag> | --check
+  webindex skill     repin [--root <dir>] [--json]
+  webindex skill     finish [--root <dir>]
+  webindex skill     recall [--ref <baseline>] [--root <dir>]
   webindex skill     init <name> [--root <dir>]
   webindex doctor
   webindex version
@@ -156,7 +169,8 @@ COMMANDS
   issues     Search a repository's issues on GitHub, GitLab or Gitea. Every
              term must match; when together they match nothing, it searches
              once more with the most distinctive ones and says so on stderr.
-  prs        The same, over pull or merge requests.
+  prs        Search a repository's pull or merge requests, as issues searches
+             its issues.
   releases   Its releases, newest first, with their notes.
   tags       Its tags — the versions of a project that tags without
              publishing releases.
@@ -225,6 +239,11 @@ COMMANDS
              the engine exports; 'bundle' proves \`skills add\` would install a
              working skill rather than a lone SKILL.md; 'copy' embeds the built
              engine in the package; 'init' scaffolds a new skill repository.
+             'repin', 'finish' and 'recall' are the steps of the reusable
+             .github/workflows/skill-repin.yml: move every pin to the newest
+             stable release, wait for CI and publication to complete, and check
+             that regenerated artifacts kept every identity of the --ref
+             baseline (HEAD by default).
              Dev-time only — it reads a repo, it never runs inside one.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
@@ -352,6 +371,9 @@ export const COMMANDS = [
 ];
 
 const SPEC: CliSpec = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS };
+
+/** What `webindex skill` does. The last three are the repin workflow's steps (.github/workflows/skill-repin.yml). */
+const SKILL_ACTIONS = ["check", "bundle", "vendor", "copy", "doctor", "init", "repin", "finish", "recall"];
 
 function fail(msg: string): never {
   process.stderr.write(`webindex: ${msg}\n`);
@@ -1179,10 +1201,66 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 }
 
+/**
+ * `webindex <cmd> --help`: that command's lines from USAGE and its paragraph
+ * from COMMANDS, cut out of HELP rather than written a second time — a second
+ * copy is a second thing to drift. Falls back to the whole of HELP for a
+ * command it cannot find there.
+ */
+export function commandHelp(cmd: string): string {
+  const section = (title: string) => {
+    const lines = HELP.split("\n");
+    const start = lines.indexOf(title);
+    const end = lines.indexOf("", start);
+    return start === -1 ? [] : lines.slice(start + 1, end === -1 ? undefined : end);
+  };
+  // An entry is its first line and the deeper-indented lines that continue it.
+  const entries = (lines: string[], head: RegExp) => {
+    const out: { name: string; lines: string[] }[] = [];
+    for (const line of lines) {
+      const m = head.exec(line);
+      if (m) out.push({ name: m[1] as string, lines: [line] });
+      else out.at(-1)?.lines.push(line);
+    }
+    return out.filter((e) => e.name === cmd).flatMap((e) => e.lines);
+  };
+  const usageLines = entries(section("USAGE"), /^ {2}webindex ([a-z-]+)/);
+  const described = entries(section("COMMANDS"), /^ {2}([a-z-]+) /);
+  if (!usageLines.length) return HELP;
+  return [
+    `webindex v${ENGINE_VERSION}`,
+    "",
+    "USAGE",
+    ...usageLines,
+    "",
+    ...described,
+    "",
+    "Run `webindex --help` for every command and the environment variables.",
+  ].join("\n");
+}
+
+/**
+ * How many bare words a command takes: a query or a text any number, `rank`,
+ * `hybrid`, `doctor` and `mcp` none, everything else one — a URL, a file, a
+ * reference, an action. A second one used to be dropped (`fetch a b` fetched a)
+ * or glued onto the first (`tables a b` fetched the URL "a b"), and the command
+ * then succeeded at something other than what was typed.
+ */
+function positionalLimit(args: CommandArgs): { max: number; hint?: string } {
+  const cmd = args.command;
+  if (cmd === "search" || cmd === "embed") return { max: Number.POSITIVE_INFINITY };
+  if (cmd === "rank" || cmd === "hybrid") return { max: 0, hint: 'the question goes in --query "<q>"' };
+  if (cmd === "doctor" || cmd === "mcp") return { max: 0 };
+  if (cmd === "skill") return { max: args.positional[0] === "init" ? 2 : 1 };
+  if (cmd === "issues" || cmd === "prs") return { max: 1, hint: 'search words go in --terms "<words>"' };
+  if (cmd === "repo" || cmd === "releases" || cmd === "tags") return { max: 1, hint: "quote a path that contains spaces" };
+  return { max: 1 };
+}
+
 async function dispatch(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv, SPEC);
   if (parsed.kind === "help") {
-    process.stdout.write(HELP + "\n");
+    process.stdout.write((parsed.command ? commandHelp(parsed.command) : HELP) + "\n");
     return;
   }
   if (parsed.kind === "version") {
@@ -1191,15 +1269,21 @@ async function dispatch(argv: string[]): Promise<void> {
   }
   const args: CommandArgs = parsed;
   const cmd = args.command;
+  const arity = positionalLimit(args);
+  if (args.positional.length > arity.max) {
+    const extra = args.positional[arity.max] as string;
+    const takes = arity.max === 0 ? "no arguments" : arity.max === 1 ? "one argument" : `${arity.max} arguments`;
+    usage(`unexpected argument "${extra}" — \`webindex ${cmd}\` takes ${takes}${arity.hint ? `; ${arity.hint}` : ""} (see \`webindex ${cmd} --help\`)`);
+  }
 
   if (cmd === "search") {
     const q = positionalText(args);
     if (!q) usage("usage: webindex search <query>");
     const engine = argValue(args, "engine");
-    if (engine && engine !== "off" && !isKeylessEngine(engine)) fail(`unknown --engine "${engine}" — expected one of ${KEYLESS_ENGINES.join(", ")}, or off`);
+    if (engine && engine !== "off" && !isKeylessEngine(engine)) usage(`unknown --engine "${engine}" — expected one of ${KEYLESS_ENGINES.join(", ")}, or off`);
     const r = await search(q, {
-      limit: argInt(args, "limit"),
-      pages: argInt(args, "pages"),
+      limit: argInt(args, "limit", { min: 1 }),
+      pages: argInt(args, "pages", { min: 1 }),
       lang: argValue(args, "lang"),
       region: argValue(args, "region"),
       searxng: argValue(args, "searxng"),
@@ -1303,9 +1387,8 @@ async function dispatch(argv: string[]): Promise<void> {
       await runStdioServer(webindexAdapter());
       return;
     }
-    if (transport !== "http") fail(`unknown transport "${transport}" — expected stdio or http`);
-    const port = argInt(args, "port") ?? 7340;
-    if (!Number.isInteger(port) || port < 0 || port > 65535) fail("invalid --port");
+    if (transport !== "http") usage(`unknown transport "${transport}" — expected stdio or http`);
+    const port = argInt(args, "port", { min: 0, max: 65535 }) ?? 7340;
     let running: Awaited<ReturnType<typeof startHttpServer>>;
     try {
       running = await startHttpServer(webindexAdapter(), { port, bind: argValue(args, "bind"), allowRemote: argBool(args, "allow-remote") });
@@ -1350,6 +1433,8 @@ async function dispatch(argv: string[]): Promise<void> {
     const RANK_USAGE = "usage: webindex rank --query <question> --docs <file.json|-> [--limit <n>] [--dense] [--json]";
     const question = argValue(args, "query");
     if (!question) usage(RANK_USAGE);
+    // Flags first: a bad --limit is worth saying before a large pool is read.
+    const limit = argInt(args, "limit", { min: 1 });
     const input = readDocsInput(args, RANK_USAGE);
     let docs: RankInput[];
     try {
@@ -1357,7 +1442,6 @@ async function dispatch(argv: string[]): Promise<void> {
     } catch (e) {
       fail((e as Error).message);
     }
-    const limit = argInt(args, "limit");
     const r = await rankDocuments(question, docs, { limit, dense: argBool(args, "dense") });
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));
@@ -1388,7 +1472,7 @@ async function dispatch(argv: string[]): Promise<void> {
     const target = positionalText(args);
     if (!target) usage(`usage: webindex ${cmd} <${cmd === "package" ? "name" : "repo"}> [--json]`);
     const asJson = argBool(args, "json");
-    const limit = argInt(args, "limit");
+    const limit = argInt(args, "limit", { min: 1 });
     const emit = (obj: unknown, human: string[]) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}\n`);
 
     if (cmd === "package") {
@@ -1490,7 +1574,7 @@ async function dispatch(argv: string[]): Promise<void> {
     }
     if (cmd === "sitemap") {
       const robots = await fetchRobots(target);
-      const s = await fetchSitemap(target, { sitemaps: robots.sitemaps, max: argInt(args, "max") });
+      const s = await fetchSitemap(target, { sitemaps: robots.sitemaps, max: argInt(args, "max", { min: 1 }) });
       if (!asJson) for (const n of s.notes ?? []) process.stderr.write(`${n}\n`);
       if (!s.urls.length && !s.sitemaps.length) fail(`no sitemap found for ${target}`);
       // An index whose children the budget did not reach is not an empty
@@ -1590,9 +1674,10 @@ async function dispatch(argv: string[]): Promise<void> {
     // The same answer the MCP tool gives: a budget of nothing is not a budget.
     if (max < 1) usage("--max must be a positive whole number — a crawl without a budget is not one");
     const prefix = argValue(args, "prefix");
+    const depth = argInt(args, "depth", { min: 0 });
     const r = await crawlSite(seed, {
       maxPages: max,
-      ...(argInt(args, "depth") !== undefined ? { maxDepth: argInt(args, "depth") as number } : {}),
+      ...(depth !== undefined ? { maxDepth: depth } : {}),
       crossOrigin: argBool(args, "cross-origin"),
       useSitemap: !argBool(args, "no-sitemap"),
       ...(prefix ? { prefix } : {}),
@@ -1662,6 +1747,7 @@ async function dispatch(argv: string[]): Promise<void> {
     const HYBRID_USAGE = "usage: webindex hybrid --query <question> --docs <file.json|->";
     const question = argValue(args, "query");
     if (!question) usage(HYBRID_USAGE);
+    const limit = argInt(args, "limit", { min: 1 });
     const input = readDocsInput(args, HYBRID_USAGE);
     let docs: RankInput[];
     try {
@@ -1672,7 +1758,7 @@ async function dispatch(argv: string[]): Promise<void> {
     const r = await hybridSearch(
       question,
       docs.map((d, i) => ({ id: d.url ?? String(i), title: d.title ?? "", headings: "", body: d.text ?? "" })),
-      { ...(argInt(args, "limit") !== undefined ? { limit: argInt(args, "limit") as number } : {}) },
+      limit !== undefined ? { limit } : {},
     );
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));
@@ -1731,13 +1817,19 @@ async function dispatch(argv: string[]): Promise<void> {
     const action = args.positional[0] ?? "";
     const root = resolve(argValue(args, "root") ?? process.cwd());
     const asJson = argBool(args, "json");
+    // Before skill.json is read: with none on disk, a missing or misspelt
+    // action was answered "no readable skill.json" — the wrong problem, exit 1.
+    if (!SKILL_ACTIONS.includes(action)) usage(`usage: webindex skill ${SKILL_ACTIONS.join("|")}`);
 
     if (action === "init") {
       const name = args.positional[1];
       if (!name) usage("usage: webindex skill init <name> [--root <dir>]");
+      const badName = skillNameProblem(name);
+      if (badName) usage(badName);
       const r = scaffoldSkill(root, name, { exists: existsSync });
       for (const e of r.errors) process.stderr.write(`  ${e}\n`);
-      process.stdout.write(asJson ? jsonLine(r) : `${r.written.map((p) => `  wrote ${relative(root, p)}`).join("\n")}\n`);
+      if (asJson) process.stdout.write(jsonLine(r));
+      else if (r.written.length) process.stdout.write(`${r.written.map((p) => `  wrote ${relative(root, p)}`).join("\n")}\n`);
       if (!r.written.length) process.exit(EXIT_FAILURE);
       return;
     }
@@ -1766,13 +1858,6 @@ async function dispatch(argv: string[]): Promise<void> {
     }
 
     if (action === "vendor") {
-      if (argBool(args, "list")) {
-        for (const [name, pin] of Object.entries(config.engines)) {
-          const meta = JSON.parse(readFileSync(join(root, config.vendorDir, pin.meta), "utf8"));
-          process.stdout.write(`${name} ${pin.repo} ${meta.tag}\n`);
-        }
-        return;
-      }
       // `--check` is offline on purpose: this runs in CI on every commit, and a
       // gate that needs the network goes red when GitHub does.
       if (argBool(args, "check")) {
@@ -1920,8 +2005,6 @@ async function dispatch(argv: string[]): Promise<void> {
       }
       return;
     }
-
-    usage("usage: webindex skill check|bundle|vendor|copy|doctor|init");
   }
 
   if (cmd === "doctor") {
