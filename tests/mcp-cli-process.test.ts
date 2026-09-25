@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { build } from "tsup";
@@ -28,6 +28,37 @@ beforeAll(async () => {
 
 afterAll(() => {
   if (dir) rmSync(dir, { recursive: true, force: true });
+});
+
+describe("the built CLI as a process", () => {
+  it("stops quietly when the reader of its output goes away", () => {
+    // `webindex extract big.txt | head -1`: head exits after one line, the next
+    // write fails with EPIPE, and an unhandled stream error used to end the
+    // run in a Node stack trace on the user's terminal.
+    const big = join(dir, "big.txt");
+    writeFileSync(big, Array.from({ length: 200_000 }, (_, i) => `line ${i}`).join("\n"));
+    const child = spawnSync("sh", ["-c", `"${process.execPath}" "${binary}" extract "${big}" | head -1`], {
+      encoding: "utf8",
+      timeout: 20_000,
+      env: { ...process.env, WEBINDEX_CACHE_DIR: dir },
+    });
+    expect(child.stdout).toBe("line 0\n");
+    expect(child.stderr).not.toMatch(/EPIPE|Unhandled|node:events/);
+  });
+
+  it("answers `version` without loading the HTTP server it only needs for `mcp --transport http`", () => {
+    // node:http is the costliest builtin to import — ~40 ms of a 130 ms cold
+    // start, undici included — and every command paid it because the MCP HTTP
+    // transport imported it at module scope.
+    const probe = join(dir, "probe.cjs");
+    writeFileSync(
+      probe,
+      `process.on("exit", () => process.stderr.write("LOADED " + JSON.stringify(process.moduleLoadList.filter((m) => /^NativeModule (http|https|_http_\\w+)$/.test(m))) + "\\n"));`,
+    );
+    const child = spawnSync(process.execPath, ["--require", probe, binary, "version"], { encoding: "utf8", timeout: 10_000 });
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.stderr).toContain("LOADED []");
+  });
 });
 
 describe("MCP process survival", () => {

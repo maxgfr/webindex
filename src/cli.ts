@@ -51,6 +51,7 @@ import {
   type CliSpec,
   type CommandArgs,
   EXIT_FAILURE,
+  EXIT_OK,
   EXIT_USAGE,
   isInvokedDirectly,
   jsonLine,
@@ -1937,6 +1938,16 @@ async function dispatch(argv: string[]): Promise<void> {
 // Only when run as a program. Importing this module must not start anything —
 // the skill-bundle gate imports the built artifact to read its flag tables.
 if (isInvokedDirectly()) {
+  // A reader that stops early — `webindex extract big.pdf | head -1` — closes
+  // the pipe, and the next write fails with EPIPE. That is the reader's answer,
+  // not a failure of ours: stop quietly, as `cat` does, rather than end in a
+  // Node stack trace printed over the output that was asked for.
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on("error", (e: NodeJS.ErrnoException) => {
+      if (e.code === "EPIPE") process.exit(EXIT_OK);
+      throw e;
+    });
+  }
   main().catch((e) => {
     process.stderr.write(`webindex: ${(e as Error).message}\n`);
     process.exit(EXIT_FAILURE);
