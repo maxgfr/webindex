@@ -51,6 +51,9 @@ afterEach(() => {
   vi.restoreAllMocks();
   // `fetch --refresh/--offline` set process-wide cache switches.
   resetCacheMode();
+  // A "no embedding server" verdict stands for 30 s; a case that met one must
+  // not hand it to the next.
+  resetOllamaProbe();
   rmSync(dir, { recursive: true, force: true });
 });
 afterAll(() => vi.restoreAllMocks());
@@ -901,6 +904,125 @@ describe("rank", () => {
     expect(await run(["rank", "--query", "what is the of", "--docs", withDocs(DOCS)])).toBe(1);
     expect(stderr()).toMatch(/no rankable terms/);
   });
+
+  it("never ranks a document that matched nothing above one that matched", async () => {
+    // MMR used to pick the off-topic pages (relevance 0, similarity 0) before a
+    // relevant one whose overlap with the top result carried the full penalty.
+    const pool = JSON.stringify([
+      { url: "https://a.test/1", title: "Rate limiting with a token bucket", text: "A token bucket refills at a fixed rate; rate limiting caps bursts." },
+      { url: "https://a.test/2", title: "Token bucket explained", text: "The token bucket algorithm refills tokens at a fixed rate." },
+      { url: "https://c.test/3", title: "Slow braised beef", text: "Braise the beef slowly with onions and wine." },
+      { url: "https://d.test/4", title: "Match report", text: "The home side won after extra time." },
+      { url: "https://e.test/5", title: "Why do my requests get 429?", text: "Your client exceeded the rate the server allows." },
+    ]);
+    await run(["rank", "--query", "token bucket rate limiting", "--docs", withDocs(pool), "--json"]);
+    const ranked = JSON.parse(stdout()).ranked as { url: string; matched: string[] }[];
+    const lastMatched = ranked.map((r) => r.matched.length > 0).lastIndexOf(true);
+    const firstUnmatched = ranked.findIndex((r) => r.matched.length === 0);
+    expect(lastMatched).toBeLessThan(firstUnmatched);
+    expect(ranked.slice(0, 3).map((r) => r.url)).toContain("https://e.test/5");
+  });
+
+  it("names each collapsed mirror and the URL it duplicated", async () => {
+    const article = `A token bucket refills at a fixed rate and caps at its burst size. ${"Each request removes one token from the bucket. ".repeat(20)}`;
+    const pool = JSON.stringify([
+      { url: "https://origin.test/a", title: "Token bucket", text: article },
+      { url: "https://mirror.test/a", title: "Token bucket (mirror)", text: `${article} ` },
+      { url: "https://other.test/b", title: "Leaky bucket", text: "A leaky bucket drains at a constant rate." },
+    ]);
+    await run(["rank", "--query", "token bucket", "--docs", withDocs(pool), "--json"]);
+    const j = JSON.parse(stdout());
+    expect(j.collapsed).toBe(1);
+    expect(j.duplicates).toEqual([{ url: "https://mirror.test/a", of: "https://origin.test/a" }]);
+
+    out = [];
+    err = [];
+    await run(["rank", "--query", "token bucket", "--docs", withDocs(pool)]);
+    expect(stderr()).toMatch(/1 near-duplicate\(s\) collapsed/);
+    expect(stderr()).toContain("https://mirror.test/a");
+    expect(stdout()).not.toContain("https://mirror.test/a");
+  });
+
+  it("fuses a document's own score with BM25F, but never lifts one that matched nothing", async () => {
+    // `score` was validated and documented, then ignored: equal BM25 documents
+    // with 0.01 and 0.99 were ordered by URL.
+    const pool = JSON.stringify([
+      { url: "https://a.test/1", title: "Token bucket", text: "token bucket", score: 0.01 },
+      { url: "https://b.test/2", title: "Token bucket", text: "token bucket", score: 0.99 },
+      { url: "https://c.test/3", title: "Cooking", text: "braise the beef", score: 5 },
+    ]);
+    await run(["rank", "--query", "token bucket", "--docs", withDocs(pool), "--json"]);
+    const ranked = JSON.parse(stdout()).ranked as { url: string; score: number }[];
+    expect(ranked.map((r) => r.url)).toEqual(["https://b.test/2", "https://a.test/1", "https://c.test/3"]);
+    expect(ranked[0]!.score).toBe(1);
+    expect(ranked[2]!.score).toBe(0);
+  });
+
+  it("warns when no document contains any term of the question", async () => {
+    // The order is then the URL tie-break, which a bare exit 0 passed off as a ranking.
+    expect(await run(["rank", "--query", "quantum chromodynamics", "--docs", withDocs(DOCS), "--json"])).toBe(0);
+    expect(JSON.parse(stdout()).note).toMatch(/no document contains/);
+    expect(stderr()).toMatch(/no document contains any term of the question/);
+  });
+
+  it("says which input is not valid JSON, and how to pass one", async () => {
+    expect(await run(["rank", "--query", "x", "--docs", withDocs('[{"url": "a"')])).toBe(1);
+    expect(stderr()).toMatch(/--docs .*docs\.json is not valid JSON/);
+    expect(stderr()).toMatch(/JSON array of \{url, text\}/);
+  });
+
+  it("asks for documents instead of waiting on a terminal", async () => {
+    const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+    try {
+      expect(await run(["rank", "--query", "token bucket"])).toBe(2);
+      expect(stderr()).toMatch(/usage: webindex rank/);
+    } finally {
+      if (tty) Object.defineProperty(process.stdin, "isTTY", tty);
+      else delete (process.stdin as { isTTY?: boolean }).isTTY;
+    }
+  });
+
+  it("adds the dense lane with --dense, and says so when there is none", async () => {
+    // The dense lane lifts a document that never uses the question's words.
+    resetOllamaProbe();
+    process.env[envName("OLLAMA")] = "http://ol.test";
+    installFetchMock((url, init) => {
+      if (url.includes("/api/tags")) return { status: 200, body: "{}", contentType: "application/json" };
+      const input = JSON.parse(String(init?.body)).input as string[];
+      const vec = (t: string) => (/question|Throttling/.test(t) ? [1, 0] : [0, 1]);
+      return { status: 200, body: JSON.stringify({ embeddings: input.map(vec) }), contentType: "application/json" };
+    });
+    const pool = JSON.stringify([
+      { url: "https://a.test/", title: "The question itself", text: "the question" },
+      { url: "https://b.test/", title: "Cooking", text: "braising" },
+      { url: "https://c.test/", title: "Throttling requests", text: "shaping traffic" },
+    ]);
+    await run(["rank", "--query", "the question", "--docs", withDocs(pool), "--dense", "--json"]);
+    const j = JSON.parse(stdout());
+    expect(j.note).toBeUndefined();
+    expect(j.ranked.map((r: { url: string }) => r.url).slice(0, 2)).toEqual(["https://a.test/", "https://c.test/"]);
+
+    out = [];
+    err = [];
+    resetOllamaProbe();
+    installFetchMock(() => ({ status: 502, body: "", contentType: "text/plain" }));
+    expect(await run(["rank", "--query", "the question", "--docs", withDocs(pool), "--dense"])).toBe(0);
+    expect(stdout()).toContain("https://a.test/");
+    expect(stdout()).not.toMatch(/semantic up/);
+    expect(stderr()).toMatch(/semantic up/);
+  });
+
+  it("orders tied documents the same on every machine", async () => {
+    // Code units, not localeCompare: "B" (0x42) sorts before "a" (0x61) whatever
+    // LANG says. Two documents, so the order is the pipeline's own sort.
+    const tie = JSON.stringify([
+      { url: "https://s.test/a", title: "Token bucket", text: "token bucket" },
+      { url: "https://s.test/B", title: "Token bucket", text: "token bucket" },
+    ]);
+    await run(["rank", "--query", "token bucket", "--docs", withDocs(tie), "--json"]);
+    expect(JSON.parse(stdout()).ranked.map((r: { url: string }) => r.url)).toEqual(["https://s.test/B", "https://s.test/a"]);
+  });
 });
 
 describe("the forge, registry and page-metadata commands", () => {
@@ -1552,6 +1674,43 @@ describe("the new commands", () => {
     expect(stderr()).toMatch(/semantic up/);
   });
 
+  it("embeds a whole file of texts in one run, in input order", async () => {
+    // The MCP tool took texts[]; the CLI took one argv string, so a file of
+    // passages cost a process and a probe per line.
+    resetOllamaProbe();
+    process.env[envName("OLLAMA")] = "http://ol.test";
+    const batches: string[][] = [];
+    installFetchMock((url, init) => {
+      if (url.includes("/api/tags")) return { status: 200, body: "{}", contentType: "application/json" };
+      const input = JSON.parse(String(init?.body)).input as string[];
+      batches.push(input);
+      return { status: 200, body: JSON.stringify({ embeddings: input.map((t) => [t.length, 0]) }), contentType: "application/json" };
+    });
+    const file = join(dir, "texts.json");
+    writeFileSync(file, JSON.stringify(["a", "bbb", "cc"]));
+    expect(await run(["embed", "--docs", file, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({
+      dimensions: 2,
+      vectors: [
+        [1, 0],
+        [3, 0],
+        [2, 0],
+      ],
+    });
+
+    out = [];
+    const lines = join(dir, "texts.txt");
+    writeFileSync(lines, "first line\n\nsecond\n");
+    expect(await run(["embed", "--docs", lines, "--lines"])).toBe(0);
+    expect(stdout()).toBe("10 0\n6 0\n");
+
+    out = [];
+    err = [];
+    writeFileSync(file, JSON.stringify(["a", 3]));
+    expect(await run(["embed", "--docs", file])).toBe(1);
+    expect(stderr()).toMatch(/--docs .* must be a non-empty JSON array of strings/);
+  });
+
   it("ranks hybridly, and keeps the degradation note off stdout", async () => {
     // The reason a run ranked lexically must be visible without landing in the
     // middle of the ranking — the same rule `search` follows.
@@ -1670,6 +1829,34 @@ describe("audit regressions", () => {
       },
     );
     expect(JSON.parse(messages[0].result.content[0].text).ranked).toHaveLength(1);
+  });
+
+  it("adds the dense lane to webindex_rank on request, and returns the note when there is none", async () => {
+    resetOllamaProbe();
+    process.env[envName("OLLAMA")] = "http://ol.test";
+    installFetchMock(() => ({ status: 502, body: "", contentType: "text/plain" }));
+    const adapter = webindexAdapter();
+    const decl = adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_rank");
+    expect(decl?.inputSchema.properties).toHaveProperty("dense");
+    const r = await adapter.callTool("webindex_rank", {
+      question: "alpha",
+      dense: true,
+      documents: [
+        { url: "a", text: "alpha beta" },
+        { url: "b", text: "zeta" },
+      ],
+    });
+    const j = JSON.parse(r.text);
+    expect(j.ranked.map((x: { url: string }) => x.url)).toEqual(["a", "b"]);
+    expect(j.note).toMatch(/semantic up/);
+  });
+
+  it("says plainly that webindex_embed fails, with the note, when nothing answers", async () => {
+    const decl = webindexAdapter()
+      .listTools(LATEST_PROTOCOL)
+      .find((t) => t.name === "webindex_embed");
+    expect(decl?.description).not.toMatch(/rather than an error/);
+    expect(decl?.description).toMatch(/fails with a note/i);
   });
 
   it.each(["text", "title", "headings"])("rejects an incorrectly typed rank %s as invalid params", async (field) => {

@@ -249,6 +249,26 @@ describe("extraStopwords", () => {
     expect(buildMatcher("test harness").matchLine("a test file").size).toBe(0);
   });
 
+  it("follows a new list, and one extended in place", () => {
+    const extras = ["Alpha"];
+    configure({ name: "docs-tool", envPrefix: "DOCS", cli: "docs", extraStopwords: extras });
+    expect(isStopword("alpha")).toBe(true);
+    extras.push("BETA");
+    expect(isStopword("beta")).toBe(true);
+    configure({ name: "docs-tool", envPrefix: "DOCS", cli: "docs", extraStopwords: ["gamma"] });
+    expect(isStopword("alpha")).toBe(false);
+    expect(isStopword("gamma")).toBe(true);
+  });
+
+  it("costs a lookup per term, not a scan of the extras", () => {
+    // The tokeniser asks for every word it reads; lowercasing each extra per
+    // word doubled bm25Tokenize's cost with forty extras.
+    configure({ name: "docs-tool", envPrefix: "DOCS", cli: "docs", extraStopwords: Array.from({ length: 2_000 }, (_, i) => `Extra${i}`) });
+    const started = performance.now();
+    for (let i = 0; i < 100_000; i++) isStopword("throttle");
+    expect(performance.now() - started).toBeLessThan(250);
+  });
+
   it("is absent by default, so the shared list stands alone", () => {
     resetBrand();
     expect(isStopword("test")).toBe(false);

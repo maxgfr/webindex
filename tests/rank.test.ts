@@ -18,6 +18,7 @@ import {
   simhash,
   type Bm25Doc,
 } from "../src/rank.js";
+import { configure, resetBrand } from "../src/brand.js";
 import { buildMatcher, foldTerm } from "../src/text.js";
 
 const src = (url: string, score: number, text = "") => ({ url, score, text });
@@ -41,6 +42,22 @@ describe("rrf", () => {
 
   it("is empty for empty input", () => {
     expect(rrf<{ id: string }>([], (i) => i.id).size).toBe(0);
+  });
+
+  it("counts an item once per list, at its best rank", () => {
+    // Callers key by canonical URL or DOI, so tracking-param variants inside
+    // ONE engine's list share a key. Summing them let one engine repeating a
+    // URL count as much as two engines agreeing (Cormack et al. count once).
+    const key = (u: string) => u.replace(/\?.*$/, "");
+    const fused = rrf(
+      [
+        ["x.test/a", "y.test/b", "x.test/a?utm_source=feed"],
+        ["y.test/b", "z.test/c"],
+      ],
+      key,
+    );
+    expect(fused.get("x.test/a")).toBeCloseTo(1 / 61, 10);
+    expect(fused.get("y.test/b")!).toBeGreaterThan(fused.get("x.test/a")!);
   });
 });
 
@@ -67,6 +84,20 @@ describe("identity parsed out of a URL", () => {
     expect(doiFromUrl("https://dx.doi.org/10.1145/3178876.3186111")).toBe("10.1145/3178876.3186111");
     expect(doiFromUrl("https://dl.acm.org/doi/full/10.1145/3178876.3186111")).toBe("10.1145/3178876.3186111");
     expect(doiFromUrl("https://dl.acm.org/doi/pdf/10.1145/3178876.3186111")).toBe("10.1145/3178876.3186111");
+  });
+
+  it("reads a DOI a publisher carries in its path or query without a /doi/ segment", () => {
+    expect(doiFromUrl("https://link.springer.com/article/10.1007/s11263-015-0816-y")).toBe("10.1007/s11263-015-0816-y");
+    expect(doiFromUrl("https://www.biorxiv.org/content/10.1101/2020.03.22.002386v1")).toBe("10.1101/2020.03.22.002386");
+    expect(doiFromUrl("https://www.biorxiv.org/content/10.1101/2020.03.22.002386v2.full.pdf")).toBe("10.1101/2020.03.22.002386");
+    expect(doiFromUrl("https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0000001")).toBe("10.1371/journal.pone.0000001");
+    // …so the landing page and the resolver link collapse to one identity.
+    expect(doiFromUrl("https://www.biorxiv.org/content/10.1101/2020.03.22.002386v1")).toBe(doiFromUrl("https://doi.org/10.1101/2020.03.22.002386"));
+  });
+
+  it("reads an arXiv id behind a trailing slash", () => {
+    expect(arxivIdFromUrl("https://arxiv.org/abs/2405.12345v2/")).toBe("2405.12345");
+    expect(arxivIdFromUrl("https://arxiv.org/abs/math.GT/0309136/")).toBe("math.gt/0309136");
   });
 
   it("returns nothing for a URL that carries no DOI", () => {
@@ -116,6 +147,76 @@ describe("BM25F", () => {
     expect(bm25Tokenize("bucket bucket bucket").length).toBe(3);
   });
 
+  it("reads Chinese and Japanese as overlapping character bigrams", () => {
+    // No spaces, so a whole clause used to be ONE token: a natural CJK question
+    // matched nothing and every score was 0. Bigrams are Lucene's
+    // CJKBigramFilter: deterministic, no dictionary, nothing for Latin text.
+    expect(bm25Tokenize("东京塔的高度是多少")).toEqual(["东京", "京塔", "塔的", "的高", "高度", "度是", "是多", "多少"]);
+    // A kana run bigrams too, and the digits between runs stay one token.
+    expect(bm25Tokenize("タワーの高さは333メートル")).toEqual(["タワ", "ワー", "ーの", "の高", "高さ", "さは", "333", "メー", "ート", "トル"]);
+    // A lone ideograph is a word, not noise under the two-character rule.
+    expect(bm25Tokenize("塔 and 米")).toEqual(["塔", "米"]);
+    // Latin next to a CJK run is still an ordinary term.
+    expect(bm25Tokenize("towers東京")).toEqual(["tower", "東京"]);
+  });
+
+  it("ranks the CJK document that answers the question first", () => {
+    const docs = [
+      doc("weather", "今天的天气", "", "今天的天气很好，适合出门散步。"),
+      doc("eiffel", "埃菲尔铁塔", "", "埃菲尔铁塔位于巴黎，高度约330米。"),
+      doc("tokyo", "东京塔简介", "", "东京塔的高度是333米，位于东京都港区。"),
+    ];
+    const idx = buildBm25Index("东京塔的高度是多少", docs);
+    const scores = docs.map((d) => bm25Score(idx, d));
+    expect(scores[2]).toBeGreaterThan(scores[1]!);
+    expect(scores[1]).toBeGreaterThan(scores[0]!);
+  });
+
+  it("keeps combining marks inside the word they belong to", () => {
+    // Every vowel sign or virama used to split an Indic or Thai word and was
+    // dropped with the fragments under two characters.
+    expect(bm25Tokenize("हिन्दी भाषा का इतिहास")).toEqual(["हिन्दी", "भाषा", "का", "इतिहास"]);
+    expect(bm25Tokenize("ภาษาไทย ประวัติศาสตร์")).toEqual(["ภาษาไทย", "ประวัติศาสตร์"]);
+    expect(bm25Tokenize("தமிழ் மொழி வரலாறு")).toEqual(["தமிழ்", "மொழி", "வரலாறு"]);
+    // A decomposed Latin accent still folds away, as a precomposed one does.
+    expect(bm25Tokenize("cafe\u0301 café")).toEqual(["cafe", "cafe"]);
+    expect(buildBm25Index("हिन्दी इतिहास", []).queryTerms).toEqual(["हिन्दी", "इतिहास"]);
+  });
+
+  it("splits identifiers into their words, as the matcher does", () => {
+    // buildMatcher expands RateLimiter into rate / limiter / ratelimiter; a
+    // BM25 that did not scored 0 the page an excerpt then highlighted.
+    expect(bm25Tokenize("RateLimiter")).toEqual(["ratelimiter", "rate", "limiter"]);
+    expect(bm25Tokenize("rate_limiter")).toEqual(["rate_limiter", "rate", "limiter"]);
+    expect(bm25Tokenize("TokenBuckets")).toEqual(["tokenbucket", "token", "bucket"]);
+    expect(bm25Tokenize("rate-limiter")).toEqual(["rate", "limiter"]);
+    const docs = [doc("a", "RateLimiter class", "", "The RateLimiter throttles."), doc("b", "", "", "cooking"), doc("c", "", "", "weather")];
+    const idx = buildBm25Index("rate limiter", docs);
+    expect(bm25Score(idx, docs[0]!)).toBeGreaterThan(0);
+    expect(bm25MatchedTerms(idx, docs[0]!)).toEqual(["rate", "limiter"]);
+    // …and the query side expands the same way.
+    expect(buildBm25Index("RateLimiter", docs).queryTerms).toEqual(["ratelimiter", "rate", "limiter"]);
+  });
+
+  it("drops an identifier's words that are stopwords, under whichever list is configured now", () => {
+    expect(bm25Tokenize("RateLimiter")).toEqual(["ratelimiter", "rate", "limiter"]);
+    configure({ name: "t", envPrefix: "T", cli: "t", extraStopwords: ["limiter"] });
+    expect(bm25Tokenize("RateLimiter")).toEqual(["ratelimiter", "rate"]);
+    resetBrand();
+    expect(bm25Tokenize("RateLimiter")).toEqual(["ratelimiter", "rate", "limiter"]);
+  });
+
+  it("keeps SimHash on the unexpanded words, so a hash never moves between versions", () => {
+    expect(simhash("The RateLimiter throttles rate_limiter calls from getHTTPClient and parseJSON2")).toBe(0x292a0806401246c2n);
+  });
+
+  it("tokenises a long mixed-script text in linear time", () => {
+    const text = `${"東京タワー".repeat(20_000)} ${"RateLimiterX".repeat(5_000)} ${"हिन्दी ".repeat(10_000)} ${"a_".repeat(20_000)}`;
+    const started = performance.now();
+    bm25Tokenize(text);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   it("ranks a title match above the same term buried in the body", () => {
     const docs = [
       doc("titled", "Token bucket rate limiting", "", "filler ".repeat(200)),
@@ -158,6 +259,13 @@ describe("BM25F", () => {
     changing.body = "token bucket";
     expect(bm25MatchedTerms(idx, changing)).toEqual(["token", "bucket"]);
     expect(bm25Score(idx, changing)).toBeGreaterThan(0);
+  });
+
+  it("scores the same from body tokens the caller already has", () => {
+    const docs = [doc("a", "Token buckets", "Rate limits", "a bucket refills"), doc("b", "", "", "cooking"), doc("c", "", "", "token weather")];
+    const plain = buildBm25Index("token bucket", docs);
+    const shared = buildBm25Index("token bucket", docs, { tokensOf: (d) => bm25Tokenize(d.body) });
+    expect(docs.map((d) => bm25Score(shared, d))).toEqual(docs.map((d) => bm25Score(plain, d)));
   });
 
   it("scores zero for an empty query or an empty document", () => {
@@ -294,6 +402,40 @@ describe("simhash near-duplicate detection", () => {
     expect(kept.map((k) => k.url)).toEqual(["https://origin.test/a", "https://other.test/b"]);
   });
 
+  it("reports which URL each dropped copy duplicated", () => {
+    // A mirror is an alternate citation, and the evidence when a collapse was wrong.
+    const other = "Something entirely different. ".repeat(40);
+    const items = [
+      src("https://origin.test/a", 0.9, article),
+      src("https://mirror.test/a", 0.4, `${article} `),
+      src("https://other.test/b", 0.5, other),
+      src("https://better.test/b", 0.8, other),
+    ];
+    const r = dedupeNearDuplicates(items);
+    expect(r.dropped).toBe(2);
+    expect(r.duplicates).toEqual([
+      { url: "https://mirror.test/a", of: "https://origin.test/a" },
+      // A later, better copy displaces the kept one: the displaced URL is the duplicate.
+      { url: "https://other.test/b", of: "https://better.test/b" },
+    ]);
+  });
+
+  it("breaks a score tie between copies by code unit, whatever the machine's locale", () => {
+    // localeCompare read LANG: under da_DK "aa" sorts after "ab". Code units
+    // put "B" (0x42) before "a" (0x61) everywhere.
+    const tie = [src("https://m.test/a", 0.5, article), src("https://m.test/B", 0.5, article)];
+    expect(dedupeNearDuplicates(tie).items.map((i) => i.url)).toEqual(["https://m.test/B"]);
+  });
+
+  it("hashes tokens a caller already has exactly as it hashes the text", () => {
+    // A pipeline that indexed a document need not tokenise it again.
+    const plain = bm25Tokenize(article, { subtokens: false });
+    expect(simhash(article, { tokens: plain })).toBe(simhash(article));
+    const items = [src("https://origin.test/a", 0.9, article), src("https://mirror.test/a", 0.4, `${article} `)];
+    const tokens = new Map(items.map((it) => [it, bm25Tokenize(it.text, { subtokens: false })]));
+    expect(dedupeNearDuplicates(items, { tokensOf: (it) => tokens.get(it)! })).toEqual(dedupeNearDuplicates(items));
+  });
+
   it("never collapses short texts, which carry too little signal", () => {
     const items = [src("https://a.test/1", 0.9, "short"), src("https://b.test/2", 0.5, "short")];
     expect(dedupeNearDuplicates(items).dropped).toBe(0);
@@ -341,6 +483,77 @@ describe("diversify", () => {
     expect(diversify(items, () => new Set()).map((i) => i.url)).toEqual(items.map((i) => i.url));
   });
 
+  it("never ranks a matched document below one that matched nothing", () => {
+    // Pool-normalised similarity made any overlap with the picked set carry the
+    // full penalty, so a relevant page (rel < sim/3) went negative while every
+    // off-topic page sat at 0 and was picked first — and `limit` then cut it.
+    const items = [src("https://tb.test/", 1, ""), src("https://cook.test/", 0, ""), src("https://leaky.test/", 0.294, "")];
+    const tokens: Record<string, string[]> = {
+      "https://tb.test/": ["token", "bucket", "rate", "refill"],
+      "https://cook.test/": ["braise", "beef", "slow"],
+      "https://leaky.test/": ["leaky", "bucket", "rate", "queue"],
+    };
+    const out = diversify(items, (it) => new Set(tokens[it.url]));
+    expect(out.map((o) => o.url)).toEqual(["https://tb.test/", "https://leaky.test/", "https://cook.test/"]);
+  });
+
+  it("still diversifies among the relevant ones, and among the rest", () => {
+    const items = [
+      src("https://a1.test/", 1, ""),
+      src("https://a2.test/", 0.95, ""),
+      src("https://b.test/", 0.7, ""),
+      src("https://z1.test/", 0, ""),
+      src("https://z2.test/", 0, ""),
+    ];
+    const tokens: Record<string, string[]> = {
+      "https://a1.test/": ["rate", "limit", "api"],
+      "https://a2.test/": ["rate", "limit", "api"],
+      "https://b.test/": ["normative", "grammar"],
+      "https://z1.test/": ["x"],
+      "https://z2.test/": ["y"],
+    };
+    const out = diversify(items, (it) => new Set(tokens[it.url])).map((o) => o.url);
+    // b says something else and jumps the restatement; zero relevance stays last.
+    expect(out.slice(0, 3)).toEqual(["https://a1.test/", "https://b.test/", "https://a2.test/"]);
+    expect(out.slice(3).sort()).toEqual(["https://z1.test/", "https://z2.test/"]);
+  });
+
+  it("breaks ties by code unit, not by the machine's locale", () => {
+    const items = [src("https://s.test/a", 0.5, ""), src("https://s.test/B", 0.5, ""), src("https://s.test/c", 0.5, "")];
+    expect(diversify(items, () => new Set(["t"])).map((i) => i.url)).toEqual(["https://s.test/B", "https://s.test/a", "https://s.test/c"]);
+  });
+
+  it("diversifies only the window, and keeps the tail in relevance order", () => {
+    const items = Array.from({ length: 10 }, (_, i) => src(`https://w${i}.test/`, 1 - i * 0.05, ""));
+    const tokens = (it: { url: string }) => (it.url < "https://w4" ? ["same", "words"] : [it.url]);
+    const out = diversify(items, tokens, 0.75, { window: 4 });
+    expect(out).toHaveLength(10);
+    expect(new Set(out.slice(0, 4))).toEqual(new Set(items.slice(0, 4)));
+    expect(out.slice(4)).toEqual(items.slice(4));
+    // A window at least as large as the pool is the exact pass.
+    expect(diversify(items, tokens, 0.75, { window: 50 })).toEqual(diversify(items, tokens));
+  });
+
+  it("stays fast on a large pool when windowed, and tractable when exact", () => {
+    // MMR is quadratic: 2 000 documents took 35 s in `webindex rank` with
+    // string-set Jaccard computed twice per pair.
+    let seed = 7;
+    const rnd = () => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed / 2_147_483_648;
+    };
+    const pool = Array.from({ length: 2_000 }, (_, i) => ({
+      ...src(`https://p${i}.test/`, rnd(), ""),
+      tokens: Array.from({ length: 300 }, () => `t${Math.floor(rnd() * 5_000)}`),
+    }));
+    let started = performance.now();
+    expect(diversify(pool, (it) => it.tokens, 0.75, { window: 100 })).toHaveLength(2_000);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    started = performance.now();
+    expect(diversify(pool.slice(0, 400), (it) => it.tokens)).toHaveLength(400);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
   it("is deterministic — the same pool ranks identically twice", () => {
     const items = Array.from({ length: 7 }, (_, i) => src(`https://s${i}.test/`, 0.5, ""));
     const toks = (it: { url: string }) => new Set([it.url.slice(-8)]);
@@ -357,5 +570,21 @@ describe("externalHosts", () => {
 
   it("is empty for a text that cites nothing", () => {
     expect(externalHosts("https://example.com/a", "no links at all").size).toBe(0);
+  });
+
+  it("leaves a sentence's final period out of the host", () => {
+    const hosts = externalHosts("https://example.com/a", "Read https://example.com. Also see https://mdn.io/x and https://mdn.io.");
+    expect(hosts).toEqual(new Set(["mdn.io"]));
+  });
+
+  it("reads a Unicode host whole and skips a userinfo prefix", () => {
+    const hosts = externalHosts("https://example.com/a", "https://müller.de/x et https://user@evil.test/ puis https://user:pw@b.test");
+    expect(hosts).toEqual(new Set(["xn--mller-kva.de", "evil.test", "b.test"]));
+  });
+
+  it("stays linear on a long run of host characters", () => {
+    const started = performance.now();
+    externalHosts("https://example.com/a", `https://${"a.".repeat(50_000)} https://${"x@".repeat(20_000)} ${"https://".repeat(20_000)}`);
+    expect(performance.now() - started).toBeLessThan(500);
   });
 });

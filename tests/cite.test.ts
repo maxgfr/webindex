@@ -92,11 +92,39 @@ describe("what cannot ground a claim", () => {
     expect(codeMask(["prose", "```", "[S1]", "```", "prose"])).toEqual([false, true, true, true, false]);
   });
 
+  it("closes a fence only with the same character, at least as long, and nothing after it", () => {
+    // A report documenting markdown shows a ``` sample inside a ```` block; a
+    // bash block may echo ~~~. Flipping on every fence-looking line masked the
+    // sample's closing line as prose and the real claim after it as code.
+    const nested = ["````md", "```", "Claim here [S1]", "```", "````", "Real claim [S2]"];
+    expect(codeMask(nested)).toEqual([true, true, true, true, true, false]);
+    expect(collectCitations(nested.join("\n"), isSource)).toEqual({ grounding: ["S2"], inertOnly: ["S1"] });
+
+    const tilde = ["```bash", "echo ~~~", "~~~", "x [S1]", "```", "Real [S2]"];
+    expect(codeMask(tilde)).toEqual([true, true, true, true, true, false]);
+    expect(collectCitations(tilde.join("\n"), isSource)).toEqual({ grounding: ["S2"], inertOnly: ["S1"] });
+
+    // A closing fence carries no info string; a line that does is content.
+    expect(codeMask(["```", "```js", "[S1]", "```", "after"])).toEqual([true, true, true, true, false]);
+    // A backtick fence whose info string holds a backtick is not a fence at all.
+    expect(codeMask(["``` a`b", "prose [S1]"])).toEqual([false, false]);
+  });
+
   it("masks a marked blockquote region as a whole", () => {
     const lines = ["a", "> [model-hint]", "> still the hint", "b", "> a plain quote"];
     const { mask, regions } = markedQuoteMask(lines, /\[model-hint\]/i);
     expect(mask).toEqual([false, true, true, false, false]);
     expect(regions).toBe(1);
+  });
+
+  it("finds every marked region with a global marker, whose lastIndex would otherwise drift", () => {
+    const lines = ["> a [model-hint]", "", "> b [model-hint]", "", "> c [model-hint]", "", "> d [model-hint]"];
+    const marker = /\[model-hint\]/g;
+    const { mask, regions } = markedQuoteMask(lines, marker);
+    expect(regions).toBe(4);
+    expect(mask).toEqual([true, false, true, false, true, false, true]);
+    // …and the caller's regex comes back as it was handed over.
+    expect(marker.lastIndex).toBe(0);
   });
 
   it("masks a Sources appendix to the next heading of the same or shallower level", () => {
@@ -107,6 +135,52 @@ describe("what cannot ground a claim", () => {
   it("does not let a deeper heading end the appendix", () => {
     const lines = ["## References", "### Primary", "- [S1]", "## Next"];
     expect(appendixMask(lines)).toEqual([true, true, true, false]);
+  });
+
+  it.each([
+    "## Références",
+    "## Références bibliographiques",
+    "## Bibliographie",
+    "## Fuentes",
+    "## Referencias",
+    "## Quellen",
+    "## Literaturverzeichnis",
+    "# References",
+    "## Works cited",
+    "## Sources:",
+    "## Sources ##",
+    "## Sources {#sources}",
+  ])("recognises %s as the rendered appendix", (heading) => {
+    // A report written in the reader's language titles its appendix in that
+    // language — the normal path for the skills on this engine, not the odd one.
+    expect(appendixMask([heading, "- [S1] a", "- [S2] b"])).toEqual([true, true, true]);
+  });
+
+  it("recognises a setext appendix heading, and a setext heading ends one", () => {
+    expect(appendixMask(["Claim [S1].", "", "Sources", "-------", "- [S1] a"])).toEqual([false, false, true, true, true]);
+    expect(appendixMask(["References", "==========", "- [S1] a", "", "Appendix", "========", "More [S2]."])).toEqual([
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+    ]);
+  });
+
+  it("does not mask a section whose title merely starts with an appendix word", () => {
+    // "## Sources and methodology" carries claims; the old trailing \b masked it.
+    expect(appendixMask(["## Sources and methodology", "We measured X [S3]."])).toEqual([false, false]);
+    expect(appendixMask(["## Referenced work", "claim"])).toEqual([false, false]);
+  });
+
+  it("lets a caller name its own appendix headings", () => {
+    const lines = ["## Fonti e riferimenti", "- [S1] a", "## Next"];
+    expect(appendixMask(lines)).toEqual([false, false, false]);
+    expect(appendixMask(lines, { headings: /^fonti e riferimenti$/i })).toEqual([true, true, false]);
+    // A global regex does not drift between headings.
+    expect(appendixMask(["## Mine", "a", "## Next", "## Mine", "b"], { headings: /^mine$/gi })).toEqual([true, true, false, true, true]);
   });
 
   it("ors masks together", () => {
@@ -188,6 +262,33 @@ describe("collecting citations", () => {
     // S2 is a sample inside a fence; S3 is the rendered appendix listing.
     expect(inertOnly).toEqual(["S2", "S3"]);
   });
+
+  it("does not read a link reference definition as a claim", () => {
+    // `[S1]: https://…` renders as nothing, like an HTML comment. Read as prose
+    // it made a report whose claims cite nothing look fully grounded.
+    const md = "# Report\n\nToken buckets smooth bursts.\n\nThey refill at a fixed rate.\n\n[S1]: https://a.test\n[S2]: https://b.test 'B'\n";
+    expect(texts(extractClaimUnits(md))).toEqual(["Token buckets smooth bursts.", "They refill at a fixed rate."]);
+    expect(collectCitations(md, isSource)).toEqual({ grounding: [], inertOnly: ["S1", "S2"] });
+  });
+
+  it("still reads a line that only looks like a definition as prose", () => {
+    // Not a definition: text after the destination that is not a title, or a
+    // line continuing a paragraph (a definition cannot interrupt one).
+    expect(collectCitations("[S1]: The study found a 40% drop.", isSource).grounding).toEqual(["S1"]);
+    expect(collectCitations("Buckets refill steadily\n[S2]: https://b.test", isSource).grounding).toEqual(["S2"]);
+  });
+
+  it("reads grouped and doubly-bracketed citations as their parts", () => {
+    // LLM-written reports group citations; each skill otherwise re-grows its
+    // own splitting regex, which is the drift this module exists to stop.
+    expect(citationTokensIn("Claim [S1, S2] here", isSource)).toEqual(["S1", "S2"]);
+    expect(citationTokensIn("Claim [S3; S1] here", isSource)).toEqual(["S3", "S1"]);
+    expect(citationTokensIn("Claim [[S1]] here", isSource)).toEqual(["S1"]);
+    expect(citationTokensIn("[S1][S2]", isSource)).toEqual(["S1", "S2"]);
+    // All parts must pass, or none is taken: the predicate stays the boundary.
+    expect(citationTokensIn("Claim [S1, see also S2] here", isSource)).toEqual([]);
+    expect(collectCitations("Claim [S1, S2].\n\n```\n[S3, S4]\n```", isSource)).toEqual({ grounding: ["S1", "S2"], inertOnly: ["S3", "S4"] });
+  });
 });
 
 describe("set differences", () => {
@@ -247,10 +348,50 @@ describe("numerals", () => {
     expect(extractNumerals("1 000 requêtes par seconde")).toEqual(["1000"]);
   });
 
+  it("reads a figure of a million or more through every group separator", () => {
+    // The group pass used to consume the digit before each separator, so the
+    // second comma of "1,000,000" had no free leading digit, was skipped, and
+    // the decimal-comma pass turned it into a point: "1000.000".
+    expect(normalizeNumeralText("1,000,000")).toBe("1000000");
+    expect(normalizeNumeralText("10 000 000")).toBe("10000000");
+    expect(normalizeNumeralText("$1,234,567.89")).toBe("$1234567.89");
+    expect(normalizeNumeralText("3,14159")).toBe("3.14159");
+    expect(extractNumerals("Revenue hit $1,234,567 and 2,500,000 users; 1 000 000 requêtes")).toEqual(["1234567", "2500000", "1000000"]);
+    // …so a report and a source that write one figure in two notations agree.
+    expect(extractNumerals("2 500 000 utilisateurs")).toEqual(extractNumerals("2,500,000 users"));
+  });
+
+  it("keeps the separator pass linear on a long run of digit groups", () => {
+    const long = `1${",000".repeat(50_000)}`;
+    const started = performance.now();
+    expect(normalizeNumeralText(long)).toBe(`1${"000".repeat(50_000)}`);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it("lets a figure survive translation between the two notations", () => {
     const source = extractNumerals("For a 60-second window, 150ms of skew is 0.25%");
     const report = extractNumerals("150 ms représentent 0,25 % sur une fenêtre de 60 secondes");
     expect(report.filter((n) => !source.includes(n))).toEqual([]);
+  });
+});
+
+describe("adversarial input", () => {
+  it("reads headings, definitions and brackets in linear time on long runs of spaces and markers", () => {
+    const pad = " ".repeat(20_000);
+    const lines = [
+      `## a${pad}b`,
+      `## Sources${pad}#`,
+      `## x ${"{#".repeat(10_000)}`,
+      `[S1]: https://a.test${pad}x`,
+      `Claim [S1${pad}x]`,
+      `${"#".repeat(20_000)} x`,
+    ];
+    const started = performance.now();
+    appendixMask(lines);
+    extractClaimUnits(lines.join("\n\n"));
+    collectCitations(lines.join("\n\n"), isSource);
+    codeMask([`\`\`\`${pad}\``, `~~~${pad}x`]);
+    expect(performance.now() - started).toBeLessThan(500);
   });
 });
 

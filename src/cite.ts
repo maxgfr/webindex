@@ -80,19 +80,35 @@ export function stripInlineCode(line: string): string {
  *
  * A report that documents its own citation format has `[S1]` in a code block;
  * that is a sample, not a source.
+ *
+ * A fence closes the way CommonMark closes it: with the SAME character, at
+ * least as many of them, and nothing after. Flipping on any fence-looking line
+ * inverted the mask for a ```` block quoting a ``` sample, or a bash block
+ * echoing ~~~ — the sample's citation grounded, the real claim went inert.
  */
 export function codeMask(lines: readonly string[]): boolean[] {
   const mask = new Array<boolean>(lines.length).fill(false);
-  let inFence = false;
+  let open: { ch: string; len: number } | undefined;
   for (let i = 0; i < lines.length; i++) {
-    if (/^\s*(```|~~~)/.test(lines[i] as string)) {
-      mask[i] = true;
-      inFence = !inFence;
+    const m = /^\s*(`{3,}|~{3,})(.*)$/.exec(lines[i] as string);
+    if (!open) {
+      // An info string holding a backtick means the line is inline code, not a fence.
+      if (m && !((m[1] as string)[0] === "`" && (m[2] as string).includes("`"))) {
+        open = { ch: (m[1] as string)[0] as string, len: (m[1] as string).length };
+        mask[i] = true;
+      }
       continue;
     }
-    mask[i] = inFence;
+    mask[i] = true;
+    if (m && (m[1] as string)[0] === open.ch && (m[1] as string).length >= open.len && (m[2] as string).trim() === "") open = undefined;
   }
   return mask;
+}
+
+// A caller's /g or /y regex keeps `lastIndex` between `test` calls, so each
+// later test starts mid-string and misses. Test through a copy that cannot.
+function statelessRegExp(re: RegExp): RegExp {
+  return re.global || re.sticky ? new RegExp(re.source, re.flags.replace(/[gy]/g, "")) : re;
 }
 
 /**
@@ -105,6 +121,7 @@ export function codeMask(lines: readonly string[]): boolean[] {
  */
 export function markedQuoteMask(lines: readonly string[], marker: RegExp): { mask: boolean[]; regions: number } {
   const mask = new Array<boolean>(lines.length).fill(false);
+  const re = statelessRegExp(marker);
   let regions = 0;
   let i = 0;
   while (i < lines.length) {
@@ -115,7 +132,7 @@ export function markedQuoteMask(lines: readonly string[], marker: RegExp): { mas
     let j = i;
     let marked = false;
     while (j < lines.length && /^\s*>/.test(lines[j] as string)) {
-      if (marker.test(lines[j] as string)) marked = true;
+      if (re.test(lines[j] as string)) marked = true;
       j++;
     }
     if (marked) {
@@ -127,7 +144,35 @@ export function markedQuoteMask(lines: readonly string[], marker: RegExp): { mas
   return { mask, regions };
 }
 
-const APPENDIX_HEADING = /^\s*(#{2,6})\s+(sources|references|bibliography)\b/i;
+// The WHOLE heading, lowercased and deaccented, in the languages the skills on
+// this engine report in. Whole, because a prefix match masked "## Sources and
+// methodology" — a section full of claims — as the appendix.
+const APPENDIX_TITLE =
+  /^(?:sources?|references?(?: bibliographiques)?|bibliograph(?:y|ie)|works cited|citations|quellen(?:angaben)?|literatur(?:verzeichnis)?|fuentes|referencias|fontes|fonti|bibliografia|bronnen)$/;
+
+/** A heading at line `i` — ATX, or setext underlined on the next line — as its level and bare text. */
+function headingAt(lines: readonly string[], i: number): { level: number; text: string } | undefined {
+  const line = lines[i] as string;
+  // Trimmed in code rather than by `\s*$` around a lazy group: every pattern
+  // here stays linear on a line of ten thousand spaces.
+  const atx = /^\s{0,3}(#{1,6})(?:\s+(.*))?$/.exec(line);
+  if (atx) {
+    const text = (atx[2] ?? "")
+      .trimEnd()
+      .replace(/(?:^|\s)#+$/, "")
+      .trimEnd()
+      .replace(/\{#[^{}\s]*\}$/, "")
+      .trim();
+    return { level: (atx[1] as string).length, text };
+  }
+  // Setext: a line of prose over a run of `=` (level 1) or `-` (level 2). A
+  // list item, a quote or a table row over `---` is not a heading.
+  const under = i + 1 < lines.length ? /^\s{0,3}(=+|-+)\s*$/.exec(lines[i + 1] as string) : null;
+  if (under && line.trim() && !/^\s*(?:[-*+>|]|\d+\.|```|~~~)/.test(line) && !/^\s{4}/.test(line)) {
+    return { level: (under[1] as string)[0] === "=" ? 1 : 2, text: line.trim() };
+  }
+  return undefined;
+}
 
 /**
  * Lines belonging to a trailing "## Sources" / "## References" section — from
@@ -137,17 +182,30 @@ const APPENDIX_HEADING = /^\s*(#{2,6})\s+(sources|references|bibliography)\b/i;
  * citing happens. Counting its `[S#]` entries marks every source as cited and
  * pads any coverage number computed downstream, which is the failure mode this
  * exists for.
+ *
+ * The title is matched whole, accents and case aside, in English, French,
+ * German, Spanish, Portuguese, Italian and Dutch ("Références", "Quellen",
+ * "Works cited"…), with or without a trailing colon or `{#anchor}`, as an ATX
+ * or a setext heading. `headings` adds the caller's own titles; it is tested
+ * against the heading text as written, without its `#` markers.
  */
-export function appendixMask(lines: readonly string[]): boolean[] {
+export function appendixMask(lines: readonly string[], opts: { headings?: RegExp } = {}): boolean[] {
   const mask = new Array<boolean>(lines.length).fill(false);
+  const extra = opts.headings ? statelessRegExp(opts.headings) : undefined;
+  const isAppendix = (text: string): boolean => {
+    const bare = text.replace(/:$/, "").trimEnd();
+    const folded = bare
+      .normalize("NFD")
+      .replace(/\p{M}+/gu, "")
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+    return APPENDIX_TITLE.test(folded) || (extra?.test(bare) ?? false);
+  };
   let level = 0;
   for (let i = 0; i < lines.length; i++) {
-    const h = /^\s*(#{1,6})\s/.exec(lines[i] as string);
-    if (level && h && (h[1] as string).length <= level) level = 0;
-    if (!level) {
-      const a = APPENDIX_HEADING.exec(lines[i] as string);
-      if (a) level = (a[1] as string).length;
-    }
+    const h = headingAt(lines, i);
+    if (level && h && h.level <= level) level = 0;
+    if (!level && h && isAppendix(h.text)) level = h.level;
     mask[i] = level > 0;
   }
   return mask;
@@ -207,6 +265,10 @@ const isHeadingOrRule = (t: string): boolean => /^#{1,6}\s/.test(t) || /^([-*_])
 const isTableSeparator = (line: string): boolean => /\|/.test(line) && /^[\s:|-]+$/.test(line.trim()) && /-/.test(line);
 const isTableRow = (line: string): boolean => /\|/.test(line.trim()) && !isTableSeparator(line);
 const isListItem = (line: string): boolean => /^\s*([-*+]|\d+\.)\s+\S/.test(line);
+// `[S1]: https://…` — a link reference definition: a label, a destination and
+// an optional quoted title, nothing else. "[S1]: The study found…" is prose.
+const isReferenceDefinition = (line: string): boolean =>
+  /^ {0,3}\[[^\]\n]+\]:[ \t]*(?:<[^>\n]*>|\S+)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*$/.test(line);
 
 function tableCells(line: string): string {
   return line
@@ -256,6 +318,15 @@ export function extractClaimUnits(text: string, opts: ClaimUnitOptions = {}): Cl
     const raw = lines[i] as string;
     const line = stripInlineCode(raw);
     const t = line.trim();
+
+    // A link reference definition renders as nothing, like an HTML comment, so
+    // a report listing its sources that way grounded every claim around them.
+    // It cannot interrupt a paragraph (CommonMark), so only a line that starts
+    // a block is one.
+    if (!prose.length && isReferenceDefinition(raw)) {
+      i++;
+      continue;
+    }
 
     if (t === "" || isHeadingOrRule(t) || isTableSeparator(line)) {
       flush();
@@ -348,10 +419,27 @@ export function citationTokensIn(text: string, isCitation: (token: string) => bo
   const masked = stripInlineCode(text);
   const out: string[] = [];
   for (const m of masked.matchAll(TOKEN_RE)) {
-    const tok = (m[1] as string).trim();
-    if (isCitation(tok) && !out.includes(tok)) out.push(tok);
+    for (const tok of citationsInBracket(m[1] as string, isCitation)) if (!out.includes(tok)) out.push(tok);
   }
   return out;
+}
+
+/**
+ * The citations one bracket holds. Reports written by a model group them —
+ * `[S1, S2]`, `[S1; S2]` — or double the brackets, `[[S1]]` (which the token
+ * pattern reads as "[S1"). When the predicate rejects the whole bracket, its
+ * parts are taken only if EVERY one passes, so the predicate stays the
+ * caller's boundary: `[S1, see also S2]` is prose.
+ */
+function citationsInBracket(inner: string, isCitation: (token: string) => boolean): string[] {
+  const tok = inner.trim();
+  if (isCitation(tok)) return [tok];
+  const unwrapped = tok.startsWith("[") ? tok.slice(1).trim() : tok;
+  if (unwrapped !== tok && isCitation(unwrapped)) return [unwrapped];
+  // Split on the separator alone and trim after: `\s*[,;]\s*` is quadratic on
+  // a bracket holding a long run of spaces.
+  const parts = unwrapped.split(/[,;]/).map((p) => p.trim());
+  return parts.length > 1 && parts.every((p) => isCitation(p)) ? parts : [];
 }
 
 /**
@@ -394,8 +482,7 @@ export function collectCitations(
   }
   const all: string[] = [];
   for (const m of text.matchAll(TOKEN_RE)) {
-    const tok = (m[1] as string).trim();
-    if (isCitation(tok) && !all.includes(tok)) all.push(tok);
+    for (const tok of citationsInBracket(m[1] as string, isCitation)) if (!all.includes(tok)) all.push(tok);
   }
   return { grounding, inertOnly: all.filter((t) => !grounding.includes(t)) };
 }
@@ -441,11 +528,16 @@ export function uncitedIds(cited: Iterable<string>, known: Iterable<string>): st
  * three-digit group is the far more common convention in the corpora these
  * tools fetch. NBSP, narrow NBSP and apostrophe are never decimal marks, so
  * they are still stripped between any two digits.
+ *
+ * The group pass consumes no digit, only the separator. When it consumed the
+ * digit before each one, the second comma of "1,000,000" had no free leading
+ * digit left, was skipped, and the decimal pass made it "1000.000" — every
+ * figure of a million or more was misread.
  */
 export function normalizeNumeralText(text: string): string {
   return text
     .replace(/(\d)[\u00A0\u202F'](?=\d)/g, "$1")
-    .replace(/(\d)[, ](\d{3})(?!\d)/g, "$1$2")
+    .replace(/(?<=\d)[, ](?=\d{3}(?!\d))/g, "")
     .replace(/(\d),(?=\d)/g, "$1.");
 }
 
