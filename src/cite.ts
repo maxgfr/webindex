@@ -419,10 +419,27 @@ export function citationTokensIn(text: string, isCitation: (token: string) => bo
   const masked = stripInlineCode(text);
   const out: string[] = [];
   for (const m of masked.matchAll(TOKEN_RE)) {
-    const tok = (m[1] as string).trim();
-    if (isCitation(tok) && !out.includes(tok)) out.push(tok);
+    for (const tok of citationsInBracket(m[1] as string, isCitation)) if (!out.includes(tok)) out.push(tok);
   }
   return out;
+}
+
+/**
+ * The citations one bracket holds. Reports written by a model group them —
+ * `[S1, S2]`, `[S1; S2]` — or double the brackets, `[[S1]]` (which the token
+ * pattern reads as "[S1"). When the predicate rejects the whole bracket, its
+ * parts are taken only if EVERY one passes, so the predicate stays the
+ * caller's boundary: `[S1, see also S2]` is prose.
+ */
+function citationsInBracket(inner: string, isCitation: (token: string) => boolean): string[] {
+  const tok = inner.trim();
+  if (isCitation(tok)) return [tok];
+  const unwrapped = tok.startsWith("[") ? tok.slice(1).trim() : tok;
+  if (unwrapped !== tok && isCitation(unwrapped)) return [unwrapped];
+  // Split on the separator alone and trim after: `\s*[,;]\s*` is quadratic on
+  // a bracket holding a long run of spaces.
+  const parts = unwrapped.split(/[,;]/).map((p) => p.trim());
+  return parts.length > 1 && parts.every((p) => isCitation(p)) ? parts : [];
 }
 
 /**
@@ -465,8 +482,7 @@ export function collectCitations(
   }
   const all: string[] = [];
   for (const m of text.matchAll(TOKEN_RE)) {
-    const tok = (m[1] as string).trim();
-    if (isCitation(tok) && !all.includes(tok)) all.push(tok);
+    for (const tok of citationsInBracket(m[1] as string, isCitation)) if (!all.includes(tok)) all.push(tok);
   }
   return { grounding, inertOnly: all.filter((t) => !grounding.includes(t)) };
 }

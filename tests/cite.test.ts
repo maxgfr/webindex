@@ -277,6 +277,18 @@ describe("collecting citations", () => {
     expect(collectCitations("[S1]: The study found a 40% drop.", isSource).grounding).toEqual(["S1"]);
     expect(collectCitations("Buckets refill steadily\n[S2]: https://b.test", isSource).grounding).toEqual(["S2"]);
   });
+
+  it("reads grouped and doubly-bracketed citations as their parts", () => {
+    // LLM-written reports group citations; each skill otherwise re-grows its
+    // own splitting regex, which is the drift this module exists to stop.
+    expect(citationTokensIn("Claim [S1, S2] here", isSource)).toEqual(["S1", "S2"]);
+    expect(citationTokensIn("Claim [S3; S1] here", isSource)).toEqual(["S3", "S1"]);
+    expect(citationTokensIn("Claim [[S1]] here", isSource)).toEqual(["S1"]);
+    expect(citationTokensIn("[S1][S2]", isSource)).toEqual(["S1", "S2"]);
+    // All parts must pass, or none is taken: the predicate stays the boundary.
+    expect(citationTokensIn("Claim [S1, see also S2] here", isSource)).toEqual([]);
+    expect(collectCitations("Claim [S1, S2].\n\n```\n[S3, S4]\n```", isSource)).toEqual({ grounding: ["S1", "S2"], inertOnly: ["S3", "S4"] });
+  });
 });
 
 describe("set differences", () => {
