@@ -28,21 +28,10 @@ import { join, resolve } from "node:path";
 import { brand } from "./brand.js";
 import { ensureDir, writeArtifact } from "./no-write.js";
 import { readJsonSafe } from "./run.js";
-import { emitWorkflowScript, runbookMd, type PhaseEmission } from "./orchestrate/templates.js";
+import { emitWorkflowScript, runbookMd, SMALL_WORKLIST, type PhaseEmission } from "./orchestrate/templates.js";
 
-export { oneWriterFooter, toBatches, emitWorkflowScript, runbookMd, WORKFLOW_FORBIDDEN } from "./orchestrate/templates.js";
+export { oneWriterFooter, toBatches, emitWorkflowScript, runbookMd, SMALL_WORKLIST, WORKFLOW_FORBIDDEN } from "./orchestrate/templates.js";
 export type { PhaseEmission } from "./orchestrate/templates.js";
-
-/**
- * Below this many items a fan-out does not pay for itself, and `orchestrate`
- * says so rather than emitting a workflow nobody should launch.
- *
- * A default, not a rule: each phase overrides it through `collapseFloor`,
- * because the units differ in weight. One heavy per-sub-question gather is
- * worth its own agent at any count above one; one cheap claim↔source judgment
- * is not.
- */
-export const SMALL_WORKLIST = 3;
 
 /** One agent per batch of at most this many items, unless a phase says otherwise. */
 export const BATCH_SIZE = 8;
@@ -233,7 +222,7 @@ export function orchestrateRun<T>(
     }
   }
 
-  written.push(writeArtifact(join(orchDir, "RUNBOOK.md"), runbookMd(phases, defs, run, engineAbs, brand().cli, opts.runbookPreamble)));
+  written.push(writeArtifact(join(orchDir, "RUNBOOK.md"), runbookMd(phases, defs, run, engineAbs, brand().cli, opts.runbookPreamble, small)));
 
   return { exitCode: 0, written, notices, errors: [], phases };
 }

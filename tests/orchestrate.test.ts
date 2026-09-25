@@ -321,6 +321,16 @@ describe("the runbook", () => {
     expect(rb).toContain("'Q1,Q2,Q3,Q4'");
   });
 
+  it("counts the agents the emitted script will actually launch", () => {
+    // At or under the collapse floor the script runs ONE agent over every
+    // item; the runbook batched the ids regardless and promised two.
+    todo(10);
+    orchestrateRun(run, ENGINE, DEFS, contracts, { smallWorklist: 10 });
+    const script = readFileSync(join(run, "orchestration", "verify.workflow.mjs"), "utf8");
+    expect(JSON.parse(/const BATCHES = (\[.*?\])\n/s.exec(script)![1]!)).toHaveLength(1);
+    expect(readFileSync(join(run, "orchestration", "RUNBOOK.md"), "utf8")).toContain("(1 agent(s)");
+  });
+
   it("carries the skill's own preamble above the phases", () => {
     orchestrateRun(run, ENGINE, DEFS, contracts, { runbookPreamble: ["Read the deep-research playbook first."] });
     expect(readFileSync(join(run, "orchestration", "RUNBOOK.md"), "utf8")).toContain("Read the deep-research playbook first.");

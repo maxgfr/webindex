@@ -89,6 +89,28 @@ Exception for oversized prose: if a note is too large to return, write ONLY to \
 `;
 }
 
+/**
+ * Below this many items a fan-out does not pay for itself, and `orchestrate`
+ * says so rather than emitting a workflow nobody should launch.
+ *
+ * A default, not a rule: each phase overrides it through `collapseFloor`,
+ * because the units differ in weight. One heavy per-sub-question gather is
+ * worth its own agent at any count above one; one cheap claim↔source judgment
+ * is not.
+ */
+export const SMALL_WORKLIST = 3;
+
+/**
+ * The batches a phase fans out as: ONE, over every item, at or under its
+ * collapse floor — the fan-out does not amortize there — and `batchSize`-wide
+ * ones above it. The script and the runbook both read this; the runbook used to
+ * batch on its own and promised two agents where the script launched one.
+ */
+function phaseBatches<T>(phase: PhaseInfo<T>, emission: PhaseEmission, smallWorklist: number): string[][] {
+  const floor = emission.collapseFloor ? emission.collapseFloor(smallWorklist) : smallWorklist;
+  return phase.items <= floor ? [phase.ids] : toBatches(phase.ids, emission.batchSize);
+}
+
 /** Chunk ids into batches, one subagent per batch. Order-preserving and deterministic. */
 export function toBatches(ids: readonly string[], batchSize: number): string[][] {
   const width = Math.max(1, Math.floor(batchSize));
@@ -135,10 +157,9 @@ export function emitWorkflowScript<T>(
   const scriptPath = join(runAbs, "orchestration", `${phase.name}.workflow.mjs`);
   const meta = { name: `${cli}-${phase.name}`, description: emission.description(phase.items), phases: [{ title: emission.title }] };
 
-  // At or under the floor the fan-out does not amortize: one agent plays every
-  // item. The notice nudging --eco fires alongside this in orchestrateRun.
-  const floor = emission.collapseFloor ? emission.collapseFloor(smallWorklist) : smallWorklist;
-  const batches = phase.items <= floor ? [phase.ids] : toBatches(phase.ids, emission.batchSize);
+  // At or under the floor one agent plays every item. The notice nudging
+  // --eco fires alongside this in orchestrateRun.
+  const batches = phaseBatches(phase, emission, smallWorklist);
   const hint = emission.applyHint(runAbs, engineAbs, phase);
 
   const script = [
@@ -209,6 +230,7 @@ export function runbookMd<T>(
   engineAbs: string,
   cli: string,
   preamble: readonly string[] = [],
+  smallWorklist = SMALL_WORKLIST,
 ): string {
   const lines: string[] = [`# ${cli} — orchestration runbook`, ``, `Run: \`${runAbs}\``, ``];
   if (preamble.length) lines.push(...preamble, ``);
@@ -233,7 +255,7 @@ export function runbookMd<T>(
       return;
     }
     if (emission) {
-      const batches = toBatches(ph.ids, emission.batchSize);
+      const batches = phaseBatches(ph, emission, smallWorklist);
       lines.push(
         `Fan out: \`Workflow({ scriptPath: "${join(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
         `(${batches.length} agent(s) of at most ${emission.batchSize} item(s), contract \`agents/${emission.role}.md\`).`,
