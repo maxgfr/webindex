@@ -51,6 +51,10 @@ describe("parseArgs", () => {
     // command's help rather than every command's.
     expect(parseArgs(["search", "q", "--help"], SPEC)).toEqual({ kind: "help", command: "search" });
     expect(parseArgs(["--help"], SPEC)).toEqual({ kind: "help" });
+    // `help <command>` is the other way people ask, git's among them.
+    expect(parseArgs(["help", "fetch"], SPEC)).toEqual({ kind: "help", command: "fetch" });
+    expect(parseArgs(["--help", "rank"], SPEC)).toEqual({ kind: "help", command: "rank" });
+    expect(parseArgs(["help", "nonsense"], SPEC)).toEqual({ kind: "help" });
   });
 
   it("lets a declared flag beat the built-in shorthand", () => {

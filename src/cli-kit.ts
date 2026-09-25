@@ -97,7 +97,8 @@ export function parseArgs(argv: readonly string[], spec: CliSpec): ParsedArgs {
   // No arguments at all is a request for help, not an error. Someone typing the
   // bare command name is asking what it does.
   if (argv.length === 0) return { kind: "help" };
-  if (isHelpWord(argv[0])) return { kind: "help" };
+  // `help fetch` asks about one command, as `fetch --help` does.
+  if (isHelpWord(argv[0])) return argv[1] !== undefined && commands.has(argv[1]) ? { kind: "help", command: argv[1] } : { kind: "help" };
   if (isVersionWord(argv[0])) return { kind: "version" };
 
   const command = argv[0] as string;
