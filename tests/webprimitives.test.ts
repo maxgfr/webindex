@@ -271,6 +271,147 @@ Sitemap: https://ex.test/sitemap.xml
     await fetchRobots("https://other.test/a");
     expect(spy).toHaveBeenCalledTimes(2);
   });
+
+  it("matches wildcards the way the spec and Google's parser do", () => {
+    const allowed = (rule: string, path: string) => isAllowed(parseRobots(`User-agent: *\nDisallow: ${rule}`, "x"), `https://ex.test${path}`);
+    // Google's documented examples, both ways round.
+    for (const p of ["/fish", "/fish.html", "/fishheads/yummy.html"]) expect(allowed("/fish*", p)).toBe(false);
+    expect(allowed("/fish*", "/Fish.asp")).toBe(true);
+    for (const p of ["/index.php", "/folder/filename.php?parameters", "/filename.php/"]) expect(allowed("/*.php", p)).toBe(false);
+    expect(allowed("/*.php", "/")).toBe(true);
+    for (const p of ["/filename.php", "/folder/filename.php"]) expect(allowed("/*.php$", p)).toBe(false);
+    for (const p of ["/filename.php?parameters", "/filename.php/", "/filename.php5"]) expect(allowed("/*.php$", p)).toBe(true);
+    expect(allowed("/fish*.php", "/fishheads/catfish.php?parameters")).toBe(false);
+    expect(allowed("/fish*.php", "/Fish.PHP")).toBe(true);
+    // Runs of `*`, a `*` at either end, and a `$` that is not at the end.
+    expect(allowed("/a**b", "/a-x-b")).toBe(false);
+    expect(allowed("*/private", "/x/private")).toBe(false);
+    expect(allowed("/*$", "/anything")).toBe(false);
+    expect(allowed("/a$b", "/a$b")).toBe(false);
+    expect(allowed("/a$b", "/a")).toBe(true);
+    expect(allowed("/a*b*c$", "/a-b-c-b")).toBe(true);
+    expect(allowed("/a*b*c$", "/a-c-b-c")).toBe(false);
+  });
+
+  it("matches a hostile wildcard rule in linear time", () => {
+    // `/*a*a*…$` compiled to `.*a.*a…` backtracked O(L^k): one call took
+    // seconds, and robots.txt supplies the pattern while the site's own links
+    // supply the path. The bounds are generous — the old matcher took minutes.
+    const r = parseRobots(`User-agent: *\nDisallow: /${"*a".repeat(10)}$\nDisallow: /${"*a".repeat(40)}*b*c`, "x");
+    const started = performance.now();
+    expect(isAllowed(r, `https://ex.test/${"a".repeat(2000)}b`)).toBe(true);
+    expect(isAllowed(r, `https://ex.test/${"a".repeat(2000)}`)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(200);
+  });
+
+  it("compares percent-encoded and literal paths as the same path", () => {
+    // WHATWG encodes non-ASCII but leaves `~` alone, so a rule written either
+    // way used to miss the URL written the other way.
+    const r = parseRobots("User-agent: *\nDisallow: /café\nDisallow: /%7Ejoe\nDisallow: /~ann\nDisallow: /a%2fb\nDisallow: /with space", "x");
+    expect(isAllowed(r, "https://ex.test/café/menu")).toBe(false);
+    expect(isAllowed(r, "https://ex.test/caf%C3%A9/menu")).toBe(false);
+    expect(isAllowed(r, "https://ex.test/~joe/")).toBe(false);
+    expect(isAllowed(r, "https://ex.test/%7Eann/")).toBe(false);
+    // An encoded reserved character is not the character itself, but its hex
+    // case does not matter.
+    expect(isAllowed(r, "https://ex.test/a%2Fb")).toBe(false);
+    expect(isAllowed(r, "https://ex.test/a/b")).toBe(true);
+    expect(isAllowed(r, "https://ex.test/with%20space")).toBe(false);
+    // The rules are reported as written.
+    expect(r.rules.map((rule) => rule.path)).toContain("/café");
+  });
+
+  it("applies a group only when it names our product token exactly", () => {
+    const file = (agent: string) => `User-agent: ${agent}\nDisallow: /x\n`;
+    // A substring of our name is somebody else's bot.
+    expect(isAllowed(parseRobots(file("web"), "webindex"), "https://ex.test/x")).toBe(true);
+    expect(isAllowed(parseRobots(file("index"), "webindex"), "https://ex.test/x")).toBe(true);
+    // A version, a comment or different case still names us.
+    expect(isAllowed(parseRobots(file("WebIndex/1.0"), "webindex"), "https://ex.test/x")).toBe(false);
+    expect(isAllowed(parseRobots(file("WEBINDEX"), "webindex"), "https://ex.test/x")).toBe(false);
+    // A full User-Agent string is reduced to its product token too, so a
+    // `Mozilla` group does not capture every bot that sends one.
+    expect(isAllowed(parseRobots(file("Mozilla"), "MyBot/2.1 (compatible; Mozilla/5.0)"), "https://ex.test/x")).toBe(true);
+    expect(isAllowed(parseRobots(file("mybot"), "MyBot/2.1 (compatible; Mozilla/5.0)"), "https://ex.test/x")).toBe(false);
+  });
+
+  it("splits lines on a bare CR, which the spec allows", () => {
+    const r = parseRobots("User-agent: *\rDisallow: /x\rCrawl-delay: 1\r", "webindex");
+    expect(isAllowed(r, "https://ex.test/x")).toBe(false);
+    expect(r.crawlDelayMs).toBe(1000);
+  });
+
+  it("ignores an empty Crawl-delay rather than reading it as zero", () => {
+    expect(parseRobots("User-agent: *\nCrawl-delay:\nDisallow: /x", "x").crawlDelayMs).toBeUndefined();
+  });
+});
+
+describe("fetching robots.txt", () => {
+  it("parses the prefix of a file over the size cap, whatever its Content-Length", async () => {
+    // RFC 9309 §2.5: parse at least the first 500 KiB. The verdict must not
+    // depend on whether the server declared the length or streamed it.
+    // Padded so the 512 KiB cap falls inside the last rule.
+    const head = "User-agent: *\nDisallow: /nope\n";
+    const pad = "# padding line\n".repeat(Math.floor((512 * 1024 - head.length - 20) / 15));
+    const body = `${head}${pad}Disallow: /cut${"x".repeat(100)}\nDisallow: /after-the-cap\n`;
+    installFetchMock(() => ({ body, contentType: "text/plain", headers: { "content-length": String(Buffer.byteLength(body)) } }));
+    const r = await fetchRobots("https://big.test/");
+    expect(r.absent).toBe(false);
+    expect(isAllowed(r, "https://big.test/nope")).toBe(false);
+    // The last line was cut at the cap: half a rule is not a rule.
+    expect(r.rules.some((rule) => rule.path.startsWith("/cut"))).toBe(false);
+  });
+
+  it("assumes complete disallow when the file is unreachable, as RFC 9309 requires", async () => {
+    installFetchMock(() => ({ status: 503, body: "busy", contentType: "text/plain" }));
+    const r = await fetchRobots("https://down.test/");
+    expect(r).toMatchObject({ unreachable: true, status: 503, absent: false });
+    expect(isAllowed(r, "https://down.test/anything")).toBe(false);
+  });
+
+  it("treats a network failure the same way", async () => {
+    vi.stubGlobal("fetch", async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED", message: "connect ECONNREFUSED" } });
+    });
+    const r = await fetchRobots("https://gone.test/");
+    expect(r).toMatchObject({ unreachable: true, status: 0 });
+    expect(isAllowed(r, "https://gone.test/")).toBe(false);
+  });
+
+  it("keeps `absent` for a real 4xx and says which status it was", async () => {
+    installFetchMock(() => ({ status: 410, body: "", contentType: "text/plain" }));
+    const r = await fetchRobots("https://no-file.test/");
+    expect(r).toMatchObject({ absent: true, status: 410 });
+    expect(r.unreachable).toBeUndefined();
+    expect(isAllowed(r, "https://no-file.test/x")).toBe(true);
+  });
+
+  it("forgets an unreachable answer after minutes and a good one after a day", async () => {
+    let status = 500;
+    const spy = installFetchMock(() => ({ status, body: "User-agent: *\nDisallow: /nope", contentType: "text/plain" }));
+    const now = vi.spyOn(Date, "now");
+    let t = 1_000_000;
+    now.mockImplementation(() => t);
+    try {
+      expect((await fetchRobots("https://flaky.test/")).unreachable).toBe(true);
+      status = 200;
+      // Still the failure a moment later: a crawl must not re-ask per page.
+      expect((await fetchRobots("https://flaky.test/")).unreachable).toBe(true);
+      t += 10 * 60_000;
+      const recovered = await fetchRobots("https://flaky.test/");
+      expect(recovered.unreachable).toBeUndefined();
+      expect(isAllowed(recovered, "https://flaky.test/nope")).toBe(false);
+      const calls = spy.mock.calls.length;
+      t += 60 * 60_000;
+      await fetchRobots("https://flaky.test/");
+      expect(spy.mock.calls.length).toBe(calls);
+      t += 24 * 60 * 60_000;
+      await fetchRobots("https://flaky.test/");
+      expect(spy.mock.calls.length).toBe(calls + 1);
+    } finally {
+      now.mockRestore();
+    }
+  });
 });
 
 describe("structured metadata", () => {

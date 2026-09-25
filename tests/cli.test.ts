@@ -996,6 +996,13 @@ describe("the forge, registry and page-metadata commands", () => {
     expect(await run(["robots", "https://ex.test/public"])).toBe(0);
   });
 
+  it("says a robots.txt that errored forbids everything, rather than calling it missing", async () => {
+    installFetchMock(() => ({ status: 503, body: "", contentType: "text/plain" }));
+    expect(await run(["robots", "https://down.test/page"])).toBe(1);
+    expect(stdout()).toContain("allowed   no");
+    expect(stdout()).toMatch(/HTTP 503.*RFC 9309/);
+  });
+
   it("lists the URLs a sitemap declares", async () => {
     installFetchMock((url) => (url.endsWith("robots.txt") ? { status: 404, body: "" } : { body: "<urlset><url><loc>https://ex.test/p1</loc></url></urlset>" }));
     expect(await run(["sitemap", "https://ex.test/x"])).toBe(0);

@@ -1213,7 +1213,13 @@ async function dispatch(argv: string[]): Promise<void> {
       const allowed = isAllowed(r, target);
       emit({ url: target, allowed, ...r }, [
         `  allowed   ${allowed ? "yes" : "no"}`,
-        `  rules     ${r.absent ? "none (no robots.txt)" : r.rules.length}`,
+        `  rules     ${
+          r.unreachable
+            ? `none readable (${r.status ? `HTTP ${r.status}` : "no answer"}) — RFC 9309 says to assume nothing may be crawled`
+            : r.absent
+              ? `none (no robots.txt${r.status ? `, HTTP ${r.status}` : ""})`
+              : r.rules.length
+        }`,
         ...(r.crawlDelayMs ? [`  delay     ${r.crawlDelayMs}ms`] : []),
         ...(r.sitemaps.length ? [`  sitemaps  ${r.sitemaps.join("\n            ")}`] : []),
       ]);
