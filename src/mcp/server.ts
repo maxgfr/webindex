@@ -1,5 +1,6 @@
 import { brand } from "../brand.js";
 import {
+  ANNOTATIONS_SINCE,
   DEFAULT_MAX_RESPONSE_BYTES,
   LATEST_PROTOCOL,
   RICH_TOOLS_SINCE,
@@ -40,13 +41,31 @@ export interface JsonRpcMessage {
   [k: string]: unknown;
 }
 
+/**
+ * What a client may assume about a tool (MCP 2025-03-26 on). Hints, not
+ * guarantees — a client decides from them whether a call needs confirmation.
+ */
+export interface ToolAnnotations {
+  /** A display name; the server fills it from ToolDecl.title when absent. */
+  title?: string;
+  /** Changes nothing in its environment. */
+  readOnlyHint?: boolean;
+  /** May destroy or overwrite something (meaningful only when not read-only). */
+  destructiveHint?: boolean;
+  /** Calling it again with the same arguments has no further effect. */
+  idempotentHint?: boolean;
+  /** Reaches an open world — the web, a remote API — rather than a closed one. */
+  openWorldHint?: boolean;
+  [hint: string]: boolean | string | undefined;
+}
+
 export interface ToolDecl {
   name: string;
   description: string;
   inputSchema: JsonSchema;
   title?: string;
   outputSchema?: JsonSchema;
-  annotations?: Record<string, boolean>;
+  annotations?: ToolAnnotations;
 }
 
 export interface PromptDecl {
@@ -141,12 +160,24 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
   // numeric 7 and string "7" name different JSON-RPC requests.
   const active = new Map<string | number, { cancelled: boolean }>();
 
-  const listTools = () => adapter.listTools(protocol);
+  const listTools = () => adapter.listTools(protocol).map((decl) => forRevision(decl, protocol));
   const prompts = () => adapter.prompts ?? [];
 
   async function handle(msg: JsonRpcMessage, send: (out: JsonRpcMessage) => void): Promise<void> {
     if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
       send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: expected a JSON-RPC object" } });
+      return;
+    }
+
+    // A response is addressed to whoever sent the request, and this server
+    // sends none. Answering it — "method not found" under the same id — reached
+    // the client as the reply to ITS OWN request of that id.
+    if (msg.method === undefined && ("result" in msg || "error" in msg)) return;
+
+    // JSON-RPC ids are strings or numbers. Echoing `true` or an object back is
+    // not a response any client can match, so the error goes out under null.
+    if (msg.id !== undefined && msg.id !== null && typeof msg.id !== "string" && typeof msg.id !== "number") {
+      send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: `id` must be a string or a number" } });
       return;
     }
 
@@ -173,6 +204,10 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
     };
 
     try {
+      if (typeof msg.method !== "string") {
+        reply({ error: { code: ERR_INVALID_REQUEST, message: "invalid request: no `method`" } });
+        return;
+      }
       switch (msg.method) {
         case "initialize": {
           protocol = negotiateProtocol(msg.params?.protocolVersion);
@@ -204,6 +239,11 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
           return;
         case "resources/list":
           reply({ result: { resources: listResources(opts.skillDir) } });
+          return;
+        // Part of the resources capability declared above; every resource is
+        // a fixed document, so there are no templates to offer.
+        case "resources/templates/list":
+          reply({ result: { resourceTemplates: [] } });
           return;
         case "resources/read": {
           const uri = typeof msg.params?.uri === "string" ? msg.params.uri : "";
@@ -253,7 +293,14 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
   async function handleToolCall(msg: JsonRpcMessage, reply: (out: Omit<JsonRpcMessage, "jsonrpc" | "id">) => void): Promise<void> {
     const params = msg.params ?? {};
     const name = typeof params.name === "string" ? params.name : "";
-    const args = (params.arguments ?? {}) as Record<string, unknown>;
+    const rawArgs = params.arguments ?? {};
+    // A string or an array here was validated key by key — a string's
+    // characters as properties — and failed with a message about the wrong thing.
+    if (rawArgs === null || typeof rawArgs !== "object" || Array.isArray(rawArgs)) {
+      reply({ error: { code: ERR_INVALID_PARAMS, message: "`arguments` must be an object" } });
+      return;
+    }
+    const args = rawArgs as Record<string, unknown>;
 
     // An unknown tool and malformed arguments are PROTOCOL errors: the client
     // asked for something that doesn't exist or sent something the declared
@@ -314,6 +361,28 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
     },
     tools: listTools,
   };
+}
+
+/**
+ * A tool declaration as the negotiated revision defines it.
+ *
+ * `annotations` arrived in 2025-03-26, `title` and `outputSchema` in
+ * 2025-06-18. Gating them was each adapter's job, so an adapter that declared
+ * them unconditionally — webindex's own did — sent a 2024-11-05 client fields
+ * its schema does not have. Here it holds for every adapter. `annotations.title`
+ * carries the name for a 2025-03-26 client, which has no top-level `title`.
+ */
+function forRevision(decl: ToolDecl, protocol: ProtocolVersion): ToolDecl {
+  const { title, outputSchema, annotations, ...base } = decl;
+  const out: ToolDecl = { ...base };
+  if (protocol >= RICH_TOOLS_SINCE) {
+    if (title !== undefined) out.title = title;
+    if (outputSchema !== undefined) out.outputSchema = outputSchema;
+  }
+  if (protocol >= ANNOTATIONS_SINCE && annotations) {
+    out.annotations = title !== undefined && annotations.title === undefined ? { title, ...annotations } : annotations;
+  }
+  return out;
 }
 
 function errMessage(e: unknown): string {

@@ -190,6 +190,35 @@ describe("malformed input", () => {
     }
   });
 
+  it("never answers a response", async () => {
+    // The server sends no requests, so a response is not addressed to it — and
+    // answering one with an error under the same id would reach the client as
+    // the reply to ITS request of that id.
+    expect(await call({ jsonrpc: "2.0", id: 10, result: {} })).toBeUndefined();
+    expect(await call({ jsonrpc: "2.0", id: 11, error: { code: -1, message: "no" } })).toBeUndefined();
+  });
+
+  it("rejects an id that is neither a string nor a number, answering with a null id", async () => {
+    // Echoing `true` or an object back as the id is not a JSON-RPC response at all.
+    for (const id of [true, { a: 1 }, [1]]) {
+      const r = await call({ jsonrpc: "2.0", id, method: "ping" } as unknown as JsonRpcMessage);
+      expect(r, JSON.stringify(id)).toMatchObject({ id: null, error: { code: -32600 } });
+    }
+  });
+
+  it("rejects a request without a method as invalid, not as an unknown method", async () => {
+    const r = await call({ jsonrpc: "2.0", id: 9 });
+    expect(r).toMatchObject({ id: 9, error: { code: -32600 } });
+  });
+
+  it("rejects tool arguments that are not an object", async () => {
+    for (const args of ["text=hi", ["hi"], 7]) {
+      const r = await call(rpc("tools/call", { name: "probe_echo", arguments: args }));
+      expect(r!.error, JSON.stringify(args)).toMatchObject({ code: -32602 });
+      expect((r!.error as any).message).toMatch(/`arguments` must be an object/);
+    }
+  });
+
   it("reports an unknown method", async () => {
     const r = await call(rpc("does/not/exist"));
     expect(r!.error).toMatchObject({ code: -32601 });
@@ -198,5 +227,60 @@ describe("malformed input", () => {
   it("requires a uri for resources/read", async () => {
     const r = await call(rpc("resources/read", {}));
     expect(r!.error).toMatchObject({ code: -32602 });
+  });
+
+  it("answers resources/templates/list, which the resources capability covers, with none", async () => {
+    // Clients probe it as soon as `resources` is declared; "method not found"
+    // there reads as a broken server.
+    expect(await call(rpc("resources/templates/list"))).toMatchObject({ result: { resourceTemplates: [] } });
+  });
+});
+
+describe("version-gated tool fields", () => {
+  // An adapter that declares every field whatever the client negotiated: the
+  // server, not each adapter, is where the revision a field needs is known.
+  const eager = () =>
+    createServer(
+      testAdapter({
+        listTools: () => [
+          {
+            name: "probe_echo",
+            title: "Echo",
+            description: "Echo the text back.",
+            inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+            outputSchema: { type: "object", properties: {}, required: [] },
+            annotations: { readOnlyHint: true },
+          },
+        ],
+      }),
+    );
+  const echoOn = async (version: string) => {
+    const server = eager();
+    await call(rpc("initialize", { protocolVersion: version }), server);
+    return ((await call(rpc("tools/list"), server))!.result as any).tools[0];
+  };
+
+  it("sends none of them to a 2024-11-05 client", async () => {
+    expect(await echoOn("2024-11-05")).toEqual({
+      name: "probe_echo",
+      description: "Echo the text back.",
+      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+    });
+  });
+
+  it("sends annotations, carrying the title, to a 2025-03-26 client", async () => {
+    // `title` and `outputSchema` arrived in 2025-06-18; `annotations.title` in
+    // 2025-03-26, so that is where an older client can still read the name.
+    const echo = await echoOn("2025-03-26");
+    expect(echo.title).toBeUndefined();
+    expect(echo.outputSchema).toBeUndefined();
+    expect(echo.annotations).toEqual({ title: "Echo", readOnlyHint: true });
+  });
+
+  it("sends every field from 2025-06-18 on", async () => {
+    const echo = await echoOn(LATEST_PROTOCOL);
+    expect(echo.title).toBe("Echo");
+    expect(echo.outputSchema).toBeDefined();
+    expect(echo.annotations).toEqual({ title: "Echo", readOnlyHint: true });
   });
 });

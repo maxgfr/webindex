@@ -82,6 +82,12 @@ describe("JSON-RPC over POST", () => {
     expect(res.status).toBe(202);
     expect(await res.text()).toBe("");
   });
+
+  it("returns 202 for a POSTed response too, as the transport requires", async () => {
+    const res = await post({ jsonrpc: "2.0", id: 10, result: {} });
+    expect(res.status).toBe(202);
+    expect(await res.text()).toBe("");
+  });
 });
 
 describe("protocol version per request", () => {

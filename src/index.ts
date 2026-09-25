@@ -244,6 +244,7 @@ export {
   type PromptDecl,
   type PromptResult,
   type ServerOptions,
+  type ToolAnnotations,
   type ToolDecl,
   type ToolOutcome,
 } from "./mcp/server.js";
