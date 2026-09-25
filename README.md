@@ -13,7 +13,7 @@ brew install maxgfr/tap/webindex
 
 ## Everything it does
 
-Three surfaces over one engine: **308 library exports**, **27 CLI commands**, **16 MCP
+Three surfaces over one engine: **312 library exports**, **27 CLI commands**, **16 MCP
 tools**. Nothing below needs an API key, and every optional helper degrades to a note
 rather than an error.
 
@@ -35,7 +35,7 @@ rather than an error.
 | **Tables** | `<table>` as headers and rows with `colspan`/`rowspan` resolved. Plain extraction flattens a table into prose in which every figure has lost its row and column — invisibly, because the result still reads well. `tables` · `webindex_tables` |
 | **The harness** | What every skill built on this engine was rewriting: the run directory, a validating CLI parser with a real exit-code taxonomy, the multi-agent **fan-out emitter**, and the mechanics of reading citations out of a report. |
 | **Skill packaging** | `webindex skill vendor\|check\|bundle\|copy\|doctor\|init` — the ~600 lines of packaging scripts each skill repo used to carry, driven by one `skill.json`. Dev-time, so it needs no vendoring and serves a repo that does not vendor this engine at all. |
-| **MCP** | The whole protocol: version negotiation, cancellation, schema validation, an error taxonomy, and both stdio and HTTP transports. An oversized response is **withheld with advice**, never truncated. |
+| **MCP** | The whole protocol: version negotiation, cancellation that stops the work (not only the answer), progress, schema validation, an error taxonomy, and both stdio and HTTP transports — with opt-in walls for a server others can reach: public addresses only, one directory, a bearer token. An oversized response is **withheld with advice**, never truncated. |
 
 ## The command line
 
@@ -46,7 +46,7 @@ rather than an error.
 | `webindex fetch <url>` | Fetch a URL and print its readable text. Routes PDFs and office documents to their ladders — by URL, content-type, download filename or the bytes themselves; images, media and archives get a note, never their bytes. HTML uses Firecrawl when available, then the built-in extractor, reducing the page to main content with consent banners dropped. `--full-page` keeps all page text through the built-in reader, including navigation and consent banners. `--json` adds `finalUrl` (where the text came from, after redirects), `canonical`, the title, status, extractor, `documentType`, `cached`, any note, `fullPage` and `consentDropped` (lines removed by the consent filter; 0 when skipped). Caching is opt-in: `--cache` reuses a fresh copy for the TTL (24 h) and revalidates a stale one with a conditional GET, so an unchanged page costs a 304; `--refresh` re-fetches and rewrites the entry; `--offline` serves only what the cache holds. `--lang fr-FR` sets Accept-Language, `--firecrawl <base>\|off` overrides the extractor. `--timeout <ms>` abandons a host that stays silent that long (default 20000, or `WEBINDEX_TIMEOUT_MS`); a timed-out request is not retried, so that is the real worst case. A failure names its cause — a refused connection, an unknown host, a redirect loop, a timeout — and one that cannot change on a second try is not retried. |
 | `webindex extract <file>` | The same extraction on a file already on disk — PDF, office document, HTML or plain text, recognised by its bytes when its name says otherwise; a CSV nothing can convert is read as its text, and a binary file is refused rather than printed. HTML is reduced to main content with consent banners dropped; `--full-page` keeps all page text, including navigation and consent banners. `--json` includes `fullPage` and `consentDropped` as above (0 for non-HTML). |
 | `webindex repo\|issues\|prs\|releases\|tags <ref>` | What GitHub, GitLab or Gitea records about a repository: its facts (stars, licence, last push, archived), an issue or PR search (`--terms`; relaxed once to the most distinctive terms, and said so, when all of them match nothing), releases, tags. `<ref>` is `owner/repo`, any repository URL — one copied from a browser works — `git@host:owner/repo`, or a local checkout, read as its origin. `--forge github\|gitlab\|gitea` names what a self-hosted host runs; `WEBINDEX_FORGE_HOSTS` declares it once, and is also what lets a token go there. A failure says which one it was. |
-| `webindex mcp` | Serve the tools below to an agent. `--transport stdio` (default) or `http` with `--port`, `--bind`, `--allow-remote`. |
+| `webindex mcp` | Serve the tools below to an agent. `--transport stdio` (default) or `http` with `--port`, `--bind`, `--allow-remote`. `--public-only`, `--allow-private` and `--extract-root <dir>` set the walls an exposed server needs — see [Exposing it](#exposing-it). |
 | `webindex searxng up\|down\|status` | Drive the keyless SearXNG container. |
 | `webindex semantic up\|down\|status` | Drive Qdrant and Ollama, and pull the embedding model once they answer. |
 | `webindex firecrawl up\|down\|status` | Drive Firecrawl, which cleans a page with a real headless browser. It delegates its own search to SearXNG, so this starts both. |
@@ -114,17 +114,67 @@ claude mcp add --transport http webindex http://127.0.0.1:7340/mcp
 | `webindex_fetch` | `url` (required), `lang`, `fullPage`, `timeoutMs`, `cache` | The page's readable text, then a trailer naming the final URL after redirects, its canonical URL and title, any note, and the rung that produced it. Handles HTML, PDFs and office documents, using Firecrawl when available and local extraction as fallback. `fullPage: true` keeps all HTML page text through the built-in reader, including navigation and consent banners. `timeoutMs` shortens the wait on a silent host. `cache: true` uses the revalidating on-disk cache (off by default): a fresh copy is reused for its TTL, a stale one costs a 304 when unchanged. Never raw bytes. |
 | `webindex_extract` | `path` (required), `fullPage` | The same for a file already on disk; `fullPage: true` keeps navigation and consent banners too. |
 | `webindex_rank` | `question` (required), `documents` (required), `limit`, `dense` | The reading order for a pool of candidates: BM25F, near-duplicate collapse, then MMR. A document's own `score` is fused with BM25F by rank; `dense: true` fuses in the local embedding lane too (a `note` says when there is none). Returns each entry's score and matched query terms, plus how many duplicates were collapsed and, in `duplicates`, each dropped mirror's URL with the URL it duplicated. The brick an agent otherwise re-implements — deterministic, no model, no network unless `dense` asks for one. |
+| `webindex_repo` | `repo` (required), `forge` | A repository's own record from GitHub, GitLab or Gitea: stars, licence, default branch, last push, archived. |
+| `webindex_issues` | `repo` (required), `terms`, `kind` (`issue` or `pr`), `limit`, `forge` | Issues or pull requests matching every term, relaxed once to the most distinctive ones (and said so in `note`) when together they match nothing. |
+| `webindex_releases` | `repo` (required), `limit`, `forge` | Releases, newest first, with their notes. |
+| `webindex_tags` | `repo` (required), `limit`, `forge` | Tags — the versions of a project that tags without publishing releases. |
+| `webindex_package` | `name` (required), `registry`, `version` | A library name resolved through npm, PyPI or crates.io to its repository, docs, current version, licence and deprecation. |
+| `webindex_meta` | `url` (required) | JSON-LD, OpenGraph and meta tags: author, dates, type, canonical URL. |
+| `webindex_robots` | `url` (required) | Whether robots.txt allows the URL, its crawl-delay and the sitemaps it names. |
+| `webindex_sitemap` | `url` (required), `max` | The URLs the site's sitemaps list, reading at most `max` documents (default 3); the children not reached come back in `unfetched`. |
+| `webindex_feed` | `url` (required) | A feed's dated entries, or those of the feeds a page advertises. |
+| `webindex_tables` | `url` (required), `markdown` | A page's tables as headers and rows, spans resolved. |
+| `webindex_embed` | `texts` (required) | One vector per text from the local Ollama; fails with the command that starts it when none answers. |
+| `webindex_crawl` | `url` (required), `max` (required), `depth`, `prefix`, `sitemap` | A bounded breadth-first walk honouring robots.txt at every hop: each page's URL, title and text, plus `disallowed`, `pending` and `notes`. Every page comes back inline, and an answer over 1 MB is withheld — ask for tens of pages, not hundreds. |
+
+Every tool is annotated `readOnlyHint` (none changes anything it reaches) and,
+except `webindex_extract`, `webindex_rank` and `webindex_embed`, `openWorldHint`.
 
 The server implements `initialize`, `ping`, `tools/list`, `tools/call`,
-`resources/list`, `resources/read`, `prompts/list`, `prompts/get`, and
-`notifications/cancelled`. It negotiates protocol revisions from `2024-11-05` to
-`2025-11-25`, validates arguments against each tool's declared schema, withholds
-an oversized response rather than sending a truncated one, and distinguishes a
-tool that failed (a readable `isError` result) from a client that asked wrongly
-(a JSON-RPC error).
+`resources/list`, `resources/templates/list`, `resources/read`, `prompts/list`,
+`prompts/get`, `notifications/cancelled` and `notifications/progress`. It
+negotiates protocol revisions from `2024-11-05` to `2025-11-25` (an unknown one
+gets the newest), sends each revision only the tool fields it defines, serves
+JSON-RPC batches only to a client on a revision that has them (before
+`2025-06-18`), validates arguments against each tool's declared schema,
+withholds an oversized response rather than sending a truncated one, and
+distinguishes a tool that failed (a readable `isError` result) from a client
+that asked wrongly (a JSON-RPC error). A cancelled call stops its work — the
+fetch in flight is aborted, a crawl or a sitemap walk goes no further — rather
+than only having its answer dropped, and `webindex_crawl` and `webindex_sitemap`
+report each page or document as progress to a call that asked with a
+`progressToken`. Resources are `SKILL.md` and `references/*.md`, and nothing
+else under the payload.
 
 Over HTTP it binds loopback only unless `--allow-remote`, checks the `Origin`
-header against DNS rebinding, and answers each request statelessly.
+header against DNS rebinding, and answers each request statelessly: plain
+JSON, or — for a request that asked for progress, from a client that accepts
+`text/event-stream` — an SSE stream of its progress and then its answer. A
+POSTed notification or response gets a 202. With no session to name a
+request by, a client hanging up is what cancels it there.
+
+### Exposing it
+
+On your own machine, fetching any URL and reading any file is the point.
+Reachable by anyone else, it is a proxy into your network — the cloud metadata
+endpoint at `169.254.169.254` hands out credentials to whoever asks — and a
+reader of `~/.ssh`. So there are walls, each opt-in:
+
+| Flag or variable | What it does |
+|---|---|
+| `--public-only` (`WEBINDEX_PUBLIC_ONLY=1`) | Every URL tool refuses a target that is, or resolves to, a loopback, private, link-local, CGNAT, unique-local or reserved address — IPv4 carried inside IPv6 included — and checks again at every redirect, robots.txt, sitemap and crawl hop. A guarded fetch skips Firecrawl (which fetches on its own) and the on-disk cache (which unguarded runs share). A self-hosted forge must resolve publicly unless it is declared in `WEBINDEX_FORGE_HOSTS`. It does not stop a resolver that answers this check and the fetch differently (DNS rebinding). |
+| `--extract-root <dir>` (`WEBINDEX_EXTRACT_ROOT`) | `webindex_extract`, and a repository named by a local path, read only under `<dir>`; a relative path is read from it, and symlinks are resolved before the check. |
+| `WEBINDEX_MCP_TOKEN` | Over HTTP, answer only requests carrying `Authorization: Bearer <token>` — configure the client to send that header; the startup message prints the `claude mcp add` line that does. |
+
+`--allow-remote` turns the first two on by default: public addresses only
+(`--allow-private` lifts that), and no local file at all — `webindex_extract`
+is not even listed — unless `--extract-root` names a directory. The startup
+message says which walls are up and whether there is a token.
+
+```bash
+WEBINDEX_MCP_TOKEN=$(openssl rand -hex 32) \
+  webindex mcp --transport http --bind 0.0.0.0 --allow-remote --extract-root ~/shared-docs
+```
 
 
 ## What is in scope
@@ -137,7 +187,7 @@ A library of **primitives**, not a pipeline.
 | Retrieval | HTTP with retry, **streaming** byte caps and conditional GET, HTML→text, main-content extraction, consent-banner stripping, Firecrawl, the PDF ladder (`pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → native → OCR), the office-document ladder (`anydoc` → Firecrawl → built-in), explicit Wayback rescue, the revalidating fetch cache |
 | Text | keyword extraction, accent- and plural-folded matching, camelCase splitting, excerpting, URL canonicalisation and identity |
 | Ranking | RRF fusion, BM25F with field weighting and a relevance floor, SimHash near-duplicate collapse, MMR diversification, DOI/arXiv identity, pool-relative recency |
-| MCP | the whole protocol — negotiation, cancellation, schema validation, response capping, the error taxonomy — plus the stdio and HTTP transports |
+| MCP | the whole protocol — negotiation, cancellation, progress, schema validation, response capping, the error taxonomy — plus the stdio and HTTP transports |
 
 Discovery is deliberately thin: one query to the local stack, candidates back. There is no
 backend registry and no fan-out across twenty engines — a tool that wants its own cascade of

@@ -76,6 +76,7 @@ webindex changed <url> [--etag <v>] [--last-modified <d>]  # a 304 costs one rou
 webindex cache status|clean [--all]
 webindex searxng|firecrawl|semantic|stack up|down|status
 webindex skill check|bundle|vendor|copy|doctor|init
+webindex mcp [--transport http]       # the webindex_* tools over MCP; --public-only, --extract-root <dir> wall it in
 webindex doctor
 ```
 
@@ -136,6 +137,13 @@ a site is, and a caller that enumerates should ask first.
 The keyless engines are the only rung that reaches the public internet without
 being asked to — the rest is localhost by default. `WEBINDEX_ENGINES=off` turns
 them off for sandboxes, test suites and air-gapped runs.
+
+The MCP server fetches whatever URL it is handed and reads whatever file it is
+named. Exposed with `--allow-remote`, it refuses private and metadata addresses
+(at every redirect; `--allow-private` lifts it) and reads no local file unless
+`--extract-root <dir>` names the one directory it may; `WEBINDEX_MCP_TOKEN`
+makes HTTP require a bearer token. `--public-only` and `--extract-root` work
+without `--allow-remote` too.
 
 ## References
 
