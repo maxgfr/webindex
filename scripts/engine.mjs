@@ -2321,7 +2321,15 @@ function isStopword(term) {
   const t = term.toLowerCase();
   if (STOPWORDS.has(t)) return true;
   const extra = brand().extraStopwords;
-  return extra ? extra.some((w) => w.toLowerCase() === t) : false;
+  return extra ? extraStopwordSet(extra).has(t) : false;
+}
+var extraSets = /* @__PURE__ */ new WeakMap();
+function extraStopwordSet(extra) {
+  const hit = extraSets.get(extra);
+  if (hit && hit.length === extra.length) return hit.set;
+  const set = new Set(extra.map((w) => w.toLowerCase()));
+  extraSets.set(extra, { length: extra.length, set });
+  return set;
 }
 var TOKEN_RE = /(?<![\p{L}\p{N}_])\.net(?![\p{L}\p{N}_])|[\p{L}\p{N}_]+(?:[+#]{1,2}\d*(?![\p{L}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{N}_./]))?/giu;
 function keywords(question) {
@@ -2517,11 +2525,11 @@ function excerptWindows(text, question, opts = {}) {
   const after = opts.after ?? 12;
   const maxChars = opts.maxChars ?? 1500;
   const perDoc = Math.max(1, opts.perDoc ?? 2);
-  const matchers = (Array.isArray(question) ? question : [question]).filter((q) => q.trim()).map((q) => buildMatcher(q));
+  const matchers2 = (Array.isArray(question) ? question : [question]).filter((q) => q.trim()).map((q) => buildMatcher(q));
   const hits = [];
   for (let i = 0; i < lines.length; i++) {
     let score = 0;
-    for (const m of matchers) {
+    for (const m of matchers2) {
       const cov = m.matchLine(lines[i]).size;
       if (cov > score) score = cov;
     }
@@ -2552,6 +2560,118 @@ function slugify(input, opts = {}) {
   return head ? `${head}-${tag}` : tag;
 }
 
+// src/locale.ts
+var LANG_COUNTRY = {
+  en: "us",
+  pt: "br",
+  ja: "jp",
+  zh: "cn",
+  ko: "kr",
+  sv: "se",
+  da: "dk",
+  cs: "cz",
+  el: "gr",
+  nb: "no",
+  // Bokmål → Norway
+  nn: "no",
+  // Nynorsk → Norway
+  uk: "ua",
+  // Ukrainian language → Ukraine
+  ar: "sa",
+  he: "il",
+  hi: "in",
+  et: "ee",
+  vi: "vn",
+  ms: "my",
+  fa: "ir",
+  ca: "es",
+  sl: "si",
+  sr: "rs",
+  tl: "ph",
+  fil: "ph",
+  ga: "ie",
+  cy: "gb",
+  eu: "es",
+  gl: "es",
+  sq: "al",
+  bs: "ba",
+  be: "by",
+  ka: "ge",
+  hy: "am",
+  kk: "kz",
+  af: "za",
+  sw: "ke",
+  ur: "pk",
+  bn: "bd",
+  ta: "in",
+  te: "in",
+  mr: "in",
+  ne: "np",
+  si: "lk",
+  km: "kh",
+  lo: "la",
+  lb: "lu"
+};
+var SCRIPT_COUNTRY = {
+  "zh-hant": "tw",
+  "zh-hans": "cn"
+};
+var REGION_ALIASES = {
+  gb: "uk",
+  en: "us",
+  "419": "xl",
+  si: "sl"
+};
+var DDG_LANG_ALIASES = {
+  nb: "no",
+  // Bokmål
+  nn: "no",
+  // Nynorsk
+  ja: "jp",
+  ko: "kr",
+  fil: "tl"
+};
+var DDG_KL = {
+  ar: "xa-ar",
+  ca: "ct-ca",
+  "zh-tw": "tw-tzh",
+  "zh-hk": "hk-tzh",
+  "es-us": "ue-es"
+};
+var NO_REGION = "wt";
+function parseTag(tag) {
+  const parts = (tag || "en").trim().replace(/[.@].*$/, "").split(/[-_]/);
+  const lang = (parts[0] || "en").toLowerCase();
+  let i = 1;
+  const script = /^[a-z]{4}$/i.test(parts[i] ?? "") ? parts[i++].toLowerCase() : void 0;
+  const region = /^(?:[a-z]{2}|\d{3})$/i.test(parts[i] ?? "") ? parts[i].toLowerCase() : void 0;
+  return { lang, script, region };
+}
+function baseLang(lang) {
+  return parseTag(lang).lang;
+}
+function resolveRegion(lang, region) {
+  if (region?.trim()) return region.trim().toLowerCase();
+  const t = parseTag(lang);
+  if (t.region) return t.region;
+  const byScript = t.script ? SCRIPT_COUNTRY[`${t.lang}-${t.script}`] : void 0;
+  return byScript ?? LANG_COUNTRY[t.lang] ?? t.lang;
+}
+function ddgRegion(lang, region) {
+  const r = resolveRegion(lang, region);
+  if (r === NO_REGION) return "wt-wt";
+  const l = baseLang(lang);
+  return DDG_KL[`${l}-${r}`] ?? DDG_KL[l] ?? `${REGION_ALIASES[r] ?? r}-${DDG_LANG_ALIASES[l] ?? l}`;
+}
+function acceptLanguageHeader(lang, region) {
+  const l = baseLang(lang);
+  const r = resolveRegion(lang, region);
+  if (r === NO_REGION) return l === "en" ? "en" : `${l},en;q=0.5`;
+  const R = r.toUpperCase();
+  if (l === "en") return `${l}-${R},${l};q=0.9`;
+  return `${l}-${R},${l};q=0.9,en;q=0.5`;
+}
+
 // src/firecrawl.ts
 var FIRECRAWL_DEFAULT_BASE = "http://localhost:3002";
 var PROBE_TIMEOUT_MS = 2e3;
@@ -2570,48 +2690,69 @@ function authHeaders() {
   const key = env("FIRECRAWL_KEY");
   return key ? { authorization: `Bearer ${key}` } : void 0;
 }
-var probeCache = /* @__PURE__ */ new Map();
+var PROBE_DOWN_TTL_MS = 3e4;
+var ProbeMemo = class {
+  entries = /* @__PURE__ */ new Map();
+  /** The verdict for `key`, probing when there is none or a "down" one expired. */
+  get(key, probe) {
+    const hit = this.entries.get(key);
+    if (hit && (hit.downAt === void 0 || Date.now() - hit.downAt < PROBE_DOWN_TTL_MS)) return hit.verdict;
+    const entry = { verdict: probe() };
+    void entry.verdict.then((up) => {
+      if (!up) entry.downAt = Date.now();
+    });
+    this.entries.set(key, entry);
+    return entry.verdict;
+  }
+  markDown(key) {
+    this.entries.set(key, { verdict: Promise.resolve(false), downAt: Date.now() });
+  }
+  clear() {
+    this.entries.clear();
+  }
+};
+var probeCache = new ProbeMemo();
 function resetFirecrawlProbeCache() {
   probeCache.clear();
 }
 function markFirecrawlDown(base) {
-  for (const explicit of [true, false]) probeCache.set(`${base}|${explicit}`, Promise.resolve(false));
+  for (const explicit of [true, false]) probeCache.markDown(`${base}|${explicit}`);
 }
 function looksLikeFirecrawl(contentType, body) {
   if (/firecrawl/i.test(body.slice(0, 4096))) return true;
   return !/^\s*text\/html/i.test(contentType ?? "");
 }
 function probeFirecrawl(base, explicit = false) {
-  const key = `${base}|${explicit}`;
-  let p = probeCache.get(key);
-  if (!p) {
-    p = (async () => {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
-      try {
-        const res = await fetch(`${base}/`, { signal: ctrl.signal });
-        const body = await res.text().catch(() => "");
-        return explicit || looksLikeFirecrawl(res.headers.get("content-type"), body);
-      } catch {
-        return false;
-      } finally {
-        clearTimeout(t);
-      }
-    })();
-    probeCache.set(key, p);
-  }
-  return p;
+  return probeCache.get(`${base}|${explicit}`, async () => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${base}/`, { signal: ctrl.signal });
+      const body = await res.text().catch(() => "");
+      return explicit || looksLikeFirecrawl(res.headers.get("content-type"), body);
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(t);
+    }
+  });
 }
 var prefixCache = /* @__PURE__ */ new Map();
 function apiPrefix(base) {
   return prefixCache.get(base) ?? "/v2";
 }
-async function postJson(base, path, body, timeoutMs) {
-  const headers = authHeaders();
-  const first = await httpJson("POST", `${base}${apiPrefix(base)}${path}`, body, { timeoutMs, headers });
-  if (first.status !== 404 || apiPrefix(base) !== "/v2") return first;
+async function postJson(base, path, body, opts) {
+  const req = { timeoutMs: opts.timeoutMs, retries: opts.retries, headers: authHeaders() };
+  const prefix = apiPrefix(base);
+  const first = await httpJson("POST", `${base}${prefix}${path}`, body(prefix), req);
+  if (first.status !== 404 || prefix !== "/v2") return first;
   prefixCache.set(base, "/v1");
-  return httpJson("POST", `${base}/v1${path}`, body, { timeoutMs, headers });
+  return httpJson("POST", `${base}/v1${path}`, body("/v1"), req);
+}
+function serverReason(data) {
+  const raw = typeof data === "string" ? data : typeof data?.error === "string" ? data.error : "";
+  const line = cleanInline(raw).slice(0, 200);
+  return line || void 0;
 }
 function mapScrapeResponse(json) {
   if (!json || typeof json !== "object" || Array.isArray(json)) return null;
@@ -2622,12 +2763,16 @@ function mapScrapeResponse(json) {
   if (!markdown) return null;
   const meta = data.metadata && typeof data.metadata === "object" ? data.metadata : {};
   const rawTitle = typeof meta.title === "string" ? cleanInline(meta.title) : "";
-  const src = typeof meta.sourceURL === "string" ? meta.sourceURL : typeof meta.url === "string" ? meta.url : void 0;
+  const asked = typeof meta.sourceURL === "string" && meta.sourceURL ? meta.sourceURL : void 0;
+  const landed = typeof meta.url === "string" && meta.url ? meta.url : void 0;
+  const src = asked ?? landed;
+  const final = landed ?? asked;
   const status = typeof meta.statusCode === "number" ? meta.statusCode : void 0;
   return {
     markdown,
     ...rawTitle ? { title: rawTitle } : {},
     ...src ? { sourceURL: src } : {},
+    ...final ? { finalUrl: final } : {},
     ...status !== void 0 ? { statusCode: status } : {}
   };
 }
@@ -2658,7 +2803,7 @@ async function scrapeViaFirecrawl(url, opts = {}) {
   const r = await postJson(
     base,
     "/scrape",
-    {
+    () => ({
       url,
       formats: ["markdown"],
       onlyMainContent: true,
@@ -2666,10 +2811,13 @@ async function scrapeViaFirecrawl(url, opts = {}) {
       removeBase64Images: true,
       maxAge: SCRAPE_MAX_AGE_MS,
       timeout: SCRAPE_TIMEOUT_MS
-    },
-    SCRAPE_TIMEOUT_MS
+    }),
+    // No retry: the built-in extractor is the fallback, and a second attempt
+    // at a browser render that just failed doubles the wait for nothing.
+    { timeoutMs: SCRAPE_TIMEOUT_MS, retries: 0 }
   );
   if (!r.ok) {
+    if (!r.status) markFirecrawlDown(base);
     const why = r.status ? `status ${r.status}` : r.error ?? "no response";
     return { why: `Firecrawl could not scrape ${url} (${why}) \u2014 fell back to the built-in extractor.` };
   }
@@ -2681,12 +2829,39 @@ async function searchViaFirecrawl(query, limit, opts = {}) {
   const base = firecrawlBase(opts);
   if (!base) return { why: `Firecrawl disabled (--firecrawl off / ${envName("FIRECRAWL")}=off). Skipping.` };
   if (!await probeFirecrawl(base, firecrawlIsExplicit(opts))) {
-    return { why: `Firecrawl not reachable at ${base} (bring it up with \`${brand().cli} firecrawl up\`). Skipping.` };
+    return { why: `Firecrawl not reachable at ${base} (bring it up with \`${brand().cli} firecrawl up\`). Skipping.`, status: 0 };
   }
-  const r = await postJson(base, "/search", { query, limit, sources: ["web"] }, SEARCH_TIMEOUT_MS);
+  const n = Number.isFinite(limit) ? Math.min(100, Math.max(1, Math.trunc(limit))) : 10;
+  const locale = {};
+  if (opts.lang || opts.region) {
+    if (opts.lang) locale.lang = baseLang(opts.lang);
+    const country = resolveRegion(opts.lang, opts.region);
+    if (/^[a-z]{2}$/.test(country) && country !== "wt") locale.country = country;
+  }
+  const timeoutMs = Math.max(1, Math.round(Math.min(SEARCH_TIMEOUT_MS, opts.budgetMs ?? SEARCH_TIMEOUT_MS)));
+  const r = await postJson(
+    base,
+    "/search",
+    // `sources` is v2's; v1's strict schema rejects any key it does not know.
+    // `timeout` tells Firecrawl to stop when we do: its own default is 60 s,
+    // double the time this client waits.
+    (prefix) => ({ query, limit: n, ...locale, timeout: timeoutMs, ...prefix === "/v2" ? { sources: ["web"] } : {} }),
+    // No retry: this is the cascade's last rung, and a second attempt at an
+    // instance that just failed or throttled us doubles the wait for nothing.
+    { timeoutMs, retries: 0 }
+  );
   if (!r.ok) {
-    const why = r.status === 429 || r.status === 503 ? `rate-limited (HTTP ${r.status})` : `unreachable (status ${r.status || 0})`;
-    return { why: `Firecrawl search ${why} at ${base}.` };
+    if (!r.status) markFirecrawlDown(base);
+    const reason = serverReason(r.data);
+    const why = r.status === 429 || r.status === 503 ? `rate-limited (HTTP ${r.status})` : !r.status ? `unreachable (${r.error ?? "no response"})` : (
+      // It answered: a 4xx is this request refused (a bad field, a key a
+      // Cloud base wants), which "unreachable" misreported as an outage.
+      `${r.status < 500 ? "rejected the request" : "failed"} (HTTP ${r.status}${reason ? `: ${reason}` : ""})`
+    );
+    return { why: `Firecrawl search ${why} at ${base}.`, status: r.status };
+  }
+  if (r.data?.success === false) {
+    return { why: `Firecrawl search failed at ${base}${serverReason(r.data) ? `: ${serverReason(r.data)}` : ""}.`, status: r.status };
   }
   return { hits: mapSearchResponse(r.data) };
 }
@@ -2944,6 +3119,7 @@ async function httpGet(url, opts = {}) {
       const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(meta.retryAfterMs) : void 0;
       if (wait !== void 0) {
         last = result;
+        if (wait > 0) opts.onBackOff?.(result.url, wait);
         await sleep(wait);
         continue;
       }
@@ -3254,7 +3430,7 @@ async function fetchAndExtract(url, opts = {}) {
       return {
         text: fc.data.markdown,
         title: fc.data.title,
-        finalUrl: fc.data.sourceURL || url,
+        finalUrl: fc.data.finalUrl || url,
         status: fc.data.statusCode ?? 200,
         extractor: "firecrawl"
       };
@@ -3262,7 +3438,14 @@ async function fetchAndExtract(url, opts = {}) {
     firecrawlNote = fc.data ? `Firecrawl got HTTP ${fc.data.statusCode} for ${url} \u2014 fell back to the built-in extractor.` : fc.why;
   }
   const base = wantsPdf ? PDF_FETCH_OPTS : wantsDoc ? DOC_FETCH_OPTS : { accept: "text/html,text/plain,*/*", acceptLanguage: opts.acceptLanguage };
-  const fetchOpts = { ...base, maxDocumentBytes: PDF_FETCH_OPTS.maxBytes, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs };
+  const fetchOpts = {
+    ...base,
+    maxDocumentBytes: PDF_FETCH_OPTS.maxBytes,
+    headers: opts.headers,
+    authorizeUrl: opts.authorizeUrl,
+    timeoutMs: opts.timeoutMs,
+    onBackOff: opts.onBackOff
+  };
   let res = await httpGet(url, fetchOpts);
   const toldToWait = (res.retryAfterMs ?? 0) > RETRY_AFTER_CAP_MS;
   if (!res.ok && !toldToWait && brand().defaultUa === "contact" && (res.status === 403 || res.status === 429)) {
@@ -3506,12 +3689,21 @@ function capExtract(text, depth) {
 function rrf(lists, keyOf, k = 60) {
   const score = /* @__PURE__ */ new Map();
   for (const list of lists) {
+    const seen = /* @__PURE__ */ new Set();
     list.forEach((item, idx) => {
       const key = keyOf(item);
+      if (seen.has(key)) return;
+      seen.add(key);
       score.set(key, (score.get(key) ?? 0) + 1 / (k + idx + 1));
     });
   }
   return score;
+}
+var byCodeUnit = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function trimTrailing(s, ch) {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === ch) end--;
+  return s.slice(0, end);
 }
 function arxivIdFromUrl(url) {
   let host;
@@ -3519,7 +3711,7 @@ function arxivIdFromUrl(url) {
   try {
     const u = new URL(url.trim());
     host = u.hostname.toLowerCase();
-    path = u.pathname;
+    path = trimTrailing(u.pathname, "/");
   } catch {
     return void 0;
   }
@@ -3533,20 +3725,33 @@ function arxivIdFromUrl(url) {
 function doiFromUrl(url) {
   let host;
   let path;
+  let search2;
   try {
     const u = new URL(url.trim());
     host = u.hostname.toLowerCase();
     path = u.pathname;
+    search2 = u.search;
   } catch {
     return void 0;
   }
+  const decode = (s) => {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  };
   if (/(^|\.)(dx\.)?doi\.org$/.test(host)) {
-    const doi = normalizeDoi(decodeURIComponent(path.replace(/^\/+/, "").replace(/\/+$/, "")));
-    return /^10\.\d{4,9}\//.test(doi) ? doi : void 0;
+    const doi2 = normalizeDoi(decode(trimTrailing(path.replace(/^\/+/, ""), "/")));
+    return /^10\.\d{4,9}\//.test(doi2) ? doi2 : void 0;
   }
   const m = /\/doi(?:\/(?:abs|full|pdf|epdf|e?pub))?\/(10\.\d{4,9}\/[^\s?#]+)/i.exec(path);
-  if (m) return normalizeDoi(decodeURIComponent(m[1]).replace(/\/+$/, ""));
-  return void 0;
+  if (m) return normalizeDoi(trimTrailing(decode(m[1]), "/"));
+  const loose = /(?:^|[/=])(10\.\d{4,9}\/[^\s?#&]+)/.exec(`${path}${search2}`);
+  if (!loose) return void 0;
+  let doi = normalizeDoi(trimTrailing(decode(loose[1]), "/")).replace(/\.pdf$/, "");
+  if (doi.startsWith("10.1101/")) doi = doi.replace(/\.(?:full|abstract|supplementary-material|article-info|article-metrics)$/, "").replace(/v\d+$/, "");
+  return doi;
 }
 function dedupeByUrl(items) {
   const best = /* @__PURE__ */ new Map();
@@ -3566,16 +3771,46 @@ function dedupeByUrl(items) {
   return { items: order.map((k) => best.get(k)), dropped };
 }
 var indexTokenCache = /* @__PURE__ */ new WeakMap();
-function bm25Tokenize(text) {
+function bm25Tokenize(text, opts = {}) {
+  return tokenize(text, opts.subtokens !== false);
+}
+var WORD_SPLIT = /[^\p{L}\p{M}\p{N}_]+/u;
+var NON_ASCII2 = /[^\p{ASCII}]/u;
+var CJK_CHAR = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
+var CJK_RUNS = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
+var IDENT_BOUNDARY = new RegExp("_|[\\p{Ll}\\p{N}]\\p{Lu}|\\p{Lu}\\p{Lu}\\p{Ll}|\\p{L}\\p{N}|\\p{N}\\p{L}", "u");
+var MAX_IDENT = 64;
+function tokenize(text, expand2) {
   if (!text) return [];
   const out = [];
-  for (const raw of text.split(/[^\p{L}\p{N}_]+/u)) {
-    if (raw.length < 2) continue;
-    if (isStopword(raw)) continue;
-    const t = foldCached(raw);
-    if (t.length >= 2) out.push(t);
+  const nonAscii = NON_ASCII2.test(text);
+  for (const raw of (nonAscii ? text.normalize("NFC") : text).split(WORD_SPLIT)) {
+    if (!raw) continue;
+    if (nonAscii && CJK_CHAR.test(raw)) {
+      for (const piece of raw.split(CJK_RUNS)) {
+        if (!piece) continue;
+        if (CJK_CHAR.test(piece)) pushBigrams(piece, out);
+        else pushTerm(piece, out, expand2);
+      }
+    } else pushTerm(raw, out, expand2);
   }
   return out;
+}
+function pushTerm(raw, out, expand2) {
+  if (raw.length < 2 || isStopword(raw)) return;
+  const t = foldCached(raw);
+  if (t.length < 2) return;
+  out.push(t);
+  if (!expand2 || raw.length > MAX_IDENT) return;
+  for (const sub of subtermsCached(raw, t)) out.push(sub);
+}
+function pushBigrams(run, out) {
+  const chars = Array.from(run);
+  if (chars.length === 1) {
+    out.push(run);
+    return;
+  }
+  for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1]);
 }
 var FOLD_CACHE_MAX = 5e4;
 var foldCache = /* @__PURE__ */ new Map();
@@ -3587,8 +3822,27 @@ function foldCached(raw) {
   foldCache.set(raw, t);
   return t;
 }
-function docTokens(doc, titleWeight, headingWeight) {
-  const out = bm25Tokenize(doc.body);
+var NO_SUBTERMS = [];
+var subtermCache = /* @__PURE__ */ new Map();
+var subtermExtras = { list: void 0, length: 0 };
+function subtermsCached(raw, folded) {
+  const list = brand().extraStopwords;
+  if (list !== subtermExtras.list || (list?.length ?? 0) !== subtermExtras.length) {
+    subtermCache.clear();
+    subtermExtras = { list, length: list?.length ?? 0 };
+  }
+  const hit = subtermCache.get(raw);
+  if (hit !== void 0) return hit;
+  let subs = NO_SUBTERMS;
+  if (IDENT_BOUNDARY.test(raw)) {
+    subs = subtokens(raw).map(foldCached).filter((sub) => sub !== folded && sub.length >= 2);
+  }
+  if (subtermCache.size >= FOLD_CACHE_MAX) subtermCache.clear();
+  subtermCache.set(raw, subs);
+  return subs;
+}
+function docTokens(doc, titleWeight, headingWeight, body) {
+  const out = body ? [...body] : bm25Tokenize(doc.body);
   const headings = bm25Tokenize(doc.headings);
   for (let r = 0; r < headingWeight; r++) out.push(...headings);
   const title = bm25Tokenize(doc.title);
@@ -3621,7 +3875,7 @@ function buildBm25Index(question, docs, opts = {}) {
   const tokenCache = /* @__PURE__ */ new WeakMap();
   let totalLen = 0;
   for (const doc of docs) {
-    const toks = docTokens(doc, titleWeight, headingWeight);
+    const toks = docTokens(doc, titleWeight, headingWeight, opts.tokensOf?.(doc));
     tokenCache.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens: toks });
     totalLen += toks.length;
     for (const t of new Set(toks)) df.set(t, (df.get(t) ?? 0) + 1);
@@ -3700,9 +3954,15 @@ function recencyScore(meta, minYear, maxYear) {
   const clamped = Math.min(maxYear, Math.max(minYear, y));
   return (clamped - minYear) / (maxYear - minYear);
 }
-function simhash(text) {
-  const toks = bm25Tokenize(text);
-  if (!toks.length) return 0n;
+function simhash(text, opts = {}) {
+  const lanes = new Uint32Array(2);
+  simhashLanes(opts.tokens ?? tokenize(text, false), lanes);
+  return BigInt(lanes[0]) << 32n | BigInt(lanes[1]);
+}
+function simhashLanes(toks, out) {
+  out[0] = 0;
+  out[1] = 0;
+  if (!toks.length) return;
   const v = new Int32Array(64);
   const words = new Uint32Array(2);
   const pieces = toks.length < 3 ? [""] : ["", " ", "", " ", ""];
@@ -3728,7 +3988,8 @@ function simhash(text) {
     if (2 * v[b] > n) lo |= 1 << b;
     if (2 * v[b + 32] > n) hi |= 1 << b;
   }
-  return BigInt(hi >>> 0) << 32n | BigInt(lo >>> 0);
+  out[0] = hi;
+  out[1] = lo;
 }
 var MASK32 = 0xffffffffn;
 function popcount32(n) {
@@ -3749,75 +4010,141 @@ function hammingDistance(a, b) {
 function dedupeNearDuplicates(items, opts = {}) {
   const maxBits = opts.maxBits ?? 3;
   const minChars = opts.minChars ?? 500;
-  const better = (a, b) => a.score !== b.score ? a.score > b.score : a.url.localeCompare(b.url) < 0;
+  const better = (a, b) => a.score !== b.score ? a.score > b.score : byCodeUnit(a.url, b.url) < 0;
   const kept = [];
-  let dropped = 0;
+  const hashed = [];
+  const his = [];
+  const los = [];
+  const lanes = new Uint32Array(2);
+  const dups = [];
   for (const it of items) {
     const text = it.text || "";
-    const hash = text.length >= minChars ? simhash(text) : null;
-    if (hash !== null) {
-      const dup = kept.find((k) => k.hash !== null && hammingDistance(k.hash, hash) <= maxBits);
-      if (dup) {
-        dropped++;
-        if (better(it, dup.it)) {
-          dup.it = it;
-          dup.hash = hash;
-        }
-        continue;
+    if (text.length < minChars) {
+      kept.push({ it });
+      continue;
+    }
+    simhashLanes(opts.tokensOf ? opts.tokensOf(it) : tokenize(text, false), lanes);
+    const hi = lanes[0];
+    const lo = lanes[1];
+    let at = -1;
+    for (let k = 0; k < hashed.length; k++) {
+      if (popcount32(his[k] ^ hi) + popcount32(los[k] ^ lo) <= maxBits) {
+        at = k;
+        break;
       }
     }
-    kept.push({ it, hash });
+    if (at < 0) {
+      const cluster = { it };
+      kept.push(cluster);
+      hashed.push(cluster);
+      his.push(hi);
+      los.push(lo);
+      continue;
+    }
+    const dup = hashed[at];
+    if (better(it, dup.it)) {
+      dups.push({ url: dup.it.url, cluster: dup });
+      dup.it = it;
+      his[at] = hi;
+      los[at] = lo;
+    } else dups.push({ url: it.url, cluster: dup });
   }
-  return { items: kept.map((k) => k.it), dropped };
+  return { items: kept.map((k) => k.it), dropped: dups.length, duplicates: dups.map((d) => ({ url: d.url, of: d.cluster.it.url })) };
 }
-function diversify(items, tokensOf, lambda = 0.75) {
+function diversify(items, tokensOf, lambda = 0.75, opts = {}) {
   if (items.length <= 2) return [...items];
-  const toks = new Map(items.map((it) => [it, tokensOf(it)]));
-  const max = Math.max(...items.map((it) => it.score), 1e-9);
-  const rel = (it) => it.score / max;
-  const jaccard = (a, b) => {
-    if (!a.size || !b.size) return 0;
-    const [small, large] = a.size <= b.size ? [a, b] : [b, a];
-    let inter = 0;
-    for (const t of small) if (large.has(t)) inter++;
-    return inter / (a.size + b.size - inter);
-  };
+  const sorted = [...items].sort((a, b) => b.score - a.score || byCodeUnit(a.url, b.url));
+  const window = opts.window !== void 0 && opts.window > 0 ? Math.floor(opts.window) : sorted.length;
+  if (window >= sorted.length) return mmr(sorted, tokensOf, lambda);
+  return [...window > 2 ? mmr(sorted.slice(0, window), tokensOf, lambda) : sorted.slice(0, window), ...sorted.slice(window)];
+}
+var PAIR_CACHE_MAX = 2048;
+function mmr(sorted, tokensOf, lambda) {
+  const m = sorted.length;
+  let max = 1e-9;
+  for (const it of sorted) if (it.score > max) max = it.score;
+  const ids = /* @__PURE__ */ new Map();
+  const sets = [];
+  for (const it of sorted) {
+    const raw = [];
+    for (const t of tokensOf(it)) {
+      let id = ids.get(t);
+      if (id === void 0) {
+        id = ids.size;
+        ids.set(t, id);
+      }
+      raw.push(id);
+    }
+    const all = Int32Array.from(raw).sort();
+    let k = 0;
+    for (let j = 0; j < all.length; j++) if (j === 0 || all[j] !== all[j - 1]) all[k++] = all[j];
+    sets.push(all.subarray(0, k));
+  }
+  const cache2 = m <= PAIR_CACHE_MAX ? new Float64Array(m * (m - 1) / 2) : void 0;
+  const pair = (i, j) => i < j ? i * (2 * m - i - 1) / 2 + (j - i - 1) : j * (2 * m - j - 1) / 2 + (i - j - 1);
   let simMax = 0;
-  for (let i = 0; i < items.length; i++) {
-    for (let j = i + 1; j < items.length; j++) {
-      const v = jaccard(toks.get(items[i]), toks.get(items[j]));
+  for (let i = 0; i < m; i++) {
+    for (let j = i + 1; j < m; j++) {
+      const v = jaccardSorted(sets[i], sets[j]);
+      if (cache2) cache2[pair(i, j)] = v;
       if (v > simMax) simMax = v;
     }
   }
-  const sim = (a, b) => simMax > 0 ? jaccard(toks.get(a), toks.get(b)) / simMax : 0;
-  const remaining = [...items];
-  const out = [];
-  remaining.sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
-  out.push(remaining.shift());
-  const maxSim = new Map(remaining.map((it) => [it, sim(it, out[0])]));
+  const sim = (i, j) => simMax > 0 ? (cache2 ? cache2[pair(i, j)] : jaccardSorted(sets[i], sets[j])) / simMax : 0;
+  const out = [sorted[0]];
+  const remaining = [];
+  for (let i = 1; i < m; i++) remaining.push(i);
+  const maxSim = new Float64Array(m);
+  for (const i of remaining) maxSim[i] = sim(i, 0);
+  let relevantLeft = 0;
+  for (const i of remaining) if (sorted[i].score > 0) relevantLeft++;
   while (remaining.length) {
-    let bestIdx = 0;
+    let bestPos = -1;
     let bestVal = Number.NEGATIVE_INFINITY;
-    for (let i = 0; i < remaining.length; i++) {
-      const it = remaining[i];
-      const val = lambda * rel(it) - (1 - lambda) * (maxSim.get(it) ?? 0);
-      if (val > bestVal || val === bestVal && it.url.localeCompare(remaining[bestIdx].url) < 0) {
+    for (let p = 0; p < remaining.length; p++) {
+      const it = sorted[remaining[p]];
+      if (relevantLeft > 0 && !(it.score > 0)) continue;
+      const val = lambda * (it.score / max) - (1 - lambda) * maxSim[remaining[p]];
+      if (bestPos < 0 || val > bestVal || val === bestVal && byCodeUnit(it.url, sorted[remaining[bestPos]].url) < 0) {
         bestVal = val;
-        bestIdx = i;
+        bestPos = p;
       }
     }
-    const picked = remaining.splice(bestIdx, 1)[0];
-    out.push(picked);
-    for (const it of remaining) maxSim.set(it, Math.max(maxSim.get(it) ?? 0, sim(it, picked)));
+    const picked = remaining.splice(bestPos, 1)[0];
+    if (sorted[picked].score > 0) relevantLeft--;
+    out.push(sorted[picked]);
+    for (const i of remaining) {
+      const v = sim(i, picked);
+      if (v > maxSim[i]) maxSim[i] = v;
+    }
   }
   return out;
 }
-var URL_IN_TEXT = /https?:\/\/[a-z0-9.-]+/gi;
+function jaccardSorted(a, b) {
+  const na = a.length;
+  const nb = b.length;
+  if (!na || !nb) return 0;
+  let i = 0;
+  let j = 0;
+  let inter = 0;
+  while (i < na && j < nb) {
+    const x = a[i];
+    const y = b[j];
+    if (x === y) {
+      inter++;
+      i++;
+      j++;
+    } else if (x < y) i++;
+    else j++;
+  }
+  return inter / (na + nb - inter);
+}
+var URL_IN_TEXT = /https?:\/\/(?:[^\s/@?#]+@)?[\p{L}\p{N}.-]+/giu;
 function externalHosts(url, text) {
   const self = domainOf(url).replace(/^www\./, "");
   const out = /* @__PURE__ */ new Set();
   for (const m of text.match(URL_IN_TEXT) ?? []) {
-    const h = domainOf(m).replace(/^www\./, "");
+    const h = trimTrailing(domainOf(trimTrailing(m, ".")), ".").replace(/^www\./, "");
     if (h && h !== self) out.add(h);
   }
   return out;
@@ -3898,10 +4225,10 @@ function deriveCitableUrl(text, canonical) {
 }
 
 // src/providers.ts
-var PUBMED_LANDING = /^https?:\/\/(?:www\.)?pubmed\.ncbi\.nlm\.nih\.gov\/(\d{4,9})\/?$/i;
-var PMC_LANDING = /^https?:\/\/(?:www\.)?pmc\.ncbi\.nlm\.nih\.gov\/articles\/(PMC\d+)\/?$/i;
+var PUBMED_LANDING = /^https?:\/\/(?:(?:www\.)?pubmed\.ncbi\.nlm\.nih\.gov|(?:www\.)?ncbi\.nlm\.nih\.gov\/pubmed)\/(\d{4,9})\/?(?:[?#].*)?$/i;
+var PMC_LANDING = /^https?:\/\/(?:(?:www\.)?pmc\.ncbi\.nlm\.nih\.gov|(?:www\.)?ncbi\.nlm\.nih\.gov\/pmc)\/articles\/(PMC\d+)\/?(?:[?#].*)?$/i;
 var EUTILS = /^https?:\/\/eutils\.ncbi\.nlm\.nih\.gov\/entrez\/eutils\/([a-z]+)\.fcgi/i;
-var ARXIV_PDF = /^https?:\/\/(?:www\.|export\.)?arxiv\.org\/pdf\/([^?#]+?)(?:\.pdf)?\/?$/i;
+var ARXIV_PDF = /^https?:\/\/(?:www\.|export\.)?arxiv\.org\/pdf\/([^?#]+?)(?:\.pdf)?\/?(?:[?#].*)?$/i;
 function eutilsIds(raw) {
   return (raw ?? "").split(/[,\s+]+/).map((s) => s.trim()).filter(Boolean);
 }
@@ -3935,6 +4262,9 @@ function resolveEutils(raw, op) {
   }
   const db = (params.get("db") ?? "").toLowerCase();
   const ids = eutilsIds(params.get("id"));
+  if (ids.length > 1) {
+    return { citeUrl: raw, reject: `${raw} addresses ${ids.length} records, not one document \u2014 fetch each record's own page instead.` };
+  }
   const id = ids[0];
   if (!id) return { citeUrl: raw };
   if (db === "pubmed" && /^\d+$/.test(id)) {
@@ -3945,62 +4275,6 @@ function resolveEutils(raw, op) {
     return { citeUrl: `https://pmc.ncbi.nlm.nih.gov/articles/${pmcid}/` };
   }
   return { citeUrl: raw };
-}
-
-// src/locale.ts
-var LANG_COUNTRY = {
-  en: "us",
-  pt: "br",
-  ja: "jp",
-  zh: "cn",
-  ko: "kr",
-  sv: "se",
-  da: "dk",
-  cs: "cz",
-  el: "gr",
-  nb: "no",
-  // Bokmål → Norway
-  nn: "no",
-  // Nynorsk → Norway
-  uk: "ua",
-  // Ukrainian language → Ukraine
-  ar: "xa",
-  // DuckDuckGo's "Arabia" region
-  he: "il",
-  hi: "in"
-};
-var REGION_ALIASES = {
-  gb: "uk",
-  en: "us"
-};
-var DDG_LANG_ALIASES = {
-  nb: "no",
-  // Bokmål
-  nn: "no",
-  // Nynorsk
-  ja: "jp"
-};
-function baseLang(lang) {
-  return (lang || "en").split("-")[0].toLowerCase();
-}
-function resolveRegion(lang, region) {
-  if (region?.trim()) return region.trim().toLowerCase();
-  const parts = (lang || "en").split("-");
-  if (parts.length > 1 && parts[1]) return parts[1].toLowerCase();
-  const l = baseLang(lang);
-  return LANG_COUNTRY[l] ?? l;
-}
-function ddgRegion(lang, region) {
-  const l = DDG_LANG_ALIASES[baseLang(lang)] ?? baseLang(lang);
-  let r = resolveRegion(lang, region);
-  r = REGION_ALIASES[r] ?? r;
-  return `${r}-${l}`;
-}
-function acceptLanguageHeader(lang, region) {
-  const l = baseLang(lang);
-  const R = resolveRegion(lang, region).toUpperCase();
-  if (l === "en") return `${l}-${R},${l};q=0.9`;
-  return `${l}-${R},${l};q=0.9,en;q=0.5`;
 }
 
 // src/exec.ts
@@ -5018,14 +5292,17 @@ async function resolvePackageResult(name, opts = {}) {
 
 // src/robots.ts
 var EMPTY = { rules: [], sitemaps: [], absent: true };
+function productToken(s) {
+  return /^[A-Za-z_-]+/.exec(s.trim())?.[0]?.toLowerCase();
+}
 function parseRobots(body, userAgent) {
-  const ua = userAgent.toLowerCase();
+  const ua = productToken(userAgent) ?? userAgent.trim().toLowerCase();
   const groups = /* @__PURE__ */ new Map();
   const delays = /* @__PURE__ */ new Map();
   const sitemaps = [];
   let current2 = [];
   let inHeader = false;
-  for (const raw of body.split(/\r?\n/)) {
+  for (const raw of body.split(/\r\n|\r|\n/)) {
     const line = raw.replace(/#.*$/, "").trim();
     if (!line) continue;
     const sep2 = line.indexOf(":");
@@ -5038,7 +5315,8 @@ function parseRobots(body, userAgent) {
     }
     if (field === "user-agent") {
       if (!inHeader) current2 = [];
-      current2.push(value.toLowerCase());
+      const token = value === "*" ? "*" : productToken(value);
+      if (token) current2.push(token);
       inHeader = true;
       for (const g of current2) if (!groups.has(g)) groups.set(g, []);
       continue;
@@ -5048,49 +5326,110 @@ function parseRobots(body, userAgent) {
     if (field === "allow" || field === "disallow") {
       for (const g of current2) groups.get(g).push({ allow: field === "allow", path: value });
     } else if (field === "crawl-delay") {
-      const n = Number(value);
+      const n = value === "" ? Number.NaN : Number(value);
       if (Number.isFinite(n) && n >= 0) for (const g of current2) delays.set(g, n * 1e3);
     }
   }
-  let chosen;
-  for (const g of groups.keys()) {
-    if (g === "*") continue;
-    if (ua.includes(g) && (!chosen || g.length > chosen.length)) chosen = g;
-  }
-  chosen ??= groups.has("*") ? "*" : void 0;
+  const chosen = groups.has(ua) ? ua : groups.has("*") ? "*" : void 0;
   if (chosen === void 0) return { rules: [], sitemaps, absent: false };
-  const rules = [...groups.get(chosen)].sort((a, b) => b.path.length - a.path.length || (a.allow === b.allow ? 0 : a.allow ? -1 : 1));
+  const rules = [...groups.get(chosen)].sort((a, b) => matcherOf(b).length - matcherOf(a).length || (a.allow === b.allow ? 0 : a.allow ? -1 : 1));
   const crawlDelayMs = delays.get(chosen);
   return { rules, sitemaps, absent: false, ...crawlDelayMs !== void 0 ? { crawlDelayMs } : {} };
 }
-function ruleMatches(pattern, path) {
-  if (pattern === "") return false;
-  const anchored = pattern.endsWith("$");
-  const body = anchored ? pattern.slice(0, -1) : pattern;
-  if (!body.includes("*")) return anchored ? path === body : path.startsWith(body);
-  const re = new RegExp(`^${body.split("*").map(escapeRe).join(".*")}${anchored ? "$" : ""}`);
-  return re.test(path);
+var UNRESERVED = /^[A-Za-z0-9\-._~]$/;
+var HEX2 = /^[0-9A-Fa-f]{2}$/;
+function normalisePath(s) {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "%" && HEX2.test(s.slice(i + 1, i + 3))) {
+      const hex = s.slice(i + 1, i + 3);
+      const ch2 = String.fromCharCode(Number.parseInt(hex, 16));
+      out += UNRESERVED.test(ch2) ? ch2 : `%${hex.toUpperCase()}`;
+      i += 2;
+      continue;
+    }
+    const code = c.charCodeAt(0);
+    if (code > 32 && code < 127 && !'"<>`{}|\\^'.includes(c)) {
+      out += c;
+      continue;
+    }
+    const cp = s.codePointAt(i);
+    const ch = String.fromCodePoint(cp);
+    try {
+      out += encodeURIComponent(ch);
+    } catch {
+      out += "%EF%BF%BD";
+    }
+    i += ch.length - 1;
+  }
+  return out;
 }
-function escapeRe(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+var matchers = /* @__PURE__ */ new WeakMap();
+function matcherOf(rule) {
+  let m = matchers.get(rule);
+  if (!m) {
+    const pattern = normalisePath(rule.path);
+    const anchored = pattern.endsWith("$");
+    m = { parts: (anchored ? pattern.slice(0, -1) : pattern).split("*"), anchored, length: pattern.length };
+    matchers.set(rule, m);
+  }
+  return m;
+}
+function matches(m, path) {
+  const { parts, anchored } = m;
+  const first = parts[0];
+  if (!path.startsWith(first)) return false;
+  if (parts.length === 1) return !anchored || path.length === first.length;
+  let pos = first.length;
+  const last = parts.length - 1;
+  for (let i = 1; i < last; i++) {
+    const at = path.indexOf(parts[i], pos);
+    if (at < 0) return false;
+    pos = at + parts[i].length;
+  }
+  const tail = parts[last];
+  return anchored ? path.length - tail.length >= pos && path.endsWith(tail) : path.indexOf(tail, pos) >= 0;
 }
 function isAllowed(robots, url) {
-  if (robots.absent || !robots.rules.length) return true;
+  if (!robots.rules.length) return true;
   let path;
   try {
     const u = new URL(url);
-    path = u.pathname + u.search;
+    path = normalisePath(u.pathname + u.search);
   } catch {
     return true;
   }
-  for (const rule of robots.rules) if (ruleMatches(rule.path, path)) return rule.allow;
+  for (const rule of robots.rules) {
+    if (rule.path !== "" && matches(matcherOf(rule), path)) return rule.allow;
+  }
   return true;
 }
+var ROBOTS_TTL_MS = 24 * 60 * 60 * 1e3;
+var UNREACHABLE_TTL_MS = 5 * 60 * 1e3;
 var cache = /* @__PURE__ */ new Map();
 var guardedCaches = /* @__PURE__ */ new WeakMap();
 function resetRobotsCache() {
   cache.clear();
   guardedCaches = /* @__PURE__ */ new WeakMap();
+}
+async function readRobots(origin, authorize) {
+  let refused = false;
+  const authorizeUrl = authorize && (async (u) => {
+    const ok = await authorize(u);
+    if (!ok) refused = true;
+    return ok;
+  });
+  const r = await httpGet(`${origin}/robots.txt`, { accept: "text/plain", timeoutMs: 5e3, maxBytes: 512 * 1024, authorizeUrl });
+  if (r.ok) {
+    const body = r.truncated ? r.body.slice(0, Math.max(r.body.lastIndexOf("\n"), r.body.lastIndexOf("\r")) + 1) : r.body;
+    if (!body.trim()) return { ...EMPTY, status: r.status };
+    return { ...parseRobots(body, env("ROBOTS_UA") ?? brand().name), status: r.status };
+  }
+  if (!refused && (r.status === 0 || r.status === 429 || r.status >= 500)) {
+    return { rules: [{ allow: false, path: "/" }], sitemaps: [], absent: false, status: r.status, unreachable: true };
+  }
+  return { ...EMPTY, status: r.status };
 }
 async function fetchRobots(url, opts = {}) {
   if (envFlag("NO_ROBOTS")) return EMPTY;
@@ -5106,16 +5445,13 @@ async function fetchRobots(url, opts = {}) {
     scopedCache = existing ?? /* @__PURE__ */ new Map();
     if (!existing) guardedCaches.set(opts.authorizeUrl, scopedCache);
   }
-  let p = scopedCache.get(origin);
-  if (!p) {
-    p = (async () => {
-      const r = await httpGet(`${origin}/robots.txt`, { accept: "text/plain", timeoutMs: 5e3, maxBytes: 512 * 1024, authorizeUrl: opts.authorizeUrl });
-      if (!r.ok || !r.body.trim()) return EMPTY;
-      return parseRobots(r.body, env("ROBOTS_UA") ?? brand().name);
-    })();
-    scopedCache.set(origin, p);
-  }
-  return p;
+  const hit = scopedCache.get(origin);
+  if (hit && hit.expires > Date.now()) return hit.robots;
+  const entry = { robots: readRobots(origin, opts.authorizeUrl), expires: Number.POSITIVE_INFINITY };
+  scopedCache.set(origin, entry);
+  const robots = await entry.robots;
+  entry.expires = Date.now() + (robots.unreachable ? UNREACHABLE_TTL_MS : ROBOTS_TTL_MS);
+  return robots;
 }
 
 // src/structured.ts
@@ -5307,75 +5643,235 @@ function resolveUrl(url, base) {
 }
 
 // src/feed.ts
-function attributeValue(attrs, name) {
-  for (const match of attrs.matchAll(/([^\s"'=<>`/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
-    if (match[2] === void 0 && match[3] === void 0 && match[4] === void 0) continue;
-    if (match[1]?.toLowerCase() === name.toLowerCase()) return match[2] ?? match[3] ?? match[4] ?? "";
-  }
-  return void 0;
+import { promisify } from "util";
+import { gunzip } from "zlib";
+var OPENERS = /* @__PURE__ */ new Map();
+function openerRe(name) {
+  let re = OPENERS.get(name);
+  if (!re) OPENERS.set(name, re = new RegExp(`<${name}(?=[\\s/>])`, "gi"));
+  return re;
 }
+var withoutBom = (s) => s.charCodeAt(0) === 65279 ? s.slice(1) : s;
+function markupOnly(xml) {
+  if (!xml.includes("<![CDATA[") && !xml.includes("<!--")) return xml;
+  const re = /<!\[CDATA\[|<!--/g;
+  let out = "";
+  let pos = 0;
+  let m;
+  while (m = re.exec(xml)) {
+    const close = xml.indexOf(m[0] === "<!--" ? "-->" : "]]>", m.index + m[0].length);
+    const end = close < 0 ? xml.length : close + 3;
+    out += xml.slice(pos, m.index) + " ".repeat(end - m.index);
+    pos = re.lastIndex = end;
+  }
+  return out + xml.slice(pos);
+}
+function elements(xml, name, limit = Number.POSITIVE_INFINITY) {
+  const scan = markupOnly(xml);
+  const open = openerRe(name);
+  const close = closeTagRe(name);
+  const out = [];
+  open.lastIndex = 0;
+  let m;
+  while (out.length < limit && (m = open.exec(scan))) {
+    const tagEnd = scan.indexOf(">", open.lastIndex);
+    if (tagEnd < 0) break;
+    const attrs = xml.slice(open.lastIndex, tagEnd);
+    if (attrs.endsWith("/")) {
+      out.push({ attrs: attrs.slice(0, -1), inner: "", from: m.index, to: tagEnd + 1 });
+      open.lastIndex = tagEnd + 1;
+      continue;
+    }
+    close.lastIndex = tagEnd + 1;
+    const c = close.exec(scan);
+    if (!c) break;
+    out.push({ attrs, inner: xml.slice(tagEnd + 1, c.index), from: m.index, to: c.index + c[0].length });
+    open.lastIndex = c.index + c[0].length;
+  }
+  return out;
+}
+var OPEN_TAGS = /* @__PURE__ */ new Map();
+function openTags(html, name) {
+  let re = OPEN_TAGS.get(name);
+  if (!re) OPEN_TAGS.set(name, re = new RegExp(`<${name}(?=[\\s/>])[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>`, "gi"));
+  return [...markupOnly(html).matchAll(re)].map((m) => m[0]);
+}
+function xmlText(raw) {
+  const re = /<!\[CDATA\[|<!--/g;
+  let out = "";
+  let pos = 0;
+  let m;
+  while (m = re.exec(raw)) {
+    const cdata = m[0] !== "<!--";
+    const close = raw.indexOf(cdata ? "]]>" : "-->", m.index + m[0].length);
+    if (close < 0) break;
+    out += decodeEntities(raw.slice(pos, m.index)) + (cdata ? raw.slice(m.index + 9, close) : "");
+    pos = re.lastIndex = close + 3;
+  }
+  return out + decodeEntities(raw.slice(pos));
+}
+function fragmentText(html) {
+  const stripped = dropElements(html, ["script", "style"], RAW_TEXT_ELEMENTS).replace(TAG_RE, (tag) => INLINE_TAGS.has(tagName(tag)) ? "" : " ").replace(LOOSE_TAG_RE, " ");
+  return decodeEntities(stripped).replace(/\s+/g, " ").trim();
+}
+var collapse = (s) => s.replace(/\s+/g, " ").trim();
 function tagText(block, ...names) {
   for (const name of names) {
-    const m = new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)<\\/${name}>`, "i").exec(block);
-    if (!m) continue;
-    const raw = m[1];
-    const inner = /<!\[CDATA\[([\s\S]*?)\]\]>/.exec(raw)?.[1] ?? raw;
-    const text = decodeEntities(inner.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+    const el = elements(block, name, 1)[0];
+    const text = el && collapse(xmlText(el.inner));
     if (text) return text;
   }
   return void 0;
 }
-function itemUrl(block) {
-  const links = [...block.matchAll(/<link\b([^>]*)>/gi)].map((match) => match[1]);
-  const firstHref = links.map((attrs) => attributeValue(attrs, "href")).find(Boolean);
-  if (firstHref) {
-    const alts = links.filter((attrs) => {
-      const rels = attributeValue(attrs, "rel")?.toLowerCase().split(/\s+/) ?? [];
-      return !rels.some((rel) => ["self", "edit", "replies", "enclosure"].includes(rel));
-    });
-    for (const attrs of alts) {
-      const href = attributeValue(attrs, "href");
-      if (href) return decodeEntities(href).trim();
-    }
-    return decodeEntities(firstHref).trim();
+function proseText(block, atom, ...names) {
+  for (const name of names) {
+    const el = elements(block, name, 1)[0];
+    if (!el) continue;
+    const type = htmlAttributes(el.attrs).get("type")?.toLowerCase() ?? (atom ? "text" : "html");
+    const text = type === "xhtml" ? fragmentText(el.inner) : type === "text" || type === "text/plain" ? collapse(xmlText(el.inner)) : fragmentText(xmlText(el.inner));
+    if (text) return text;
   }
-  return tagText(block, "link", "guid");
+  return void 0;
 }
-function parseFeed(xml) {
-  const isAtom = /<feed\b[^>]*xmlns\s*=\s*["'][^"']*www\.w3\.org\/2005\/Atom/i.test(xml) || /<entry\b/i.test(xml);
-  const isRss = /<rss\b/i.test(xml) || /<channel\b/i.test(xml);
-  if (!isAtom && !isRss) return void 0;
-  const kind = isAtom && !isRss ? "atom" : "rss";
-  const itemRe = kind === "atom" ? /<entry\b[\s\S]*?<\/entry>/gi : /<item\b[\s\S]*?<\/item>/gi;
+var SUMMARY_MAX = 500;
+function clip2(s) {
+  return s && s.length > SUMMARY_MAX ? `${s.slice(0, SUMMARY_MAX).trimEnd()}\u2026` : s;
+}
+function resolveUrl2(href, base) {
+  if (!base) return href;
+  try {
+    return new URL(href, base).href;
+  } catch {
+    return href;
+  }
+}
+function rootElement(xml) {
+  let i = xml.charCodeAt(0) === 65279 ? 1 : 0;
+  for (; ; ) {
+    while (i < xml.length && /\s/.test(xml[i])) i++;
+    if (xml.startsWith("<?", i)) {
+      const end = xml.indexOf("?>", i + 2);
+      if (end < 0) return void 0;
+      i = end + 2;
+    } else if (xml.startsWith("<!--", i)) {
+      const end = xml.indexOf("-->", i + 4);
+      if (end < 0) return void 0;
+      i = end + 3;
+    } else if (xml.startsWith("<!", i)) {
+      let end = xml.indexOf(">", i);
+      const subset = xml.indexOf("[", i);
+      if (subset >= 0 && subset < end) {
+        const closed = xml.indexOf("]", subset);
+        end = closed < 0 ? -1 : xml.indexOf(">", closed);
+      }
+      if (end < 0) return void 0;
+      if (/^<!doctype\s+html\b/i.test(xml.slice(i, end))) return "html";
+      i = end + 1;
+    } else {
+      return /^<([A-Za-z_][\w.:-]*)/.exec(xml.slice(i, i + 256))?.[1]?.toLowerCase();
+    }
+  }
+}
+var NOT_THE_PAGE = /* @__PURE__ */ new Set(["self", "edit", "replies", "enclosure", "via", "related", "license"]);
+function itemUrl(block, base) {
+  const links = openTags(block, "link").map(htmlAttributes);
+  const hrefOf = (attrs) => {
+    const href2 = attrs.get("href");
+    return href2 ? decodeEntities(href2).trim() : void 0;
+  };
+  const rels = (attrs) => attrs.get("rel")?.toLowerCase().split(/\s+/) ?? [];
+  const pick = links.find((a) => hrefOf(a) && (rels(a).length === 0 || rels(a).includes("alternate"))) ?? links.find((a) => hrefOf(a) && !rels(a).some((r) => NOT_THE_PAGE.has(r))) ?? links.find((a) => hrefOf(a));
+  const href = pick && hrefOf(pick);
+  if (href) return resolveUrl2(href, base);
+  const text = tagText(block, "link");
+  if (text) return resolveUrl2(text, base);
+  const guid = elements(block, "guid", 1)[0];
+  if (!guid || htmlAttributes(guid.attrs).get("ispermalink")?.toLowerCase() === "false") return void 0;
+  const value = collapse(xmlText(guid.inner));
+  return /^https?:\/\//i.test(value) ? value : void 0;
+}
+function xmlBase(attrs, above) {
+  const declared = htmlAttributes(attrs).get("xml:base");
+  return declared ? resolveUrl2(decodeEntities(declared).trim(), above) : above;
+}
+function parseFeed(xml, baseUrl) {
+  if (withoutBom(xml).trimStart().startsWith("{")) return parseJsonFeed(xml, baseUrl);
+  const root = rootElement(xml);
+  if (!root) return void 0;
+  const kind = root === "rss" || /(^|:)rdf$/.test(root) ? "rss" : /(^|:)feed$/.test(root) ? "atom" : void 0;
+  if (!kind) return void 0;
+  const atom = kind === "atom";
+  const rootTag = atom ? openTags(xml, root)[0] : void 0;
+  const feedBase = rootTag ? xmlBase(rootTag, baseUrl) : baseUrl;
+  const blocks = elements(xml, atom ? "entry" : "item");
   const items = [];
-  for (const m of xml.matchAll(itemRe)) {
-    const block = m[0];
+  for (const block of blocks) {
+    const inner = block.inner;
     const it = {};
-    const title2 = tagText(block, "title");
+    const title2 = proseText(inner, atom, "title");
     if (title2) it.title = title2;
-    const url = itemUrl(block);
+    const url = itemUrl(inner, atom ? xmlBase(block.attrs, feedBase) : feedBase);
     if (url) it.url = url;
-    const published = tagText(block, "pubDate", "published", "updated", "dc:date");
+    const published = tagText(inner, "pubDate", "published", "updated", "dc:date");
     if (published) it.published = published;
-    const summary = tagText(block, "description", "summary");
+    const summary = proseText(inner, atom, "description", "summary") ?? clip2(proseText(inner, atom, "content", "content:encoded"));
     if (summary) it.summary = summary;
-    const id = tagText(block, "guid", "id");
+    const id = tagText(inner, "guid", "id");
     if (id) it.id = id;
     if (it.title || it.url) items.push(it);
   }
-  const head = xml.replace(itemRe, "");
-  const title = tagText(head, "title");
+  let head = "";
+  let last = 0;
+  for (const b of blocks) {
+    head += xml.slice(last, b.from);
+    last = b.to;
+  }
+  head += xml.slice(last);
+  const title = proseText(head, atom, "title");
   return { kind, items, ...title ? { title } : {} };
 }
+function parseJsonFeed(text, baseUrl) {
+  let doc;
+  try {
+    doc = JSON.parse(withoutBom(text));
+  } catch {
+    return void 0;
+  }
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) return void 0;
+  const feed = doc;
+  if (typeof feed.version !== "string" || !feed.version.startsWith("https://jsonfeed.org/version/")) return void 0;
+  const str3 = (v) => typeof v === "string" && v.trim() ? v.trim() : void 0;
+  const items = [];
+  for (const raw of Array.isArray(feed.items) ? feed.items : []) {
+    if (!raw || typeof raw !== "object") continue;
+    const entry = raw;
+    const it = {};
+    const id = typeof entry.id === "number" ? String(entry.id) : str3(entry.id);
+    if (id) it.id = id;
+    const url = str3(entry.url) ?? str3(entry.external_url);
+    if (url) it.url = resolveUrl2(url, baseUrl);
+    const title2 = str3(entry.title);
+    if (title2) it.title = title2;
+    const published = str3(entry.date_published) ?? str3(entry.date_modified);
+    if (published) it.published = published;
+    const html = str3(entry.content_html);
+    const summary = str3(entry.summary) ?? clip2(str3(entry.content_text) ?? (html ? fragmentText(html) : void 0));
+    if (summary) it.summary = summary;
+    if (it.title || it.url) items.push(it);
+  }
+  const title = str3(feed.title);
+  return { kind: "json", items, ...title ? { title } : {} };
+}
+var FEED_TYPES = /* @__PURE__ */ new Set(["application/rss+xml", "application/atom+xml", "application/feed+json"]);
 function discoverFeeds(html, baseUrl) {
   const out = [];
-  for (const m of html.matchAll(/<link\b([^>]*)>/gi)) {
-    const attrs = m[1];
-    const rels = attributeValue(attrs, "rel")?.toLowerCase().split(/\s+/) ?? [];
+  for (const tag of openTags(html, "link")) {
+    const attrs = htmlAttributes(tag);
+    const rels = attrs.get("rel")?.toLowerCase().split(/\s+/) ?? [];
     if (!rels.includes("alternate")) continue;
-    const type = attributeValue(attrs, "type")?.toLowerCase();
-    if (type !== "application/rss+xml" && type !== "application/atom+xml") continue;
-    const href = attributeValue(attrs, "href");
+    const type = attrs.get("type")?.split(";")[0]?.trim().toLowerCase();
+    if (!type || !FEED_TYPES.has(type)) continue;
+    const href = attrs.get("href");
     if (!href) continue;
     try {
       const abs = new URL(decodeEntities(href).trim(), baseUrl).href;
@@ -5387,19 +5883,64 @@ function discoverFeeds(html, baseUrl) {
 }
 function parseSitemap(xml) {
   const out = { urls: [], sitemaps: [] };
-  const isIndex = /<sitemapindex\b/i.test(xml);
-  for (const m of xml.matchAll(/<(sitemap|url)\b[\s\S]*?<\/\1>/gi)) {
-    const block = m[0];
-    const loc = tagText(block, "loc");
-    if (!loc) continue;
-    if (isIndex || m[1].toLowerCase() === "sitemap") {
-      out.sitemaps.push(loc);
-    } else {
-      const lastmod = tagText(block, "lastmod");
-      out.urls.push({ loc, ...lastmod ? { lastmod } : {} });
+  const body = withoutBom(xml);
+  if (!body.trimStart().startsWith("<")) {
+    for (const line of body.split(/\r\n|\r|\n/)) {
+      const loc = line.trim();
+      if (/^https?:\/\/\S+$/i.test(loc)) out.urls.push({ loc });
     }
+    return out;
+  }
+  const isIndex = /<sitemapindex(?=[\s/>])/i.test(body);
+  for (const el of elements(body, "sitemap")) {
+    const loc = tagText(el.inner, "loc");
+    if (loc) out.sitemaps.push(loc);
+  }
+  if (isIndex) return out;
+  for (const el of elements(body, "url")) {
+    const loc = tagText(el.inner, "loc");
+    if (!loc) continue;
+    const lastmod = tagText(el.inner, "lastmod");
+    out.urls.push({ loc, ...lastmod ? { lastmod } : {} });
   }
   return out;
+}
+var SITEMAP_MAX_BYTES = 50 * 1024 * 1024;
+var gunzipAsync = promisify(gunzip);
+async function readSitemapDocument(url, authorize) {
+  let refused = false;
+  const authorizeUrl = authorize && (async (u) => {
+    const ok = await authorize(u);
+    if (!ok) refused = true;
+    return ok;
+  });
+  const r = await httpGet(url, {
+    accept: "application/xml,text/xml,text/plain,*/*",
+    timeoutMs: 1e4,
+    binary: true,
+    maxBytes: SITEMAP_MAX_BYTES,
+    authorizeUrl
+  });
+  if (!r.ok) {
+    if (r.truncated) return { note: `${url} is larger than the 50 MB a sitemap may be; not read.` };
+    if (refused || r.status === 404 || r.status === 410) return {};
+    return { note: `could not read ${url} (${r.status ? `status ${r.status}` : r.error ?? "no answer"}).` };
+  }
+  let bytes = r.bytes ?? Buffer.alloc(0);
+  const gzipped = bytes[0] === 31 && bytes[1] === 139;
+  if (gzipped) {
+    if (r.truncated) return { note: `${url} is larger than the 50 MB a sitemap may be; not read.` };
+    try {
+      bytes = await gunzipAsync(bytes, { maxOutputLength: SITEMAP_MAX_BYTES });
+    } catch (e) {
+      const tooBig = e.code === "ERR_BUFFER_TOO_LARGE" || e instanceof RangeError;
+      return { note: tooBig ? `${url} decompresses past the 50 MB a sitemap may be; not read.` : `${url} is not valid gzip; not read.` };
+    }
+  }
+  return {
+    text: decodeBody(bytes, gzipped ? "application/xml" : r.contentType),
+    ...r.truncated ? { note: `read only the first 50 MB of ${url}, the most a sitemap may be.` } : {}
+  };
 }
 async function fetchSitemap(url, opts = {}) {
   const out = { urls: [], sitemaps: [] };
@@ -5409,30 +5950,45 @@ async function fetchSitemap(url, opts = {}) {
   } catch {
     return out;
   }
-  const queue = [...opts.sitemaps ?? [], `${origin}/sitemap.xml`];
+  const fallback = `${origin}/sitemap.xml`;
+  const named = opts.sitemaps ?? [];
+  const queue = named.length ? [...named] : [fallback];
+  let guessed = !named.length;
   const seen = /* @__PURE__ */ new Set();
+  const children = /* @__PURE__ */ new Set();
+  const notes = [];
   let fetched = 0;
-  const max = Math.max(1, opts.max ?? 3);
-  while (queue.length && fetched < max) {
+  const max = opts.max !== void 0 && Number.isFinite(opts.max) ? Math.max(1, Math.floor(opts.max)) : 3;
+  for (; ; ) {
+    if (!queue.length && !guessed && !out.urls.length && !out.sitemaps.length) {
+      guessed = true;
+      queue.push(fallback);
+    }
+    if (!queue.length || fetched >= max) break;
     const next = queue.shift();
     if (seen.has(next)) continue;
     seen.add(next);
-    const r = await httpGet(next, { accept: "application/xml,text/xml,*/*", timeoutMs: 1e4, authorizeUrl: opts.authorizeUrl });
     fetched++;
-    if (!r.ok || !r.body.trim()) continue;
-    const parsed = parseSitemap(r.body);
-    out.urls.push(...parsed.urls);
+    const doc = await readSitemapDocument(next, opts.authorizeUrl);
+    if (doc.note) notes.push(doc.note);
+    if (!doc.text?.trim()) continue;
+    const parsed = parseSitemap(doc.text);
+    for (const u of parsed.urls) out.urls.push(u);
     for (const s of parsed.sitemaps) {
-      if (!out.sitemaps.includes(s)) out.sitemaps.push(s);
+      if (children.has(s)) continue;
+      children.add(s);
+      out.sitemaps.push(s);
       queue.push(s);
     }
   }
+  out.unfetched = [...new Set(queue.filter((s) => !seen.has(s) && s !== fallback))];
+  if (notes.length) out.notes = notes;
   return out;
 }
 async function fetchFeed(url) {
-  const r = await httpGet(url, { accept: "application/atom+xml,application/rss+xml,application/xml,*/*", timeoutMs: 1e4 });
+  const r = await httpGet(url, { accept: "application/atom+xml,application/rss+xml,application/feed+json,application/xml,*/*", timeoutMs: 1e4 });
   if (!r.ok || !r.body.trim()) return void 0;
-  return parseFeed(r.body);
+  return parseFeed(r.body, r.url);
 }
 
 // src/engines.ts
@@ -5445,10 +6001,19 @@ function keylessEngines(opts = {}) {
   const raw = env("ENGINES");
   if (raw === void 0) return KEYLESS_ENGINES;
   if (raw.toLowerCase() === "off") return [];
-  return raw.split(",").map((s) => s.trim().toLowerCase()).filter(isKeylessEngine);
+  return engineNames(raw).filter(isKeylessEngine);
 }
+function unknownEngines(opts = {}) {
+  const raw = opts.engines ? void 0 : env("ENGINES");
+  if (raw === void 0 || raw.toLowerCase() === "off") return [];
+  return engineNames(raw).filter((s) => !isKeylessEngine(s));
+}
+function engineNames(raw) {
+  return raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+var INLINE_TAG = /<\/?(?:a|abbr|b|bdi|bdo|cite|code|em|i|kbd|mark|q|s|samp|small|span|strong|sub|sup|time|u|var|wbr)\b[^<>]*>/gi;
 function stripTags(s) {
-  return decodeEntities(s.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+  return decodeEntities(s.replace(INLINE_TAG, "").replace(/<[^<>]*>/g, " ")).replace(/\s+/g, " ").trim();
 }
 function ddgRedirectTarget(href) {
   const uddg = /[?&]uddg=([^&]+)/.exec(href);
@@ -5460,9 +6025,10 @@ function ddgRedirectTarget(href) {
   }
   return href.startsWith("//") ? `https:${href}` : href;
 }
-function throttleReason(status) {
+function throttleReason(status, error) {
   if (status === 429 || status === 503) return { throttled: true, why: `rate-limited (HTTP ${status})` };
   if (status === 403) return { throttled: true, why: "blocked this client as automated traffic (HTTP 403)" };
+  if (status === 0) return { throttled: false, why: `unreachable (${error || "no response"})` };
   return { throttled: false, why: `unreachable (status ${status})` };
 }
 function looksLikeChallenge(body) {
@@ -5470,66 +6036,128 @@ function looksLikeChallenge(body) {
   const head = body.slice(0, 4e3).toLowerCase();
   return /<title>[^<]*captcha/.test(head) || head.includes("anomaly-modal") || head.includes("/anomaly.js") || head.includes("captcha-wrap") || head.includes("sending automated queries");
 }
-function parseBlocks(body, limit, blockRe, snippetRe, reject, resolveHref) {
+var attrPattern = (name) => new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'<>=\`]+))`, "i");
+var HREF_ATTR = attrPattern("href");
+var CLASS_ATTR = attrPattern("class");
+var NAME_ATTR = attrPattern("name");
+var TYPE_ATTR = attrPattern("type");
+var VALUE_ATTR = attrPattern("value");
+function attr2(attrs, re) {
+  const m = re.exec(attrs);
+  return m ? decodeEntities(m[1] ?? m[2] ?? m[3] ?? "") : void 0;
+}
+function hasClass(attrs, cls) {
+  return (attr2(attrs, CLASS_ATTR) ?? "").split(/\s+/).includes(cls);
+}
+function hostIs(url, domain) {
+  try {
+    const host = new URL(url).hostname;
+    return host === domain || host.endsWith(`.${domain}`);
+  } catch {
+    return false;
+  }
+}
+var OPEN_A = /<a\b([^<>]*)>/gi;
+var element = (tag, cls) => ({ open: new RegExp(`<${tag}\\b([^<>]*)>`, "gi"), close: new RegExp(`</${tag}\\s*>`, "i"), cls });
+function parseBlocks(body, limit, shape) {
+  const anchors = [];
+  for (const m of body.matchAll(OPEN_A)) {
+    if (hasClass(m[1], shape.anchor)) anchors.push({ start: m.index, end: m.index + m[0].length, attrs: m[1] });
+  }
   const found = [];
-  let m;
-  blockRe.lastIndex = 0;
-  while ((m = blockRe.exec(body)) && found.length < limit) {
-    const href0 = /\bhref="([^"]+)"/.exec(m[1]);
-    if (!href0) continue;
-    const href = resolveHref(href0[1]);
-    if (!/^https?:\/\//.test(href) || reject.test(href)) continue;
-    const snip = snippetRe.exec(m[3]);
-    snippetRe.lastIndex = 0;
-    found.push({ url: href, title: stripTags(m[2]) || href, snippet: snip ? stripTags(snip[1]) : "" });
+  for (let i = 0; i < anchors.length && found.length < limit; i++) {
+    const a = anchors[i];
+    const block = body.slice(a.end, anchors[i + 1]?.start ?? body.length);
+    const close = /<\/a\s*>/i.exec(block);
+    const href = attr2(a.attrs, HREF_ATTR);
+    if (!close || !href) continue;
+    const url = shape.resolve(href);
+    if (!url) continue;
+    const rest = block.slice(close.index + close[0].length);
+    found.push({ url, title: stripTags(block.slice(0, close.index)) || url, snippet: elementText(rest, shape.snippet) });
   }
   return found;
 }
+function elementText(html, el) {
+  for (const m of html.matchAll(el.open)) {
+    if (!hasClass(m[1], el.cls)) continue;
+    const inner = html.slice(m.index + m[0].length);
+    const end = el.close.exec(inner);
+    return end ? stripTags(inner.slice(0, end.index)) : "";
+  }
+  return "";
+}
+function ddgDestination(href) {
+  const url = ddgRedirectTarget(href);
+  if (!/^https?:\/\//i.test(url)) return void 0;
+  const unwrapped = url !== (href.startsWith("//") ? `https:${href}` : href);
+  return unwrapped || !hostIs(url, "duckduckgo.com") ? url : void 0;
+}
 function parseDdgHtml(body, limit = 50) {
-  return parseBlocks(
-    body,
-    limit,
-    /<a\b([^>]*\bresult__a\b[^>]*)>([\s\S]*?)<\/a>([\s\S]*?)(?=<a\b[^>]*\bresult__a\b|$)/gi,
-    /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i,
-    /duckduckgo\.com/,
-    ddgRedirectTarget
-  );
+  return parseBlocks(body, limit, { anchor: "result__a", snippet: element("a", "result__snippet"), resolve: ddgDestination });
 }
 function parseDdgLite(body, limit = 50) {
-  return parseBlocks(
-    body,
-    limit,
-    /<a\b([^>]*\bresult-link\b[^>]*)>([\s\S]*?)<\/a>([\s\S]*?)(?=<a\b[^>]*\bresult-link\b|$)/gi,
-    /class="result-snippet"[^>]*>([\s\S]*?)<\/td>/i,
-    /duckduckgo\.com/,
-    ddgRedirectTarget
-  );
+  return parseBlocks(body, limit, { anchor: "result-link", snippet: element("td", "result-snippet"), resolve: ddgDestination });
 }
 function parseMojeek(body, limit = 50) {
-  return parseBlocks(
-    body,
-    limit,
-    /<a\b([^>]*\bclass="[^"]*\btitle\b[^"]*"[^>]*)>([\s\S]*?)<\/a>([\s\S]*?)(?=<a\b[^>]*\bclass="[^"]*\btitle\b|$)/gi,
-    /<p\b[^>]*\bclass="[^"]*\bs\b[^"]*"[^>]*>([\s\S]*?)<\/p>/i,
-    /mojeek\.com/,
-    (h) => h.startsWith("//") ? `https:${h}` : h
-  );
+  return parseBlocks(body, limit, {
+    anchor: "title",
+    snippet: element("p", "s"),
+    // Mojeek links its results directly, so its own links are the ones on its
+    // own host. Its blog, or a page ABOUT Mojeek, is a result like any other.
+    resolve: (h) => {
+      const url = h.startsWith("//") ? `https:${h}` : h;
+      return /^https?:\/\//i.test(url) && !/^https?:\/\/(?:www\.)?mojeek\.com(?:[:/?#]|$)/i.test(url) ? url : void 0;
+    }
+  });
+}
+var OPEN_FORM = /<form\b[^<>]*>/gi;
+var INPUT = /<input\b([^<>]*)>/gi;
+function ddgNextForm(body) {
+  const forms = [...body.matchAll(OPEN_FORM)];
+  for (let i = 0; i < forms.length; i++) {
+    const chunk = body.slice(forms[i].index + forms[i][0].length, forms[i + 1]?.index ?? body.length);
+    const end = chunk.search(/<\/form\s*>/i);
+    const fields = {};
+    let next = false;
+    for (const m of (end < 0 ? chunk : chunk.slice(0, end)).matchAll(INPUT)) {
+      const value = attr2(m[1], VALUE_ATTR) ?? "";
+      if (attr2(m[1], TYPE_ATTR)?.toLowerCase() === "submit") next ||= /^\s*next\b/i.test(value);
+      else {
+        const name = attr2(m[1], NAME_ATTR);
+        if (name) fields[name] = value;
+      }
+    }
+    if (next) return fields;
+  }
+  return void 0;
+}
+function ddgNext(endpoint) {
+  return (body, q, kl, p) => {
+    const form = ddgNextForm(body);
+    if (!form) return null;
+    return `${endpoint}?${new URLSearchParams({ ...form, q, kl, s: form.s || String((p + 1) * 10) })}`;
+  };
 }
 function mojeekLocaleParams(locale) {
   if (!locale) return "";
-  return `&lb=${encodeURIComponent(locale.lang)}&lbb=100&rb=${encodeURIComponent(locale.region)}&rbb=10`;
+  const lang = `&lb=${encodeURIComponent(locale.lang)}&lbb=100`;
+  return locale.region === "WT" ? lang : `${lang}&rb=${encodeURIComponent(locale.region)}&rbb=10`;
 }
 var SPECS = {
-  // `s` is a 0-based result offset, ~30 per page.
+  // Page one only: every later page is the one the previous page's own Next
+  // form names (see ddgNextForm).
   ddg: {
     label: "DuckDuckGo",
-    url: (q, p, kl) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}&kl=${encodeURIComponent(kl)}${p > 0 ? `&s=${p * 30}` : ""}`,
-    parse: parseDdgHtml
+    url: (q, _p, kl) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}&kl=${encodeURIComponent(kl)}`,
+    parse: parseDdgHtml,
+    next: ddgNext("https://html.duckduckgo.com/html/")
   },
   ddglite: {
     label: "DuckDuckGo Lite",
-    url: (q, p, kl) => `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}&kl=${encodeURIComponent(kl)}${p > 0 ? `&s=${p * 30}` : ""}`,
-    parse: parseDdgLite
+    url: (q, _p, kl) => `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}&kl=${encodeURIComponent(kl)}`,
+    parse: parseDdgLite,
+    next: ddgNext("https://lite.duckduckgo.com/lite/")
   },
   // Mojeek's `s` is the 1-BASED index of the first result, 10 per page — so
   // page 2 starts at 11, not 10. Its own crawler and index, which is why it is
@@ -5546,17 +6174,30 @@ async function searchViaKeyless(engine, query, opts = {}) {
   if (!q) return { hits: [], note: "Empty query." };
   const pages = Math.max(1, opts.pages ?? 1);
   const limit = Math.max(1, opts.limit ?? 10);
-  const kl = ddgRegion(opts.lang, opts.region);
+  const localised = !!(opts.lang || opts.region);
+  const kl = localised ? ddgRegion(opts.lang, opts.region) : "wt-wt";
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
-  const locale = opts.lang || opts.region ? { lang: baseLang(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : void 0;
+  const locale = localised ? { lang: baseLang(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : void 0;
   const seen = /* @__PURE__ */ new Set();
   const hits = [];
+  const deadline = opts.budgetMs === void 0 ? Number.POSITIVE_INFINITY : Date.now() + opts.budgetMs;
+  let url = spec.url(q, 0, kl, locale);
   for (let p = 0; p < pages && hits.length < limit; p++) {
-    const r = await httpGet(spec.url(q, p, kl, locale), { accept: "text/html", acceptLanguage, timeoutMs: opts.timeoutMs ?? 12e3 });
-    if (!r.ok || !r.body) {
+    if (opts.signal?.aborted || Date.now() >= deadline) {
       if (p > 0) break;
-      const { throttled, why } = throttleReason(r.status);
-      return { hits: [], note: `${spec.label} ${why}.`, throttled, ...r.status === 403 ? { blocked: true } : {} };
+      return { hits: [], note: `${spec.label} was not asked: ${opts.signal?.aborted ? "the search was cancelled" : "no time was left"}.` };
+    }
+    const r = await httpGet(url, {
+      accept: "text/html",
+      acceptLanguage,
+      timeoutMs: Math.max(1, Math.min(opts.timeoutMs ?? 12e3, deadline - Date.now())),
+      retries: 0
+    });
+    if (!r.ok || !r.body.trim()) {
+      if (p > 0) break;
+      if (r.ok) return { hits: [], note: `${spec.label} returned an empty page (HTTP ${r.status}).`, status: r.status };
+      const { throttled, why } = throttleReason(r.status, r.error);
+      return { hits: [], note: `${spec.label} ${why}.`, throttled, ...r.status === 403 ? { blocked: true } : {}, status: r.status };
     }
     const before = hits.length;
     const parsed = spec.parse(r.body, limit * 2);
@@ -5566,7 +6207,8 @@ async function searchViaKeyless(engine, query, opts = {}) {
         hits: [],
         note: `${spec.label} served an anti-bot challenge (HTTP ${r.status}) instead of results \u2014 blocked, not empty.`,
         throttled: true,
-        blocked: true
+        blocked: true,
+        status: r.status
       };
     }
     for (const f of parsed) {
@@ -5576,10 +6218,13 @@ async function searchViaKeyless(engine, query, opts = {}) {
       hits.push(f);
       if (hits.length >= limit) break;
     }
-    if (hits.length === before) break;
-    if (p < pages - 1 && pageDelayMs()) await sleep(pageDelayMs());
+    if (hits.length === before || p + 1 >= pages || hits.length >= limit) break;
+    const next = spec.next ? spec.next(r.body, q, kl, p) : spec.url(q, p + 1, kl, locale);
+    if (!next) break;
+    url = next;
+    if (pageDelayMs()) await sleep(pageDelayMs());
   }
-  return hits.length ? { hits } : { hits: [], note: `${spec.label} returned no results.` };
+  return hits.length ? { hits, answered: true } : { hits: [], note: `${spec.label} returned no results.`, answered: true };
 }
 
 // src/search.ts
@@ -5594,60 +6239,84 @@ function searxngBase(opts = {}) {
 function searxngIsExplicit(opts = {}) {
   return !!(opts.searxng ?? env("SEARXNG"));
 }
-var probeCache2 = /* @__PURE__ */ new Map();
+var probeCache2 = new ProbeMemo();
 function resetSearxngProbeCache() {
   probeCache2.clear();
 }
-function probeSearxng(base) {
-  let p = probeCache2.get(base);
-  if (!p) {
-    p = (async () => {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS2);
-      try {
-        const res = await fetch(`${base}/healthz`, { signal: ctrl.signal });
-        await res.text().catch(() => "");
-        return true;
-      } catch {
-        return false;
-      } finally {
-        clearTimeout(t);
-      }
-    })();
-    probeCache2.set(base, p);
-  }
-  return p;
+function probeSearxng(base, explicit = false) {
+  return probeCache2.get(`${base}|${explicit}`, async () => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS2);
+    try {
+      const res = await fetch(`${base}/healthz`, { signal: ctrl.signal });
+      const body = await res.text().catch(() => "");
+      return explicit || res.ok && /^\s*ok\s*$/i.test(body);
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(t);
+    }
+  });
 }
 async function searchViaSearxng(query, opts = {}) {
   const base = searxngBase(opts);
-  if (!base) return { hits: [], notes: [`SearXNG disabled (${envName("SEARXNG")}=off).`] };
-  if (!await probeSearxng(base)) {
-    return {
-      hits: [],
-      notes: [
+  if (!base) return rungResult("searxng", "disabled", [], [`SearXNG disabled (--searxng off / ${envName("SEARXNG")}=off).`]);
+  const deadline = budgetDeadline(opts);
+  if (!await probeSearxng(base, searxngIsExplicit(opts))) {
+    return rungResult(
+      "searxng",
+      "unreachable",
+      [],
+      [
         searxngIsExplicit(opts) ? `SearXNG not reachable at ${base}.` : `SearXNG not running at ${base} \u2014 start it with \`${brand().cli} searxng up\` for local, keyless discovery.`
       ]
-    };
+    );
   }
   const pages = Math.max(1, opts.pages ?? 1);
   const limit = Math.max(1, opts.limit ?? 10);
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
-  const root = `${base}/search?q=${encodeURIComponent(query)}&format=json&safesearch=1` + (opts.lang ? `&language=${encodeURIComponent(opts.lang)}` : "");
+  const language = searxngLanguage(opts);
+  const root = `${base}/search?q=${encodeURIComponent(query)}&format=json&safesearch=1` + (language ? `&language=${encodeURIComponent(language)}` : "");
   const notes = [];
   const seen = /* @__PURE__ */ new Set();
   const hits = [];
   const suspended = /* @__PURE__ */ new Map();
+  let failed2;
   for (let p = 0; p < pages && hits.length < limit; p++) {
-    const r = await httpGet(root + (p > 0 ? `&pageno=${p + 1}` : ""), { accept: "application/json", acceptLanguage, timeoutMs: QUERY_TIMEOUT_MS });
+    const stop = halted(opts, deadline);
+    if (stop) {
+      if (p > 0) break;
+      return rungResult("searxng", "not-tried", [], [`SearXNG was not asked: ${stop === "cancelled" ? "the search was cancelled" : "no time was left"}.`]);
+    }
+    const r = await httpGet(root + (p > 0 ? `&pageno=${p + 1}` : ""), {
+      accept: "application/json",
+      acceptLanguage,
+      timeoutMs: Math.max(1, Math.min(QUERY_TIMEOUT_MS, deadline - Date.now())),
+      // No retry: the cascade's next rung is the retry.
+      retries: 0
+    });
     if (!r.ok) {
-      if (p === 0) notes.push(r.status === 429 || r.status === 503 ? `SearXNG rate-limited (HTTP ${r.status}).` : `SearXNG unreachable (status ${r.status}).`);
+      if (p === 0) {
+        failed2 = r.status === 429 || r.status === 503 ? "throttled" : r.status === 0 ? "unreachable" : "error";
+        notes.push(
+          failed2 === "throttled" ? `SearXNG rate-limited (HTTP ${r.status}).` : failed2 === "unreachable" ? `SearXNG unreachable (${r.error || "no response"}).` : (
+            // SearXNG answers a format it does not serve with flask.abort(403),
+            // and the probe has just shown the instance is up: this is the
+            // most common misconfiguration, not an outage.
+            r.status === 403 ? "SearXNG refused format=json (HTTP 403) \u2014 add `json` to `search.formats` in its settings.yml." : `SearXNG failed the query (HTTP ${r.status}).`
+          )
+        );
+      }
       break;
     }
     let data;
     try {
       data = JSON.parse(r.body);
     } catch {
-      if (p === 0) notes.push("SearXNG returned a non-JSON body \u2014 is `format: json` enabled on that instance?");
+      if (p === 0) {
+        failed2 = "error";
+        notes.push("SearXNG returned a non-JSON body \u2014 is `format: json` enabled on that instance?");
+      }
       break;
     }
     for (const e of data.unresponsive_engines ?? []) {
@@ -5676,35 +6345,123 @@ async function searchViaSearxng(query, opts = {}) {
     notes.push(`SearXNG upstreams throttled: ${[...suspended].map(([e, why]) => `${e} (${why})`).join(", ")} \u2014 fewer results than usual, not an empty web.`);
   }
   if (!hits.length && !notes.length) notes.push("SearXNG returned no results.");
-  return { hits, notes };
+  const outcome = hits.length ? "hits" : failed2 ?? (suspended.size ? "throttled" : "empty");
+  return rungResult("searxng", outcome, hits, notes);
+}
+function searxngLanguage(opts) {
+  if (!opts.lang) return void 0;
+  const region = opts.region?.trim().toLowerCase();
+  if (!region) return opts.lang;
+  return region === "wt" ? baseLang(opts.lang) : `${baseLang(opts.lang)}-${region.toUpperCase()}`;
+}
+function budgetDeadline(opts) {
+  return opts.timeoutMs !== void 0 && opts.timeoutMs > 0 ? Date.now() + opts.timeoutMs : Number.POSITIVE_INFINITY;
+}
+function halted(opts, deadline) {
+  if (opts.signal?.aborted) return "cancelled";
+  return Date.now() >= deadline ? "out of time" : void 0;
+}
+function rungResult(rung, outcome, hits, notes) {
+  return { hits, notes, rungs: [report(rung, outcome, hits.length, notes.join(" "))], searched: answered(outcome) };
+}
+function report(rung, outcome, hits = 0, note) {
+  return { rung, outcome, ...hits ? { hits } : {}, ...note ? { note } : {} };
+}
+var answered = (outcome) => outcome === "hits" || outcome === "empty";
+function keylessOutcome(r) {
+  if (r.hits.length) return "hits";
+  if (r.answered) return "empty";
+  if (r.blocked) return "blocked";
+  if (r.throttled) return "throttled";
+  return r.status ? "error" : "unreachable";
 }
 async function search(query, opts = {}) {
   const q = query.trim();
   if (!q) return { hits: [], notes: ["Empty query."] };
-  const viaSearxng = await searchViaSearxng(q, opts);
-  if (viaSearxng.hits.length) return viaSearxng;
-  const notes = [...viaSearxng.notes];
+  const deadline = budgetDeadline(opts);
+  const left = () => deadline === Number.POSITIVE_INFINITY ? void 0 : Math.max(1, deadline - Date.now());
   const keyless = keylessEngines(opts);
-  let asked = 0;
-  let blocked = 0;
-  for (const engine of keyless) {
-    const r = await searchViaKeyless(engine, q, { limit: opts.limit, pages: opts.pages, lang: opts.lang, region: opts.region });
-    if (r.hits.length) {
-      return { hits: r.hits.map((h) => ({ ...h, via: engine })), notes };
+  const order = ["searxng", ...keyless, "firecrawl"];
+  const untried = (rung) => report(rung, rung === "searxng" && !searxngBase(opts) || rung === "firecrawl" && !firecrawlBase(opts) ? "disabled" : "not-tried");
+  const notes = [];
+  const unknown = unknownEngines(opts);
+  if (unknown.length) {
+    notes.push(`${envName("ENGINES")} names no engine this knows: ${unknown.join(", ")} (expected ${KEYLESS_ENGINES.join(", ")}) \u2014 ignored.`);
+  }
+  const rungs = [];
+  let hits = [];
+  for (let i = 0; i < order.length; i++) {
+    const rung = order[i];
+    if (hits.length) {
+      rungs.push(untried(rung));
+      continue;
     }
-    asked++;
-    if (r.blocked) blocked++;
-    if (r.throttled && r.note) notes.push(r.note);
+    const stop = halted(opts, deadline);
+    if (stop) {
+      const rest = order.slice(i).map(untried);
+      const skipped = rest.filter((r) => r.outcome === "not-tried").map((r) => r.rung);
+      const why = stop === "cancelled" ? "the search was cancelled" : `the ${opts.timeoutMs} ms budget ran out`;
+      if (skipped.length) notes.push(`Stopped before ${skipped.join(", ")}: ${why}.`);
+      rungs.push(...rest);
+      break;
+    }
+    if (rung === "searxng") {
+      const r = await searchViaSearxng(q, { ...opts, timeoutMs: left() });
+      hits = r.hits;
+      notes.push(...r.notes);
+      rungs.push(...r.rungs ?? []);
+    } else if (rung === "firecrawl") {
+      const fc = await searchViaFirecrawl(q, limitOf(opts), { firecrawl: opts.firecrawl, lang: opts.lang, region: opts.region, budgetMs: left() });
+      hits = firecrawlHits(fc.hits ?? [], limitOf(opts));
+      if (fc.why) notes.push(fc.why);
+      rungs.push(report("firecrawl", firecrawlOutcome(fc), hits.length, fc.why));
+    } else {
+      const r = await searchViaKeyless(rung, q, {
+        limit: opts.limit,
+        pages: opts.pages,
+        lang: opts.lang,
+        region: opts.region,
+        budgetMs: left(),
+        signal: opts.signal
+      });
+      hits = r.hits.map((h) => ({ ...h, via: rung }));
+      rungs.push(report(rung, keylessOutcome(r), r.hits.length, r.note));
+      if (!r.answered && r.note) notes.push(r.note);
+    }
   }
-  const fc = await searchViaFirecrawl(q, opts.limit ?? 10, opts);
-  const hits = (fc.hits ?? []).map((h) => ({ url: h.url, title: h.title, snippet: h.description, via: "firecrawl" }));
-  if (fc.why) notes.push(fc.why);
-  if (!hits.length) {
-    notes.push(
-      asked > 0 && blocked === asked ? `Every keyless engine blocked this client (${keyless.join(", ")}) \u2014 nothing was searched, which is not the same as nothing being there. Try again later, or run \`${brand().cli} stack up\` for a local SearXNG.` : `No results from any engine. \`${brand().cli} stack up\` starts SearXNG and Firecrawl locally.`
-    );
+  if (!hits.length) notes.push(closingNote(rungs));
+  return { hits, notes, rungs, searched: rungs.some((r) => answered(r.outcome)) };
+}
+var limitOf = (opts) => Math.max(1, opts.limit ?? 10);
+function firecrawlHits(found, limit) {
+  const seen = /* @__PURE__ */ new Set();
+  const hits = [];
+  for (const h of found) {
+    const key = canonicalizeUrl(h.url);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    hits.push({ url: h.url, title: h.title, snippet: h.description, via: "firecrawl" });
+    if (hits.length >= limit) break;
   }
-  return { hits, notes };
+  return hits;
+}
+function firecrawlOutcome(fc) {
+  if (fc.hits) return fc.hits.length ? "hits" : "empty";
+  if (fc.status === void 0) return "disabled";
+  if (fc.status === 0) return "unreachable";
+  return fc.status === 429 || fc.status === 503 ? "throttled" : "error";
+}
+function closingNote(rungs) {
+  const cli = brand().cli;
+  if (rungs.every((r) => r.outcome === "disabled")) {
+    return `No search backend was enabled \u2014 SearXNG and Firecrawl are off and no keyless engine is selected, so nothing was searched. Set ${envName("ENGINES")} to a list of ${KEYLESS_ENGINES.join(", ")}, or run \`${cli} stack up\`.`;
+  }
+  if (rungs.some((r) => answered(r.outcome))) return `No results from any engine. \`${cli} stack up\` starts SearXNG and Firecrawl locally.`;
+  const keyless = rungs.filter((r) => isKeylessEngine(r.rung));
+  if (keyless.length && keyless.every((r) => r.outcome === "blocked")) {
+    return `Every keyless engine blocked this client (${keyless.map((r) => r.rung).join(", ")}) \u2014 nothing was searched, which is not the same as nothing being there. Try again later, or run \`${cli} stack up\` for a local SearXNG.`;
+  }
+  return `No engine answered (${rungs.filter((r) => r.outcome !== "disabled").map((r) => `${r.rung} ${r.outcome}`).join(", ")}) \u2014 nothing was searched, which is not the same as nothing being there. Try again later, or run \`${cli} stack up\` for a local SearXNG.`;
 }
 
 // src/stack.ts
@@ -6107,7 +6864,7 @@ ${up.stderr}` : ""}`, code: 1 };
 
 // src/pool.ts
 async function mapLimit(items, limit, fn) {
-  const width = Math.max(1, Math.floor(limit));
+  const width = Number.isNaN(limit) ? 1 : Math.max(1, Math.floor(limit));
   if (items.length <= 1 || width === 1) {
     const out = [];
     for (let i = 0; i < items.length; i++) out.push(await fn(items[i], i));
@@ -6119,7 +6876,12 @@ async function mapLimit(items, limit, fn) {
     for (; ; ) {
       const i = next++;
       if (i >= items.length) return;
-      results[i] = await fn(items[i], i);
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (e) {
+        next = items.length;
+        throw e;
+      }
     }
   });
   await Promise.all(workers);
@@ -6554,10 +7316,10 @@ async function hasChanged(url, previous, opts = {}) {
 }
 
 // src/tables.ts
-function fragmentText(html) {
+function fragmentText2(html) {
   return decodeEntities(html.replace(TAG_RE, (tag) => INLINE_TAGS.has(tagName(tag)) ? "" : " ").replace(LOOSE_TAG_RE, " "));
 }
-var collapse = (s) => s.replace(/\s+/g, " ").trim();
+var collapse2 = (s) => s.replace(/\s+/g, " ").trim();
 function spanAttr(attrs, name) {
   const n = Number.parseInt(attrs.get(name) ?? "", 10);
   return Number.isFinite(n) && n >= 1 ? Math.min(n, 100) : 1;
@@ -6640,8 +7402,8 @@ var OpenTable = class {
   cell;
   /** Text between two table tags: it belongs to the open cell, else the caption. */
   text(fragment) {
-    if (this.cell) this.cell.parts.push(fragmentText(fragment));
-    else if (this.inCaption) this.caption.push(fragmentText(fragment));
+    if (this.cell) this.cell.parts.push(fragmentText2(fragment));
+    else if (this.inCaption) this.caption.push(fragmentText2(fragment));
   }
   /** A nested table's text, already clean, joins the cell that holds it. */
   nested(text) {
@@ -6659,7 +7421,7 @@ var OpenTable = class {
   endCell() {
     if (!this.cell || !this.row) return;
     const { parts, header: header2, colspan, rowspan } = this.cell;
-    this.row.cells.push({ text: collapse(parts.join("")), header: header2, colspan, rowspan });
+    this.row.cells.push({ text: collapse2(parts.join("")), header: header2, colspan, rowspan });
     this.cell = void 0;
   }
   endRow() {
@@ -6671,7 +7433,7 @@ var OpenTable = class {
 function closeTable(stack, done) {
   const t = stack.pop();
   t.endRow();
-  const caption = collapse(t.caption.join(""));
+  const caption = collapse2(t.caption.join(""));
   const table = buildTable(t.rows, caption);
   if (table) done.push({ order: t.order, table });
   const flat = [caption, ...t.rows.flatMap((r) => r.cells.map((c) => c.text))].filter(Boolean).join(" ");
@@ -6711,11 +7473,20 @@ function tableToMarkdown(table) {
 
 // src/crawl.ts
 var nextFree = /* @__PURE__ */ new Map();
+var holdUntil = /* @__PURE__ */ new Map();
 function resetHostSchedule() {
   nextFree.clear();
+  holdUntil.clear();
+}
+var MAX_TIMER_MS = 2 ** 31 - 1;
+async function sleepFor(ms) {
+  for (let left = ms; left > 0; left -= MAX_TIMER_MS) await sleep(Math.min(left, MAX_TIMER_MS));
 }
 function hostDelayMs() {
   return envInt("POLITE_DELAY_MS", 400, 0, 5e3);
+}
+function maxCrawlDelayMs() {
+  return envInt("MAX_CRAWL_DELAY_MS", 6e4, 0, MAX_TIMER_MS);
 }
 function hostOf(url) {
   try {
@@ -6726,27 +7497,55 @@ function hostOf(url) {
 }
 async function awaitHostSlot(url, delayMs = hostDelayMs(), now = Date.now()) {
   const host = hostOf(url);
-  if (!host || delayMs <= 0) return 0;
-  const free = nextFree.get(host) ?? 0;
-  const waited = Math.max(0, free - now);
-  nextFree.set(host, Math.max(free, now) + delayMs);
-  if (waited > 0) await sleep(waited);
-  return waited;
+  if (!host) return 0;
+  const spaced = delayMs > 0;
+  let waited = 0;
+  let t = now;
+  for (; ; ) {
+    const hold = holdUntil.get(host) ?? 0;
+    const free = spaced ? Math.max(nextFree.get(host) ?? 0, hold) : hold;
+    const wait = Math.max(0, free - t);
+    if (spaced) nextFree.set(host, Math.max(free, t) + delayMs);
+    if (wait === 0) return waited;
+    await sleepFor(wait);
+    waited += wait;
+    t = Date.now();
+    if ((holdUntil.get(host) ?? 0) <= t) return waited;
+  }
 }
 function backOffHost(url, ms, now = Date.now()) {
   const host = hostOf(url);
-  if (!host || ms <= 0) return;
-  nextFree.set(host, Math.max(nextFree.get(host) ?? 0, now + ms));
+  if (!host || !(ms > 0)) return;
+  holdUntil.set(host, Math.max(holdUntil.get(host) ?? 0, now + ms));
 }
+var LINK_TAG_RE = /<(a|area|base)(?=[\s/>])[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/gi;
+var INERT_ELEMENTS = ["script", "style", "template"];
 function linksFrom(html, baseUrl) {
+  let base = baseUrl;
+  let sawBase = false;
+  const hrefs = [];
+  for (const m of dropElements(html, INERT_ELEMENTS, RAW_TEXT_ELEMENTS).matchAll(LINK_TAG_RE)) {
+    const href = htmlAttributes(m[0]).get("href");
+    if (href === void 0) continue;
+    const raw = decodeEntities(href).trim();
+    if (m[1].toLowerCase() !== "base") {
+      hrefs.push(raw);
+      continue;
+    }
+    if (sawBase) continue;
+    sawBase = true;
+    try {
+      base = new URL(raw, baseUrl).href;
+    } catch {
+    }
+  }
   const out = [];
   const seen = /* @__PURE__ */ new Set();
-  for (const m of html.matchAll(/<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
-    const raw = decodeEntities(m[1] ?? m[2] ?? "").trim();
+  for (const raw of hrefs) {
     if (!raw || raw.startsWith("#")) continue;
     if (/^(mailto|tel|javascript|data):/i.test(raw)) continue;
     try {
-      const abs = new URL(raw, baseUrl);
+      const abs = new URL(raw, base);
       if (abs.protocol !== "http:" && abs.protocol !== "https:") continue;
       abs.hash = "";
       const canon = canonicalizeUrl(abs.href);
@@ -6768,113 +7567,291 @@ function sameOrigin(a, b) {
     return false;
   }
 }
+function sameSite(url, origin) {
+  try {
+    const a = new URL(url);
+    const b = new URL(origin);
+    const bare = (host) => host.replace(/^www\./, "");
+    const scheme = a.protocol === b.protocol || b.protocol === "http:" && a.protocol === "https:";
+    return scheme && a.port === b.port && bare(a.hostname) === bare(b.hostname);
+  } catch {
+    return false;
+  }
+}
+function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return void 0;
+  }
+}
+function pathOf(url) {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return "";
+  }
+}
+function sectionOf(url) {
+  const path = pathOf(url) || "/";
+  const cut = path.lastIndexOf("/");
+  const last = path.slice(cut + 1);
+  return last && !last.includes(".") ? `${path}/` : path.slice(0, cut + 1);
+}
+var NOT_A_PAGE_RE = /\.(?:png|jpe?g|gif|webp|avif|bmp|ico|svg|tiff?|heic|mp3|m4a|aac|ogg|oga|opus|wav|flac|mp4|m4v|mov|avi|wmv|mkv|webm|woff2?|ttf|otf|eot|zip|gz|tgz|bz2|xz|7z|rar|tar|dmg|iso|exe|msi|apk|deb|rpm|css|js|mjs|map)$/i;
 function crawlConcurrency() {
   return envInt("CRAWL_CONCURRENCY", 4, 1, 16);
 }
+function whole(n, fallback, min) {
+  return n !== void 0 && Number.isFinite(n) ? Math.max(min, Math.floor(n)) : fallback;
+}
+var seconds = (ms) => `${ms / 1e3} s`;
 async function crawlSite(seed, opts = {}) {
-  const maxPages = Math.max(1, opts.maxPages ?? 20);
-  const maxDepth = Math.max(0, opts.maxDepth ?? 2);
+  const maxPages = whole(opts.maxPages, 20, 1);
+  const maxDepth = whole(opts.maxDepth, 2, 0);
+  const maxRequests = whole(opts.maxRequests, maxPages * 3, 1);
+  const delayOverride = opts.delayMs !== void 0 && Number.isFinite(opts.delayMs) ? Math.max(0, opts.delayMs) : void 0;
+  const prefix = opts.prefix ? pathOf(`http://x${opts.prefix.startsWith("/") ? "" : "/"}${opts.prefix}`) || void 0 : void 0;
   const width = crawlConcurrency();
   const notes = [];
   const disallowed = [];
   const pages = [];
+  const seedOrigin = originOf(seed);
+  if (!seedOrigin) return { pages, pending: [], disallowed, notes: [`${seed} is not a URL.`] };
+  let origin = seedOrigin;
+  let section = sectionOf(seed);
+  const inScope = (url) => opts.crossOrigin === true || sameOrigin(url, origin);
   const NONE = { rules: [], sitemaps: [], absent: true };
-  const authorizeOrigin = async (url) => {
-    if (opts.crossOrigin || sameOrigin(url, seed)) return true;
-    notes.push(`${url}: destination is outside the crawl origin.`);
-    return false;
+  const robotsPolicy = /* @__PURE__ */ new Map();
+  const robotsFor = (url) => {
+    if (opts.ignoreRobots) return Promise.resolve(NONE);
+    const home = originOf(url) ?? "";
+    let authorize = robotsPolicy.get(home);
+    if (!authorize) {
+      authorize = async (target) => {
+        if (sameSite(target, home) || inScope(target)) return true;
+        notes.push(`${target}: destination is outside the crawl origin.`);
+        return false;
+      };
+      robotsPolicy.set(home, authorize);
+    }
+    return fetchRobots(url, { authorizeUrl: authorize });
   };
-  const robotsFor = (url) => opts.ignoreRobots ? Promise.resolve(NONE) : fetchRobots(url, { authorizeUrl: authorizeOrigin });
+  const ceiling = maxCrawlDelayMs();
+  const tooSlow = /* @__PURE__ */ new Set();
+  const refusesDelay = (url, r) => {
+    if (delayOverride !== void 0 || r.crawlDelayMs === void 0 || r.crawlDelayMs <= ceiling) return false;
+    const home = originOf(url) ?? url;
+    if (!tooSlow.has(home)) {
+      tooSlow.add(home);
+      notes.push(
+        `${home} asks for a Crawl-delay of ${seconds(r.crawlDelayMs)} between requests \u2014 over the ${seconds(ceiling)} this crawl will wait (${envName("MAX_CRAWL_DELAY_MS")}), so none of its pages were fetched.`
+      );
+    }
+    return true;
+  };
+  const delayFor = (r) => delayOverride ?? r.crawlDelayMs ?? hostDelayMs();
+  const unreachable2 = (home, r) => `robots.txt at ${home} ${r.status ? `answered HTTP ${r.status}` : "did not answer"} \u2014 RFC 9309 says to assume nothing may be crawled, so nothing was.`;
   const robots = await robotsFor(seed);
-  if (opts.ignoreRobots) notes.push("robots.txt was not consulted (ignoreRobots) \u2014 only correct on a site you own.");
-  else if (robots.absent) notes.push("no robots.txt \u2014 nothing was refused, but nothing was granted either.");
-  if (robots.crawlDelayMs && opts.delayMs === void 0) notes.push(`honouring the declared Crawl-delay of ${robots.crawlDelayMs}ms.`);
-  const delayFor = (r) => opts.delayMs ?? r.crawlDelayMs ?? hostDelayMs();
-  const authorizeUrl = async (url) => {
-    if (!await authorizeOrigin(url)) return false;
+  if (!opts.ignoreRobots && robots.unreachable) return { pages, pending: [seed], disallowed, notes: [...notes, unreachable2(seedOrigin, robots)] };
+  if (refusesDelay(seed, robots)) return { pages, pending: [seed], disallowed, notes };
+  const authorizeHop = async (url, seedHop) => {
+    if (!seedHop && !inScope(url)) {
+      notes.push(`${url}: destination is outside the crawl origin.`);
+      return false;
+    }
     const r = await robotsFor(url);
     if (!opts.ignoreRobots && !isAllowed(r, url)) {
       if (!disallowed.includes(url)) disallowed.push(url);
       return false;
     }
+    if (refusesDelay(url, r)) return false;
     await awaitHostSlot(url, delayFor(r));
     return true;
   };
+  const authorizeUrl = (url) => authorizeHop(url, false);
+  const authorizeSeed = (url) => authorizeHop(url, true);
+  let settleSeed;
+  const seedSettled = new Promise((resolve5) => {
+    settleSeed = resolve5;
+  });
+  const authorizeSitemap = async (url) => {
+    if (!sameOrigin(url, seedOrigin)) await seedSettled;
+    return authorizeUrl(url);
+  };
+  let rerooted = false;
+  const settle = (got) => {
+    if (got.status > 0) {
+      if (section !== "/") section = sectionOf(got.finalUrl);
+      const moved = originOf(got.finalUrl);
+      if (moved && moved !== origin) {
+        origin = moved;
+        rerooted = true;
+        notes.push(`the seed redirected to ${got.finalUrl}${opts.crossOrigin ? "" : `, so the walk stays on ${moved}`}.`);
+      }
+    }
+    settleSeed();
+  };
   const seen = /* @__PURE__ */ new Set([canonicalizeUrl(seed)]);
+  const read2 = /* @__PURE__ */ new Set();
+  let skippedFiles = 0;
   const admit = (url, depth, into) => {
     const canon = canonicalizeUrl(url);
     if (seen.has(canon)) return false;
-    if (!opts.crossOrigin && !sameOrigin(url, seed)) return false;
+    if (!inScope(url)) return false;
+    const path = pathOf(url);
+    if (prefix && !path.startsWith(prefix)) return false;
     seen.add(canon);
+    if (NOT_A_PAGE_RE.test(path)) {
+      skippedFiles++;
+      return false;
+    }
     into.push({ url, depth });
     return true;
   };
-  let sitemap = opts.useSitemap !== false && maxDepth > 0 ? fetchSitemap(seed, { sitemaps: robots.sitemaps, authorizeUrl }) : void 0;
-  const fetchOne = async (item) => {
-    const got = await fetchAndExtract(item.url, { keepHtml: item.depth < maxDepth, authorizeUrl });
-    if (got.retryAfterMs) backOffHost(got.finalUrl, Math.min(got.retryAfterMs, 6e4));
-    if (!got.text) return `${item.url}: ${got.note ?? "nothing readable"}`;
-    const page = {
-      url: got.finalUrl,
-      depth: item.depth,
-      ...got.title ? { title: got.title } : {},
-      text: got.text,
-      extractor: got.extractor ?? "native",
-      links: got.html ? linksFrom(got.html, got.finalUrl) : []
-    };
-    return page;
+  const wantSitemap = opts.useSitemap !== false && maxDepth > 0 && maxPages > 1;
+  let sitemap = wantSitemap ? fetchSitemap(seed, { sitemaps: robots.sitemaps, authorizeUrl: authorizeSitemap }) : void 0;
+  let sitemapAgain = false;
+  let requests = 0;
+  let failed2 = 0;
+  const takeSitemap = async (into) => {
+    const sm = await sitemap;
+    sitemap = void 0;
+    for (const n of sm.notes ?? []) notes.push(n);
+    const scope = prefix ?? (section === "/" ? void 0 : section);
+    const room = maxRequests - requests;
+    let added = 0;
+    let outside = 0;
+    let beyond = 0;
+    for (const entry of sm.urls) {
+      if (scope && !pathOf(entry.loc).startsWith(scope)) outside++;
+      else if (added >= room) beyond++;
+      else if (admit(entry.loc, 1, into)) added++;
+    }
+    if (added || outside || beyond) {
+      notes.push(
+        `seeded ${added} URL(s) from the sitemap` + (beyond ? `; ${beyond} more are past this crawl's request ceiling` : "") + (outside ? `; ${outside} outside ${scope} were left out` : "") + "."
+      );
+    }
+    if (!added && rerooted && !sitemapAgain) {
+      sitemapAgain = true;
+      const home = origin;
+      sitemap = robotsFor(home).then((r) => fetchSitemap(home, { sitemaps: r.sitemaps, authorizeUrl }));
+    }
   };
-  let wave = [{ url: seed, depth: 0 }];
-  while (wave.length && pages.length < maxPages) {
+  const seedItem = { url: seed, depth: 0 };
+  const fetchOne = async (item) => {
+    const isSeed = item === seedItem;
+    const got = await fetchAndExtract(item.url, {
+      keepHtml: item.depth < maxDepth,
+      authorizeUrl: isSeed ? authorizeSeed : authorizeUrl,
+      // A short Retry-After is waited out and retried inside httpGet; the rest
+      // of this host's queue must wait with it, not go out meanwhile.
+      onBackOff: (url, ms) => backOffHost(url, ms)
+    });
+    if (got.retryAfterMs) backOffHost(got.finalUrl, Math.min(got.retryAfterMs, 6e4));
+    if (isSeed) settle(got);
+    if (!got.text) return { note: `${item.url}: ${got.note ?? "nothing readable"}` };
+    return {
+      page: {
+        url: got.finalUrl,
+        depth: item.depth,
+        ...got.title ? { title: got.title } : {},
+        text: got.text,
+        extractor: got.extractor ?? "native",
+        links: got.html ? linksFrom(got.html, got.finalUrl) : []
+      }
+    };
+  };
+  let wave = [seedItem];
+  for (; ; ) {
+    if (!wave.length && sitemap) await takeSitemap(wave);
+    if (!wave.length || pages.length >= maxPages || requests >= maxRequests) break;
+    const room = Math.min(maxPages - pages.length, maxRequests - requests);
     const batch = [];
     let cursor = 0;
-    while (cursor < wave.length && batch.length < maxPages - pages.length) {
-      const slice = wave.slice(cursor, cursor + (maxPages - pages.length - batch.length));
+    while (cursor < wave.length && batch.length < room) {
+      const slice = wave.slice(cursor, cursor + (room - batch.length));
       const files = await Promise.all(slice.map((it) => robotsFor(it.url)));
       slice.forEach((item, i) => {
-        const r = files[i];
-        if (!opts.ignoreRobots && !isAllowed(r, item.url)) disallowed.push(item.url);
-        else batch.push({ item, robots: r });
+        if (!opts.ignoreRobots && !isAllowed(files[i], item.url)) disallowed.push(item.url);
+        else batch.push(item);
       });
       cursor += slice.length;
     }
+    requests += batch.length;
     const leftover = wave.slice(cursor);
     const settled = new Array(batch.length);
     let streamed = 0;
     const streamReady = () => {
       while (streamed < settled.length && settled[streamed] !== void 0) {
-        const done = settled[streamed++];
-        if (typeof done !== "string") opts.onPage?.(done);
+        const i = streamed++;
+        const done = settled[i];
+        if (!("page" in done)) continue;
+        const canon = canonicalizeUrl(done.page.url);
+        if (read2.has(canon)) {
+          settled[i] = { note: `${batch[i].url} redirected to ${done.page.url}, already read.`, duplicate: true };
+          continue;
+        }
+        read2.add(canon);
+        seen.add(canon);
+        opts.onPage?.(done.page);
       }
     };
-    const results = await mapLimit(batch, width, async (a, i) => {
-      const got = await fetchOne(a.item);
-      settled[i] = got;
+    await mapLimit(batch, width, async (item, i) => {
+      settled[i] = await fetchOne(item);
       streamReady();
-      return got;
     });
-    const next = [];
-    if (sitemap) {
-      const sm = await sitemap;
-      sitemap = void 0;
-      let added = 0;
-      for (const entry of sm.urls) if (admit(entry.loc, 1, next)) added++;
-      if (added) notes.push(`seeded ${added} URL(s) from the sitemap.`);
-    }
-    for (const r of results) {
-      if (typeof r === "string") {
-        notes.push(r);
+    settleSeed();
+    const parents = [];
+    for (const r of settled) {
+      if ("note" in r) {
+        notes.push(r.note);
+        if (!r.duplicate) failed2++;
         continue;
       }
-      pages.push(r);
-      if (r.depth >= maxDepth) continue;
-      for (const link of r.links) admit(link, r.depth + 1, next);
+      pages.push(r.page);
+      if (r.page.depth < maxDepth) parents.push(r.page);
     }
+    const next = [];
+    const rootSeed = section === "/";
+    if (sitemap && rootSeed) await takeSitemap(next);
+    for (const page of parents) for (const link of page.links) admit(link, page.depth + 1, next);
+    if (sitemap && !rootSeed) await takeSitemap(next);
     wave = [...leftover, ...next];
   }
   const pending = wave.map((q) => q.url);
-  if (pending.length) notes.push(`stopped at the ${maxPages}-page budget with ${pending.length} URL(s) still queued.`);
-  return { pages, pending, disallowed, notes };
+  const queued = pending.length ? ` with ${pending.length} URL(s) still queued` : "";
+  if (pages.length < maxPages && requests >= maxRequests)
+    notes.push(`stopped after ${requests} page requests, ${failed2} of them failed \u2014 the ceiling for a ${maxPages}-page budget${queued}.`);
+  else if (pending.length) notes.push(`stopped at the ${maxPages}-page budget${queued}.`);
+  if (skippedFiles) notes.push(`skipped ${skippedFiles} link(s) to images, media, fonts or archives without fetching them.`);
+  const policy = [];
+  if (opts.ignoreRobots) policy.push("robots.txt was not consulted (ignoreRobots) \u2014 only correct on a site you own.");
+  else if (envFlag("NO_ROBOTS")) policy.push(`robots.txt was not consulted (${envName("NO_ROBOTS")}) \u2014 only correct on a site you own.`);
+  else {
+    const home = await robotsFor(origin);
+    if (home.unreachable) policy.push(unreachable2(origin, home));
+    else if (home.absent) policy.push(`no robots.txt${home.status ? ` (HTTP ${home.status})` : ""} \u2014 nothing was refused, but nothing was granted either.`);
+    if (home.crawlDelayMs && delayOverride === void 0 && home.crawlDelayMs <= ceiling)
+      policy.push(`honouring the declared Crawl-delay of ${home.crawlDelayMs}ms.`);
+  }
+  return { pages, pending, disallowed, notes: [...policy, ...notes] };
+}
+
+// src/probe.ts
+var PROBE_RETRY_MS = 3e4;
+function cachedProbe(cache2, key, ask) {
+  const hit = cache2.get(key);
+  if (hit && (hit.ok !== false || Date.now() - hit.at < PROBE_RETRY_MS)) return hit.verdict;
+  const entry = { verdict: Promise.resolve(false), at: Date.now() };
+  entry.verdict = ask().catch(() => false).then((ok) => {
+    entry.ok = ok;
+    entry.at = Date.now();
+    return ok;
+  });
+  cache2.set(key, entry);
+  return entry.verdict;
 }
 
 // src/embed.ts
@@ -6897,11 +7874,7 @@ function resetOllamaProbe() {
 async function probeOllama(base = ollamaBase()) {
   const key = base.replace(/\/+$/, "");
   if (key.toLowerCase() === "off") return false;
-  const cached = probed.get(key);
-  if (cached !== void 0) return cached;
-  const r = await httpJson("GET", `${key}/api/tags`, void 0, { timeoutMs: 2e3, retries: 0 });
-  probed.set(key, r.ok);
-  return r.ok;
+  return cachedProbe(probed, key, async () => (await httpJson("GET", `${key}/api/tags`, void 0, { timeoutMs: 2e3, retries: 0 })).ok);
 }
 async function embed(texts, opts = {}) {
   const model = opts.model ?? embedModel();
@@ -6915,17 +7888,43 @@ async function embed(texts, opts = {}) {
   const width = embedBatch();
   for (let i = 0; i < texts.length; i += width) batches.push(texts.slice(i, i + width));
   let note;
+  let failed2 = false;
   const results = await mapLimit(batches, opts.concurrency ?? embedConcurrency(), async (batch) => {
+    if (failed2) return void 0;
     const r = await httpJson("POST", `${base}/api/embed`, { model, input: batch }, { timeoutMs: 6e4 });
     const got = r.ok ? r.data?.embeddings : void 0;
     if (!got || got.length !== batch.length) {
-      note ??= `embedding failed at ${base} (${r.error ?? `status ${r.status}`}) \u2014 is \`${model}\` pulled? \`${brand().cli} semantic up\` pulls it.`;
+      failed2 = true;
+      note ??= embedFailure(base, model, r);
       return void 0;
     }
     return got;
   });
   if (results.some((r) => r === void 0)) return { vectors: [], model, ...note ? { note } : {} };
   return { vectors: results.flat(), model };
+}
+function embedFailure(base, model, r) {
+  const said = typeof r.data?.error === "string" ? r.data.error : void 0;
+  const why = r.error ?? (said ? `status ${r.status}: ${said}` : r.ok ? "the response held no vectors for this batch" : `status ${r.status}`);
+  const missing = r.status === 404 || /not found/i.test(said ?? "");
+  const hint = missing ? ` \u2014 \`ollama pull ${model}\`, or \`${brand().cli} semantic up\`, pulls it.` : ".";
+  return `embedding failed at ${base} (${why})${hint}`;
+}
+var PREFIXES = [
+  { model: /nomic-embed/i, query: "search_query: ", doc: "search_document: " },
+  { model: /mxbai-embed/i, query: "Represent this sentence for searching relevant passages: ", doc: "" },
+  { model: /snowflake-arctic-embed2/i, query: "query: ", doc: "" },
+  { model: /snowflake-arctic-embed/i, query: "Represent this sentence for searching relevant passages: ", doc: "" },
+  { model: /(?:^|[/:_-])(?:multilingual-)?e5(?:[-_:]|$)/i, query: "query: ", doc: "passage: " }
+];
+function embedPrefixes(model = embedModel()) {
+  const known = PREFIXES.find((p) => p.model.test(model)) ?? { query: "", doc: "" };
+  const fromEnv = (name) => {
+    const v = env(name);
+    if (v === void 0) return void 0;
+    return v.toLowerCase() === "none" ? "" : `${v} `;
+  };
+  return { query: fromEnv("EMBED_QUERY_PREFIX") ?? known.query, doc: fromEnv("EMBED_DOC_PREFIX") ?? known.doc };
 }
 async function embedOne(text, opts = {}) {
   const r = await embed([text], opts);
@@ -6967,19 +7966,28 @@ function resetQdrantProbe() {
 async function probeQdrant(base = qdrantBase()) {
   const key = clean(base);
   if (key.toLowerCase() === "off") return false;
-  const cached = probed2.get(key);
-  if (cached !== void 0) return cached;
-  const r = await httpJson("GET", `${key}/collections`, void 0, { timeoutMs: 2e3, retries: 0 });
-  probed2.set(key, r.ok);
-  return r.ok;
+  return cachedProbe(probed2, key, async () => (await httpJson("GET", `${key}/collections`, void 0, { timeoutMs: 2e3, retries: 0 })).ok);
 }
 async function ensureCollection(name, size, opts = {}) {
   const base = clean(opts.base ?? qdrantBase());
   if (base.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
   if (!await probeQdrant(base)) return { ok: false, note: unreachable(base) };
+  const distance = opts.distance ?? "Cosine";
   const existing = await httpJson("GET", `${base}/collections/${encodeURIComponent(name)}`, void 0, { retries: 0 });
-  if (existing.ok) return { ok: true };
-  const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}`, { vectors: { size, distance: opts.distance ?? "Cosine" } });
+  if (existing.ok) {
+    const have2 = existing.data?.result?.config?.params?.vectors;
+    if (typeof have2?.size === "number" && have2.size !== size) {
+      return {
+        ok: false,
+        note: `collection "${name}" exists with size ${have2.size}, not ${size} \u2014 was it built with another embedding model? deleteCollection and re-index.`
+      };
+    }
+    if (typeof have2?.distance === "string" && have2.distance !== distance) {
+      return { ok: false, note: `collection "${name}" exists with distance ${have2.distance}, not ${distance} \u2014 deleteCollection and re-index.` };
+    }
+    return { ok: true };
+  }
+  const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}`, { vectors: { size, distance } });
   return r.ok ? { ok: true } : { ok: false, note: `could not create collection "${name}" at ${base}: ${r.error ?? `status ${r.status}`}` };
 }
 async function upsert(name, points, opts = {}) {
@@ -6987,8 +7995,16 @@ async function upsert(name, points, opts = {}) {
   const base = clean(opts.base ?? qdrantBase());
   if (base.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
   if (!await probeQdrant(base)) return { ok: false, note: unreachable(base) };
-  const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}/points?wait=true`, { points });
-  return r.ok ? { ok: true } : { ok: false, note: `upsert into "${name}" failed: ${r.error ?? `status ${r.status}`}` };
+  const width = Math.max(1, envInt("QDRANT_UPSERT_BATCH", 256));
+  for (let i = 0; i < points.length; i += width) {
+    const chunk = points.slice(i, i + width);
+    const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}/points?wait=true`, { points: chunk }, { timeoutMs: 6e4 });
+    if (!r.ok) {
+      const which = points.length > width ? ` at points ${i + 1}\u2013${i + chunk.length} of ${points.length}` : "";
+      return { ok: false, note: `upsert into "${name}" failed${which}: ${r.error ?? `status ${r.status}`}` };
+    }
+  }
+  return { ok: true };
 }
 async function searchVectors(name, vector, opts = {}) {
   const base = clean(opts.base ?? qdrantBase());
@@ -7011,33 +8027,42 @@ function unreachable(base) {
 }
 async function hybridSearch(question, docs, opts = {}) {
   if (docs.length === 0) return { hits: [] };
-  const embedding = embed([question, ...docs.map((d) => [d.title, d.headings, d.body].filter(Boolean).join("\n"))], {
+  const prefixes = embedPrefixes(opts.model);
+  const queryPrefix = opts.queryPrefix ?? prefixes.query;
+  const docPrefix = opts.docPrefix ?? prefixes.doc;
+  const maxChars = opts.maxChars ?? envInt("EMBED_MAX_CHARS", 8e3);
+  const embedding = embed([queryPrefix + question, ...docs.map((d) => docPrefix + clip3([d.title, d.headings, d.body].filter(Boolean).join("\n"), maxChars))], {
     ...opts.base !== void 0 ? { base: opts.base } : {},
     ...opts.model !== void 0 ? { model: opts.model } : {}
   });
   const index = buildBm25Index(question, docs);
-  const lexical = docs.map((doc) => ({ doc, score: bm25Score(index, doc) })).sort((a, b) => b.score - a.score).map((s) => s.doc);
+  const lexical = docs.map((doc, i) => ({ i, score: bm25Score(index, doc) })).sort((a, b) => b.score - a.score).map((s) => s.i);
   const embedded = await embedding;
   let dense = [];
   let note = embedded.note;
   if (embedded.vectors.length === docs.length + 1) {
     const q = embedded.vectors[0];
-    const scored = docs.map((doc, i) => ({ doc, sim: cosine(q, embedded.vectors[i + 1]) }));
-    dense = scored.sort((a, b) => b.sim - a.sim).map((s) => s.doc);
+    const scored = docs.map((_, i) => ({ i, sim: cosine(q, embedded.vectors[i + 1]) }));
+    dense = scored.sort((a, b) => b.sim - a.sim).map((s) => s.i);
   } else if (!note) {
     note = "the dense lane returned an unexpected number of vectors \u2014 ranking lexically only.";
   }
   const lists = dense.length ? [lexical, dense] : [lexical];
-  const fused = rrf(lists, (d) => d.id, opts.k ?? envInt("RRF_K", 60));
-  const lexRank = new Map(lexical.map((d, i) => [d.id, i + 1]));
-  const denseRank = new Map(dense.map((d, i) => [d.id, i + 1]));
-  const hits = [...docs].map((doc) => ({
+  const fused = rrf(lists, (i) => String(i), opts.k ?? envInt("RRF_K", 60));
+  const lexRank = new Map(lexical.map((i, r) => [i, r + 1]));
+  const denseRank = new Map(dense.map((i, r) => [i, r + 1]));
+  const hits = docs.map((doc, i) => ({
     doc,
-    score: fused.get(doc.id) ?? 0,
-    ...lexRank.has(doc.id) ? { lexicalRank: lexRank.get(doc.id) } : {},
-    ...denseRank.has(doc.id) ? { denseRank: denseRank.get(doc.id) } : {}
+    score: fused.get(String(i)) ?? 0,
+    ...lexRank.has(i) ? { lexicalRank: lexRank.get(i) } : {},
+    ...denseRank.has(i) ? { denseRank: denseRank.get(i) } : {}
   })).sort((a, b) => b.score - a.score);
-  return { hits: opts.limit ? hits.slice(0, opts.limit) : hits, ...note ? { note } : {} };
+  return { hits: opts.limit !== void 0 && opts.limit > 0 ? hits.slice(0, opts.limit) : hits, ...note ? { note } : {} };
+}
+function clip3(text, max) {
+  if (max <= 0 || text.length <= max) return text;
+  const code = text.charCodeAt(max - 1);
+  return text.slice(0, code >= 55296 && code <= 56319 ? max - 1 : max);
 }
 
 // src/cite.ts
@@ -7061,19 +8086,27 @@ function stripInlineCode(line) {
 }
 function codeMask(lines) {
   const mask = new Array(lines.length).fill(false);
-  let inFence = false;
+  let open;
   for (let i = 0; i < lines.length; i++) {
-    if (/^\s*(```|~~~)/.test(lines[i])) {
-      mask[i] = true;
-      inFence = !inFence;
+    const m = /^\s*(`{3,}|~{3,})(.*)$/.exec(lines[i]);
+    if (!open) {
+      if (m && !(m[1][0] === "`" && m[2].includes("`"))) {
+        open = { ch: m[1][0], len: m[1].length };
+        mask[i] = true;
+      }
       continue;
     }
-    mask[i] = inFence;
+    mask[i] = true;
+    if (m && m[1][0] === open.ch && m[1].length >= open.len && m[2].trim() === "") open = void 0;
   }
   return mask;
 }
+function statelessRegExp(re) {
+  return re.global || re.sticky ? new RegExp(re.source, re.flags.replace(/[gy]/g, "")) : re;
+}
 function markedQuoteMask(lines, marker) {
   const mask = new Array(lines.length).fill(false);
+  const re = statelessRegExp(marker);
   let regions = 0;
   let i = 0;
   while (i < lines.length) {
@@ -7084,7 +8117,7 @@ function markedQuoteMask(lines, marker) {
     let j = i;
     let marked = false;
     while (j < lines.length && /^\s*>/.test(lines[j])) {
-      if (marker.test(lines[j])) marked = true;
+      if (re.test(lines[j])) marked = true;
       j++;
     }
     if (marked) {
@@ -7095,17 +8128,33 @@ function markedQuoteMask(lines, marker) {
   }
   return { mask, regions };
 }
-var APPENDIX_HEADING = /^\s*(#{2,6})\s+(sources|references|bibliography)\b/i;
-function appendixMask(lines) {
+var APPENDIX_TITLE = /^(?:sources?|references?(?: bibliographiques)?|bibliograph(?:y|ie)|works cited|citations|quellen(?:angaben)?|literatur(?:verzeichnis)?|fuentes|referencias|fontes|fonti|bibliografia|bronnen)$/;
+function headingAt(lines, i) {
+  const line = lines[i];
+  const atx = /^\s{0,3}(#{1,6})(?:\s+(.*))?$/.exec(line);
+  if (atx) {
+    const text = (atx[2] ?? "").trimEnd().replace(/(?:^|\s)#+$/, "").trimEnd().replace(/\{#[^{}\s]*\}$/, "").trim();
+    return { level: atx[1].length, text };
+  }
+  const under = i + 1 < lines.length ? /^\s{0,3}(=+|-+)\s*$/.exec(lines[i + 1]) : null;
+  if (under && line.trim() && !/^\s*(?:[-*+>|]|\d+\.|```|~~~)/.test(line) && !/^\s{4}/.test(line)) {
+    return { level: under[1][0] === "=" ? 1 : 2, text: line.trim() };
+  }
+  return void 0;
+}
+function appendixMask(lines, opts = {}) {
   const mask = new Array(lines.length).fill(false);
+  const extra = opts.headings ? statelessRegExp(opts.headings) : void 0;
+  const isAppendix = (text) => {
+    const bare = text.replace(/:$/, "").trimEnd();
+    const folded = bare.normalize("NFD").replace(new RegExp("\\p{M}+", "gu"), "").toLowerCase().replace(/\s+/g, " ");
+    return APPENDIX_TITLE.test(folded) || (extra?.test(bare) ?? false);
+  };
   let level = 0;
   for (let i = 0; i < lines.length; i++) {
-    const h = /^\s*(#{1,6})\s/.exec(lines[i]);
-    if (level && h && h[1].length <= level) level = 0;
-    if (!level) {
-      const a = APPENDIX_HEADING.exec(lines[i]);
-      if (a) level = a[1].length;
-    }
+    const h = headingAt(lines, i);
+    if (level && h && h.level <= level) level = 0;
+    if (!level && h && isAppendix(h.text)) level = h.level;
     mask[i] = level > 0;
   }
   return mask;
@@ -7118,6 +8167,7 @@ var isHeadingOrRule = (t) => /^#{1,6}\s/.test(t) || /^([-*_])\1{2,}$/.test(t);
 var isTableSeparator = (line) => /\|/.test(line) && /^[\s:|-]+$/.test(line.trim()) && /-/.test(line);
 var isTableRow = (line) => /\|/.test(line.trim()) && !isTableSeparator(line);
 var isListItem = (line) => /^\s*([-*+]|\d+\.)\s+\S/.test(line);
+var isReferenceDefinition = (line) => /^ {0,3}\[[^\]\n]+\]:[ \t]*(?:<[^>\n]*>|\S+)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*$/.test(line);
 function tableCells(line) {
   return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim()).join(" ");
 }
@@ -7147,6 +8197,10 @@ function extractClaimUnits(text, opts = {}) {
     const raw = lines[i];
     const line = stripInlineCode(raw);
     const t = line.trim();
+    if (!prose.length && isReferenceDefinition(raw)) {
+      i++;
+      continue;
+    }
     if (t === "" || isHeadingOrRule(t) || isTableSeparator(line)) {
       flush();
       if (/^#{1,6}\s/.test(t)) section = opts.sectionTag?.(t);
@@ -7210,10 +8264,17 @@ function citationTokensIn(text, isCitation) {
   const masked = stripInlineCode(text);
   const out = [];
   for (const m of masked.matchAll(TOKEN_RE2)) {
-    const tok = m[1].trim();
-    if (isCitation(tok) && !out.includes(tok)) out.push(tok);
+    for (const tok of citationsInBracket(m[1], isCitation)) if (!out.includes(tok)) out.push(tok);
   }
   return out;
+}
+function citationsInBracket(inner, isCitation) {
+  const tok = inner.trim();
+  if (isCitation(tok)) return [tok];
+  const unwrapped = tok.startsWith("[") ? tok.slice(1).trim() : tok;
+  if (unwrapped !== tok && isCitation(unwrapped)) return [unwrapped];
+  const parts = unwrapped.split(/[,;]/).map((p) => p.trim());
+  return parts.length > 1 && parts.every((p) => isCitation(p)) ? parts : [];
 }
 function bracketedTokensIn(text) {
   const masked = stripInlineCode(text);
@@ -7233,8 +8294,7 @@ function collectCitations(text, isCitation, opts = {}) {
   }
   const all = [];
   for (const m of text.matchAll(TOKEN_RE2)) {
-    const tok = m[1].trim();
-    if (isCitation(tok) && !all.includes(tok)) all.push(tok);
+    for (const tok of citationsInBracket(m[1], isCitation)) if (!all.includes(tok)) all.push(tok);
   }
   return { grounding, inertOnly: all.filter((t) => !grounding.includes(t)) };
 }
@@ -7249,7 +8309,7 @@ function uncitedIds(cited, known) {
   return [...new Set(known)].filter((id) => !used.has(id));
 }
 function normalizeNumeralText(text) {
-  return text.replace(/(\d)[\u00A0\u202F'](?=\d)/g, "$1").replace(/(\d)[, ](\d{3})(?!\d)/g, "$1$2").replace(/(\d),(?=\d)/g, "$1.");
+  return text.replace(/(\d)[\u00A0\u202F'](?=\d)/g, "$1").replace(/(?<=\d)[, ](?=\d{3}(?!\d))/g, "").replace(/(\d),(?=\d)/g, "$1.");
 }
 function extractNumerals(text, max = 8) {
   const cleaned = normalizeNumeralText(
@@ -8297,6 +9357,7 @@ export {
   embed,
   embedModel,
   embedOne,
+  embedPrefixes,
   embeddingsDisabled,
   emitWorkflowScript,
   enabledDocExtractors,
@@ -8379,6 +9440,7 @@ export {
   markFirecrawlDown,
   markedQuoteMask,
   matcherFromTokens,
+  maxCrawlDelayMs,
   metaDescriptionOf,
   missingFromHelp,
   nearestHeading,
@@ -8492,6 +9554,7 @@ export {
   toBatches,
   uncitedIds,
   unitTexts,
+  unknownEngines,
   upsert,
   urlDeclaresIdentity,
   validateArgs,
