@@ -4,7 +4,15 @@ import { envName } from "../src/brand.js";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { firecrawlBase, mapScrapeResponse, mapSearchResponse, probeFirecrawl, scrapeViaFirecrawl, searchViaFirecrawl } from "../src/firecrawl.js";
+import {
+  firecrawlBase,
+  mapScrapeResponse,
+  mapSearchResponse,
+  markFirecrawlDown,
+  probeFirecrawl,
+  scrapeViaFirecrawl,
+  searchViaFirecrawl,
+} from "../src/firecrawl.js";
 import { fetchAndExtract } from "../src/fetch.js";
 import { installFetchMock, routes } from "./fetchmock.js";
 
@@ -109,6 +117,37 @@ describe("probeFirecrawl", () => {
       }),
     );
     expect(await probeFirecrawl(base)).toBe(false);
+  });
+
+  it("forgets a 'down' verdict after a short while, and so does markFirecrawlDown", async () => {
+    // Sticky "down" is right for a one-shot CLI and wrong for a long-lived MCP
+    // server: one call before `firecrawl up` left it unusable until restart.
+    const base = nextBase();
+    let running = false;
+    const spy = vi.fn(async () => {
+      if (!running) throw new Error("ECONNREFUSED");
+      return new Response('{"message":"Firecrawl API"}', { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", spy);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(2_000_000);
+    try {
+      expect(await probeFirecrawl(base)).toBe(false);
+      running = true;
+      expect(await probeFirecrawl(base)).toBe(false);
+      clock.mockReturnValue(2_000_000 + 31_000);
+      expect(await probeFirecrawl(base)).toBe(true);
+      expect(await probeFirecrawl(base)).toBe(true); // up stays up
+      expect(spy).toHaveBeenCalledTimes(2);
+
+      // A container that dies mid-run is skipped for a while, then asked again.
+      markFirecrawlDown(base);
+      expect(await probeFirecrawl(base)).toBe(false);
+      clock.mockReturnValue(2_000_000 + 62_000);
+      expect(await probeFirecrawl(base)).toBe(true);
+      expect(spy).toHaveBeenCalledTimes(3);
+    } finally {
+      clock.mockRestore();
+    }
   });
 });
 

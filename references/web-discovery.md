@@ -18,6 +18,14 @@ parts.
 `--engine <name>` pins one rung. `--engine off` (or `WEBINDEX_ENGINES=off`)
 disables the keyless rungs entirely.
 
+SearXNG and Firecrawl are probed before they are asked. On the localhost
+defaults the probe checks it is really them — SearXNG's `/healthz` answers `OK`,
+so a notebook server on 8888 is not taken for it; a base you name with
+`--searxng`/`--firecrawl` only has to answer. A "down" verdict is remembered for
+30 seconds and an "up" one for the process, so a long-running `webindex mcp`
+finds a stack started after its first search. A SearXNG that answers `/search`
+with a 403 has `format: json` switched off, and the note says so.
+
 ## What "no results" means
 
 Different facts, kept separate on purpose:

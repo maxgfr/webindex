@@ -65,35 +65,73 @@ function authHeaders(): Record<string, string> | undefined {
   return key ? { authorization: `Bearer ${key}` } : undefined;
 }
 
-// One probe per base per process. Keyed by base so a test (or a run pointed at
-// two instances) is never served another base's verdict.
-const probeCache = new Map<string, Promise<boolean>>();
+// How long a "down" verdict is trusted. Long enough that a burst of calls pays
+// one refused connection between them; short enough that a long-lived MCP
+// server notices the stack its own message told the user to start. A sticky
+// "down" left `webindex mcp` reporting "not reachable" until it was restarted.
+const PROBE_DOWN_TTL_MS = 30_000;
+
+/**
+ * Memoised probe verdicts, one per key: "up" is kept for the process, "down"
+ * for PROBE_DOWN_TTL_MS. Shared by the SearXNG and Firecrawl probes; not part
+ * of the public API.
+ */
+export class ProbeMemo {
+  private readonly entries = new Map<string, { verdict: Promise<boolean>; downAt?: number }>();
+
+  /** The verdict for `key`, probing when there is none or a "down" one expired. */
+  get(key: string, probe: () => Promise<boolean>): Promise<boolean> {
+    const hit = this.entries.get(key);
+    if (hit && (hit.downAt === undefined || Date.now() - hit.downAt < PROBE_DOWN_TTL_MS)) return hit.verdict;
+    const entry: { verdict: Promise<boolean>; downAt?: number } = { verdict: probe() };
+    // Registered before any caller awaits the verdict, so it has run by the
+    // time the first caller resumes.
+    void entry.verdict.then((up) => {
+      if (!up) entry.downAt = Date.now();
+    });
+    this.entries.set(key, entry);
+    return entry.verdict;
+  }
+
+  markDown(key: string): void {
+    this.entries.set(key, { verdict: Promise.resolve(false), downAt: Date.now() });
+  }
+
+  clear(): void {
+    this.entries.clear();
+  }
+}
+
+// Keyed by base (and probe mode) so a test, or a run pointed at two
+// instances, is never served another base's verdict.
+const probeCache = new ProbeMemo();
 
 /**
  * Test seam: forget which bases were probed.
  *
- * The memoisation is per-process and deliberately sticky — the whole cost of an
- * absent Firecrawl is meant to be one refused connection. That is right in
- * production and wrong across test cases, where one case's "down" verdict would
- * silently decide the next case's behaviour. Mirrors resetOcrBudget,
- * resetPdfLadderCache and resetDocLadderCache.
+ * An "up" verdict is sticky for the process and a "down" one lasts 30 s, so
+ * the whole cost of an absent Firecrawl is one refused connection per burst of
+ * calls. That is right in production and wrong across test cases, where one
+ * case's verdict would silently decide the next case's behaviour. Mirrors
+ * resetOcrBudget, resetPdfLadderCache and resetDocLadderCache.
  */
 export function resetFirecrawlProbeCache(): void {
   probeCache.clear();
 }
 
 /**
- * Record that `base` stopped answering, so the rest of this run skips it.
+ * Record that `base` stopped answering, so the calls that follow skip it.
  *
- * The probe runs once and is then trusted for the process — which is right for
- * "it was never there" and wrong for "the container died at page 4 of 40". A
- * caller that sees a request abort with no status knows something the memoised
- * verdict does not, and without this every remaining page pays the timeout again.
+ * An "up" verdict is trusted for the process — which is right for "it is
+ * there" and wrong for "the container died at page 4 of 40". A caller that
+ * sees a request fail with no status knows something the memoised verdict does
+ * not, and without this every remaining page pays the timeout again. Like any
+ * "down" verdict it expires, so an instance that comes back is found again.
  * Both probe modes are marked down: the instance is gone whether or not the user
  * named it.
  */
 export function markFirecrawlDown(base: string): void {
-  for (const explicit of [true, false]) probeCache.set(`${base}|${explicit}`, Promise.resolve(false));
+  for (const explicit of [true, false]) probeCache.markDown(`${base}|${explicit}`);
 }
 
 /**
@@ -121,34 +159,28 @@ export function looksLikeFirecrawl(contentType: string | null, body: string): bo
  * ceiling. The response must also look like Firecrawl (see above) unless the
  * caller named the instance itself — pointing `--firecrawl` somewhere is a
  * statement about what lives there, and it may legitimately sit behind a proxy
- * that masks the root. Connection refused / timeout ⇒ down. Memoised for the
- * process, so the whole cost of an absent Firecrawl is one refused connection.
- * Never throws.
+ * that masks the root. Connection refused / timeout ⇒ down. Memoised — "up"
+ * for the process, "down" for 30 s — so the whole cost of an absent Firecrawl is
+ * one refused connection per burst of calls. Never throws.
  *
  * Deliberately bypasses `httpGet`: that layer retries once with a backoff,
  * which would turn a 2s ceiling into ~4.6s on a blackholed host. A probe wants
  * a single shot.
  */
 export function probeFirecrawl(base: string, explicit = false): Promise<boolean> {
-  const key = `${base}|${explicit}`;
-  let p = probeCache.get(key);
-  if (!p) {
-    p = (async () => {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
-      try {
-        const res = await fetch(`${base}/`, { signal: ctrl.signal });
-        const body = await res.text().catch(() => ""); // drain so the socket is released
-        return explicit || looksLikeFirecrawl(res.headers.get("content-type"), body);
-      } catch {
-        return false;
-      } finally {
-        clearTimeout(t);
-      }
-    })();
-    probeCache.set(key, p);
-  }
-  return p;
+  return probeCache.get(`${base}|${explicit}`, async () => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${base}/`, { signal: ctrl.signal });
+      const body = await res.text().catch(() => ""); // drain so the socket is released
+      return explicit || looksLikeFirecrawl(res.headers.get("content-type"), body);
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(t);
+    }
+  });
 }
 
 // Resolved API prefix per base. Firecrawl 2.10.5 serves `/v2`; older images only

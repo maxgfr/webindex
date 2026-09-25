@@ -35,7 +35,7 @@ import { extractTables, tableToMarkdown } from "./tables.js";
 import { fingerprint, hasChanged } from "./changed.js";
 import { auditEngineUsage, auditSkillBundle, checkPins, readSkillConfig, scaffoldSkill, vendorEngine, type CliSurface } from "./skillkit/index.js";
 import { isKeylessEngine, KEYLESS_ENGINES, type KeylessEngine } from "./engines.js";
-import { probeSearxng, search, searxngBase } from "./search.js";
+import { probeSearxng, search, searxngBase, searxngIsExplicit } from "./search.js";
 import { cacheClean, cacheDir, cachedFetchAndExtract, cacheStats, setCacheMode } from "./cache.js";
 import { fetchRobots, isAllowed } from "./robots.js";
 import { discoverFeeds, fetchFeed, fetchSitemap, parseFeed } from "./feed.js";
@@ -1636,7 +1636,7 @@ async function dispatch(argv: string[]): Promise<void> {
       (pdfRungs as string[]).includes(id) || (docRungs as string[]).includes(id) ? npxCacheState(spec) : undefined;
     const [fc, sxUp, olUp, qdUp, inspectorCache, anydocCache, ocr] = await Promise.all([
       base ? probeFirecrawl(base) : false,
-      sx ? probeSearxng(sx) : false,
+      sx ? probeSearxng(sx, searxngIsExplicit()) : false,
       probeOllama(ol),
       probeQdrant(qd),
       cacheState("pdf-inspector", PDF_INSPECTOR_SPEC),

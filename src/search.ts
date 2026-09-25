@@ -1,6 +1,6 @@
 import { brand, env, envName } from "./brand.js";
 import { httpGet, pageDelayMs, sleep } from "./fetch.js";
-import { firecrawlBase, searchViaFirecrawl } from "./firecrawl.js";
+import { firecrawlBase, ProbeMemo, searchViaFirecrawl } from "./firecrawl.js";
 import { acceptLanguageHeader } from "./locale.js";
 import { canonicalizeUrl } from "./url.js";
 import { isKeylessEngine, KEYLESS_ENGINES, keylessEngines, searchViaKeyless, unknownEngines, type EngineResult, type KeylessEngine } from "./engines.js";
@@ -109,7 +109,7 @@ export function searxngIsExplicit(opts: SearchOptions = {}): boolean {
   return !!(opts.searxng ?? env("SEARXNG"));
 }
 
-const probeCache = new Map<string, Promise<boolean>>();
+const probeCache = new ProbeMemo();
 
 /** Test seam: forget memoised probe verdicts. */
 export function resetSearxngProbeCache(): void {
@@ -118,32 +118,36 @@ export function resetSearxngProbeCache(): void {
 
 /**
  * Is a SearXNG instance answering at `base`? A single `GET {base}/healthz` with
- * a hard 2s ceiling; ANY HTTP response counts as up, because a 404 from a proxy
- * in front of it still proves something is listening. Memoised per base, so the
- * whole cost of an absent instance is one refused connection per process.
+ * a hard 2s ceiling.
+ *
+ * What counts as an answer depends on who chose the base, as for Firecrawl's
+ * probe. On the localhost DEFAULT it must be SearXNG's own `OK`: 8888 is also
+ * Jupyter's default port, and taking a notebook server for SearXNG made doctor
+ * report it "answering" and every search blame SearXNG's JSON setting. A base
+ * the caller NAMED is a statement about what lives there, so ANY HTTP response
+ * counts — a proxy in front of it may not route /healthz.
+ *
+ * Memoised per base: "up" for the process, "down" for 30 s, so an absent
+ * instance costs one refused connection per burst of calls while a long-lived
+ * MCP server still finds one started later.
  *
  * Deliberately bypasses httpGet, whose retry-with-backoff would turn a 2s
  * ceiling into roughly 4.6s on a blackholed host. A probe wants a single shot.
  */
-export function probeSearxng(base: string): Promise<boolean> {
-  let p = probeCache.get(base);
-  if (!p) {
-    p = (async () => {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
-      try {
-        const res = await fetch(`${base}/healthz`, { signal: ctrl.signal });
-        await res.text().catch(() => ""); // drain so the socket is released
-        return true;
-      } catch {
-        return false;
-      } finally {
-        clearTimeout(t);
-      }
-    })();
-    probeCache.set(base, p);
-  }
-  return p;
+export function probeSearxng(base: string, explicit = false): Promise<boolean> {
+  return probeCache.get(`${base}|${explicit}`, async () => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${base}/healthz`, { signal: ctrl.signal });
+      const body = await res.text().catch(() => ""); // drain so the socket is released
+      return explicit || (res.ok && /^\s*ok\s*$/i.test(body));
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(t);
+    }
+  });
 }
 
 /**
@@ -157,7 +161,7 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
   const base = searxngBase(opts);
   if (!base) return rungResult("searxng", "disabled", [], [`SearXNG disabled (--searxng off / ${envName("SEARXNG")}=off).`]);
 
-  if (!(await probeSearxng(base))) {
+  if (!(await probeSearxng(base, searxngIsExplicit(opts)))) {
     return rungResult(
       "searxng",
       "unreachable",
@@ -199,7 +203,12 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
             ? `SearXNG rate-limited (HTTP ${r.status}).`
             : failed === "unreachable"
               ? `SearXNG unreachable (${r.error || "no response"}).`
-              : `SearXNG failed the query (HTTP ${r.status}).`,
+              : // SearXNG answers a format it does not serve with flask.abort(403),
+                // and the probe has just shown the instance is up: this is the
+                // most common misconfiguration, not an outage.
+                r.status === 403
+                ? "SearXNG refused format=json (HTTP 403) — add `json` to `search.formats` in its settings.yml."
+                : `SearXNG failed the query (HTTP ${r.status}).`,
         );
       }
       break;

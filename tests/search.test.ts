@@ -48,10 +48,20 @@ describe("searxngBase", () => {
 });
 
 describe("probeSearxng", () => {
-  it("counts any HTTP answer as up, including a 404", async () => {
+  it("counts any HTTP answer from a NAMED instance as up, including a 404", async () => {
     // A reverse proxy in front of SearXNG may not route /healthz. Something
-    // answered on that port; that is what the probe is for.
+    // answered where the user said SearXNG lives; that is what the probe is for.
     installFetchMock(() => ({ status: 404, body: "nope" }));
+    await expect(probeSearxng(nextBase(), true)).resolves.toBe(true);
+  });
+
+  it("does not take whatever answers on the default port for SearXNG", async () => {
+    // 8888 is also Jupyter's default port. Taken for SearXNG, doctor reported
+    // "answering" and every search blamed SearXNG's JSON setting. SearXNG's
+    // /healthz answers exactly "OK".
+    installFetchMock(() => ({ status: 302, body: "<html><title>Jupyter Server</title></html>", contentType: "text/html" }));
+    await expect(probeSearxng(nextBase())).resolves.toBe(false);
+    installFetchMock(() => ({ status: 200, body: "OK", contentType: "text/plain" }));
     await expect(probeSearxng(nextBase())).resolves.toBe(true);
   });
 
@@ -65,12 +75,38 @@ describe("probeSearxng", () => {
     await expect(probeSearxng(nextBase())).resolves.toBe(false);
   });
 
-  it("probes a given base only once per process", async () => {
-    const spy = installFetchMock(() => ({ body: "ok" }));
+  it("probes a given base only once per process while it is up", async () => {
+    const spy = installFetchMock(() => ({ body: "OK" }));
     const base = nextBase();
     await probeSearxng(base);
     await probeSearxng(base);
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("forgets a 'down' verdict after a short while, so a stack started later is found", async () => {
+    // A long-lived MCP server asked once before `stack up` kept answering "not
+    // reachable" until it was restarted, while its own message said to start
+    // the stack. Down is remembered briefly, for a burst of calls; up for good.
+    const base = nextBase();
+    let running = false;
+    const spy = vi.fn(async () => {
+      if (!running) throw new Error("ECONNREFUSED");
+      return new Response("OK", { status: 200 });
+    });
+    vi.stubGlobal("fetch", spy);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    try {
+      expect(await probeSearxng(base)).toBe(false);
+      running = true;
+      expect(await probeSearxng(base)).toBe(false); // a burst pays one refused connection
+      clock.mockReturnValue(1_000_000 + 31_000);
+      expect(await probeSearxng(base)).toBe(true);
+      clock.mockReturnValue(1_000_000 + 3_600_000);
+      expect(await probeSearxng(base)).toBe(true);
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      clock.mockRestore();
+    }
   });
 });
 
@@ -158,6 +194,18 @@ describe("searchViaSearxng", () => {
     installFetchMock((url) => (url.includes("/search") ? { status: 429, body: "slow down" } : { body: "ok" }));
     const r = await searchViaSearxng("q", { searxng: base });
     expect(r.notes[0]).toContain("rate-limited (HTTP 429)");
+  });
+
+  it("reads a 403 from /search as format=json switched off, not as an outage", async () => {
+    // SearXNG answers a format it does not serve with flask.abort(403). The
+    // probe has just proved the instance is up, so "unreachable" is wrong.
+    const base = nextBase();
+    installFetchMock((url) => (url.includes("/search") ? { status: 403, body: "Forbidden" } : { body: "OK" }));
+    const r = await searchViaSearxng("q", { searxng: base });
+    expect(r.notes[0]).toMatch(/refused format=json \(HTTP 403\)/);
+    expect(r.notes[0]).toMatch(/search\.formats/);
+    expect(r.notes[0]).not.toMatch(/unreachable/);
+    expect(r.rungs?.[0]?.outcome).toBe("error");
   });
 
   it("blames the instance's json setting when the body is not JSON", async () => {

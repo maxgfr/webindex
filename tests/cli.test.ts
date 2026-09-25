@@ -14,6 +14,7 @@ import { envName } from "../src/brand.js";
 import { resetOllamaProbe } from "../src/embed.js";
 import { resetCacheMode } from "../src/cache.js";
 import { resetHaveCache } from "../src/exec.js";
+import { resetSearxngProbeCache } from "../src/search.js";
 
 // Every stack service the engine knows, except `all` — the CLI spells that one
 // `stack`. Derived rather than typed out, because a hand-written list is exactly
@@ -467,6 +468,20 @@ describe("doctor", () => {
     expect(s).toContain(`ocr            off (${envName("OCR_MAX")}=0)`);
     expect(s).toMatch(/doc rungs {3}anydoc {9}npx not found\n/);
     expect(s).toMatch(/^ {14}builtin {8}built-in \(OOXML and OpenDocument\)$/m);
+  });
+
+  it("does not report a notebook server on SearXNG's default port as SearXNG", async () => {
+    // 8888 is Jupyter's default port too. SearXNG's /healthz answers "OK".
+    process.env[envName("FIRECRAWL")] = "off";
+    delete process.env[envName("SEARXNG")];
+    installFetchMock(() => ({ status: 200, body: "<html><title>Jupyter Server</title></html>", contentType: "text/html" }));
+    try {
+      expect(await run(["doctor"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+      resetSearxngProbeCache();
+    }
+    expect(stdout()).toMatch(/searxng {5}not reachable at http:\/\/localhost:8888/);
   });
 
   it("lists a rung the environment switched off, and which variable did it", async () => {
