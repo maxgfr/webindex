@@ -22,7 +22,7 @@ import {
 // HTTP — and is still exported from the package root, so no consumer sees it move.
 import { buildMatcher, nearestHeading } from "./text.js";
 import { extractPdf } from "./pdf.js";
-import { extractDocument, docFormatForUrl, docFormatForContentType } from "./doc.js";
+import { extractDocument, docFormatForUrl, docFormatForContentType, sniffDocument, type DocFormat } from "./doc.js";
 // Cyclic by design: firecrawl.ts is a CLIENT of this HTTP layer, and this layer
 // is where the extraction seam lives. Safe because neither module calls into the
 // other at module-evaluation time — only from inside function bodies.
@@ -114,9 +114,11 @@ export interface HttpResult {
   body: string;
   contentType: string;
   url: string; // final URL after redirects (for post-redirect exclude re-check)
-  bytes?: Buffer; // raw body, only when opts.binary (for PDF extraction)
+  bytes?: Buffer; // raw body, when opts.binary, or when the response is a complete document (for the extraction ladders)
   /** Retained response bytes, before character decoding. */
   bytesRead?: number;
+  /** The name Content-Disposition gives the body, when it gives one — what a download route calls its file. */
+  filename?: string;
   /** The body exceeded the cap; its retained prefix is incomplete. */
   truncated?: boolean;
   error?: string;
@@ -276,6 +278,48 @@ function isBinaryDocument(contentType: string): boolean {
   return /application\/pdf/i.test(contentType) || docFormatForContentType(contentType) !== undefined;
 }
 
+// Content types that say nothing about the body. Download routes answer these
+// for PDFs and office files as often as for anything else, so for them the
+// bytes decide (see sniffDocument). `application/zip` is here because every
+// .docx, .xlsx and .odt is one.
+const AMBIGUOUS_TYPES = new Set([
+  "",
+  "application/octet-stream",
+  "binary/octet-stream",
+  "application/x-download",
+  "application/force-download",
+  "application/download",
+  "application/unknown",
+  "application/zip",
+  "application/x-zip-compressed",
+]);
+
+const mimeOf = (contentType: string): string => contentType.split(";")[0]!.trim().toLowerCase();
+
+/** The filename a Content-Disposition header names: RFC 6266's `filename*` first, then `filename`. */
+function dispositionFilename(header: string | null): string | undefined {
+  if (!header) return undefined;
+  let name: string | undefined;
+  const extended = /filename\*\s*=\s*[^'\s;]*'[^']*'([^;\s]+)/i.exec(header);
+  if (extended) {
+    try {
+      name = decodeURIComponent(extended[1]!);
+    } catch {
+      name = undefined; // malformed percent-encoding: fall back to the plain parameter
+    }
+  }
+  if (name === undefined) {
+    const plain = /filename\s*=\s*(?:"((?:\\.|[^"\\])*)"|([^;]+))/i.exec(header);
+    name = plain ? (plain[1]?.replace(/\\(.)/g, "$1") ?? plain[2]!.trim()) : undefined;
+  }
+  // Only the last segment is a name; some servers send a whole path.
+  return name?.split(/[\\/]/).pop() || undefined;
+}
+
+/** Does this filename announce a PDF or an office document? */
+const namesDocument = (filename: string | undefined): boolean =>
+  filename !== undefined && (PDF_URL_RE.test(filename) || docFormatForUrl(filename) !== undefined);
+
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 
 // A crawler's policy must run before each request, including redirect hops.
@@ -399,7 +443,15 @@ export async function httpGet(
         rateLimited: detectRateLimited(res.status, res.headers),
         retryAfterMs: parseRetryAfter(res.headers, Number.POSITIVE_INFINITY),
       };
-      const max = opts.maxBytes ?? (isBinaryDocument(meta.contentType) ? opts.maxDocumentBytes : undefined) ?? DEFAULT_MAX_RESPONSE_BYTES;
+      const mime = mimeOf(meta.contentType);
+      const filename = dispositionFilename(res.headers.get("content-disposition"));
+      // A document by what the headers say: its type, or the name it is served
+      // under. An ambiguous type may be one too, so it is read under the same
+      // cap — a 10 MB PDF behind `application/octet-stream` must not be cut at
+      // the text cap and then refused as incomplete.
+      const namedDocument = isBinaryDocument(meta.contentType) || namesDocument(filename);
+      const ambiguous = AMBIGUOUS_TYPES.has(mime);
+      const max = opts.maxBytes ?? (namedDocument || ambiguous ? opts.maxDocumentBytes : undefined) ?? DEFAULT_MAX_RESPONSE_BYTES;
 
       // Refuse a body the server has already declared too big, before a single
       // byte of it is read, when its prefix is useless: a document, or the
@@ -409,7 +461,7 @@ export async function httpGet(
       // below, exactly as it does when the same bytes arrive chunked — whether
       // a long article is readable must not depend on a Content-Length.
       const declared = Number(res.headers.get("content-length"));
-      const prefixUseless = opts.binary || isBinaryDocument(meta.contentType) || Object.keys(opts.headers ?? {}).some((k) => k.toLowerCase() === "range");
+      const prefixUseless = opts.binary || namedDocument || Object.keys(opts.headers ?? {}).some((k) => k.toLowerCase() === "range");
       if (Number.isFinite(declared) && declared > max && prefixUseless) {
         ctrl.abort();
         return { ok: false, status: res.status, body: "", bytesRead: 0, truncated: true, ...meta, error: `response too large: ${declared} bytes > ${max} cap` };
@@ -417,29 +469,42 @@ export async function httpGet(
 
       // 304 carries no body by definition — reading it is not an error, and the
       // caller (the cache) wants the status, not an empty-body complaint.
-      const { bytes, bytesRead, truncated } =
-        res.status === 304 ? { bytes: Buffer.alloc(0), bytesRead: 0, truncated: false } : await readMeasuredBody(res, max);
+      let { bytes, bytesRead, truncated } = res.status === 304 ? { bytes: Buffer.alloc(0), bytesRead: 0, truncated: false } : await readMeasuredBody(res, max);
       countFetch(bytes.length, false);
+      // Behind an ambiguous type, the bytes say whether this is a document.
+      const sniffed = ambiguous ? sniffDocument(bytes) : undefined;
+      if (ambiguous && !namedDocument && !sniffed && opts.maxBytes === undefined && bytes.length > DEFAULT_MAX_RESPONSE_BYTES) {
+        // Read under the document cap in case it was one. It is not, so it
+        // keeps the text cap it always had.
+        bytes = bytes.subarray(0, DEFAULT_MAX_RESPONSE_BYTES);
+        bytesRead = bytes.length;
+        truncated = true;
+      }
       // The raw bytes are kept when the caller asked for them, and ALSO when
-      // the origin says the body is a PDF or an office document that the URL
-      // did not announce: they are already in memory, and handing them over is
-      // what spares fetchAndExtract a second full download of the same file.
+      // the body is a PDF or an office document that the URL did not announce:
+      // they are already in memory, and handing them over is what spares
+      // fetchAndExtract a second full download of the same file.
       //
       // Only complete documents are handed over implicitly. fetchAndExtract
       // allows 16 MB after MIME detection; a caller's explicit cap still wins,
       // and a prefix cut at that cap must never masquerade as a complete file.
-      const keepBytes = opts.binary || (isBinaryDocument(meta.contentType) && !truncated);
+      const keepBytes = opts.binary || ((namedDocument || sniffed !== undefined) && !truncated);
+      // A binary document's bytes are its payload. Decoding them as text built
+      // a mostly-U+FFFD copy as large as the file that nothing ever read; a
+      // document that IS text (CSV) is still decoded.
+      const binaryBody = opts.binary || sniffed !== undefined || (isBinaryDocument(meta.contentType) && !mime.startsWith("text/"));
       const result: HttpResult = {
         ok: res.ok,
         status: res.status,
         // Decoded per the response's own encoding, not assumed UTF-8. A
         // Windows-1252 page used to come back with every accented character
         // replaced by U+FFFD, and nothing anywhere noticed.
-        body: opts.binary ? "" : decodeBody(bytes, meta.contentType),
+        body: binaryBody ? "" : decodeBody(bytes, meta.contentType),
         bytes: keepBytes ? bytes : undefined,
         bytesRead,
         truncated,
         ...meta,
+        ...(filename ? { filename } : {}),
       };
       const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(meta.retryAfterMs) : undefined;
       if (wait !== undefined) {
@@ -960,11 +1025,12 @@ const DOC_FETCH_OPTS = { accept: "*/*", binary: true, maxBytes: 16 * 1024 * 1024
 // extractor is never served to a run configured for the other (see src/cache.ts).
 //
 // `pdf-inspector` and `pdftotext` are PDF-only rungs (see backends/pdf/ladder.ts);
-// `anydoc` reads office documents (backends/doc/ladder.ts) and PDFs. They are
+// `anydoc` reads office documents (backends/doc/ladder.ts) and PDFs, and
+// `builtin` is the office ladder's own OOXML/OpenDocument reader. They are
 // reported so a dossier can say which tool read a paper, but PDFs and office
 // documents each share a single cache namespace — see the note on
 // currentExtractor in src/cache.ts.
-export type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext" | "anydoc" | "ocr";
+export type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext" | "anydoc" | "ocr" | "builtin";
 
 export interface ExtractResult {
   text: string;
@@ -1115,13 +1181,34 @@ export async function fetchAndExtract(
   // Only materialised when the origin actually sent one, so an entry written for
   // a validator-less server keeps exactly the shape it had before.
   const validators = res.etag || res.lastModified ? { etag: res.etag, lastModified: res.lastModified } : {};
-  if (res.truncated && (wantsPdf || wantsDoc || isBinaryDocument(res.contentType))) {
+  const mime = mimeOf(res.contentType);
+  // What the response claims to be — by its URL, its type, or the name it is
+  // served under.
+  const claimsPdf = wantsPdf || /application\/pdf/i.test(res.contentType) || (res.filename !== undefined && PDF_URL_RE.test(res.filename));
+  const claimsDoc = claimsPdf
+    ? undefined
+    : (wantsDoc ?? docFormatForContentType(res.contentType) ?? (res.filename ? docFormatForUrl(res.filename) : undefined));
+  // httpGet leaves a body undecoded exactly when it is a binary document, so an
+  // empty body behind retained bytes is one even when nothing claimed it.
+  if (res.truncated && (claimsPdf || claimsDoc || (!res.body && res.bytesRead))) {
     return { text: "", finalUrl: res.url, status: res.status, note: `Fetched ${url} but the document exceeds the response size cap.` };
   }
-  if (wantsPdf || /application\/pdf/i.test(res.contentType)) {
-    // httpGet keeps the raw bytes of anything the origin labelled a PDF, so a
-    // content-type-only PDF (no .pdf in the URL) is not downloaded twice. The
-    // refetch is only for a response that somehow arrived without them.
+  // …and what its bytes are, which outranks every claim: a download route's
+  // octet-stream PDF and a .pdf URL's login page both contradict theirs.
+  const sniffed = res.bytes ? sniffDocument(res.bytes) : undefined;
+  if (!sniffed && NON_TEXT_TYPE_RE.test(mime)) {
+    return { text: "", finalUrl: res.url, status: res.status, note: `Fetched ${url} but it is ${mime}, not a text document.`, ...validators };
+  }
+  // A document URL answered with a web page — a login wall, a landing page, an
+  // abstract. Forced through the document ladder it was blamed on a scanned PDF
+  // and the page, often worth having, was thrown away.
+  const answeredHtml = !sniffed && (claimsPdf || claimsDoc !== undefined) && HTML_TYPE_RE.test(mime);
+  const route: "pdf" | DocFormat | undefined = sniffed ?? (answeredHtml ? undefined : claimsPdf ? "pdf" : claimsDoc);
+  if (route === "pdf") {
+    // httpGet keeps the raw bytes of anything the origin labelled or the bytes
+    // showed to be a PDF, so a content-type-only PDF (no .pdf in the URL) is not
+    // downloaded twice. The refetch is only for a response that somehow arrived
+    // without them.
     const bytes =
       res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
     // The ladder tries pdf-inspector, then an already-running Firecrawl, then
@@ -1149,12 +1236,13 @@ export async function fetchAndExtract(
       ...validators,
     };
   }
-  // An office document, either because the URL said so or because only the
-  // content-type did. Everything here exists to stop the fall-through below
-  // treating a ZIP as prose: a .docx is not HTML, so `res.body` used to become
-  // the source text — kilobytes of U+FFFD, cited, with no note saying so.
-  const docFmt = wantsDoc ?? docFormatForContentType(res.contentType);
-  if (docFmt) {
+  // An office document: because the URL said so, or the content-type, or the
+  // Content-Disposition name, or only the bytes. Everything here exists to stop
+  // the fall-through below treating a ZIP as prose: a .docx is not HTML, so
+  // `res.body` used to become the source text — kilobytes of U+FFFD, cited,
+  // with no note saying so.
+  if (route) {
+    const docFmt = route;
     // Same as the PDF path: the bytes of a content-type-only document are
     // already here; the refetch is the fallback, not the rule.
     const bytes =
@@ -1184,16 +1272,29 @@ export async function fetchAndExtract(
       ...validators,
     };
   }
-  const mime = res.contentType.split(";")[0]!.trim().toLowerCase();
-  const ambiguousType = !mime || mime === "application/octet-stream";
-  const isHtml =
-    /^(?:text\/html|application\/xhtml\+xml)$/.test(mime) ||
-    (ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(res.body));
-  const stripped = isHtml ? htmlToText(opts.fullPage ? res.body : extractMainHtml(res.body), opts) : res.body;
+  const ambiguousType = AMBIGUOUS_TYPES.has(mime);
+  // Behind a type that says nothing, a NUL in the first kilobyte means binary
+  // data — an archive, an image — that no decoding turns into prose.
+  if (ambiguousType && res.body.slice(0, 1024).includes("\u0000")) {
+    return {
+      text: "",
+      finalUrl: res.url,
+      status: res.status,
+      note: `Fetched ${url} but it is binary data (${mime || "no content-type"}), not a text document.`,
+      ...validators,
+    };
+  }
+  // A document URL's fetch asked for bytes and got a web page instead.
+  const body = !res.body && res.bytes ? decodeBody(res.bytes, res.contentType) : res.body;
+  const isHtml = HTML_TYPE_RE.test(mime) || (ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(body));
+  const stripped = isHtml ? htmlToText(opts.fullPage ? body : extractMainHtml(body), opts) : body;
   const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped) : { text: stripped, dropped: 0 };
-  const title = isHtml ? pageTitle(res.body) : undefined;
-  const canonical = isHtml ? absoluteCanonical(htmlCanonicalUrl(res.body), res.url) : undefined;
-  const metaDescription = isHtml ? metaDescriptionOf(res.body) : undefined;
+  const title = isHtml ? pageTitle(body) : undefined;
+  const canonical = isHtml ? absoluteCanonical(htmlCanonicalUrl(body), res.url) : undefined;
+  const metaDescription = isHtml ? metaDescriptionOf(body) : undefined;
+  const notDocument = answeredHtml
+    ? `${url} looked like ${claimsPdf ? "a PDF" : "an office document"} but the server returned HTML (a login wall or landing page?), so it was read as a web page.`
+    : undefined;
   // A prefix read at the byte cap is still worth having, but never silently: a
   // caller quoting the page must be able to tell it did not see the rest.
   const cut = res.truncated ? `Read only the first ${res.bytesRead} bytes of ${url} (the response size cap), so this text is a prefix.` : undefined;
@@ -1203,14 +1304,22 @@ export async function fetchAndExtract(
     title,
     canonical,
     metaDescription,
-    ...(opts.keepHtml && isHtml ? { html: res.body } : {}),
+    ...(opts.keepHtml && isHtml ? { html: body } : {}),
     finalUrl: res.url,
     status: res.status,
-    note: [firecrawlNote, cut].filter(Boolean).join(" ") || undefined,
+    note: [firecrawlNote, notDocument, cut].filter(Boolean).join(" ") || undefined,
     ...(res.truncated ? { truncated: true } : {}),
     ...validators,
   };
 }
+
+const HTML_TYPE_RE = /^(?:text\/html|application\/xhtml\+xml)$/;
+
+// Types whose body is never text to cite: media, fonts, compressed archives.
+// SVG is XML and stays readable; application/zip is left to sniffDocument,
+// because every .docx is one.
+const NON_TEXT_TYPE_RE =
+  /^(?:image\/(?!svg\+xml$)|audio\/|video\/|font\/|model\/|application\/(?:gzip|x-gzip|x-tar|x-bzip2|x-xz|x-7z-compressed|x-rar-compressed|vnd\.rar|java-archive|wasm|x-msdownload|vnd\.android\.package-archive|x-shockwave-flash|ogg)$)/;
 
 // Statuses where the origin is gone/blocked and a live re-fetch will never
 // work, so an archived copy is worth trying (410 Gone, 451 legal, 403 blocked).

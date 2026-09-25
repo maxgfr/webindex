@@ -487,6 +487,99 @@ describe("fetchAndExtract", () => {
   });
 });
 
+// Routing used to look only at the URL and an exact content-type. A download
+// route answering `application/octet-stream` (or no type at all) fell through
+// to the text branch, and the PDF's source or a ZIP's bytes came back as
+// "readable text" with exit 0 — cited, and cached for the TTL.
+describe("fetchAndExtract routes on what the bytes are", () => {
+  const PDF = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Length 44 >>\nstream\nBT (Octet stream PDF body text) Tj ET\nendstream\nendobj\n%%EOF\n", "latin1");
+
+  it.each([
+    [
+      "application/octet-stream with a filename",
+      { contentType: "application/octet-stream", headers: { "content-disposition": 'attachment; filename="report.pdf"' } },
+    ],
+    ["application/octet-stream alone", { contentType: "application/octet-stream" }],
+    ["no content-type at all", { contentType: "" }],
+    ["application/x-download", { contentType: "application/x-download" }],
+  ])("reads a PDF served as %s through the PDF ladder, from one download", async (_label, response) => {
+    const spy = installFetchMock(() => ({ bytes: PDF, ...response }));
+    const r = await fetchAndExtract("https://x.test/download?id=7");
+    expect(r).toMatchObject({ text: "Octet stream PDF body text", documentType: "pdf" });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives an ambiguous download the document byte cap, not the 4 MB text cap", async () => {
+    const big = Buffer.concat([Buffer.from(`%PDF-1.4\n${"% padding\n".repeat(600_000)}`, "latin1"), PDF.subarray(9)]);
+    installFetchMock(() => ({ bytes: big, contentType: "application/octet-stream", chunkSize: 256 * 1024 }));
+    expect(await fetchAndExtract("https://x.test/download")).toMatchObject({ text: "Octet stream PDF body text", documentType: "pdf" });
+  });
+
+  it("still reads a text file a server labelled application/octet-stream", async () => {
+    installFetchMock(() => ({ body: "Plain notes served without a type.\n", contentType: "application/octet-stream" }));
+    const r = await fetchAndExtract("https://x.test/notes");
+    expect(r.text).toBe("Plain notes served without a type.\n");
+    expect(r.note).toBeUndefined();
+  });
+
+  it("keeps the 4 MB text cap for an ambiguous body that turns out not to be a document", async () => {
+    const text = Buffer.alloc(5 * 1024 * 1024, 0x61);
+    installFetchMock(() => ({ bytes: text, contentType: "application/octet-stream", chunkSize: 256 * 1024 }));
+    const r = await fetchAndExtract("https://x.test/log");
+    expect(r.truncated).toBe(true);
+    expect(r.text.length).toBe(4 * 1024 * 1024);
+  });
+
+  it.each([
+    ["image/png", Buffer.from("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10", "latin1")],
+    ["video/mp4", Buffer.from("\x00\x00\x00\x18ftypmp42", "latin1")],
+    ["font/woff2", Buffer.from("wOF2\x00\x01\x00\x00", "latin1")],
+    ["application/gzip", Buffer.from("\x1f\x8b\x08\x00\x00\x00\x00\x00", "latin1")],
+  ])("returns no text and a note for %s, never its bytes", async (contentType, bytes) => {
+    installFetchMock(() => ({ bytes, contentType }));
+    const r = await fetchAndExtract("https://x.test/asset");
+    expect(r.text).toBe("");
+    expect(r.note).toContain(`https://x.test/asset`);
+    expect(r.note).toContain(contentType);
+  });
+
+  it("returns no text and a note for binary data behind an ambiguous type", async () => {
+    installFetchMock(() => ({ bytes: Buffer.from("PK\x03\x04\x14\x00\x00\x00\x08\x00src/index.ts\x00\x00", "latin1"), contentType: "application/zip" }));
+    const r = await fetchAndExtract("https://x.test/files/source");
+    expect(r.text).toBe("");
+    expect(r.note).toMatch(/not a text document/);
+  });
+
+  // The reverse: a URL that looks like a PDF but answers with a login wall or
+  // a landing page. It used to be forced through the PDF ladder, which blamed
+  // a scanned PDF and threw away the page — often an abstract worth having.
+  it("reads a .pdf URL that answered HTML as the web page it is, and says so", async () => {
+    const page = `<html><head><title>Sign in</title></head><body><main><h1>Abstract</h1><p>${"We study attention in sequence models. ".repeat(20)}</p></main></body></html>`;
+    installFetchMock(() => ({ body: page, contentType: "text/html; charset=utf-8" }));
+    const r = await fetchAndExtract("https://x.test/paper.pdf");
+    expect(r.text).toContain("We study attention in sequence models.");
+    expect(r.title).toBe("Sign in");
+    expect(r.documentType).toBeUndefined();
+    expect(r.note).toMatch(/looked like a PDF but the server returned HTML/);
+  });
+
+  it("does not decode a PDF or office body into a string nobody reads", async () => {
+    installFetchMock(() => ({ bytes: PDF, contentType: "application/pdf" }));
+    const r = await httpGet("https://x.test/paper");
+    expect(r.body).toBe("");
+    expect(r.bytes?.length).toBe(PDF.length);
+    installFetchMock(() => ({ body: "a,b\n1,2\n", contentType: "text/csv" }));
+    expect((await httpGet("https://x.test/data")).body).toBe("a,b\n1,2\n"); // CSV is text
+  });
+
+  it("reports the Content-Disposition filename", async () => {
+    installFetchMock(() => ({ body: "x", headers: { "content-disposition": "attachment; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf; filename=\"resume.pdf\"" } }));
+    expect((await httpGet("https://x.test/dl")).filename).toBe("résumé.pdf");
+    installFetchMock(() => ({ body: "x", headers: { "content-disposition": "attachment; filename=export.csv" } }));
+    expect((await httpGet("https://x.test/dl")).filename).toBe("export.csv");
+  });
+});
+
 describe("extractMainHtml", () => {
   it("isolates the <main> region and drops the surrounding chrome", () => {
     const main = `<p>${"real article prose about rate limiting and token buckets. ".repeat(20)}</p>`;

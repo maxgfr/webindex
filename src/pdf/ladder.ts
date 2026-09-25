@@ -1,8 +1,9 @@
 import { env, envFlag, envName } from "../brand.js";
 import { runWithInput, ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./exec.js";
-import { assessPdfText } from "./quality.js";
+import { failureDetail, resetNpxState, runNpx, skipNpxHint } from "./npx.js";
+import { assessPdfText, NO_TEXT_LAYER } from "./quality.js";
 import { pdfToText } from "./native.js";
-import { ocrPdf, ocrBudgetLeft, resetOcrBudget, resetOcrTools } from "./ocr.js";
+import { ocrPdf, ocrBudgetLeft, ocrTools, resetOcrBudget, resetOcrTools } from "./ocr.js";
 
 // The PDF extractor ladder: try the strongest tool available, fall through when
 // it is missing or its output fails the quality gate, and refuse rather than
@@ -64,27 +65,61 @@ export interface PdfLadderOptions {
   engines?: PdfExtractorId[];
 }
 
-// First run may download the pdf-inspector binary (~6 MB); later runs are
-// ~0.2s. Generous, but paid at most once per process thanks to `dead` below.
-const NPX_TIMEOUT_MS = 90_000;
 const PDFTOTEXT_TIMEOUT_MS = 60_000;
 
-// Rungs proven unavailable in this process (npm absent, poppler not installed,
-// unsupported platform). Without this, a 40-source run would re-pay the same
-// 90s discovery for every single PDF.
-const dead = new Set<PdfExtractorId>();
+// Rungs proven unavailable in this process (npm absent or offline, poppler not
+// installed, unsupported platform), with the reason worth repeating. Without
+// this, a 40-source run would re-pay the same failed discovery for every single
+// PDF. Only a failure that says something about the TOOL lands here: one that
+// says something about a document (it rejected a truncated file, a scan) must
+// not cost every later document its best rung — see ./npx.ts.
+const dead = new Map<PdfExtractorId, Unread>();
 
 /** Test seam: forget which rungs and OCR binaries were found, and refill the OCR budget. */
 export function resetPdfLadderCache(): void {
   dead.clear();
+  resetNpxState();
   resetOcrBudget();
   resetOcrTools();
 }
 
+const warnedEngineValues = new Set<string>();
+
 /**
- * The rungs to try, honouring `<PREFIX>_PDF_ENGINE` (force exactly one) and
- * `<PREFIX>_NO_NPX` (skip the rung that needs an implicit install), where
- * `<PREFIX>` is whatever the consuming skill declared via `configure()`.
+ * The rungs a `<PREFIX>_<NAME>` engine variable asks for: a comma list of rung
+ * names in the order to try them, any case, or `none` for no rung at all.
+ * Undefined when the variable is unset or names no known rung — the caller's
+ * cue to use its default ladder.
+ *
+ * Only an exact single name used to be honoured, so `pdftotext,native` (the
+ * natural way to say "no npx"), `Native` and `none` all silently selected
+ * every rung, including the network ones the user was avoiding. Unknown names
+ * are now said out loud, once per value.
+ */
+export function enginesFromEnv<T extends string>(name: string, known: readonly T[]): T[] | undefined {
+  const raw = env(name)?.trim();
+  if (!raw) return undefined;
+  const asked = raw
+    .toLowerCase()
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (asked.length === 1 && asked[0] === "none") return [];
+  const picked = [...new Set(asked.filter((s): s is T => (known as readonly string[]).includes(s)))];
+  const unknown = asked.filter((s) => !(known as readonly string[]).includes(s));
+  if (unknown.length && !warnedEngineValues.has(`${name}=${raw}`)) {
+    warnedEngineValues.add(`${name}=${raw}`);
+    const fallback = picked.length ? "" : " — using the full ladder";
+    process.emitWarning(`${envName(name)}: ignoring unknown rung ${unknown.map((u) => `"${u}"`).join(", ")} (known: ${known.join(", ")}, or none)${fallback}`);
+  }
+  return picked.length ? picked : undefined;
+}
+
+/**
+ * The rungs to try, honouring `<PREFIX>_PDF_ENGINE` (a comma list of rungs to
+ * run, in order, or `none`) and `<PREFIX>_NO_NPX` (skip the rungs that need an
+ * implicit install), where `<PREFIX>` is whatever the consuming skill declared
+ * via `configure()`.
  *
  * An explicit `engines` list wins over both: it is the most specific instruction
  * available, and it is how callers and tests drive the ladder deterministically
@@ -92,50 +127,116 @@ export function resetPdfLadderCache(): void {
  */
 export function enabledExtractors(engines?: PdfExtractorId[]): PdfExtractorId[] {
   if (engines) return engines;
-  const forced = env("PDF_ENGINE") as PdfExtractorId | undefined;
-  if (forced && (PDF_EXTRACTORS as string[]).includes(forced)) return [forced];
+  const chosen = enginesFromEnv("PDF_ENGINE", PDF_EXTRACTORS);
+  if (chosen) return chosen;
   // Both npx rungs go, not just the first: `anydoc` needs the same implicit
   // install, so leaving it in would defeat the point of the switch.
   if (envFlag("NO_NPX")) return PDF_EXTRACTORS.filter((e) => e !== "pdf-inspector" && e !== "anydoc");
   return PDF_EXTRACTORS;
 }
 
-async function viaAnydoc(bytes: Buffer): Promise<string | undefined> {
-  // `--format pdf` rather than letting anydoc sniff: this rung is only ever
-  // reached with bytes the caller already judged to be a PDF, and naming the
-  // format keeps a truncated download from being misread as something else.
-  const r = await runWithInput("npx", ["-y", "--prefer-offline", ANYDOC_SPEC, "-", "--format", "pdf"], bytes, NPX_TIMEOUT_MS);
-  return r.ok ? r.stdout : undefined;
+/** A rung that produced no text, and what is worth saying about it. */
+interface Unread {
+  text?: undefined;
+  /** Worth telling the reader: the tool's own words, or why it cannot run. */
+  failure?: string;
+  /** What the reader can do about it, said once however many rungs need it. */
+  hint?: string;
+  /** The rung cannot run in this process at all; stop asking. */
+  unavailable?: boolean;
 }
 
-async function viaPdfInspector(bytes: Buffer): Promise<string | undefined> {
-  // `-` reads the PDF from stdin. `--prefer-offline` keeps the steady state at
-  // one local cache hit instead of a registry round-trip per run; `-y` stops npx
-  // asking to install. No user input reaches argv — the PDF travels on stdin.
-  const r = await runWithInput("npx", ["-y", "--prefer-offline", PDF_INSPECTOR_SPEC, "-"], bytes, NPX_TIMEOUT_MS);
-  return r.ok ? r.stdout : undefined;
+/** What one rung made of the PDF: text to judge, or why there is none. */
+type RungResult = { text: string } | Unread;
+
+async function viaNpx(id: PdfExtractorId, spec: string, args: string[], bytes: Buffer): Promise<RungResult> {
+  const r = await runNpx(spec, args, bytes);
+  if (r.ok) return { text: r.stdout };
+  // npx itself missing is the ordinary state of a machine without npm, not news.
+  if (r.unavailable === "not installed") return { unavailable: true };
+  if (r.unavailable) return { unavailable: true, failure: `${id} ${r.unavailable}`, hint: skipNpxHint() };
+  return { failure: failureDetail(id, r) };
 }
 
-async function viaPdftotext(bytes: Buffer): Promise<string | undefined> {
+async function viaPdftotext(bytes: Buffer): Promise<RungResult> {
   // `-layout` preserves column structure, which is what keeps a two-column
   // paper's sentences from interleaving. Trailing `-` writes to stdout.
   const r = await runWithInput("pdftotext", ["-layout", "-", "-"], bytes, PDFTOTEXT_TIMEOUT_MS);
-  return r.ok ? r.stdout : undefined;
+  // pdftotext ends each page with a form feed; a reader wants a paragraph break.
+  if (r.ok) return { text: r.stdout.replace(/\f/g, "\n\n") };
+  return r.error === "not installed" ? { unavailable: true } : { failure: failureDetail("pdftotext", r) };
+}
+
+async function viaOcr(bytes: Buffer): Promise<RungResult> {
+  const text = await ocrPdf(bytes);
+  if (text !== undefined) return { text };
+  // ocrPdf says only "no text". The tools decide which kind of no: missing
+  // binaries are the machine's; a conversion that failed or timed out is this
+  // scan's, and must not cost every later scan its only reader.
+  const { copyablePdf, tesseract } = await ocrTools();
+  if (!copyablePdf || !tesseract) return { unavailable: true };
+  // Spent by concurrent scans between the ladder's check and this one.
+  if (ocrBudgetLeft() <= 0) return {};
+  return { failure: "ocr: the conversion failed on this document" };
+}
+
+async function runRung(id: PdfExtractorId, bytes: Buffer, opts: PdfLadderOptions): Promise<RungResult> {
+  try {
+    // `--format pdf` rather than letting anydoc sniff: this rung is only ever
+    // reached with bytes the caller already judged to be a PDF, and naming the
+    // format keeps a truncated download from being misread as something else.
+    if (id === "pdf-inspector") return await viaNpx(id, PDF_INSPECTOR_SPEC, ["-"], bytes);
+    if (id === "anydoc") return await viaNpx(id, ANYDOC_SPEC, ["-", "--format", "pdf"], bytes);
+    if (id === "pdftotext") return await viaPdftotext(bytes);
+    if (id === "ocr") return await viaOcr(bytes);
+    if (id === "firecrawl") {
+      const text = opts.firecrawl ? await opts.firecrawl() : undefined;
+      // Never remembered as unavailable: its own client memoises the probe, and
+      // it can legitimately fail on one URL and work on the next.
+      return text === undefined ? {} : { text };
+    }
+    return { text: pdfToText(bytes) };
+  } catch {
+    return {}; // a rung must never take the run down
+  }
 }
 
 /**
  * Extract text from PDF bytes, trying each enabled rung in order and returning
  * the first result that `assessPdfText` accepts.
  *
- * Never throws. When every rung fails, returns empty text plus the LAST
- * rejection reason, so the caller can say why the source is unusable instead of
- * silently citing nothing.
+ * Never throws. When every rung fails, returns empty text plus the reason — the
+ * last rung's verdict, sharpened where the bytes say more (not a PDF at all, an
+ * encrypted one, a scan that OCR would read), then what the tools themselves
+ * said — so the caller can say why the source is unusable instead of silently
+ * citing nothing.
  */
 export async function extractPdf(bytes: Buffer, opts: PdfLadderOptions = {}): Promise<PdfExtraction> {
+  // An error page or a login wall: every tool would fail on it and the note
+  // would blame a scan. No reader accepts a PDF whose header is not in its
+  // first kilobyte, so neither does this.
+  if (!bytes.subarray(0, 1024).includes("%PDF-")) {
+    return { text: "", reason: "not a PDF (no %PDF- header — an error page or a login wall?)" };
+  }
+
   let lastReason: string | undefined;
+  const failures: string[] = [];
+  const hints = new Set<string>();
+  let ocrMissing = false;
+  // A rung that produced nothing: keep what it said, and what to do about it.
+  const noteFailure = (id: PdfExtractorId, got: Unread) => {
+    if (id === "ocr" && got.unavailable) ocrMissing = true;
+    else if (got.failure) failures.push(got.failure);
+    if (got.hint) hints.add(got.hint);
+  };
 
   for (const id of enabledExtractors(opts.engines)) {
-    if (dead.has(id)) continue;
+    const known = dead.get(id);
+    if (known) {
+      // Still said for every document: the reason is as true for this one.
+      noteFailure(id, known);
+      continue;
+    }
     // A spent OCR budget is NOT the same as an unreadable document, and saying
     // so matters: without this the run would report "no text layer" for a scan
     // it simply declined to read, and the reader would go looking for a fault in
@@ -145,30 +246,24 @@ export async function extractPdf(bytes: Buffer, opts: PdfLadderOptions = {}): Pr
       continue;
     }
 
-    let text: string | undefined;
-    try {
-      if (id === "pdf-inspector") text = await viaPdfInspector(bytes);
-      else if (id === "anydoc") text = await viaAnydoc(bytes);
-      else if (id === "pdftotext") text = await viaPdftotext(bytes);
-      else if (id === "firecrawl") text = opts.firecrawl ? await opts.firecrawl() : undefined;
-      else if (id === "ocr") text = await ocrPdf(bytes);
-      else text = pdfToText(bytes);
-    } catch {
-      text = undefined; // a rung must never take the run down
-    }
-
-    if (text === undefined) {
-      // Tool missing / errored / no container. Never ask again this process —
-      // except Firecrawl, whose own client already memoises its availability
-      // probe and which can legitimately fail on one URL and work on the next.
-      if (id !== "firecrawl") dead.add(id);
+    const got = await runRung(id, bytes, opts);
+    if (got.text === undefined) {
+      if (got.unavailable) dead.set(id, got);
+      noteFailure(id, got);
       continue;
     }
 
-    const verdict = assessPdfText(text);
-    if (verdict.ok) return { text: text.trim(), via: id };
+    const verdict = assessPdfText(got.text);
+    if (verdict.ok) return { text: got.text.trim(), via: id };
     lastReason = verdict.reason;
   }
 
-  return { text: "", reason: lastReason ?? "no PDF extractor available" };
+  if (lastReason === NO_TEXT_LAYER) {
+    // An encrypted PDF extracts as nothing through every rung that cannot
+    // decrypt it, which reads exactly like a scan.
+    if (bytes.includes("/Encrypt")) lastReason = "encrypted PDF (no rung here could decrypt its text)";
+    else if (ocrMissing) lastReason = `${NO_TEXT_LAYER} — install copyable-pdf and tesseract to OCR it`;
+  }
+  const reason = [...new Set([lastReason, ...failures, ...hints].filter(Boolean))].join("; ");
+  return { text: "", reason: reason || "no PDF extractor available" };
 }

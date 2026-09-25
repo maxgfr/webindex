@@ -21,7 +21,7 @@ rather than an error.
 |---|---|
 | **Discovery** | A cascade: a local SearXNG, then the keyless engines (DuckDuckGo, DDG Lite, **Mojeek** — its own index, not a reseller), then Firecrawl. Pagination that stops when a page adds nothing new, cross-page dedupe, and throttled-upstream detection. `search` · `webindex_search` |
 | **Retrieval** | HTTP with retry, **streaming byte caps** (the transfer is cancelled at the cap, not trimmed after), **conditional GET** (a stale cache entry costs a 304, not a re-download), rate-limit and `Retry-After` semantics, and **encoding detection** — BOM, `Content-Type` charset, the XML declaration, `<meta charset>` (HTML only), then a UTF-8 validity check that falls back to Windows-1252 — so an undeclared Latin-1 page or feed is not silently mojibake. `fetch` · `webindex_fetch` |
-| **Extraction** | HTML→text with main-content isolation and consent-banner stripping; the **PDF ladder** (`pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → native → **OCR**) with a length-independent garbage gate; the **office ladder** over 20 formats; an explicit library primitive for Wayback rescue. `extract` · `webindex_extract` |
+| **Extraction** | HTML→text with main-content isolation and consent-banner stripping; the **PDF ladder** (`pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → native → **OCR**) with a length-independent garbage gate; the **office ladder** over 20 formats (`anydoc` → Firecrawl → a built-in OOXML/OpenDocument reader that needs no network); an explicit library primitive for Wayback rescue. `extract` · `webindex_extract` |
 | **Ranking** | RRF fusion, **BM25F** with title/heading weighting and an off-topic floor, **SimHash** near-duplicate collapse, **MMR** diversification so the top of a list says several different things. Generic over your item type — the engine ranks, it never sees your evidence model. `rank` · `webindex_rank` |
 | **Forges** | GitHub, GitLab and Gitea: issues, pull requests, releases, tags, and a repository's own record — stars, licence, last push, **archived**. Rename-following, GitHub Enterprise bases, and a quota reported rather than retried. `repo` `issues` `prs` `releases` |
 | **Registries** | A library **name** → its repository, homepage, docs, current version, licence and **deprecation**, through npm, PyPI or crates.io. Bounded registry requests instead of a web search and a guess. `package` · `webindex_package` |
@@ -43,8 +43,8 @@ rather than an error.
 |---|---|
 | `webindex search <query>` | Candidate URLs, through a cascade: a local SearXNG, then the keyless engines (DuckDuckGo, DDG Lite, Mojeek — no key, no container), then Firecrawl. Prints title, URL and snippet; `--json` returns them structured with the notes. `--limit <n>`, `--pages <n>` walk further, `--lang fr-FR` sets the result language, `--engine ddg\|ddglite\|mojeek\|off` pins or disables the keyless rung. Exits non-zero when it found nothing, and says on stderr which backend was missing. |
 | `webindex rank --query <q>` | Order candidate documents against a question — BM25F with title and heading weighting, a SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. Reads a JSON array of `{url,title,text}` from `--docs <file>` or stdin. Deterministic: no model, no network. |
-| `webindex fetch <url>` | Fetch a URL and print its readable text. Routes PDFs and office documents to their ladders; HTML uses Firecrawl when available, then the built-in extractor, reducing the page to main content with consent banners dropped. `--full-page` keeps all page text through the built-in reader, including navigation and consent banners. `--json` adds `finalUrl` (where the text came from, after redirects), `canonical`, the title, status, extractor, `documentType`, `cached`, any note, `fullPage` and `consentDropped` (lines removed by the consent filter; 0 when skipped). Caching is opt-in: `--cache` reuses a fresh copy for the TTL (24 h) and revalidates a stale one with a conditional GET, so an unchanged page costs a 304; `--refresh` re-fetches and rewrites the entry; `--offline` serves only what the cache holds. `--lang fr-FR` sets Accept-Language, `--firecrawl <base>\|off` overrides the extractor. `--timeout <ms>` abandons a host that stays silent that long (default 20000, or `WEBINDEX_TIMEOUT_MS`); a timed-out request is not retried, so that is the real worst case. A failure names its cause — a refused connection, an unknown host, a redirect loop, a timeout — and one that cannot change on a second try is not retried. |
-| `webindex extract <file>` | The same extraction on a file already on disk — PDF, office document, HTML or plain text. HTML is reduced to main content with consent banners dropped; `--full-page` keeps all page text, including navigation and consent banners. `--json` includes `fullPage` and `consentDropped` as above (0 for non-HTML). |
+| `webindex fetch <url>` | Fetch a URL and print its readable text. Routes PDFs and office documents to their ladders — by URL, content-type, download filename or the bytes themselves; images, media and archives get a note, never their bytes. HTML uses Firecrawl when available, then the built-in extractor, reducing the page to main content with consent banners dropped. `--full-page` keeps all page text through the built-in reader, including navigation and consent banners. `--json` adds `finalUrl` (where the text came from, after redirects), `canonical`, the title, status, extractor, `documentType`, `cached`, any note, `fullPage` and `consentDropped` (lines removed by the consent filter; 0 when skipped). Caching is opt-in: `--cache` reuses a fresh copy for the TTL (24 h) and revalidates a stale one with a conditional GET, so an unchanged page costs a 304; `--refresh` re-fetches and rewrites the entry; `--offline` serves only what the cache holds. `--lang fr-FR` sets Accept-Language, `--firecrawl <base>\|off` overrides the extractor. `--timeout <ms>` abandons a host that stays silent that long (default 20000, or `WEBINDEX_TIMEOUT_MS`); a timed-out request is not retried, so that is the real worst case. A failure names its cause — a refused connection, an unknown host, a redirect loop, a timeout — and one that cannot change on a second try is not retried. |
+| `webindex extract <file>` | The same extraction on a file already on disk — PDF, office document, HTML or plain text, recognised by its bytes when its name says otherwise; a CSV nothing can convert is read as its text, and a binary file is refused rather than printed. HTML is reduced to main content with consent banners dropped; `--full-page` keeps all page text, including navigation and consent banners. `--json` includes `fullPage` and `consentDropped` as above (0 for non-HTML). |
 | `webindex mcp` | Serve the tools below to an agent. `--transport stdio` (default) or `http` with `--port`, `--bind`, `--allow-remote`. |
 | `webindex searxng up\|down\|status` | Drive the keyless SearXNG container. |
 | `webindex semantic up\|down\|status` | Drive Qdrant and Ollama, and pull the embedding model once they answer. |
@@ -57,7 +57,7 @@ rather than an error.
 | `webindex hybrid --query <q>` | Rank documents with BM25F **and** a dense lane, fused by RRF. Each hit reports its rank in each lane. Degrades to the lexical half, with a note on stderr, when no embedding server answers. |
 | `webindex changed <url>` | Fingerprint a URL, or — given `--etag` / `--last-modified` / `--hash` — say whether it changed and how it was decided. A baseline prints `etag`, `last-modified`, `hash` (SHA-256 of the raw bytes, what `sha256sum` of the download gives) and `status`, and exits non-zero instead of printing one it could not read. `--timeout <ms>` bounds the request. Exits non-zero on "could not tell", so a watcher never reads an error as "nothing to do". |
 | `webindex skill <action>` | Packaging gates for a repo built on this engine, driven by its `skill.json`: `vendor` (pin by tag + sha256, `--check` for the offline drift/staleness gate), `check` (no module may re-declare an engine export), `bundle` (`skills add` would install a working skill), `copy`, `doctor`, `init`. |
-| `webindex doctor` | Which optional helpers answer — SearXNG, Firecrawl, Ollama, Qdrant, the extraction rungs, OCR — on this machine. |
+| `webindex doctor` | Which optional helpers answer — SearXNG, Firecrawl, Ollama, Qdrant — and what each extraction rung will do on this machine: installed, downloads on first use, not installed, built-in, or switched off and by which variable. The npx rungs are checked against npm's cache, never installed. |
 | `webindex version` | The engine version. |
 
 Nothing above needs an API key, and nothing is required: every optional helper
@@ -133,7 +133,7 @@ A library of **primitives**, not a pipeline.
 | Layer | What it owns |
 |---|---|
 | Discovery | the SearXNG JSON API and Firecrawl's `/search`, with pagination, cross-page dedupe, and throttled-upstream detection |
-| Retrieval | HTTP with retry, **streaming** byte caps and conditional GET, HTML→text, main-content extraction, consent-banner stripping, Firecrawl, the PDF ladder (`pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → native → OCR), the office-document ladder, explicit Wayback rescue, the revalidating fetch cache |
+| Retrieval | HTTP with retry, **streaming** byte caps and conditional GET, HTML→text, main-content extraction, consent-banner stripping, Firecrawl, the PDF ladder (`pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → native → OCR), the office-document ladder (`anydoc` → Firecrawl → built-in), explicit Wayback rescue, the revalidating fetch cache |
 | Text | keyword extraction, accent- and plural-folded matching, camelCase splitting, excerpting, URL canonicalisation and identity |
 | Ranking | RRF fusion, BM25F with field weighting and a relevance floor, SimHash near-duplicate collapse, MMR diversification, DOI/arXiv identity, pool-relative recency |
 | MCP | the whole protocol — negotiation, cancellation, schema validation, response capping, the error taxonomy — plus the stdio and HTTP transports |
@@ -156,6 +156,42 @@ cap is refused unread — and `fetchAndExtract` marks such a prefix with
 content fingerprint; `hasChanged` returns an unknown verdict in that case. Document MIME types receive the 16 MB extraction
 budget even when the URL has no file extension, and explicit HTTP byte limits
 remain authoritative.
+
+`fetchAndExtract` routes on what the bytes are, not only on what the URL and the
+headers claim. A body behind a type that says nothing — `application/octet-stream`,
+`application/zip`, a download type, or none at all — is sniffed with `sniffDocument`
+(a PDF header, an OOXML or OpenDocument package, an OLE or RTF signature), and a
+`Content-Disposition` filename counts as a claim too (`httpGet` reports it as
+`filename`). Such a body gets the document budget and is never decoded into a
+string nobody reads. A `.pdf` or office URL that answers with HTML is read as the
+web page it is, with a note saying so; images, audio, video, fonts and archives
+return no text and a note, never their bytes. `webindex extract` sniffs the same
+way, so an extension-less or misnamed file is read for what it is.
+
+The extraction ladders tell a tool that cannot run here from one that rejected a
+document. A rung is set aside for the rest of the process only when its binary or
+npx is missing, npm could not install its package, or its first run never finished
+— never because one truncated PDF or one scan made it exit 1 — and a refusal names
+what the tool itself said. The npx rungs run with a fail-fast npm network policy
+(`npm_config_fetch_retries=1`, a 1–2 s back-off, a 30 s fetch timeout) unless those
+keys are already set in the environment, so an offline machine falls through in
+seconds rather than ~70 s per rung; once the registry proved unreachable the other
+npx rung is not asked, and the note says `WEBINDEX_NO_NPX=1` skips them.
+`WEBINDEX_NPX_TIMEOUT_MS` bounds one npx run (default 90000, first download included).
+Each package's executable is located once per process and then run directly, so
+npm's start-up (~0.6 s) is paid once rather than per document; on Windows the rungs
+keep running through `npx`.
+
+The office ladder ends in a built-in reader (`officeToText`) for OOXML (`.docx`,
+`.xlsx`, `.pptx`) and OpenDocument (`.odt`, `.ods`, `.odp`): no subprocess, no
+network, so an offline or `WEBINDEX_NO_NPX` run still reads them —
+`WEBINDEX_DOC_ENGINE=builtin` forces it. It returns headings, lists, tables, each
+sheet as a table and each slide with its speaker notes, and it is strict about
+the ZIP it opens: ZIP64, encrypted entries and unknown compression methods are
+refused, and every entry, the whole archive and the text it produces are capped,
+so a decompression bomb costs 64 MB of work, not its full size. Its output passes
+the same garbage gate as every other rung. Legacy `.doc`/`.xls`/`.ppt` and RTF
+still need `anydoc` or Firecrawl.
 
 A `Retry-After` of up to 5 s is waited out and retried once; a longer one is
 not slept through and not retried early — the call returns at once with the

@@ -16,11 +16,14 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { configure } from "./brand.js";
+import { configure, env, envName } from "./brand.js";
 import { decodeLocal } from "./charset.js";
 import { ENGINE_VERSION } from "./version.js";
-import { docFormatForUrl, extractDocument, enabledDocExtractors } from "./doc.js";
-import { enabledExtractors, extractPdf, ocrTools } from "./pdf.js";
+import { DOC_EXTRACTORS, docFormatForUrl, extractDocument, enabledDocExtractors, sniffDocument } from "./doc.js";
+import { enabledExtractors, extractPdf, ocrBudgetLeft, ocrTools, PDF_EXTRACTORS } from "./pdf.js";
+import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./pdf/exec.js";
+import { npxCacheState } from "./pdf/npx.js";
+import { have } from "./exec.js";
 import { extractMainHtml, htmlToText, httpGet, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
 import { firecrawlBase, probeFirecrawl } from "./firecrawl.js";
 import { embedModel, ensureComposeMaterialized, STACK_SERVICES, stackControl } from "./stack.js";
@@ -107,7 +110,9 @@ COMMANDS
              then Firecrawl. Prints what it found, or says which backend was
              missing and how to start it — those are different answers.
   fetch      Fetch a URL and print the extracted text. Routes PDFs and office
-             documents to their ladders automatically. Uses Firecrawl when
+             documents to their ladders automatically — by URL, content-type,
+             download filename or the bytes themselves; images, media and
+             archives get a note, never their bytes. Uses Firecrawl when
              available, with built-in extraction as fallback. HTML is reduced
              to main content with consent banners dropped. Caching is opt-in:
              --cache reuses a fresh copy for the TTL (24 h) and revalidates a
@@ -115,9 +120,10 @@ COMMANDS
              304; --refresh re-fetches and rewrites the entry; --offline
              serves only what the cache holds. --json adds finalUrl (after
              redirects), canonical, documentType and cached.
-  extract    Same extraction, on a file already on disk. For both, --full-page
-             keeps the whole HTML page through the built-in reader: navigation,
-             footer and consent banners included.
+  extract    Same extraction, on a file already on disk, recognised by its bytes
+             when its name says otherwise. For both, --full-page keeps the
+             whole HTML page through the built-in reader: navigation, footer
+             and consent banners included.
   rank       Order candidate documents against a question — BM25F, then a
              near-duplicate collapse, then MMR so the top says several
              different things. Reads a JSON array of {url,title,text} from
@@ -175,14 +181,22 @@ COMMANDS
              working skill rather than a lone SKILL.md; 'copy' embeds the built
              engine in the package; 'init' scaffolds a new skill repository.
              Dev-time only — it reads a repo, it never runs inside one.
-  doctor     Report which optional helpers are reachable and which extraction
-             rungs are available on this machine.
+  doctor     Report which optional helpers are reachable, and what each
+             extraction rung will do on this machine: installed, downloads on
+             first use, not installed, built-in, or switched off (and by which
+             variable). The npx rungs are checked against npm's cache, never
+             installed.
 
 ENVIRONMENT
   WEBINDEX_FIRECRAWL     Firecrawl base URL, or "off"  (default http://localhost:3002)
-  WEBINDEX_PDF_ENGINE    force one PDF rung: native|pdf-inspector|anydoc|firecrawl|pdftotext|ocr
-  WEBINDEX_DOC_ENGINE    force one office rung, or "none" to disable
+  WEBINDEX_PDF_ENGINE    the PDF rungs to run, in order: a comma list of
+                         pdf-inspector|anydoc|firecrawl|pdftotext|native|ocr, or "none"
+  WEBINDEX_DOC_ENGINE    the office rungs to run, in order: a comma list of
+                         anydoc|firecrawl|builtin, or "none" to disable
+                         (builtin reads OOXML and OpenDocument with no network)
   WEBINDEX_NO_NPX        skip the rungs that would install through npx
+  WEBINDEX_NPX_TIMEOUT_MS  how long one npx rung may run, first download included
+                         (default 90000)
   WEBINDEX_OCR_MAX       documents this process may OCR (default 3)
   WEBINDEX_ENGINES       keyless engines to try: a comma list, or "off"  (default all)
   WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
@@ -311,13 +325,20 @@ async function extractLocal(path: string, fullPage = false): Promise<{ text: str
   }
   const asUrl = pathToFileURL(path).href;
 
-  if (looksLikePdfUrl(asUrl) || bytes.subarray(0, 5).toString("latin1") === "%PDF-") {
+  // The bytes before the name: an extension-less download or a .docx saved as
+  // .txt is still a document, and read by its name it came back as the ZIP's
+  // bytes under extractor "plain".
+  const sniffed = sniffDocument(bytes);
+  if (sniffed === "pdf" || (!sniffed && looksLikePdfUrl(asUrl))) {
     const r = await extractPdf(bytes);
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
-  const fmt = docFormatForUrl(asUrl);
+  const fmt = sniffed ?? docFormatForUrl(asUrl);
   if (fmt) {
     const r = await extractDocument(bytes, fmt);
+    // A format that is already text (CSV) is read as text when nothing could
+    // convert it, as fetchAndExtract does — refusing it helped no one.
+    if (!r.text && fmt.textFallback) return { text: decodeLocal(bytes, { sniffHtmlCharset: false }), extractor: "plain", consentDropped: 0 };
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
   const extension = extname(path).toLowerCase();
@@ -325,6 +346,9 @@ async function extractLocal(path: string, fullPage = false): Promise<{ text: str
   // A Markdown file quoting `<meta charset="iso-8859-1">` as an example is not
   // declaring its own encoding: only a document that may be HTML gets sniffed.
   const raw = decodeLocal(bytes, { sniffHtmlCharset: !explicitText });
+  // Decoded text keeps no NUL (a UTF-16 BOM is honoured above); binary data —
+  // an image, an archive — always has one early. Never print its bytes.
+  if (raw.slice(0, 1024).includes("\u0000")) return { text: "", extractor: "none", reason: "binary data, not a text document", consentDropped: 0 };
   const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
   const text = looksHtml ? htmlToText(fullPage ? raw : extractMainHtml(raw), { fullPage }) : raw;
   const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text) : { text, dropped: 0 };
@@ -439,7 +463,7 @@ export function webindexAdapter(): McpAdapter {
         name: "webindex_fetch",
         title: "Fetch a URL as clean text",
         description:
-          "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR) and office documents, " +
+          "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR) and office documents (anydoc → Firecrawl → a built-in OOXML/OpenDocument reader), " +
           "and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text, then a trailer with the final URL after redirects, the page's canonical URL and title, any note, and which rung produced it — never raw bytes. " +
           "Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
         inputSchema: {
@@ -1514,18 +1538,60 @@ async function dispatch(argv: string[]): Promise<void> {
     const sx = searxngBase();
     const ol = ollamaBase();
     const qd = qdrantBase();
-    const [fc, sxUp, olUp, qdUp] = await Promise.all([base ? probeFirecrawl(base) : false, sx ? probeSearxng(sx) : false, probeOllama(ol), probeQdrant(qd)]);
+    const pdfRungs = enabledExtractors();
+    const docRungs = enabledDocExtractors();
+    // The npx rungs are asked whether npm already holds them, never told to
+    // install: doctor must not download 10 MB to say what a run would do.
+    const cacheState = (id: string, spec: string) =>
+      (pdfRungs as string[]).includes(id) || (docRungs as string[]).includes(id) ? npxCacheState(spec) : undefined;
+    const [fc, sxUp, olUp, qdUp, inspectorCache, anydocCache, ocr] = await Promise.all([
+      base ? probeFirecrawl(base) : false,
+      sx ? probeSearxng(sx) : false,
+      probeOllama(ol),
+      probeQdrant(qd),
+      cacheState("pdf-inspector", PDF_INSPECTOR_SPEC),
+      cacheState("anydoc", ANYDOC_SPEC),
+      ocrTools(),
+    ]);
     const off = (s: string) => s.toLowerCase() === "off";
-    const ocr = await ocrTools();
+    const npxRung = (state: Awaited<ReturnType<typeof npxCacheState>> | undefined) =>
+      state === "cached"
+        ? "installed (npx cache)"
+        : state === "not cached"
+          ? "downloads on first use (npx)"
+          : state === "no npx"
+            ? "npx not found"
+            : "runs through npx";
+    // What each rung will actually do here — not merely that it is enabled.
+    const rungState = (id: string): string => {
+      if (id === "pdf-inspector") return npxRung(inspectorCache);
+      if (id === "anydoc") return npxRung(anydocCache);
+      if (id === "firecrawl") return base ? (fc ? `answering at ${base}` : `not reachable at ${base}`) : "disabled";
+      if (id === "pdftotext") return have("pdftotext") ? "installed" : "not installed";
+      if (id === "ocr") {
+        if (ocrBudgetLeft() <= 0) return `off (${envName("OCR_MAX")}=${env("OCR_MAX")})`;
+        return ocr.copyablePdf && ocr.tesseract
+          ? "available"
+          : `unavailable (copyable-pdf: ${ocr.copyablePdf ? "yes" : "no"}, tesseract: ${ocr.tesseract ? "yes" : "no"})`;
+      }
+      if (id === "builtin") return "built-in (OOXML and OpenDocument)";
+      return "built-in";
+    };
+    // The ladder in the order it runs, then the rungs the environment switched
+    // off, with the variable that did it.
+    const rungLines = (label: string, all: readonly string[], enabled: readonly string[], engineVar: string) => {
+      const why = env(engineVar)?.trim() ? `${envName(engineVar)}=${env(engineVar)!.trim()}` : envName("NO_NPX");
+      const rows = [...enabled.map((id) => [id, rungState(id)]), ...all.filter((id) => !enabled.includes(id)).map((id) => [id, `off (${why})`])];
+      return rows.map(([id, state], i) => `  ${(i ? "" : label).padEnd(12)}${id!.padEnd(15)}${state}`);
+    };
     const lines = [
       `webindex ${ENGINE_VERSION}`,
       `  searxng     ${sx ? (sxUp ? `answering at ${sx}` : `not reachable at ${sx} — \`webindex searxng up\` starts it`) : "disabled"}`,
       `  firecrawl   ${base ? (fc ? `answering at ${base}` : `not reachable at ${base} — the built-in extractor is used instead`) : "disabled"}`,
       `  ollama      ${off(ol) ? "disabled" : olUp ? `answering at ${ol} (model ${embedModel()})` : `not reachable at ${ol} — \`webindex semantic up\` starts it`}`,
       `  qdrant      ${off(qd) ? "disabled" : qdUp ? `answering at ${qd}` : `not reachable at ${qd} — \`webindex semantic up\` starts it`}`,
-      `  pdf rungs   ${enabledExtractors().join(", ")}`,
-      `  doc rungs   ${enabledDocExtractors().join(", ") || "none (disabled)"}`,
-      `  ocr         ${ocr.copyablePdf && ocr.tesseract ? "available" : `unavailable (copyable-pdf: ${ocr.copyablePdf ? "yes" : "no"}, tesseract: ${ocr.tesseract ? "yes" : "no"})`}`,
+      ...rungLines("pdf rungs", PDF_EXTRACTORS, pdfRungs, "PDF_ENGINE"),
+      ...rungLines("doc rungs", DOC_EXTRACTORS, docRungs, "DOC_ENGINE"),
       "",
       "  Everything optional degrades to a note — nothing above is required, and none of it needs a key.",
     ];

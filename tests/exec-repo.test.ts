@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +18,29 @@ afterEach(() => {
 
 // `node` is the one executable guaranteed present — this suite is running in it.
 const NODE = process.execPath;
+
+// A command that starts a long-lived child sharing its pipes, records the
+// child's pid in the file named by its first argument, and then waits.
+const SPAWN_GRANDCHILD = `
+  const { spawn } = require('node:child_process');
+  const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'inherit' });
+  require('node:fs').writeFileSync(process.argv[1], String(g.pid));
+  setTimeout(() => {}, 30000);
+`;
+
+/** Wait (briefly) for a pid to be gone — or a zombie, which is dead but unreaped. */
+async function gone(pid: number): Promise<boolean> {
+  for (let i = 0; i < 40; i++) {
+    try {
+      process.kill(pid, 0);
+      if (process.platform === "linux" && / Z /.test(readFileSync(`/proc/${pid}/stat`, "latin1"))) return true;
+    } catch {
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+}
 
 describe("running a command", () => {
   it("captures stdout and reports success", () => {
@@ -84,6 +107,39 @@ describe("running a command without blocking", () => {
     expect(r.ok).toBe(false);
     expect(r.status).toBe(124);
     expect(r.stderr).toMatch(/timed out after 150ms/);
+  });
+
+  // A command that spawns its own child (git clone and its transport) left that
+  // grandchild running after the kill, holding the pipes — the process could
+  // not exit until it finished.
+  it("kills the command's children with it at the timeout", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "webindex-tree-"));
+    const pidFile = join(dir, "grandchild.pid");
+    try {
+      const started = performance.now();
+      const r = await shAsync(NODE, ["-e", SPAWN_GRANDCHILD, pidFile], { timeoutMs: 1500 });
+      expect(r.status).toBe(124);
+      expect(performance.now() - started).toBeLessThan(4000);
+      expect(await gone(Number(readFileSync(pidFile, "utf8")))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // `stdout += String(chunk)` decoded each 64 KiB chunk on its own, so a
+  // character split across two chunks became two U+FFFD.
+  it("decodes a multi-byte character split across chunks", async () => {
+    const text = `x${"é".repeat(200_000)}${"日本語".repeat(50_000)}`;
+    const r = await shAsync(NODE, ["-e", "process.stdout.write('x' + 'é'.repeat(200000) + '日本語'.repeat(50000))"]);
+    expect(r.stdout).not.toContain("�");
+    expect(r.stdout).toBe(text);
+  });
+
+  // spawn validates argv synchronously; a NUL (which an MCP argument can carry
+  // into a ref or branch name) threw out of the "never throws" contract.
+  it("returns a result for an argument with a NUL byte instead of throwing", async () => {
+    expect(sh("echo", ["a\0b"])).toMatchObject({ ok: false, status: 1 });
+    await expect(shAsync("echo", ["a\0b"])).resolves.toMatchObject({ ok: false, status: 1 });
   });
 
   it("actually overlaps — that is the reason it exists", async () => {
