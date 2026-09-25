@@ -6,6 +6,7 @@ import {
   forgeAuthHeaders,
   forgeKind,
   listReleases,
+  listTags,
   mapGithubIssues,
   repoFacts,
   repoFactsResult,
@@ -433,6 +434,80 @@ describe("why a forge call failed", () => {
         : { body: JSON.stringify({ items: [] }), contentType: "application/json" },
     );
     expect(await canonicalRepo(REF)).toBe("a/b-renamed");
+  });
+});
+
+describe("each forge's own field names and URLs", () => {
+  const json = (o: unknown) => ({ body: JSON.stringify(o), contentType: "application/json" });
+
+  it("asks Gitea for issues only, and searches its pull requests where it can search", async () => {
+    // Gitea's /issues lists pull requests too unless `type` says otherwise, and
+    // its /pulls endpoint has no `q` at all — the terms were silently dropped.
+    const seen: string[] = [];
+    installFetchMock((url) => {
+      seen.push(url);
+      return json([{ number: 9, title: "t", html_url: "https://codeberg.org/o/r/pulls/9", state: "open" }]);
+    });
+    await searchIssues(resolveRepo("codeberg.org/o/r"), ["memory", "leak"], "issue");
+    await searchIssues(resolveRepo("codeberg.org/o/r"), ["memory", "leak"], "pr");
+    expect(seen[0]).toMatch(/\/api\/v1\/repos\/o\/r\/issues\?.*type=issues/);
+    expect(seen[1]).toMatch(/\/api\/v1\/repos\/o\/r\/issues\?.*type=pulls/);
+    expect(seen[1]).toContain("q=memory%20leak");
+  });
+
+  it("reads Gitea's repository record by Gitea's names", async () => {
+    installFetchMock(() =>
+      json({
+        full_name: "forgejo/forgejo",
+        stars_count: 3000,
+        forks_count: 5,
+        website: "https://forgejo.org",
+        updated_at: "2026-09-01T00:00:00Z",
+        licenses: ["GPL-3.0-or-later"],
+        default_branch: "forgejo",
+      }),
+    );
+    expect(await repoFacts(resolveRepo("codeberg.org/forgejo/forgejo"))).toMatchObject({
+      stars: 3000,
+      homepage: "https://forgejo.org",
+      pushedAt: "2026-09-01T00:00:00Z",
+      license: "GPL-3.0-or-later",
+    });
+  });
+
+  it("links a GitLab release to its page, not to '[object Object]'", async () => {
+    installFetchMock(() =>
+      json([
+        { name: "v19.4.0", tag_name: "v19.4.0", description: "d", released_at: "2026-01-01", _links: { self: "https://gitlab.com/g/p/-/releases/v19.4.0" } },
+      ]),
+    );
+    const r = await listReleases(resolveRepo("gitlab.com/g/p"));
+    expect(r.items[0]!.url).toBe("https://gitlab.com/g/p/-/releases/v19.4.0");
+  });
+
+  it("links a tag where each forge serves it, with the name escaped", async () => {
+    // GitLab's /releases/tag/<name> redirects to the sign-in page.
+    installFetchMock(() => json([{ name: "release/1.0 rc" }]));
+    expect((await listTags(resolveRepo("gitlab.com/gnutls/gnutls"))).items[0]!.url).toBe("https://gitlab.com/gnutls/gnutls/-/tags/release/1.0%20rc");
+    expect((await listTags(resolveRepo("github.com/a/b"))).items[0]!.url).toBe("https://github.com/a/b/releases/tag/release/1.0%20rc");
+  });
+
+  it("asks GitLab for the licence, which it only includes when asked", async () => {
+    const seen: string[] = [];
+    installFetchMock((url) => {
+      seen.push(url);
+      return json({ path_with_namespace: "g/p", star_count: 4, license: { key: "mit", name: "MIT License" } });
+    });
+    const f = await repoFacts(resolveRepo("gitlab.com/g/p"));
+    expect(seen[0]).toMatch(/\/projects\/g%2Fp\?license=true$/);
+    expect(f).toMatchObject({ license: "MIT License", stars: 4 });
+  });
+
+  it("does not report GitHub's NOASSERTION as a licence, or an empty homepage as one", async () => {
+    installFetchMock(() => json({ full_name: "a/b", homepage: "", license: { spdx_id: "NOASSERTION", name: "Other" } }));
+    const f = await repoFacts(resolveRepo("github.com/a/b"));
+    expect(f?.license).toBe("Other");
+    expect(f?.homepage).toBeUndefined();
   });
 });
 

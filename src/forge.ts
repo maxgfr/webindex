@@ -518,8 +518,10 @@ export async function searchIssues(ref: RepoRef, terms: string[], kind: "issue" 
     return { items };
   }
 
-  const path = kind === "pr" ? "pulls" : "issues";
-  const url = `${apiBase(ref, opts)}/${repoAt}/${path}?state=all&limit=${limit}&q=${encodeURIComponent(q)}`;
+  // Gitea's /issues lists pull requests as well unless `type` narrows it, and
+  // its /pulls endpoint takes no `q` — so both kinds go through /issues, the one
+  // endpoint that can actually filter by the terms.
+  const url = `${apiBase(ref, opts)}/${repoAt}/issues?state=all&type=${kind === "pr" ? "pulls" : "issues"}&limit=${limit}&q=${encodeURIComponent(q)}`;
   const r = await forgeGet(url, forge, ref, opts);
   if (!r.ok) return failed(r, forge, ref, "Gitea search", opts);
   const items: ForgeItem[] = (Array.isArray(r.data) ? r.data : []).map((it: Record<string, unknown>) => ({
@@ -547,7 +549,8 @@ export async function listReleases(ref: RepoRef, opts: ForgeOptions = {}): Promi
   const items: ForgeItem[] = (Array.isArray(r.data) ? r.data : []).map((it: Record<string, unknown>) => ({
     kind: "release" as const,
     title: String(it.name ?? it.tag_name ?? it.tag ?? "").trim() || String(it.tag_name ?? ""),
-    url: String(it.html_url ?? it._links ?? it.web_url ?? ref.webUrl ?? ""),
+    // GitLab has no html_url; its page is `_links.self`, an object's field.
+    url: String(it.html_url ?? (it._links as { self?: unknown } | undefined)?.self ?? it.web_url ?? ref.webUrl ?? ""),
     state: it.prerelease ? "prerelease" : "released",
     labels: [],
     body: clip(it.body ?? it.description),
@@ -568,13 +571,22 @@ export async function listTags(ref: RepoRef, opts: ForgeOptions = {}): Promise<F
       : `${apiBase(ref, opts)}/${repoAt}/tags?per_page=${limit}&limit=${limit}`;
   const r = await forgeGet(url, forge, ref, opts);
   if (!r.ok) return failed(r, forge, ref, "Listing tags", opts);
-  const items: ForgeItem[] = (Array.isArray(r.data) ? r.data : []).map((it: Record<string, unknown>) => ({
-    kind: "tag" as const,
-    title: String(it.name ?? "").trim(),
-    url: ref.webUrl ? `${ref.webUrl}/releases/tag/${String(it.name ?? "")}` : "",
-    labels: [],
-    body: "",
-  }));
+  // GitLab serves a tag at /-/tags/<name>; its /releases/tag/<name> redirects to
+  // the sign-in page. A tag name may hold `/`, which stays a separator there.
+  const tagPage = forge === "gitlab" ? "-/tags" : "releases/tag";
+  const items: ForgeItem[] = (Array.isArray(r.data) ? r.data : []).map((it: Record<string, unknown>) => {
+    const name = String(it.name ?? "").trim();
+    const commit = it.commit as { created_at?: unknown; created?: unknown } | undefined;
+    const at = commit?.created_at ?? commit?.created;
+    return {
+      kind: "tag" as const,
+      title: name,
+      url: ref.webUrl ? `${ref.webUrl}/${tagPage}/${name.split("/").map(encodeURIComponent).join("/")}` : "",
+      labels: [],
+      body: "",
+      ...(typeof at === "string" ? { updatedAt: at } : {}),
+    };
+  });
   return { items };
 }
 
@@ -628,24 +640,60 @@ export async function repoFactsResult(ref: RepoRef, opts: ForgeOptions = {}): Pr
   if (!forge) return { note: `${ref.host} is not a forge this engine knows how to query.` };
   const repoAt = repoPath(ref, forge);
   if (!repoAt) return { note: `"${ref.raw}" does not name owner/repo.` };
-  const r = await forgeGet(`${apiBase(ref, opts)}/${repoAt}`, forge, ref, opts);
+  // GitLab leaves the licence out of a project unless asked for it by name.
+  const r = await forgeGet(`${apiBase(ref, opts)}/${repoAt}${forge === "gitlab" ? "?license=true" : ""}`, forge, ref, opts);
   if (!r.ok) return failure(r, forge, ref, `Reading ${ref.webUrl ?? ref.raw}`, opts);
   if (!r.data || typeof r.data !== "object") return { status: r.status, note: `${ref.host} answered with something other than a repository record.` };
-  return { status: r.status, facts: mapRepoFacts(r.data as Record<string, any>) };
+  return { status: r.status, facts: mapRepoFacts(forge, r.data as Record<string, any>) };
 }
 
-function mapRepoFacts(d: Record<string, any>): RepoFacts {
+const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v : undefined);
+const num = (v: unknown): number | undefined => (typeof v === "number" ? v : undefined);
+
+// Each forge names the same facts differently, and reading one forge's record by
+// another's names does not fail — it quietly answers "—" for every field.
+function mapRepoFacts(forge: ForgeKind, d: Record<string, any>): RepoFacts {
+  const topics = (v: unknown) => (Array.isArray(v) ? v.filter((t): t is string => typeof t === "string") : []);
+  const shared = {
+    description: str(d.description),
+    forks: num(d.forks_count),
+    openIssues: num(d.open_issues_count),
+    defaultBranch: str(d.default_branch),
+    archived: typeof d.archived === "boolean" ? d.archived : undefined,
+  };
+  if (forge === "gitlab") {
+    return {
+      ...shared,
+      fullName: str(d.path_with_namespace),
+      // A project has no homepage field; its page is the closest thing it states.
+      homepage: str(d.web_url),
+      license: str(d.license?.name) ?? str(d.license?.key),
+      stars: num(d.star_count),
+      pushedAt: str(d.last_activity_at),
+      topics: topics(d.topics).length ? topics(d.topics) : topics(d.tag_list),
+    };
+  }
+  if (forge === "gitea") {
+    return {
+      ...shared,
+      fullName: str(d.full_name),
+      homepage: str(d.website),
+      license: Array.isArray(d.licenses) ? str(d.licenses[0]) : undefined,
+      stars: num(d.stars_count),
+      pushedAt: str(d.updated_at),
+      topics: topics(d.topics),
+    };
+  }
+  // GitHub says NOASSERTION when it found a licence file it cannot classify;
+  // that is not a licence, but "Other" (its name for the case) is honest.
+  const spdx = str(d.license?.spdx_id);
   return {
-    fullName: d.full_name ?? d.path_with_namespace,
-    description: d.description ?? undefined,
-    homepage: d.homepage ?? d.web_url ?? undefined,
-    license: d.license?.spdx_id ?? d.license?.name ?? undefined,
-    stars: d.stargazers_count ?? d.star_count,
-    forks: d.forks_count,
-    openIssues: d.open_issues_count,
-    defaultBranch: d.default_branch,
-    pushedAt: d.pushed_at ?? d.last_activity_at,
-    archived: d.archived,
-    topics: Array.isArray(d.topics) ? d.topics : Array.isArray(d.tag_list) ? d.tag_list : [],
+    ...shared,
+    fullName: str(d.full_name),
+    homepage: str(d.homepage),
+    license: spdx && spdx !== "NOASSERTION" ? spdx : str(d.license?.name),
+    stars: num(d.stargazers_count),
+    pushedAt: str(d.pushed_at),
+    topics: topics(d.topics),
   };
 }
