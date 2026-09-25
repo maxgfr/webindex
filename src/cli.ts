@@ -1257,7 +1257,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
  * copy is a second thing to drift. Falls back to the whole of HELP for a
  * command it cannot find there.
  */
-export function commandHelp(cmd: string): string {
+function commandHelp(cmd: string): string {
   const section = (title: string) => {
     const lines = HELP.split("\n");
     const start = lines.indexOf(title);
