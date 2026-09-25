@@ -76,6 +76,23 @@ Ties are broken by comparing URLs code unit by code unit, never with the
 locale's collation — `localeCompare` reads `LANG`, and two machines would
 disagree on the order and on which near-duplicate survives.
 
+## Lanes fused into the ranking
+
+A document may carry its own `score` — its search engine's relevance, say.
+`webindex rank` fuses that order with BM25F's by reciprocal rank, with ties in
+one lane left for the other to break, so two documents BM25F cannot separate
+follow the engine's opinion. It never lifts a document sharing no term with the
+question: without a lane that reads meaning, that document stays at zero.
+
+`--dense` (`dense: true` over MCP) is that lane: the dense order `hybridSearch`
+computes is fused in the same way before the collapse and MMR, so a page that
+never uses the question's words can still rank. With no embedding server the
+ranking is BM25F's, plus a note. Off by default, which keeps the ranking
+deterministic and offline.
+
+When no document contains any term of the question, `webindex rank` says so on
+stderr (and in `note`): the order is then a tie-break, not a ranking.
+
 ## Scores are pool-relative
 
 `webindex rank` normalises to the pool maximum, so `0.7` means "70% as relevant

@@ -84,6 +84,10 @@ With no embedding server, `hybridSearch` degrades to exactly the lexical ranking
 `bm25Score` alone would have given, plus a note. It never throws and never
 returns fewer documents than it was given.
 
+`webindex rank --dense` (and `webindex_rank` with `dense: true`) fuses this dense
+lane into the full ranking pipeline, before the near-duplicate collapse and MMR
+that `hybrid` skips.
+
 ## Task prefixes
 
 Most local embedding models were trained with a task prefix, and

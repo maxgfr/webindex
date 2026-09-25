@@ -16,7 +16,7 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { configure, env, envName } from "./brand.js";
+import { configure, env, envInt, envName } from "./brand.js";
 import { decodeLocal } from "./charset.js";
 import { ENGINE_VERSION } from "./version.js";
 import { DOC_EXTRACTORS, docFormatForUrl, extractDocument, enabledDocExtractors, sniffDocument } from "./doc.js";
@@ -77,7 +77,7 @@ USAGE
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>] [--full-page]
                        [--cache] [--refresh] [--offline] [--timeout <ms>]
   webindex extract <file> [--json] [--full-page]
-  webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--json]
+  webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--dense] [--json]
   webindex repo <ref> [--forge github|gitlab|gitea] [--json]
   webindex issues <ref> [--terms "<words>"] [--limit <n>] [--forge <kind>] [--json]
   webindex prs <ref> [--terms "<words>"] [--limit <n>] [--forge <kind>] [--json]
@@ -129,10 +129,15 @@ COMMANDS
   rank       Order candidate documents against a question — BM25F, then a
              near-duplicate collapse, then MMR so the top says several
              different things. Reads a JSON array of {url,title,text} from
-             --docs or stdin. Each collapsed mirror is named on stderr (in
-             "duplicates" with --json). MMR reorders the best max(5 × --limit,
-             100); the rest follow by relevance. Deterministic; no model, no
-             network.
+             --docs or stdin; a document's own "score" (a search engine's
+             relevance) is fused with BM25F by rank, but never lifts one that
+             shares no term with the question. Each collapsed mirror is named
+             on stderr (in "duplicates" with --json). MMR reorders the best
+             max(5 × --limit, 100); the rest follow by relevance. Warns when no
+             document contains any term of the question. Deterministic; no
+             model, no network — unless --dense fuses in the local embedding
+             lane first (as hybrid does), which degrades to BM25F with a note
+             when no embedding server answers.
   repo       A repository's own facts: stars, licence, default branch, last
              push, and whether it is archived — the record, not the README.
              A <ref> is owner/repo, any repository URL (one copied from a
@@ -275,7 +280,7 @@ export const VALUE_FLAGS = [
   "timeout",
   "forge",
 ];
-export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page", "cache", "refresh", "offline"];
+export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page", "cache", "refresh", "offline", "dense"];
 export const COMMANDS = [
   "search",
   "fetch",
@@ -418,6 +423,30 @@ interface RankedOut {
   matched: string[];
 }
 
+interface RankResult {
+  ranked: RankedOut[];
+  collapsed: number;
+  duplicates: { url: string; of: string }[];
+  queryTerms: string[];
+  /** Why the order is less than it looks: no dense lane when one was asked for, or no document matched. */
+  note?: string;
+}
+
+/**
+ * Ranks that ties share ("1, 2, 2, 4"): two documents one lane cannot tell
+ * apart are left for the other lanes to order, rather than ranked by whichever
+ * happened to come first.
+ */
+function competitionRanks(values: readonly number[]): number[] {
+  const order = values.map((_, i) => i).sort((a, b) => values[b]! - values[a]!);
+  const ranks = new Array<number>(values.length);
+  order.forEach((i, p) => {
+    const prev = order[p - 1];
+    ranks[i] = prev !== undefined && values[prev] === values[i] ? ranks[prev]! : p + 1;
+  });
+  return ranks;
+}
+
 // MMR is quadratic in what it diversifies, and diversity is read at the top of
 // a list: it reorders the best max(5 × limit, MMR_WINDOW) candidates and the
 // rest follow in relevance order. At 2 000 documents that is milliseconds
@@ -431,27 +460,63 @@ const MMR_WINDOW = 100;
  * the list is not four rewrites of one argument. Scores are normalised to the
  * pool max, so "0.7" means "70% as relevant as the best thing here" rather than
  * an uncalibrated BM25 magnitude nobody can compare across runs.
+ *
+ * Two optional lanes are fused with BM25F by reciprocal rank, which needs no
+ * calibration between a BM25 score, a cosine and a search engine's number: the
+ * documents' own `score`, and with `dense` the embedding lane `hybridSearch`
+ * computes. Without the dense lane nothing here reads meaning, so a document
+ * sharing no term with the question stays at zero whatever its own score says.
  */
-function rankDocuments(
-  question: string,
-  docs: RankInput[],
-  limit?: number,
-): { ranked: RankedOut[]; collapsed: number; duplicates: { url: string; of: string }[]; queryTerms: string[] } {
+async function rankDocuments(question: string, docs: RankInput[], opts: { limit?: number; dense?: boolean } = {}): Promise<RankResult> {
+  const { limit } = opts;
   const bm = docs.map((d, i) => ({ id: String(i), title: d.title ?? "", headings: d.headings ?? "", body: d.text ?? "" }));
   // Each body is tokenised ONCE, and the tokens shared by the index, the
   // near-duplicate hash and the diversity pass — it used to be read three times.
   const bodyTokens = bm.map((d) => bm25Tokenize(d.body));
   const index = buildBm25Index(question, bm, { tokensOf: (d) => bodyTokens[Number(d.id)]! });
   const raw = bm.map((d) => bm25Score(index, d));
-  // A loop, not Math.max(...raw): spreading a very large pool overflows the stack.
+
+  const lanes: (number | undefined)[][] = [];
+  // A document's own `score` — typically its search engine's relevance — was
+  // validated and documented, then ignored: equal BM25 documents scored 0.01
+  // and 0.99 were ordered by URL.
+  if (docs.some((d) => d.score !== undefined)) {
+    const ranks = competitionRanks(docs.map((d) => d.score ?? Number.NEGATIVE_INFINITY));
+    lanes.push(docs.map((d, i) => (d.score === undefined ? undefined : ranks[i])));
+  }
+  const notes: string[] = [];
+  let dense = false;
+  if (opts.dense) {
+    const h = await hybridSearch(question, bm);
+    const ranks = new Array<number | undefined>(bm.length);
+    for (const hit of h.hits) if (hit.denseRank !== undefined) ranks[Number(hit.doc.id)] = hit.denseRank;
+    dense = ranks.some((r) => r !== undefined);
+    if (dense) lanes.push(ranks);
+    else notes.push(h.note ?? "the dense lane returned nothing — ranked with BM25F only.");
+  }
+  let relevance = raw;
+  if (lanes.length) {
+    const k = envInt("RRF_K", 60);
+    const lexical = competitionRanks(raw);
+    relevance = raw.map((s, i) => {
+      if (!dense && !(s > 0)) return 0;
+      let fused = 1 / (k + lexical[i]!);
+      for (const lane of lanes) if (lane[i] !== undefined) fused += 1 / (k + lane[i]!);
+      return fused;
+    });
+  }
+  if (!dense && index.queryTerms.length && raw.every((s) => !(s > 0))) {
+    notes.push("no document contains any term of the question — the order is not a relevance ranking.");
+  }
+  // A loop, not Math.max(...relevance): spreading a very large pool overflows the stack.
   let max = 1e-9;
-  for (const r of raw) if (r > max) max = r;
+  for (const r of relevance) if (r > max) max = r;
 
   const scored = docs.map((d, i) => ({
     url: d.url,
     title: d.title,
     text: d.text ?? "",
-    score: (raw[i] ?? 0) / max,
+    score: (relevance[i] ?? 0) / max,
     matched: bm25MatchedTerms(index, bm[i]!),
     tokens: bodyTokens[i]!,
   }));
@@ -469,12 +534,39 @@ function rankDocuments(
     score: Number(it.score.toFixed(4)),
     matched: it.matched,
   }));
-  return { ranked, collapsed: dropped, duplicates, queryTerms: index.queryTerms };
+  return { ranked, collapsed: dropped, duplicates, queryTerms: index.queryTerms, ...(notes.length ? { note: notes.join(" ") } : {}) };
 }
+
+/** JSON.parse that says which input was broken and what was expected, instead of the parser's bare message. */
+function parseJsonInput(text: string, label: string, expected: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(`${label} is not valid JSON (${(e as Error).message}) — ${expected}`);
+  }
+}
+
+/**
+ * The text a command reads from `--docs <file>` or, without it, stdin. A
+ * terminal on stdin with no --docs is a usage error, not a silent wait for
+ * input that is not coming.
+ */
+function readDocsInput(args: CommandArgs, usageLine: string): { text: string; label: string } {
+  const src = argValue(args, "docs");
+  if (src === undefined && process.stdin.isTTY) usage(usageLine);
+  const label = `--docs ${src === undefined || src === "-" ? "(stdin)" : src}`;
+  try {
+    return { text: readFileSync(src === undefined || src === "-" ? 0 : src, "utf8"), label };
+  } catch (e) {
+    fail(`cannot read ${src === undefined || src === "-" ? "stdin" : src}: ${(e as Error).message}`);
+  }
+}
+
+const RANK_DOCS_SHAPE = "pass a JSON array of {url, text} via --docs <file> or stdin";
 
 /** Parse and validate the `documents` payload both entry points accept. */
 function parseRankDocs(value: unknown, where: string): RankInput[] {
-  const arr = typeof value === "string" ? JSON.parse(value) : value;
+  const arr = typeof value === "string" ? parseJsonInput(value, where, "pass a JSON array of {url, text}") : value;
   if (!Array.isArray(arr) || !arr.length) throw new Error(`${where} must be a non-empty JSON array of {url, text}`);
   return arr.map((d, i) => {
     if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error(`${where}[${i}] is not an object`);
@@ -563,7 +655,8 @@ export function webindexAdapter(): McpAdapter {
         title: "Rank candidate documents against a question",
         description:
           "Order a pool of documents by relevance to a question: BM25F (title and headings weighted above body), then SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. " +
-          "Returns the ranking with a score, the matched query terms, and what was collapsed (each dropped mirror's URL and the URL it duplicated) — deterministic, no model, no network. Use it after gathering pages from any search provider to decide what to actually read. Scores measure relevance within this pool, not factual accuracy.",
+          "Returns the ranking with a score, the matched query terms, and what was collapsed (each dropped mirror's URL and the URL it duplicated), plus a `note` when no document matched or the dense lane was missing — deterministic, no model, no network unless `dense` asks for the local embedding lane. " +
+          "Use it after gathering pages from any search provider to decide what to actually read. Scores measure relevance within this pool, not factual accuracy.",
         inputSchema: {
           type: "object",
           properties: {
@@ -571,9 +664,14 @@ export function webindexAdapter(): McpAdapter {
             documents: {
               type: "array",
               description:
-                'The pool. Each item is {url, text} plus optional {title, headings, score}. Passed as JSON, e.g. [{"url":"…","title":"…","text":"…"}].',
+                'The pool. Each item is {url, text} plus optional {title, headings, score}. A `score` (e.g. the search engine\'s own relevance) is fused with BM25F by rank; it never lifts a document sharing no term with the question. Passed as JSON, e.g. [{"url":"…","title":"…","text":"…"}].',
             },
             limit: { type: "number", description: "How many ranked entries to return (default all)." },
+            dense: {
+              type: "boolean",
+              description:
+                "Fuse the local embedding lane (Ollama) with BM25F before the collapse and MMR, so a page that never uses the question's words can still rank. Falls back to BM25F with a `note` when no embedding server answers. Default false: deterministic and offline.",
+            },
           },
           required: ["question", "documents"],
         },
@@ -814,7 +912,7 @@ export function webindexAdapter(): McpAdapter {
         } catch (e) {
           throw new InvalidParamsError((e as Error).message);
         }
-        const r = rankDocuments(question, docs, typeof args.limit === "number" ? args.limit : undefined);
+        const r = await rankDocuments(question, docs, { limit: typeof args.limit === "number" ? args.limit : undefined, dense: args.dense === true });
         if (!r.queryTerms.length) {
           throw new ToolError("`question` has no rankable terms once stopwords are removed — nothing to score against.");
         }
@@ -1116,23 +1214,18 @@ async function dispatch(argv: string[]): Promise<void> {
   }
 
   if (cmd === "rank") {
+    const RANK_USAGE = "usage: webindex rank --query <question> --docs <file.json|-> [--limit <n>] [--dense] [--json]";
     const question = argValue(args, "query");
-    if (!question) usage("usage: webindex rank --query <question> --docs <file.json|-> [--limit <n>] [--json]");
-    const src = argValue(args, "docs") ?? "-";
-    let payload: string;
-    try {
-      payload = src === "-" ? readFileSync(0, "utf8") : readFileSync(src, "utf8");
-    } catch (e) {
-      fail(`cannot read ${src === "-" ? "stdin" : src}: ${(e as Error).message}`);
-    }
+    if (!question) usage(RANK_USAGE);
+    const input = readDocsInput(args, RANK_USAGE);
     let docs: RankInput[];
     try {
-      docs = parseRankDocs(payload, "--docs");
+      docs = parseRankDocs(parseJsonInput(input.text, input.label, RANK_DOCS_SHAPE), "--docs");
     } catch (e) {
       fail((e as Error).message);
     }
     const limit = argInt(args, "limit");
-    const r = rankDocuments(question, docs, limit);
+    const r = await rankDocuments(question, docs, { limit, dense: argBool(args, "dense") });
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));
     } else {
@@ -1148,6 +1241,7 @@ async function dispatch(argv: string[]): Promise<void> {
         for (const d of r.duplicates) process.stderr.write(`  ${d.url} duplicates ${d.of}\n`);
       }
     }
+    if (r.note) process.stderr.write(`  ${r.note}\n`);
     if (!r.queryTerms.length) {
       process.stderr.write("The question has no rankable terms once stopwords are removed — the order is arbitrary.\n");
       process.exit(1);
@@ -1379,18 +1473,13 @@ async function dispatch(argv: string[]): Promise<void> {
   }
 
   if (cmd === "hybrid") {
+    const HYBRID_USAGE = "usage: webindex hybrid --query <question> --docs <file.json|->";
     const question = argValue(args, "query");
-    if (!question) usage("usage: webindex hybrid --query <question> --docs <file.json|->");
-    const src = argValue(args, "docs") ?? "-";
-    let payload: string;
-    try {
-      payload = src === "-" ? readFileSync(0, "utf8") : readFileSync(src, "utf8");
-    } catch (e) {
-      fail(`cannot read ${src === "-" ? "stdin" : src}: ${(e as Error).message}`);
-    }
+    if (!question) usage(HYBRID_USAGE);
+    const input = readDocsInput(args, HYBRID_USAGE);
     let docs: RankInput[];
     try {
-      docs = parseRankDocs(payload, "--docs");
+      docs = parseRankDocs(parseJsonInput(input.text, input.label, RANK_DOCS_SHAPE), "--docs");
     } catch (e) {
       fail((e as Error).message);
     }
