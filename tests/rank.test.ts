@@ -179,7 +179,7 @@ describe("BM25F", () => {
     expect(bm25Tokenize("ภาษาไทย ประวัติศาสตร์")).toEqual(["ภาษาไทย", "ประวัติศาสตร์"]);
     expect(bm25Tokenize("தமிழ் மொழி வரலாறு")).toEqual(["தமிழ்", "மொழி", "வரலாறு"]);
     // A decomposed Latin accent still folds away, as a precomposed one does.
-    expect(bm25Tokenize("café café")).toEqual(["cafe", "cafe"]);
+    expect(bm25Tokenize("cafe\u0301 café")).toEqual(["cafe", "cafe"]);
     expect(buildBm25Index("हिन्दी इतिहास", []).queryTerms).toEqual(["हिन्दी", "इतिहास"]);
   });
 

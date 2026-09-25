@@ -242,7 +242,7 @@ function tokenize(text: string, expand: boolean): string[] {
   if (!text) return [];
   const out: string[] = [];
   const nonAscii = NON_ASCII.test(text);
-  // NFC so a decomposed "é" is one letter plus its mark, as a precomposed
+  // NFC, so "e" plus a combining acute (U+0301) is one letter as a precomposed
   // "é" is, and folds the same way. ASCII is already NFC.
   for (const raw of (nonAscii ? text.normalize("NFC") : text).split(WORD_SPLIT)) {
     if (!raw) continue;
