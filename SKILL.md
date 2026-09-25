@@ -75,12 +75,19 @@ webindex hybrid --query <q>          # BM25F + dense, fused by RRF
 webindex changed <url> [--etag <v>] [--last-modified <d>]  # a 304 costs one round trip
 webindex cache status|clean [--all]
 webindex searxng|firecrawl|semantic|stack up|down|status
-webindex skill check|bundle|vendor|copy|doctor|init
-webindex doctor
+webindex skill check|bundle|vendor|copy|doctor|init|repin|finish|recall
+webindex doctor [--json]
 ```
 
-Every command takes `--json`. Human output goes to stdout and degradation notes
-to stderr, so `webindex search q | head` stays a clean URL list.
+Every command that answers with data takes `--json` — all but the container
+commands, which print docker's own report, and `mcp`. Human output goes to
+stdout and degradation notes to stderr, so `webindex search q | head` stays a
+clean URL list. `webindex <command> --help` prints that command's usage alone.
+
+Exit codes: 0 when the command did what was asked; 1 when it ran and the answer
+is a failure — nothing found, a page unreadable, robots.txt saying no, a gate
+refusing; 2 when the invocation itself was wrong — an unknown command or flag, a
+missing or out-of-range value, a stray argument.
 
 ## What it will and will not do
 

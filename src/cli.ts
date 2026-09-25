@@ -120,7 +120,7 @@ USAGE
   webindex skill     finish [--root <dir>]
   webindex skill     recall [--ref <baseline>] [--root <dir>]
   webindex skill     init <name> [--root <dir>]
-  webindex doctor
+  webindex doctor [--json]
   webindex version
 
 COMMANDS
@@ -1635,13 +1635,12 @@ async function dispatch(argv: string[]): Promise<void> {
     if (action !== "status" && action !== "clean") usage("usage: webindex cache status|clean [--all]");
     if (action === "clean") {
       const all = argBool(args, "all");
+      const noWrite = isNoWrite();
+      const removed = noWrite ? 0 : cacheClean(all);
+      if (argBool(args, "json")) process.stdout.write(jsonLine({ dir: cacheDir(), removed, all, noWrite }));
       // "0 entries removed" would read as an empty cache, not a blocked clean.
-      if (isNoWrite()) {
-        process.stdout.write(`no-write mode: nothing removed from ${cacheDir()}\n`);
-        return;
-      }
-      const removed = cacheClean(all);
-      process.stdout.write(`${removed} entr${removed === 1 ? "y" : "ies"} removed (${all ? "all" : "stale only"}) from ${cacheDir()}\n`);
+      else if (noWrite) process.stdout.write(`no-write mode: nothing removed from ${cacheDir()}\n`);
+      else process.stdout.write(`${removed} entr${removed === 1 ? "y" : "ies"} removed (${all ? "all" : "stale only"}) from ${cacheDir()}\n`);
       return;
     }
     const s = cacheStats();
@@ -2053,19 +2052,42 @@ async function dispatch(argv: string[]): Promise<void> {
     };
     // The ladder in the order it runs, then the rungs the environment switched
     // off, with the variable that did it.
-    const rungLines = (label: string, all: readonly string[], enabled: readonly string[], engineVar: string) => {
+    const rungRows = (all: readonly string[], enabled: readonly string[], engineVar: string) => {
       const why = env(engineVar)?.trim() ? `${envName(engineVar)}=${env(engineVar)!.trim()}` : envName("NO_NPX");
-      const rows = [...enabled.map((id) => [id, rungState(id)]), ...all.filter((id) => !enabled.includes(id)).map((id) => [id, `off (${why})`])];
-      return rows.map(([id, state], i) => `  ${(i ? "" : label).padEnd(12)}${id!.padEnd(15)}${state}`);
+      return [
+        ...enabled.map((id) => ({ id, enabled: true, state: rungState(id) })),
+        ...all.filter((id) => !enabled.includes(id)).map((id) => ({ id, enabled: false, state: `off (${why})` })),
+      ];
     };
+    const pdf = rungRows(PDF_EXTRACTORS, pdfRungs, "PDF_ENGINE");
+    const doc = rungRows(DOC_EXTRACTORS, docRungs, "DOC_ENGINE");
+    if (argBool(args, "json")) {
+      const service = (base: string | null | undefined, up: boolean, extra: Record<string, string> = {}) =>
+        base ? { state: up ? "answering" : "unreachable", base, ...(up ? extra : {}) } : { state: "disabled" };
+      process.stdout.write(
+        jsonLine({
+          version: ENGINE_VERSION,
+          services: {
+            searxng: service(sx, sxUp),
+            firecrawl: service(base, fc),
+            ollama: service(off(ol) ? undefined : ol, olUp, { model: embedModel() }),
+            qdrant: service(off(qd) ? undefined : qd, qdUp),
+          },
+          rungs: { pdf, doc },
+        }),
+      );
+      return;
+    }
+    const rungLines = (label: string, rows: { id: string; state: string }[]) =>
+      rows.map(({ id, state }, i) => `  ${(i ? "" : label).padEnd(12)}${id.padEnd(15)}${state}`);
     const lines = [
       `webindex ${ENGINE_VERSION}`,
       `  searxng     ${sx ? (sxUp ? `answering at ${sx}` : `not reachable at ${sx} — \`webindex searxng up\` starts it`) : "disabled"}`,
       `  firecrawl   ${base ? (fc ? `answering at ${base}` : `not reachable at ${base} — the built-in extractor is used instead`) : "disabled"}`,
       `  ollama      ${off(ol) ? "disabled" : olUp ? `answering at ${ol} (model ${embedModel()})` : `not reachable at ${ol} — \`webindex semantic up\` starts it`}`,
       `  qdrant      ${off(qd) ? "disabled" : qdUp ? `answering at ${qd}` : `not reachable at ${qd} — \`webindex semantic up\` starts it`}`,
-      ...rungLines("pdf rungs", PDF_EXTRACTORS, pdfRungs, "PDF_ENGINE"),
-      ...rungLines("doc rungs", DOC_EXTRACTORS, docRungs, "DOC_ENGINE"),
+      ...rungLines("pdf rungs", pdf),
+      ...rungLines("doc rungs", doc),
       "",
       "  Everything optional degrades to a note — nothing above is required, and none of it needs a key.",
     ];

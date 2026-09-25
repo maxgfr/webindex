@@ -536,6 +536,23 @@ describe("doctor", () => {
     expect(stdout()).toMatch(/searxng {5}not reachable at http:\/\/localhost:8888/);
   });
 
+  it("answers as JSON on demand: each service and each rung, as data", async () => {
+    // --json was accepted and ignored; a script asking what this machine can
+    // do had to parse the aligned text.
+    process.env[envName("FIRECRAWL")] = "off";
+    process.env[envName("OLLAMA")] = "off";
+    process.env[envName("QDRANT")] = "off";
+    expect(await run(["doctor", "--json"])).toBe(0);
+    const j = JSON.parse(stdout());
+    expect(j.version).toMatch(/^\d+\.\d+\.\d+/);
+    expect(j.services.searxng).toEqual({ state: "disabled" });
+    expect(j.services.firecrawl).toEqual({ state: "disabled" });
+    expect(j.services.ollama).toEqual({ state: "disabled" });
+    expect(j.rungs.pdf).toContainEqual({ id: "native", enabled: true, state: "built-in" });
+    expect(j.rungs.pdf).toContainEqual({ id: "pdf-inspector", enabled: false, state: `off (${envName("PDF_ENGINE")}=native)` });
+    expect(j.rungs.doc.map((r: { id: string }) => r.id)).toEqual(["anydoc", "firecrawl", "builtin"]);
+  });
+
   it("lists a rung the environment switched off, and which variable did it", async () => {
     process.env[envName("FIRECRAWL")] = "off";
     process.env[envName("NO_NPX")] = "1";
@@ -903,6 +920,18 @@ describe("the fetch cache", () => {
     process.env[envName("NO_WRITE")] = "1";
     expect(await run(["cache", "clean", "--all"])).toBe(0);
     expect(stdout()).toMatch(/no-write mode: nothing removed/);
+  });
+
+  it("reports an eviction as JSON on demand, as status does", async () => {
+    // --json was accepted and ignored: a script got the sentence.
+    process.env[envName("CACHE_DIR")] = join(dir, "empty-cache");
+    expect(await run(["cache", "clean", "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toEqual({ dir: join(dir, "empty-cache"), removed: 0, all: false, noWrite: false });
+
+    out = [];
+    process.env[envName("NO_WRITE")] = "1";
+    expect(await run(["cache", "clean", "--all", "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ removed: 0, all: true, noWrite: true });
   });
 
   it("rejects an action it does not have", async () => {
