@@ -213,7 +213,7 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
     const stop = halted(opts, deadline);
     if (stop) {
       if (p > 0) break; // the pages already read stand
-      return rungResult("searxng", "not-tried", [], [`SearXNG was not asked: ${stop}.`]);
+      return rungResult("searxng", "not-tried", [], [`SearXNG was not asked: ${stop === "cancelled" ? "the search was cancelled" : "no time was left"}.`]);
     }
     const r = await httpGet(root + (p > 0 ? `&pageno=${p + 1}` : ""), {
       accept: "application/json",
@@ -300,9 +300,9 @@ function budgetDeadline(opts: SearchOptions): number {
 // Why no further rung or page may start, if none may. Checked between them
 // because a request in flight cannot be recalled — httpGet takes no signal —
 // so the budget ALSO caps each request's own timeout.
-function halted(opts: SearchOptions, deadline: number): string | undefined {
-  if (opts.signal?.aborted) return "the search was cancelled";
-  return Date.now() >= deadline ? `the ${opts.timeoutMs} ms budget ran out` : undefined;
+function halted(opts: SearchOptions, deadline: number): "cancelled" | "out of time" | undefined {
+  if (opts.signal?.aborted) return "cancelled";
+  return Date.now() >= deadline ? "out of time" : undefined;
 }
 
 // A one-rung SearchResult: the hits and notes, plus the report that says the same in data.
@@ -375,7 +375,8 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
     if (stop) {
       const rest = order.slice(i).map(untried);
       const skipped = rest.filter((r) => r.outcome === "not-tried").map((r) => r.rung);
-      if (skipped.length) notes.push(`Stopped before ${skipped.join(", ")}: ${stop}.`);
+      const why = stop === "cancelled" ? "the search was cancelled" : `the ${opts.timeoutMs} ms budget ran out`;
+      if (skipped.length) notes.push(`Stopped before ${skipped.join(", ")}: ${why}.`);
       rungs.push(...rest);
       break;
     }
