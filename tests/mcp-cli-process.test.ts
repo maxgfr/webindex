@@ -80,10 +80,14 @@ describe("the built CLI as a process", () => {
 
   it("does not run when it is imported rather than started", () => {
     // The skill-bundle gate imports a built CLI to read its flag tables.
-    const child = spawnSync(process.execPath, ["--input-type=module", "-e", `const m = await import(${JSON.stringify(pathToFileURL(binary).href)}); console.log(typeof m.HELP);`], {
-      encoding: "utf8",
-      timeout: 10_000,
-    });
+    const child = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", `const m = await import(${JSON.stringify(pathToFileURL(binary).href)}); console.log(typeof m.HELP);`],
+      {
+        encoding: "utf8",
+        timeout: 10_000,
+      },
+    );
     expect(child.status, child.stderr).toBe(0);
     expect(child.stdout).toBe("string\n");
   });
