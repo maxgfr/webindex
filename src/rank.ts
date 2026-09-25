@@ -1,3 +1,4 @@
+import { brand } from "./brand.js";
 import { foldTerm, isStopword, type KeywordMatcher, subtokens } from "./text.js";
 import { canonicalizeUrl, domainOf, fnv1a64Words, normalizeDoi } from "./url.js";
 
@@ -262,11 +263,8 @@ function pushTerm(raw: string, out: string[], expand: boolean): void {
   const t = foldCached(raw);
   if (t.length < 2) return;
   out.push(t);
-  if (!expand || raw.length > MAX_IDENT || !IDENT_BOUNDARY.test(raw)) return;
-  for (const sub of subtokens(raw)) {
-    const s = foldCached(sub);
-    if (s !== t && s.length >= 2) out.push(s);
-  }
+  if (!expand || raw.length > MAX_IDENT) return;
+  for (const sub of subtermsCached(raw, t)) out.push(sub);
 }
 
 function pushBigrams(run: string, out: string[]): void {
@@ -292,6 +290,34 @@ function foldCached(raw: string): string {
   if (foldCache.size >= FOLD_CACHE_MAX) foldCache.clear();
   foldCache.set(raw, t);
   return t;
+}
+
+// An identifier's folded inner words, by raw token. Code repeats its
+// identifiers far more than prose repeats words, and splitting one is four
+// regex passes: uncached, a code-heavy pool tokenised four times slower. The
+// split drops stopwords, so the cache is only good for the stopword list it was
+// filled under.
+const NO_SUBTERMS: readonly string[] = [];
+const subtermCache = new Map<string, readonly string[]>();
+let subtermExtras: { list: readonly string[] | undefined; length: number } = { list: undefined, length: 0 };
+
+function subtermsCached(raw: string, folded: string): readonly string[] {
+  const list = brand().extraStopwords;
+  if (list !== subtermExtras.list || (list?.length ?? 0) !== subtermExtras.length) {
+    subtermCache.clear();
+    subtermExtras = { list, length: list?.length ?? 0 };
+  }
+  const hit = subtermCache.get(raw);
+  if (hit !== undefined) return hit;
+  let subs = NO_SUBTERMS;
+  if (IDENT_BOUNDARY.test(raw)) {
+    subs = subtokens(raw)
+      .map(foldCached)
+      .filter((sub) => sub !== folded && sub.length >= 2);
+  }
+  if (subtermCache.size >= FOLD_CACHE_MAX) subtermCache.clear();
+  subtermCache.set(raw, subs);
+  return subs;
 }
 
 // Field-weighted token stream: body once, headings ×headingWeight, title

@@ -18,6 +18,7 @@ import {
   simhash,
   type Bm25Doc,
 } from "../src/rank.js";
+import { configure, resetBrand } from "../src/brand.js";
 import { buildMatcher, foldTerm } from "../src/text.js";
 
 const src = (url: string, score: number, text = "") => ({ url, score, text });
@@ -195,6 +196,14 @@ describe("BM25F", () => {
     expect(bm25MatchedTerms(idx, docs[0]!)).toEqual(["rate", "limiter"]);
     // …and the query side expands the same way.
     expect(buildBm25Index("RateLimiter", docs).queryTerms).toEqual(["ratelimiter", "rate", "limiter"]);
+  });
+
+  it("drops an identifier's words that are stopwords, under whichever list is configured now", () => {
+    expect(bm25Tokenize("RateLimiter")).toEqual(["ratelimiter", "rate", "limiter"]);
+    configure({ name: "t", envPrefix: "T", cli: "t", extraStopwords: ["limiter"] });
+    expect(bm25Tokenize("RateLimiter")).toEqual(["ratelimiter", "rate"]);
+    resetBrand();
+    expect(bm25Tokenize("RateLimiter")).toEqual(["ratelimiter", "rate", "limiter"]);
   });
 
   it("keeps SimHash on the unexpanded words, so a hash never moves between versions", () => {
