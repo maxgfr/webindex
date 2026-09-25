@@ -64,6 +64,61 @@ describe("resolveProvider", () => {
     expect(resolveProvider(url)).toEqual({ citeUrl: url });
   });
 
+  it("refuses a multi-id efetch instead of citing its first record", () => {
+    // Rewritten to pubmed/1 the batch signal was gone: addressedIdCount of the
+    // resolved URL is 0, and the caller cited one record for three.
+    for (const url of [`${EFETCH}?db=pubmed&id=1,2,3`, `${EFETCH}?db=pmc&id=PMC1+PMC2`]) {
+      const r = resolveProvider(url);
+      expect(r.citeUrl).toBe(url);
+      expect(r.textUrl).toBeUndefined();
+      expect(r.reject).toMatch(/addresses \d records, not one document/);
+    }
+  });
+
+  it("recognises a landing page copied with its query string or fragment", () => {
+    // PubMed's own search UI appends `?from_term=…`; a link shared from a page
+    // carries a `#fragment`.
+    for (const url of ["https://pubmed.ncbi.nlm.nih.gov/34397876/?from_term=covid&from_pos=2", "https://pubmed.ncbi.nlm.nih.gov/34397876#abstract"]) {
+      const r = resolveProvider(url);
+      expect(r.citeUrl).toBe("https://pubmed.ncbi.nlm.nih.gov/34397876/");
+      expect(r.textUrl).toBe(pubmedAbstractUrl("34397876"));
+    }
+    expect(resolveProvider("https://pmc.ncbi.nlm.nih.gov/articles/PMC8481186/?report=classic").citeUrl).toBe(
+      "https://pmc.ncbi.nlm.nih.gov/articles/PMC8481186/",
+    );
+    const pdf = resolveProvider("https://arxiv.org/pdf/2301.00001v2.pdf?download=1");
+    expect(pdf.citeUrl).toBe("https://arxiv.org/abs/2301.00001v2");
+    expect(pdf.textUrl).toBe("https://arxiv.org/pdf/2301.00001v2.pdf?download=1");
+  });
+
+  it("recognises the legacy www.ncbi.nlm.nih.gov forms, still linked everywhere", () => {
+    const pubmed = resolveProvider("https://www.ncbi.nlm.nih.gov/pubmed/34397876");
+    expect(pubmed.citeUrl).toBe("https://pubmed.ncbi.nlm.nih.gov/34397876/");
+    expect(pubmed.textUrl).toBe(pubmedAbstractUrl("34397876"));
+    expect(resolveProvider("https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8481186/").citeUrl).toBe("https://pmc.ncbi.nlm.nih.gov/articles/PMC8481186/");
+    expect(resolveProvider("http://ncbi.nlm.nih.gov/pmc/articles/pmc8481186").citeUrl).toBe("https://pmc.ncbi.nlm.nih.gov/articles/PMC8481186/");
+  });
+
+  it("reads a hostile URL in linear time", () => {
+    // The optional tail sits after a lazy path match; neither may turn into a
+    // scan per starting position. Linear work takes milliseconds here.
+    const hostile = [
+      `https://arxiv.org/pdf/${"a".repeat(200_000)}?${"x".repeat(200_000)}\ny`,
+      `https://arxiv.org/pdf/${"a.pdf/".repeat(50_000)}\n`,
+      `https://pubmed.ncbi.nlm.nih.gov/12345/?${"?".repeat(200_000)}\n`,
+    ];
+    for (const url of hostile) {
+      const t0 = performance.now();
+      resolveProvider(url);
+      expect(performance.now() - t0).toBeLessThan(1000);
+    }
+  });
+
+  it("does not take a PubMed search page for a record", () => {
+    const search = "https://pubmed.ncbi.nlm.nih.gov/?term=34397876";
+    expect(resolveProvider(search)).toEqual({ citeUrl: search });
+  });
+
   it("survives a malformed url", () => {
     expect(resolveProvider("not a url").citeUrl).toBe("not a url");
   });
