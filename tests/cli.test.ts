@@ -637,6 +637,27 @@ describe("the MCP tools", () => {
     }
   });
 
+  it("annotates every tool as read-only, and the ones that reach the web as open-world", () => {
+    // Without hints a client has to treat each tool as possibly destructive
+    // and ask before every call; none of these changes anything anywhere.
+    const closed = ["webindex_extract", "webindex_rank", "webindex_embed"];
+    for (const t of adapter.listTools(LATEST_PROTOCOL)) {
+      expect(t.annotations, t.name).toEqual({
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: !closed.includes(t.name),
+      });
+      expect(t.title, t.name).toBeTruthy();
+    }
+    // What a 2025-03-26 client sees: the hints, with the title carried inside.
+    const server = createServer(webindexAdapter());
+    server.setProtocolVersion("2025-03-26");
+    const fetchTool = server.tools().find((t) => t.name === "webindex_fetch")!;
+    expect(fetchTool.title).toBeUndefined();
+    expect(fetchTool.annotations).toMatchObject({ title: "Fetch a URL as clean text", readOnlyHint: true, openWorldHint: true });
+  });
+
   it("does not promise a single network request for package metadata", () => {
     const packageTool = adapter.listTools(LATEST_PROTOCOL).find((tool) => tool.name === "webindex_package");
     const publicDescriptions = [
