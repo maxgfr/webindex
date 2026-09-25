@@ -283,6 +283,16 @@ function markdownTable(rows: string[][]): string {
   return out.join("\n");
 }
 
+/** Blocks as Markdown paragraphs — except consecutive list items, which stay one list. */
+function joinBlocks(blocks: string[]): string {
+  const out: string[] = [];
+  for (const [i, block] of blocks.entries()) {
+    if (i) out.push(block.startsWith("- ") && blocks[i - 1]!.startsWith("- ") ? "\n" : "\n\n");
+    out.push(block);
+  }
+  return out.join("");
+}
+
 /** A part's relationships: id → { target part path, type }. */
 function relationships(zip: Zip, part: string): Map<string, { target: string; type: string }> {
   const slash = part.lastIndexOf("/");
@@ -319,10 +329,65 @@ function resolvePart(dir: string, target: string): string {
 
 // ── Word processing (.docx) ──────────────────────────────────────────────────
 
-// Word derives a style's id from its localised name with the non-ASCII letters
-// dropped, so a German heading is `berschrift1` and a Spanish one `Ttulo1`.
+// What a paragraph style makes of its paragraphs, from the style's definition
+// in word/styles.xml: Word stores its built-in styles' names in English
+// whatever the interface language ("heading 2", "Title", "List Bullet"), and a
+// custom style inherits its level through basedOn. The id a paragraph names is
+// only a fallback, for a package without styles.xml: Word derives it from the
+// localised name with the non-ASCII letters dropped, so a German heading is
+// `berschrift1` and a Spanish one `Ttulo1`.
 const HEADING_STYLE_RE = /^(?:heading|titre|berschrift|überschrift|kop|titolo|encabezado|ttulo|título)\s?([1-6])$/i;
 const TITLE_STYLE_RE = /^(?:title|titel|titre|titolo|ttulo|título)$/i;
+// A list numbered through its style (`List Bullet`, `List Number 2`), with no
+// numPr on the paragraph itself.
+const LIST_STYLE_RE = /^list ?(?:bullet|number)/i;
+
+/** The Markdown prefix a style name (or, failing that, an outline level) gives a paragraph. */
+function stylePrefix(name: string, outline?: number): string | undefined {
+  const level = HEADING_STYLE_RE.exec(name)?.[1] ?? (outline !== undefined && outline >= 0 && outline < 6 ? String(outline + 1) : undefined);
+  if (level) return `${"#".repeat(Number(level))} `;
+  if (TITLE_STYLE_RE.test(name)) return "# ";
+  if (LIST_STYLE_RE.test(name)) return "- ";
+  return undefined;
+}
+
+/** Each paragraph style's prefix ("" for none), by style id, from word/styles.xml. */
+function wordStyles(xml: string | undefined): Map<string, string> | undefined {
+  if (!xml) return undefined;
+  const styles = new Map<string, { name: string; basedOn?: string; outline?: number }>();
+  let current: { name: string; basedOn?: string; outline?: number } | undefined;
+  walkXml(xml, {
+    open(name, attrs) {
+      const n = local(name);
+      if (n === "style") {
+        const id = attr(attrs, "w:styleId");
+        current = id && attr(attrs, "w:type") === "paragraph" ? { name: "" } : undefined;
+        if (current) styles.set(id!, current);
+      } else if (!current) return;
+      else if (n === "name") current.name = attr(attrs, "w:val") ?? "";
+      else if (n === "basedOn") current.basedOn = attr(attrs, "w:val");
+      else if (n === "outlineLvl") current.outline = Number(attr(attrs, "w:val"));
+    },
+    close(name) {
+      if (local(name) === "style") current = undefined;
+    },
+  });
+  const prefixes = new Map<string, string>();
+  for (const [id, own] of styles) {
+    // A bounded walk up basedOn: a cycle in a hostile file ends it too.
+    let style: typeof own | undefined = own;
+    for (let depth = 0; style && depth < 16; depth++) {
+      const prefix = stylePrefix(style.name, style.outline);
+      if (prefix !== undefined) {
+        prefixes.set(id, prefix);
+        break;
+      }
+      style = style.basedOn ? styles.get(style.basedOn) : undefined;
+    }
+    if (!prefixes.has(id)) prefixes.set(id, "");
+  }
+  return prefixes;
+}
 
 interface Paragraph {
   text: string;
@@ -335,7 +400,7 @@ interface Table {
   cell?: string[];
 }
 
-function wordText(xml: string, budget: Budget): string {
+function wordText(xml: string, budget: Budget, styles?: Map<string, string>): string {
   const blocks: string[] = [];
   const paragraphs: Paragraph[] = []; // a text box's paragraphs nest inside another
   const tables: Table[] = [];
@@ -369,10 +434,9 @@ function wordText(xml: string, budget: Budget): string {
       else if (n === "br" || n === "cr") add(p, "\n");
       else if (n === "noBreakHyphen") add(p, "-");
       else if (n === "pStyle" && p) {
-        const style = attr(attrs, "w:val") ?? "";
-        const level = HEADING_STYLE_RE.exec(style)?.[1];
-        if (level) p.prefix = `${"#".repeat(Number(level))} `;
-        else if (TITLE_STYLE_RE.test(style)) p.prefix = "# ";
+        const id = attr(attrs, "w:val") ?? "";
+        const prefix = styles?.has(id) ? styles.get(id) : stylePrefix(id);
+        if (prefix) p.prefix = prefix;
       } else if (n === "numPr" && p && !p.prefix) p.prefix = "- ";
       else if (n === "tbl") tables.push({ rows: [] });
       else if (n === "tr" && table) table.row = [];
@@ -390,7 +454,8 @@ function wordText(xml: string, budget: Budget): string {
       if (n === "t") inText = Math.max(0, inText - 1);
       else if (n === "p") {
         const p = paragraphs.pop();
-        if (p) emit(table?.cell ? p.text.trim() : (p.prefix + p.text).trimEnd());
+        // An empty list item or heading is not a bare "-" or "#".
+        if (p?.text.trim()) emit(table?.cell ? p.text.trim() : p.prefix ? p.prefix + p.text.trim() : p.text.trimEnd());
       } else if (n === "tc" && table?.row && table.cell) {
         table.row.push(table.cell.join(" "));
         table.cell = undefined;
@@ -406,7 +471,7 @@ function wordText(xml: string, budget: Budget): string {
       if (!fallback && inText) add(paragraphs[paragraphs.length - 1], s);
     },
   });
-  return blocks.join("\n\n");
+  return joinBlocks(blocks);
 }
 
 // ── Spreadsheets (.xlsx) ─────────────────────────────────────────────────────
@@ -448,11 +513,87 @@ function columnOf(ref: string | undefined): number | undefined {
   return col - 1;
 }
 
-function sheetRows(xml: string, shared: string[], budget: Budget): string[][] {
+// A date cell holds a serial day number, and only its style says it is a date:
+// cited as 46082, a meeting date is a number nobody can check.
+type Temporal = "date" | "time" | "datetime";
+
+// The built-in number formats that show one (ECMA-376 Part 1, §18.8.30). The
+// elapsed-time format 46 (`[h]:mm:ss`) is a duration, not a time of day.
+const BUILTIN_TEMPORAL: Record<number, Temporal> = {
+  14: "date",
+  15: "date",
+  16: "date",
+  17: "date",
+  18: "time",
+  19: "time",
+  20: "time",
+  21: "time",
+  22: "datetime",
+  45: "time",
+  47: "time",
+};
+
+/** What a custom number format code shows: a date, a time, both — or a number (undefined). */
+function temporalOf(code: string): Temporal | undefined {
+  // Excel caps a code at 255 characters; an elapsed `[h]` is a duration.
+  if (code.length > 255 || /\[[hms]+\]/i.test(code)) return undefined;
+  // Quoted literals, escaped and padding characters, [colour] and [condition]
+  // sections, `General` and exponents all hold letters that are not date codes.
+  const bare = code.replace(/"[^"]*"|[\\_*].|\[[^[\]]*\]|General|E[+-]/gi, "");
+  const time = /[hs]/i.test(bare);
+  // `m` is a month, unless hours or seconds make it minutes.
+  const date = /[yd]/i.test(bare) || (!time && /m/i.test(bare));
+  return date && time ? "datetime" : date ? "date" : time ? "time" : undefined;
+}
+
+/** Each cell style's temporal kind, by its index in cellXfs — which is what a cell's `s` names. */
+function cellTemporals(xml: string | undefined): (Temporal | undefined)[] {
+  const kinds: (Temporal | undefined)[] = [];
+  if (!xml) return kinds;
+  const custom = new Map<number, Temporal | undefined>();
+  let cellXfs = false; // cellStyleXfs holds <xf> elements too, which cells do not name
+  walkXml(xml, {
+    open(name, attrs) {
+      const n = local(name);
+      if (n === "numFmt") custom.set(Number(attr(attrs, "numFmtId")), temporalOf(attr(attrs, "formatCode") ?? ""));
+      else if (n === "cellXfs") cellXfs = true;
+      else if (n === "xf" && cellXfs) {
+        const id = Number(attr(attrs, "numFmtId") ?? 0);
+        kinds.push(custom.has(id) ? custom.get(id) : BUILTIN_TEMPORAL[id]);
+      }
+    },
+    close(name) {
+      if (local(name) === "cellXfs") cellXfs = false;
+    },
+  });
+  return kinds;
+}
+
+const DAY_MS = 86_400_000;
+const EXCEL_EPOCH = Date.UTC(1899, 11, 30);
+
+/** A serial day number as ISO text — `2026-03-01`, `18:00`, `2026-03-01 12:00` — or undefined when out of range. */
+function serialDate(serial: number, kind: Temporal, date1904: boolean): string | undefined {
+  // The 1900 system counts from 1899-12-31 up to Lotus's phantom 1900-02-29
+  // (serial 60), and from 1899-12-30 after it; the 1904 system is 1462 days on.
+  const days = date1904 ? serial + 1462 : serial < 60 ? serial + 1 : serial;
+  if (!(serial >= 0 && days <= 2_958_466)) return undefined; // through 9999-12-31
+  const iso = new Date(Math.round((EXCEL_EPOCH + days * DAY_MS) / 1000) * 1000).toISOString();
+  const time = iso.slice(11, iso.endsWith(":00.000Z") ? 16 : 19);
+  return kind === "date" ? iso.slice(0, 10) : kind === "time" ? time : `${iso.slice(0, 10)} ${time}`;
+}
+
+interface SheetStyles {
+  temporal: (Temporal | undefined)[];
+  date1904: boolean;
+}
+
+function sheetRows(xml: string, shared: string[], styles: SheetStyles, budget: Budget): string[][] {
   const rows: string[][] = [];
   let row: string[] | undefined;
   let col = 0;
   let type: string | undefined;
+  let style = 0;
   let value: string | undefined;
   let collecting = 0;
   walkXml(xml, {
@@ -462,6 +603,7 @@ function sheetRows(xml: string, shared: string[], budget: Budget): string[][] {
       else if (n === "c" && row) {
         col = columnOf(attr(attrs, "r")) ?? row.length;
         type = attr(attrs, "t");
+        style = Number(attr(attrs, "s") ?? 0);
         value = "";
       } else if ((n === "v" || n === "t") && value !== undefined) collecting++;
     },
@@ -470,8 +612,10 @@ function sheetRows(xml: string, shared: string[], budget: Budget): string[][] {
       if ((n === "v" || n === "t") && collecting) collecting--;
       else if (n === "c" && row && value !== undefined) {
         let shown = value;
+        const kind = styles.temporal[style];
         if (type === "s") shown = shared[Number(value)] ?? "";
         else if (type === "b") shown = value === "1" ? "TRUE" : "FALSE";
+        else if (kind && (type === undefined || type === "n") && value.trim()) shown = serialDate(Number(value), kind, styles.date1904) ?? value;
         // Metered here, where a shared string is shown, not where it is written.
         if (col < MAX_COLUMNS && shown && budget.take(shown.length)) {
           while (row.length < col) row.push("");
@@ -494,11 +638,15 @@ function spreadsheetText(zip: Zip, workbookPart: string, budget: Budget): string
   const rels = relationships(zip, workbookPart);
   const stringsPart = relatedPart(rels, "sharedStrings");
   const shared = sharedStrings(stringsPart ? zip.text(stringsPart) : undefined);
+  const stylesPart = relatedPart(rels, "styles");
+  const styles: SheetStyles = { temporal: cellTemporals(stylesPart ? zip.text(stylesPart) : undefined), date1904: false };
   const sheets: { name: string; id: string }[] = [];
   walkXml(zip.text(workbookPart) ?? "", {
     open(name, attrs) {
+      const n = local(name);
       const id = attr(attrs, "*:id");
-      if (local(name) === "sheet" && id) sheets.push({ name: attr(attrs, "name") ?? `Sheet ${sheets.length + 1}`, id });
+      if (n === "sheet" && id) sheets.push({ name: attr(attrs, "name") ?? `Sheet ${sheets.length + 1}`, id });
+      else if (n === "workbookPr") styles.date1904 = /^(?:1|true)$/i.test(attr(attrs, "date1904") ?? "");
     },
   });
   const blocks: string[] = [];
@@ -506,7 +654,7 @@ function spreadsheetText(zip: Zip, workbookPart: string, budget: Budget): string
     if (budget.spent) break;
     const part = rels.get(sheet.id)?.target;
     const xml = part ? zip.text(part) : undefined;
-    const table = xml ? markdownTable(sheetRows(xml, shared, budget)) : "";
+    const table = xml ? markdownTable(sheetRows(xml, shared, styles, budget)) : "";
     if (table) blocks.push(`## ${sheet.name}\n\n${table}`);
   }
   return blocks.join("\n\n");
@@ -514,26 +662,51 @@ function spreadsheetText(zip: Zip, workbookPart: string, budget: Budget): string
 
 // ── Presentations (.pptx) ────────────────────────────────────────────────────
 
-/** DrawingML text: one line per paragraph. `onlyBody` keeps the body placeholder of a notes page, not its slide number. */
-function drawingText(xml: string, budget: Budget, onlyBody = false): string {
+interface Shape {
+  kind: "title" | "body" | "other";
+  lines: string[];
+}
+
+/**
+ * DrawingML text: one line per paragraph, a table as a Markdown table, and the
+ * title placeholder's text apart. `onlyBody` keeps the body placeholder of a
+ * notes page, not its slide number.
+ */
+function drawingText(xml: string, budget: Budget, onlyBody = false): { title: string; text: string } {
   const lines: string[] = [];
-  const shapes: { body: boolean; lines: string[] }[] = [];
+  const titles: string[] = [];
+  const shapes: Shape[] = [];
+  const tables: Table[] = [];
   let para: string | undefined;
   let inText = 0;
   let fallback = 0;
   const add = (s: string) => {
     if (para !== undefined && budget.take(s.length)) para += s;
   };
+  // A finished line goes to the innermost open table cell, else its shape,
+  // else the slide.
+  const emit = (line: string) => {
+    const table = tables[tables.length - 1];
+    if (table?.cell) table.cell.push(line);
+    else if (shapes.length) shapes[shapes.length - 1]!.lines.push(line);
+    else if (!onlyBody) lines.push(line);
+  };
   walkXml(xml, {
     open(name, attrs) {
       const n = local(name);
       if (n === "Fallback") fallback++;
       if (fallback) return;
-      if (n === "sp") shapes.push({ body: false, lines: [] });
-      else if (n === "ph" && shapes.length) shapes[shapes.length - 1]!.body = attr(attrs, "type") === "body";
-      else if (n === "p" && name.startsWith("a:")) para = "";
+      const table = tables[tables.length - 1];
+      if (n === "sp") shapes.push({ kind: "other", lines: [] });
+      else if (n === "ph" && shapes.length) {
+        const type = attr(attrs, "type");
+        shapes[shapes.length - 1]!.kind = type === "title" || type === "ctrTitle" ? "title" : type === "body" ? "body" : "other";
+      } else if (n === "p" && name.startsWith("a:")) para = "";
       else if (n === "t") inText++;
       else if (n === "br") add("\n");
+      else if (name === "a:tbl") tables.push({ rows: [] });
+      else if (name === "a:tr" && table) table.row = [];
+      else if (name === "a:tc" && table?.row) table.cell = [];
     },
     close(name) {
       const n = local(name);
@@ -542,24 +715,34 @@ function drawingText(xml: string, budget: Budget, onlyBody = false): string {
         return;
       }
       if (fallback) return;
+      const table = tables[tables.length - 1];
       if (n === "t") inText = Math.max(0, inText - 1);
       else if (n === "p" && name.startsWith("a:") && para !== undefined) {
         const line = para.trim();
         para = undefined;
-        if (!line) return;
-        const shape = shapes[shapes.length - 1];
-        if (shape) shape.lines.push(line);
-        else if (!onlyBody) lines.push(line);
+        if (line) emit(line);
+      } else if (name === "a:tc" && table?.row && table.cell) {
+        table.row.push(table.cell.join(" "));
+        table.cell = undefined;
+      } else if (name === "a:tr" && table?.row) {
+        table.rows.push(table.row);
+        table.row = undefined;
+      } else if (name === "a:tbl") {
+        const done = tables.pop();
+        // Blank lines around it, or Markdown reads it as part of a paragraph.
+        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : `\n${markdownTable(done.rows)}\n`);
       } else if (n === "sp") {
         const shape = shapes.pop();
-        if (shape && (!onlyBody || shape.body)) lines.push(...shape.lines);
+        if (!shape) return;
+        if (shape.kind === "title" && !onlyBody) titles.push(shape.lines.join(" "));
+        else if (!onlyBody || shape.kind === "body") lines.push(...shape.lines);
       }
     },
     text(s) {
       if (!fallback && inText) add(s);
     },
   });
-  return lines.join("\n");
+  return { title: titles.join(" ").trim(), text: lines.join("\n").trim() };
 }
 
 function presentationText(zip: Zip, presentationPart: string, budget: Budget): string {
@@ -574,12 +757,14 @@ function presentationText(zip: Zip, presentationPart: string, budget: Budget): s
     },
   });
   const blocks: string[] = [];
-  for (const [i, slide] of order.entries()) {
+  for (const [i, part] of order.entries()) {
     if (budget.spent) break;
-    const text = drawingText(zip.text(slide) ?? "", budget);
-    const notesPart = relatedPart(relationships(zip, slide), "notesSlide");
-    const notes = notesPart ? drawingText(zip.text(notesPart) ?? "", budget, true) : "";
-    if (text || notes) blocks.push(`## Slide ${i + 1}${text ? `\n\n${text}` : ""}${notes ? `\n\nNotes: ${notes}` : ""}`);
+    const slide = drawingText(zip.text(part) ?? "", budget);
+    const notesPart = relatedPart(relationships(zip, part), "notesSlide");
+    const notes = notesPart ? drawingText(zip.text(notesPart) ?? "", budget, true).text : "";
+    // The number stays in the heading: it is how a reader finds the slide again.
+    const heading = `## Slide ${i + 1}${slide.title ? `: ${slide.title}` : ""}`;
+    if (slide.title || slide.text || notes) blocks.push(`${heading}${slide.text ? `\n\n${slide.text}` : ""}${notes ? `\n\nNotes: ${notes}` : ""}`);
   }
   return blocks.join("\n\n");
 }
@@ -642,7 +827,7 @@ function openDocumentText(xml: string, budget: Budget): string {
       const table = tables[tables.length - 1];
       if (name === "text:p" || name === "text:h") {
         const p = paragraphs.pop();
-        if (p) emit(table?.cell ? p.text.trim() : (p.prefix + p.text).trim());
+        if (p?.text.trim()) emit(table?.cell ? p.text.trim() : p.prefix + p.text.trim());
       } else if ((name === "table:table-cell" || name === "table:covered-table-cell") && table?.row && table.cell) {
         const text = table.cell.join(" ");
         // The first copy was metered as it was read; the repeats are shown too.
@@ -670,7 +855,7 @@ function openDocumentText(xml: string, budget: Budget): string {
       if (!skip) add(paragraphs[paragraphs.length - 1], s.replace(/[ \t\r\n]+/g, " "));
     },
   });
-  return blocks.join("\n\n");
+  return joinBlocks(blocks);
 }
 
 // ── The rung ─────────────────────────────────────────────────────────────────
@@ -699,7 +884,10 @@ function packageText(bytes: Buffer, budget: Budget): string {
   const main = mainPart(zip);
   const xml = main ? zip.text(main) : undefined;
   if (!main || xml === undefined) throw new Refused("not an OOXML or OpenDocument file");
-  if (main.startsWith("word/")) return wordText(xml, budget);
+  if (main.startsWith("word/")) {
+    const stylesPart = relatedPart(relationships(zip, main), "styles");
+    return wordText(xml, budget, wordStyles(stylesPart ? zip.text(stylesPart) : undefined));
+  }
   if (main.startsWith("xl/")) return spreadsheetText(zip, main, budget);
   if (main.startsWith("ppt/")) return presentationText(zip, main, budget);
   throw new Refused("not an OOXML or OpenDocument file");

@@ -32,9 +32,9 @@ describe("officeToText on real files", () => {
 
   it("reads a .pptx: slides in order, with their speaker notes", () => {
     const text = officeToText(fixture("deck.pptx"))!;
-    expect(text).toMatch(/^## Slide 1\n\nRoadmap 2027\nShip the offline reader/);
+    expect(text).toMatch(/^## Slide 1: Roadmap 2027\n\nShip the offline reader\nCut cold-start latency/);
     expect(text).toContain("Notes: Speaker notes: mention the budget.");
-    expect(text.indexOf("## Slide 2\n\nRisks")).toBeGreaterThan(text.indexOf("Notes:"));
+    expect(text.indexOf("## Slide 2: Risks\n\nZip bombs")).toBeGreaterThan(text.indexOf("Notes:"));
   });
 
   it("reads an .odt: headings, tabs, tables and entities", () => {
@@ -91,6 +91,73 @@ describe("the Word reader", () => {
       para("Titulo", '<w:pStyle w:val="Title"/>');
     expect(officeToText(docx(body))).toBe("## Einleitung\n\n- Punkt\n\n# Titulo");
   });
+
+  // A style id is whatever the author or a localised Word called it; the
+  // style's own definition says what it is — Word stores the names of its
+  // built-in styles in English whatever the interface language.
+  it("reads a heading from the style's definition, inheriting through basedOn", () => {
+    const styles =
+      '<w:styles xmlns:w="w"><w:style w:type="paragraph" w:styleId="Kapitel"><w:name w:val="heading 2"/></w:style>' +
+      '<w:style w:type="paragraph" w:styleId="MeinKapitel"><w:name w:val="Mein Kapitel"/><w:basedOn w:val="Kapitel"/></w:style>' +
+      '<w:style w:type="paragraph" w:styleId="Gliederung"><w:name w:val="Gliederung"/><w:pPr><w:outlineLvl w:val="2"/></w:pPr></w:style>' +
+      '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Body copy"/></w:style></w:styles>';
+    const body =
+      para("Zwei", '<w:pStyle w:val="Kapitel"/>') +
+      para("Geerbt", '<w:pStyle w:val="MeinKapitel"/>') +
+      para("Drei", '<w:pStyle w:val="Gliederung"/>') +
+      para("Not a heading, whatever its id", '<w:pStyle w:val="Heading1"/>');
+    const file = docx(body, {
+      "word/_rels/document.xml.rels":
+        '<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
+      "word/styles.xml": styles,
+    });
+    expect(officeToText(file)).toBe("## Zwei\n\n## Geerbt\n\n### Drei\n\nNot a heading, whatever its id");
+  });
+
+  // python-docx and many templates number a list through its style, with no
+  // numPr on the paragraph.
+  it("reads a list item from a list style", () => {
+    const body =
+      para("Bullet", '<w:pStyle w:val="ListBullet"/>') + para("Numbered", '<w:pStyle w:val="ListNumber2"/>') + para(" ", '<w:pStyle w:val="ListBullet"/>');
+    expect(officeToText(docx(body))).toBe("- Bullet\n- Numbered");
+  });
+});
+
+describe("the spreadsheet reader", () => {
+  const rel = (id: string, type: string, target: string) => `<Relationship Id="${id}" Type="x/${type}" Target="${target}"/>`;
+  const workbook = (sheet: string, styles: string, workbookPr = "") =>
+    zip({
+      "xl/workbook.xml": `<workbook xmlns:r="r">${workbookPr}<sheets><sheet name="S" r:id="rId1"/></sheets></workbook>`,
+      "xl/_rels/workbook.xml.rels": `<Relationships>${rel("rId1", "worksheet", "sheet1.xml")}${rel("rId2", "styles", "styles.xml")}</Relationships>`,
+      "xl/styles.xml": styles,
+      "xl/sheet1.xml": `<worksheet><sheetData>${sheet}</sheetData></worksheet>`,
+    });
+  // Cell style 1 is a built-in date, 2 a custom date-time, 3 a built-in time,
+  // 4 a custom number whose quoted "d" is a literal, not a day.
+  const STYLES =
+    '<styleSheet><numFmts count="2"><numFmt numFmtId="164" formatCode="dd/mm/yyyy\\ hh:mm"/><numFmt numFmtId="165" formatCode="0.0&quot; d&quot;;[Red]-0.0"/></numFmts>' +
+    '<cellStyleXfs count="1"><xf numFmtId="14"/></cellStyleXfs>' +
+    '<cellXfs count="5"><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="164"/><xf numFmtId="20"/><xf numFmtId="165"/></cellXfs></styleSheet>';
+  const row =
+    '<row r="1"><c r="A1" s="1"><v>46082</v></c><c r="B1" s="2"><v>46082.5</v></c><c r="C1" s="3"><v>0.75</v></c><c r="D1" s="4"><v>3</v></c><c r="E1"><v>46082</v></c></row>';
+
+  // A date cell holds a serial day number; its style says it is a date. Cited
+  // as 46082, a meeting date was a number nobody could check.
+  it("shows a date-formatted serial as the date it is", () => {
+    expect(officeToText(workbook(row, STYLES))).toBe("## S\n\n| 2026-03-01 | 2026-03-01 12:00 | 18:00 | 3 | 46082 |\n| --- | --- | --- | --- | --- |");
+  });
+
+  it("counts days from 1904 when the workbook says so", () => {
+    const text = officeToText(workbook('<row r="1"><c r="A1" s="1"><v>0</v></c></row>', STYLES, '<workbookPr date1904="1"/>'));
+    expect(text).toContain("| 1904-01-01 |");
+  });
+
+  it("reads a format code with runaway brackets and quotes in linear time", () => {
+    const hostile = `<styleSheet><numFmts count="1"><numFmt numFmtId="164" formatCode="${"[".repeat(200_000)}${"&quot;".repeat(200_000)}"/></numFmts><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="164"/></cellXfs></styleSheet>`;
+    const t0 = performance.now();
+    expect(officeToText(workbook('<row r="1"><c r="A1" s="1"><v>5</v></c></row>', hostile))).toContain("| 5 |");
+    expect(performance.now() - t0).toBeLessThan(2000);
+  });
 });
 
 describe("the presentation reader", () => {
@@ -108,6 +175,20 @@ describe("the presentation reader", () => {
       "ppt/slides/slide2.xml": slide("Shown first"),
     });
     expect(officeToText(pptx)).toBe("## Slide 1\n\nShown first\n\n## Slide 2\n\nShown second");
+  });
+
+  it("heads a slide with its title, and reads a table as a table", () => {
+    const P = 'xmlns:p="p" xmlns:a="a" xmlns:r="r"';
+    const shape = (ph: string, text: string) =>
+      `<p:sp><p:nvSpPr><p:nvPr>${ph}</p:nvPr></p:nvSpPr><p:txBody><a:p><a:r><a:t>${text}</a:t></a:r></a:p></p:txBody></p:sp>`;
+    const tc = (text: string) => `<a:tc><a:txBody><a:p><a:r><a:t>${text}</a:t></a:r></a:p></a:txBody></a:tc>`;
+    const table = `<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr>${tc("K")}${tc("V")}</a:tr><a:tr>${tc("x")}${tc("42")}</a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>`;
+    const pptx = zip({
+      "ppt/presentation.xml": `<p:presentation ${P}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>`,
+      "ppt/_rels/presentation.xml.rels": '<Relationships><Relationship Id="rId1" Type="x/slide" Target="slides/slide1.xml"/></Relationships>',
+      "ppt/slides/slide1.xml": `<p:sld ${P}><p:cSld><p:spTree>${shape('<p:ph idx="1"/>', "Body text")}${shape('<p:ph type="title"/>', "Numbers")}${table}</p:spTree></p:cSld></p:sld>`,
+    });
+    expect(officeToText(pptx)).toBe("## Slide 1: Numbers\n\nBody text\n\n| K | V |\n| --- | --- |\n| x | 42 |");
   });
 });
 
