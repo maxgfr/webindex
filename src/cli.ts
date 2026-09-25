@@ -252,7 +252,11 @@ COMMANDS
              installed.
 
 ENVIRONMENT
+  WEBINDEX_SEARXNG       SearXNG base URL, or "off"   (default http://localhost:8888)
+  WEBINDEX_ENGINES       keyless engines to try: a comma list, or "off"  (default all)
   WEBINDEX_FIRECRAWL     Firecrawl base URL, or "off"  (default http://localhost:3002)
+  WEBINDEX_FIRECRAWL_KEY a bearer key, only for a hosted Firecrawl
+  WEBINDEX_PAGE_DELAY_MS pause between two result pages of one engine (default 350)
   WEBINDEX_PDF_ENGINE    the PDF rungs to run, in order: a comma list of
                          pdf-inspector|anydoc|firecrawl|pdftotext|native|ocr, or "none"
   WEBINDEX_DOC_ENGINE    the office rungs to run, in order: a comma list of
@@ -262,7 +266,8 @@ ENVIRONMENT
   WEBINDEX_NPX_TIMEOUT_MS  how long one npx rung may run, first download included
                          (default 90000)
   WEBINDEX_OCR_MAX       documents this process may OCR (default 3)
-  WEBINDEX_ENGINES       keyless engines to try: a comma list, or "off"  (default all)
+  WEBINDEX_OCR_LANG, WEBINDEX_OCR_TIMEOUT_MS
+                         tesseract's language (default eng), one document's budget (300000)
   WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
   WEBINDEX_QDRANT        vector store base URL, or "off"      (default http://localhost:6333)
   WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
@@ -271,22 +276,35 @@ ENVIRONMENT
                          document ("none" for none); default from the model — nomic's
                          "search_query: " / "search_document: ", mxbai's, e5's
   WEBINDEX_EMBED_MAX_CHARS  characters of each document hybrid embeds (default 8000, 0 = all)
+  WEBINDEX_EMBED_BATCH, WEBINDEX_EMBED_CONCURRENCY
+                         texts per embedding request (16), requests in flight (4)
   WEBINDEX_QDRANT_UPSERT_BATCH  points per upsert request (default 256)
+  WEBINDEX_RRF_K         the fusion constant rank and hybrid use (default 60)
   WEBINDEX_TIMEOUT_MS    how long a request may stay silent before it is abandoned,
                          not retried (default 20000; --timeout overrides it per call)
-  WEBINDEX_CACHE_DIR     where the fetch cache lives (default <tmp>/webindex-<uid>/cache)
+  WEBINDEX_MAX_ATTEMPTS, WEBINDEX_RETRY_MS
+                         attempts per request (default 2, at most 5), back-off before a retry (600)
+  WEBINDEX_CACHE_DIR     where the fetch cache lives, and the stack in compose/
+                         (default <tmp>/webindex-<uid>/cache)
   WEBINDEX_CACHE_TTL_HOURS  how long a cached page stays fresh (default 24; fractions allowed)
+  WEBINDEX_NO_WRITE      write nothing: no cache entry, no eviction
+  WEBINDEX_NO_ROBOTS     robots and crawl do not consult robots.txt — only on a site you own
+  WEBINDEX_ROBOTS_UA     the token robots.txt groups are matched against (default webindex)
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
   WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
   WEBINDEX_MAX_CRAWL_DELAY_MS the longest robots.txt Crawl-delay a crawl waits out, in ms
                               (default 60000); a site asking for more is not crawled
   WEBINDEX_UA            override the browser User-Agent
   GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, GITEA_TOKEN
-                         optional forge tokens; each goes only to github.com, gitlab.com,
-                         or a host listed in WEBINDEX_FORGE_HOSTS
+                         optional forge tokens (WEBINDEX_GITHUB_TOKEN and its kin win over
+                         them); each goes only to github.com, gitlab.com, or a host listed
+                         in WEBINDEX_FORGE_HOSTS
   WEBINDEX_FORGE_HOSTS   self-hosted forges, e.g. "salsa.debian.org=gitlab,git.corp=github":
                          each is queried as that forge and receives that forge's token
+  WEBINDEX_NO_GH         never reach for the gh CLI on github.com — plain HTTP only
+  WEBINDEX_DOCKER_PULL_TIMEOUT_MS  the image-pull budget of up (default 1200000)
 
+The README lists every variable, the library-only ones included.
 Every optional helper degrades to a note. Nothing here needs an API key.`;
 
 // The flag surface, declared rather than discovered.

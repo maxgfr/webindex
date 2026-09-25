@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BOOL_FLAGS, HELP, main, VALUE_FLAGS, webindexAdapter } from "../src/cli.js";
+import { BOOL_FLAGS, COMMANDS, HELP, main, VALUE_FLAGS, webindexAdapter } from "../src/cli.js";
 import { documentedFlags, missingFromHelp } from "../src/cli-kit.js";
 import { createServer, ToolError } from "../src/mcp/server.js";
 import { LATEST_PROTOCOL } from "../src/mcp/protocol.js";
@@ -1523,6 +1523,36 @@ describe("the docs↔CLI drift gate", () => {
   it("documents no flag it would reject", () => {
     const universe = new Set([...VALUE_FLAGS, ...BOOL_FLAGS, "help", "version"]);
     expect(documentedFlags(HELP).filter((f) => !universe.has(f))).toEqual([]);
+  });
+
+  it("counts its own surfaces correctly in the README, and tables every MCP tool", async () => {
+    // The README said 308 library exports while the bundle had 320, and its
+    // MCP table described four of sixteen tools.
+    const readme = readFileSync(join(import.meta.dirname, "..", "README.md"), "utf8");
+    const lib = await import("../src/index.js");
+    expect(readme).toContain(`**${Object.keys(lib).length} library exports**`);
+    expect(readme).toContain(`**${COMMANDS.length} CLI commands**`);
+    const tools = webindexAdapter().listTools(LATEST_PROTOCOL);
+    expect(readme).toContain(`**${tools.length} MCP\ntools**`);
+    for (const t of tools) expect(readme, t.name).toMatch(new RegExp(`^\\| \`${t.name}\` \\|`, "m"));
+    for (const cmd of COMMANDS) expect(readme, cmd).toMatch(new RegExp(`^\\| \`webindex (?:[a-z|\\\\]*\\|)?${cmd}\\b`, "m"));
+  });
+
+  it("documents every environment variable the engine reads, in the README", () => {
+    // HELP carries the ones a command-line user reaches for; the README has to
+    // carry all of them. WEBINDEX_SEARXNG — the first rung of every search —
+    // was named in neither.
+    const srcDir = join(import.meta.dirname, "..", "src");
+    const walk = (d: string): string[] =>
+      readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : e.name.endsWith(".ts") ? [join(d, e.name)] : []));
+    const read = new Set<string>();
+    for (const file of walk(srcDir)) {
+      for (const m of readFileSync(file, "utf8").matchAll(/\b(?:env|envInt|envFlag|envName|enginesFromEnv|fromEnv)\(\s*"([A-Z][A-Z0-9_]*)"/g)) read.add(m[1]!);
+    }
+    expect(read.size).toBeGreaterThan(30); // a negative control for the scan itself
+    const readme = readFileSync(join(srcDir, "..", "README.md"), "utf8");
+    expect([...read].filter((v) => !readme.includes(`WEBINDEX_${v}`)).sort()).toEqual([]);
+    for (const v of ["SEARXNG", "NO_ROBOTS", "FIRECRAWL_KEY", "DOCKER_PULL_TIMEOUT_MS", "OCR_LANG"]) expect(HELP, v).toContain(`WEBINDEX_${v}`);
   });
 });
 
