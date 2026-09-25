@@ -41,13 +41,28 @@ webindex skill bundle                   # `skills add` would install a working s
 webindex skill copy                     # embed the built engine in the package
 webindex skill doctor                   # pins, lag, outstanding forks
 webindex skill init <name>              # scaffold a new skill repository
+webindex skill repin                    # move every pin to the newest stable release
+webindex skill finish                   # wait for CI and publication of the repin commit
+webindex skill recall [--ref <base>]    # regenerated artifacts kept every identity
 ```
+
+`vendor --ref` fetches the files by the commit the tag names, not by the tag,
+so a tag moved upstream cannot change what lands. It resolves that commit with
+the GitHub CLI when `gh` is installed, and through GitHub's REST API otherwise
+(keyless for a public repository; `GITHUB_TOKEN` raises the quota). `repin` and
+`finish` drive `gh` itself and need it. `skill init` pins `minRef` to the
+engine release doing the scaffolding.
 
 Your `package.json` becomes one line:
 
 ```json
 "verify": "webindex skill check && webindex skill bundle && webindex skill vendor --check"
 ```
+
+The CLI is the `@maxgfr/webindex` development dependency, installed from a
+GitHub release archive and kept current by `skill repin` — run it through
+`pnpm exec`, never `npx webindex`: that name on npm belongs to an unrelated
+package, which npx would download and run.
 
 ## Two ways a vendored engine goes wrong
 

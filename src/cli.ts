@@ -24,7 +24,7 @@ import { enabledExtractors, extractPdf, ocrBudgetLeft, ocrTools, PDF_EXTRACTORS 
 import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./pdf/exec.js";
 import { npxCacheState } from "./pdf/npx.js";
 import { have } from "./exec.js";
-import { extractMainHtml, htmlToText, httpGet, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
+import { extractMainHtml, htmlToText, httpGet, httpJson, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
 import { firecrawlBase, probeFirecrawl } from "./firecrawl.js";
 import { embedModel, ensureComposeMaterialized, STACK_SERVICES, stackControl } from "./stack.js";
 import { ollamaBase, probeOllama } from "./embed.js";
@@ -50,7 +50,7 @@ import { fetchRobots, isAllowed } from "./robots.js";
 import { discoverFeeds, fetchFeed, fetchSitemap, parseFeed } from "./feed.js";
 import { pageMetadata } from "./structured.js";
 import { type RepoRef, resolveRepo } from "./repo.js";
-import { type ForgeKind, forgeRef, listReleases, listTags, repoFactsResult, searchIssues } from "./forge.js";
+import { type ForgeKind, forgeAuthHeaders, forgeRef, listReleases, listTags, repoFactsResult, searchIssues } from "./forge.js";
 import { type RegistryKind, resolvePackageResult } from "./registry.js";
 import { bm25MatchedTerms, bm25Score, bm25Tokenize, buildBm25Index, dedupeNearDuplicates, diversify } from "./rank.js";
 import {
@@ -481,6 +481,35 @@ async function extractLocal(
   const text = looksHtml ? htmlToText(fullPage ? raw : extractMainHtml(raw), { fullPage }) : raw;
   const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text) : { text, dropped: 0 };
   return { text: consent.text, extractor: looksHtml ? "native" : "plain", consentDropped: consent.dropped };
+}
+
+/**
+ * The commit a release tag names, for `skill vendor --ref`: the files are then
+ * fetched by that immutable commit rather than by a tag that could move.
+ *
+ * Through the GitHub CLI when it is installed — the repin workflow's path, with
+ * its authentication — else GitHub's REST API, keyless for a public repository.
+ * It used to be gh or nothing, and a machine without gh got "spawnSync gh
+ * ENOENT" for an answer.
+ */
+async function tagCommit(repo: string, tag: string): Promise<string> {
+  let viaGh: string | undefined;
+  if (have("gh")) {
+    try {
+      return releaseCommit(repo, tag);
+    } catch (e) {
+      viaGh = (e as Error).message.trim().split("\n")[0];
+    }
+  }
+  const r = await httpJson("GET", `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(tag)}`, undefined, {
+    accept: "application/vnd.github+json",
+    headers: forgeAuthHeaders("github", "api.github.com"),
+  });
+  const sha = r.ok ? (r.data as { sha?: unknown } | undefined)?.sha : undefined;
+  if (typeof sha === "string" && /^[a-f0-9]{40}$/.test(sha)) return sha;
+  throw new ToolError(
+    `could not resolve ${repo}@${tag} to a commit — GitHub answered ${r.status ? `HTTP ${r.status}` : (r.error ?? "nothing")}${viaGh ? `, and gh said: ${viaGh}` : ""}`,
+  );
 }
 
 /** One candidate as the CLI and the MCP tool accept it. */
@@ -1872,6 +1901,9 @@ async function dispatch(argv: string[]): Promise<void> {
       }
       const ref = argValue(args, "ref");
       if (!ref) usage("usage: webindex skill vendor [--engine <name>] --ref <tag>   |   webindex skill vendor --check");
+      // vendorEngine refuses this too, but only after the tag was resolved —
+      // which asked GitHub about a ref that could never be pinned.
+      if (!/^v\d+\.\d+\.\d+$/.test(ref)) usage(`--ref expects a stable release tag like v1.2.3, got "${ref}"`);
       const only = argValue(args, "engine");
       const names = only ? [only] : Object.keys(config.engines);
       const fetchFile = async (url: string) => {
@@ -1880,7 +1912,7 @@ async function dispatch(argv: string[]): Promise<void> {
       };
       for (const n of names) {
         const pin = config.engines[n];
-        const r = await vendorEngine(root, config, n, ref, fetchFile, pin ? releaseCommit(pin.repo, ref) : undefined);
+        const r = await vendorEngine(root, config, n, ref, fetchFile, pin ? await tagCommit(pin.repo, ref) : undefined);
         for (const w of r.written) process.stdout.write(`  wrote ${relative(root, w)}\n`);
         if (r.errors.length) {
           for (const e of r.errors) process.stderr.write(`webindex: ${e}\n`);

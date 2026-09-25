@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resetNoWrite, setNoWrite, takeArtifacts } from "../src/no-write.js";
+import { ENGINE_VERSION } from "../src/version.js";
 import {
   auditEngineUsage,
   auditSkillBundle,
@@ -353,6 +354,24 @@ describe("scaffoldSkill", () => {
     const { config, errors } = readSkillConfig(root);
     expect(errors).toEqual([]);
     expect(config?.name).toBe("newskill");
+  });
+
+  it("never has CI fetch the CLI by its npm name", () => {
+    // `webindex` on npm is somebody else's package, with a `webindex` bin of
+    // its own: `npx webindex skill check` in a repo that had not installed
+    // this one downloaded and ran a stranger's code in CI.
+    scaffoldSkill(root, "newskill");
+    const ci = readFileSync(join(root, ".github/workflows/ci.yml"), "utf8");
+    expect(ci).not.toMatch(/run: npx /);
+    expect(ci).toContain("pnpm exec webindex skill check");
+    expect(ci).toContain("@maxgfr/webindex");
+  });
+
+  it("pins a new skill to the engine release scaffolding it, not an old one", () => {
+    // A skill started today is written against today's engine; v1.15.0 was
+    // five releases stale and would let the staleness gate pass a pin that old.
+    scaffoldSkill(root, "newskill");
+    expect(JSON.parse(readFileSync(join(root, "skill.json"), "utf8")).engines.webindex.minRef).toBe(`v${ENGINE_VERSION}`);
   });
 
   it("refuses a name that could not be a package or an env prefix", () => {

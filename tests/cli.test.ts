@@ -1658,6 +1658,60 @@ describe("webindex skill", () => {
     expect(stderr()).toMatch(/--ref <tag>/);
   });
 
+  it("refuses a ref that is no release tag before asking GitHub anything", async () => {
+    skillJson();
+    const spy = installFetchMock(() => ({ status: 500, body: "" }));
+    try {
+      expect(await run(["skill", "vendor", "--ref", "1.20", "--root", repo])).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stderr()).toMatch(/--ref expects a stable release tag like v1\.2\.3, got "1\.20"/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("vendors by the tag's commit without the GitHub CLI, through the REST API", async () => {
+    // Resolving the tag went through `gh api` only, and a machine without gh
+    // got "spawnSync gh ENOENT" and nothing else.
+    skillJson();
+    const sha = "a".repeat(40);
+    const bundle = 'const ENGINE_VERSION = "1.0.0";\n';
+    installFetchMock((url) => {
+      if (url === "https://api.github.com/repos/maxgfr/webindex/commits/v1.0.0") return { body: JSON.stringify({ sha }), contentType: "application/json" };
+      if (url === `https://raw.githubusercontent.com/maxgfr/webindex/${sha}/scripts/engine.mjs`) return { body: bundle };
+      if (url === `https://raw.githubusercontent.com/maxgfr/webindex/${sha}/scripts/engine.d.mts`) return { body: "export {};\n" };
+      return undefined;
+    });
+    vi.stubEnv("PATH", join(dir, "no-gh-here"));
+    resetHaveCache();
+    try {
+      expect(await run(["skill", "vendor", "--ref", "v1.0.0", "--root", repo])).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+      resetHaveCache();
+    }
+    expect(stdout()).toMatch(/pinned webindex v1\.0\.0 \(1\.0\.0\)/);
+    expect(JSON.parse(readFileSync(join(repo, "src", "vendor", "webindex.meta.json"), "utf8"))).toMatchObject({ tag: "v1.0.0", commit: sha });
+    expect(readFileSync(join(repo, "src", "vendor", "webindex-engine.mjs"), "utf8")).toBe(bundle);
+  });
+
+  it("says why a tag could not be resolved, rather than failing on a missing binary", async () => {
+    skillJson();
+    installFetchMock(() => ({ status: 404, body: '{"message":"No commit found for SHA: v1.0.0"}', contentType: "application/json" }));
+    vi.stubEnv("PATH", join(dir, "no-gh-here"));
+    resetHaveCache();
+    try {
+      expect(await run(["skill", "vendor", "--ref", "v1.0.0", "--root", repo])).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+      resetHaveCache();
+    }
+    expect(stderr()).toMatch(/could not resolve maxgfr\/webindex@v1\.0\.0 to a commit/);
+    expect(stderr()).not.toMatch(/ENOENT/);
+  });
+
   // A well-shaped package now includes EXPORTING the flag surface: without it
   // the docs↔CLI half of the gate cannot run, and a gate that cannot check must
   // not certify. `SURFACE` is the smallest bundle that satisfies it.
