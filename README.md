@@ -178,6 +178,9 @@ keys are already set in the environment, so an offline machine falls through in
 seconds rather than ~70 s per rung; once the registry proved unreachable the other
 npx rung is not asked, and the note says `WEBINDEX_NO_NPX=1` skips them.
 `WEBINDEX_NPX_TIMEOUT_MS` bounds one npx run (default 90000, first download included).
+Each package's executable is located once per process and then run directly, so
+npm's start-up (~0.6 s) is paid once rather than per document; on Windows the rungs
+keep running through `npx`.
 
 The office ladder ends in a built-in reader (`officeToText`) for OOXML (`.docx`,
 `.xlsx`, `.pptx`) and OpenDocument (`.odt`, `.ods`, `.odp`): no subprocess, no

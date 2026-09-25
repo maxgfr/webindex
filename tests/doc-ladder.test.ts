@@ -143,16 +143,18 @@ describe("extractDocument", () => {
   // The document travels on stdin and the format comes from the table in
   // formats.ts — nothing derived from a URL may reach argv.
   it("passes the document on stdin, and names a format only when the table does", async () => {
+    // The first call asks npx where the executable is; this answer is no path,
+    // so the conversion runs through npx itself.
     runMock.mockResolvedValue({ ok: true, stdout: "converted" });
+    const conversion = () => runMock.mock.calls.find(([, , input]) => input === BYTES)!;
     await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
-    const [cmd, args, input] = runMock.mock.calls[0]!;
+    const [cmd, args] = conversion();
     expect(cmd).toBe("npx");
     expect(args).toEqual(["-y", "--prefer-offline", ANYDOC_SPEC, "-"]);
-    expect(input).toBe(BYTES);
 
     runMock.mockClear();
     await extractDocument(BYTES, { format: "csv", textFallback: true }, { engines: ["anydoc"] });
-    expect(runMock.mock.calls[0]![1]).toEqual(["-y", "--prefer-offline", ANYDOC_SPEC, "-", "--format", "csv"]);
+    expect(conversion()[1]).toEqual(["-y", "--prefer-offline", ANYDOC_SPEC, "-", "--format", "csv"]);
   });
 
   it("falls through a failed rung to the next one", async () => {
@@ -219,6 +221,63 @@ describe("a document the converter rejects", () => {
     const r = await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
     expect(runMock).not.toHaveBeenCalled();
     expect(r.reason).toMatch(/anydoc could not be installed/);
+  });
+});
+
+// `npx <spec>` starts npm and re-resolves the package for every document: about
+// 0.6 s before the tool does anything, twenty times what it then spends on a
+// small file. The executable is found once per process and run directly.
+describe.skipIf(process.platform === "win32")("running an installed converter", () => {
+  const BIN = "/home/u/.npm/_npx/9874503ee8e3efdc/node_modules/.bin/anydoc";
+  const isProbe = (cmd: string, args: string[]) => cmd === "npx" && args.includes("-c");
+  const probes = () => runMock.mock.calls.filter(([cmd, args]) => isProbe(cmd, args));
+  const CONVERTED = { ok: true, stdout: "# Quarterly report\n\nReal prose from the converter.\n" };
+
+  it("finds the executable once, then runs it directly", async () => {
+    runMock.mockImplementation(async (cmd, args) => (isProbe(cmd, args) ? { ok: true, stdout: `${BIN}\n` } : CONVERTED));
+    expect((await extractDocument(BYTES, BINARY, { engines: ["anydoc"] })).via).toBe("anydoc");
+    await extractDocument(BYTES, { format: "csv", textFallback: true }, { engines: ["anydoc"] });
+    expect(probes()).toHaveLength(1);
+    expect(probes()[0]![1]).toEqual(["-y", "--prefer-offline", "--package", ANYDOC_SPEC, "-c", "command -v anydoc"]);
+    const runs = runMock.mock.calls.filter(([cmd]) => cmd === BIN);
+    expect(runs.map(([, args]) => args)).toEqual([["-"], ["-", "--format", "csv"]]);
+    expect(runs[0]![2]).toBe(BYTES);
+  });
+
+  it("shares one probe between concurrent first documents", async () => {
+    runMock.mockImplementation(async (cmd, args) => (isProbe(cmd, args) ? { ok: true, stdout: BIN } : CONVERTED));
+    await Promise.all([1, 2, 3].map(() => extractDocument(BYTES, BINARY, { engines: ["anydoc"] })));
+    expect(probes()).toHaveLength(1);
+    expect(runMock.mock.calls.filter(([cmd]) => cmd === BIN)).toHaveLength(3);
+  });
+
+  // Installed and found: a failure is this document's, even a timeout on the
+  // very first one — nothing is downloading any more.
+  it("never sets an installed converter aside over one document", async () => {
+    runMock.mockImplementation(async (cmd, args, input) =>
+      isProbe(cmd, args) ? { ok: true, stdout: BIN } : input.equals(BYTES) ? CONVERTED : { ok: false, stdout: "", error: "timed out after 90s" },
+    );
+    expect((await extractDocument(Buffer.from("PK slow"), BINARY, { engines: ["anydoc"] })).text).toBe("");
+    expect((await extractDocument(BYTES, BINARY, { engines: ["anydoc"] })).via).toBe("anydoc");
+  });
+
+  it("goes back through npx when the executable has gone from npm's cache", async () => {
+    runMock.mockImplementation(async (cmd, args) => {
+      if (isProbe(cmd, args)) return { ok: true, stdout: BIN };
+      return cmd === BIN ? { ok: false, stdout: "", error: "not installed" } : CONVERTED;
+    });
+    expect((await extractDocument(BYTES, BINARY, { engines: ["anydoc"] })).via).toBe("anydoc");
+    expect(runMock.mock.calls.at(-1)![1]).toEqual(["-y", "--prefer-offline", ANYDOC_SPEC, "-"]);
+    // …and the next document looks for it again rather than trusting a stale path.
+    await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
+    expect(probes()).toHaveLength(2);
+  });
+
+  it("does not run npx twice for a document when the probe found npm offline", async () => {
+    runMock.mockResolvedValue({ ok: false, stdout: "", error: "exit 1", stderr: "npm error code ENOTFOUND\n" });
+    const r = await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
+    expect(runMock).toHaveBeenCalledTimes(1);
+    expect(r.reason).toMatch(/anydoc could not be installed \(npm error ENOTFOUND — offline\?\)/);
   });
 });
 

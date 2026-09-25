@@ -4,6 +4,7 @@ import { describe, it, expect } from "vitest";
 import { docFormatForUrl, docFormatForContentType, DOC_EXTENSIONS, sniffDocument } from "../src/doc.js";
 import { looksLikePdfUrl } from "../src/fetch.js";
 import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "../src/pdf/exec.js";
+import { npxBinName } from "../src/pdf/npx.js";
 
 // The npx rungs run a PINNED range, not `latest`. Floating would let a breaking
 // release change what every dossier is grounded on, and a rung that starts
@@ -14,6 +15,13 @@ describe("the npm specs the rungs run", () => {
   it("pins both to a range instead of floating on latest", () => {
     expect(PDF_INSPECTOR_SPEC).toBe("@firecrawl/pdf-inspector@1");
     expect(ANYDOC_SPEC).toBe("@firecrawl/anydoc@0.1");
+  });
+
+  // The executable each package installs (checked against the real packages'
+  // node_modules/.bin), which the ladders find once and then run directly.
+  it("names the executable each spec installs", () => {
+    expect(npxBinName(PDF_INSPECTOR_SPEC)).toBe("pdf-inspector");
+    expect(npxBinName(ANYDOC_SPEC)).toBe("anydoc");
   });
 });
 

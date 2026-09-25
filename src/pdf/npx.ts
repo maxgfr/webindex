@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import { envInt, envName } from "../brand.js";
 import { runWithInput, type RunResult } from "./exec.js";
 
@@ -66,6 +67,7 @@ let registryDown: string | undefined;
 export function resetNpxState(): void {
   proven.clear();
   registryDown = undefined;
+  installed.clear();
 }
 
 export interface NpxRun extends RunResult {
@@ -92,8 +94,48 @@ function unavailability(r: RunResult, spec: string): string | undefined {
   return undefined;
 }
 
+/** The executable a pinned spec installs: its name without scope or range (`@firecrawl/anydoc@0.1` → `anydoc`). */
+export function npxBinName(spec: string): string {
+  return spec.replace(/^@[^/]+\//, "").replace(/@.*$/, "");
+}
+
+// Where each package's executable lives once npx has installed it, found once
+// per process. `npx <spec>` starts npm and re-resolves the range against the
+// cached packument before the tool runs — ~0.6 s per document, twenty times
+// what pdf-inspector then spends on a small PDF. Running the executable
+// directly skips all of it, and concurrent first documents share one probe
+// (so one install). The probe asks npm's script shell for `command -v <bin>`,
+// which is POSIX: on Windows, and whenever the answer is not a path, the rungs
+// keep running through npx as they always did.
+interface Installed {
+  path?: string;
+  /** The probe showed the package cannot be installed here. */
+  unavailable?: NpxRun;
+}
+const installed = new Map<string, Promise<Installed>>();
+
+function findInstalled(spec: string): Promise<Installed> {
+  let hit = installed.get(spec);
+  if (!hit) {
+    hit = (async (): Promise<Installed> => {
+      if (process.platform === "win32") return {};
+      const probe = ["-y", "--prefer-offline", "--package", spec, "-c", `command -v ${npxBinName(spec)}`];
+      const r = await runWithInput("npx", probe, Buffer.alloc(0), npxTimeoutMs(), { env: npxEnv() });
+      if (!r.ok) {
+        const why = unavailability(r, spec);
+        return why ? { unavailable: { ...r, unavailable: why } } : {};
+      }
+      const path = r.stdout.trim().split("\n").pop()?.trim();
+      return path && isAbsolute(path) ? { path } : {};
+    })();
+    installed.set(spec, hit);
+  }
+  return hit;
+}
+
 /**
- * Run `npx -y --prefer-offline <spec> <args…>` with `input` on stdin.
+ * Run `<spec>`'s executable with `args…` and `input` on stdin: directly once
+ * npx has said where it is installed, else as `npx -y --prefer-offline <spec>`.
  *
  * `-y` stops npx asking to install; `--prefer-offline` keeps the steady state
  * at one local cache hit instead of a registry round-trip. No user input
@@ -102,9 +144,20 @@ function unavailability(r: RunResult, spec: string): string | undefined {
 export async function runNpx(spec: string, args: string[], input: Buffer): Promise<NpxRun> {
   // pdf-inspector and anydoc come from the same registry. Once it is known to
   // be unreachable, a package this process never ran cannot be installed either.
-  if (registryDown && !proven.has(spec)) {
+  if (registryDown && !proven.has(spec) && !installed.has(spec)) {
     const why = `could not be installed (npm error ${registryDown} — offline?)`;
     return { ok: false, stdout: "", error: why, unavailable: why };
+  }
+  const found = await findInstalled(spec);
+  if (found.unavailable) return found.unavailable;
+  if (found.path) {
+    const run = await runWithInput(found.path, args, input, npxTimeoutMs());
+    if (run.ok) proven.add(spec);
+    // Installed and found, so whatever went wrong — a timeout included — is
+    // this document's. Unless the executable is gone (npm's cache was
+    // cleaned): then this document goes through npx and the next looks again.
+    if (run.error !== "not installed") return run;
+    installed.delete(spec);
   }
   const r = await runWithInput("npx", ["-y", "--prefer-offline", spec, ...args], input, npxTimeoutMs(), { env: npxEnv() });
   if (r.ok) {
