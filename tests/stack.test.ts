@@ -393,6 +393,29 @@ describe("stackControl", () => {
         expect(stackControl("searxng", "status", deps).message).not.toMatch(/refusing/);
       });
     });
+
+    it("holds the default location's per-user directory to the same rule", () => {
+      // <tmp>/<brand>-<uid> is a name anyone can predict and create first, and
+      // whoever owns it can swap the whole cache directory inside it.
+      if (typeof process.getuid !== "function") return;
+      const tmp = mkdtempSync(join(tmpdir(), "wi-stack-tmp-"));
+      const saved = process.env.TMPDIR;
+      process.env.TMPDIR = tmp;
+      delete process.env[envName("CACHE_DIR")];
+      configure({ name: "webindex-tests", envPrefix: "WEBINDEX_TEST", cli: "webindex-tests" });
+      try {
+        const perUser = join(tmp, `webindex-tests-${process.getuid()}`);
+        mkdirSync(perUser);
+        chmodSync(perUser, 0o777);
+        expect(stackControl("searxng", "status", fake().deps).message).toMatch(/refusing to run docker.*writable by anyone/);
+        chmodSync(perUser, 0o700);
+        expect(stackControl("searxng", "status", fake().deps).code).toBe(0);
+      } finally {
+        if (saved === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = saved;
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
   });
 
   it("names the consumer's command, not the engine's", () => {

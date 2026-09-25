@@ -358,17 +358,21 @@ function untrustedStack(): string | undefined {
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
   if (uid === undefined) return undefined;
   // Resolved, so "/x/cache/" and "./cache" end the walk up where they should
-  // rather than at / — which belongs to root.
+  // rather than at / — which belongs to root. A directory the caller chose is
+  // where it ends; the default one sits in `<tmp>/<brand>-<uid>`, a name anyone
+  // can predict and create first, and whoever owns that can swap the whole
+  // cache directory inside it — so the walk ends there instead.
   const root = resolve(cacheDir());
+  const top = (env("CACHE_DIR") ?? brand().cacheDir) ? root : dirname(root);
   const paths = new Set<string>();
   for (const a of assets) {
-    for (let p = resolve(a.path); p !== root && p !== dirname(p); p = dirname(p)) paths.add(p);
+    for (let p = resolve(a.path); p !== top && p !== dirname(p); p = dirname(p)) paths.add(p);
   }
-  for (const p of [root, ...paths]) {
+  for (const p of [top, ...paths]) {
     try {
-      // The root itself may be reached through a link of the caller's own
-      // choosing (`<PREFIX>_CACHE_DIR=~/.cache/x`); below it, nothing may be.
-      const st = p === root ? statSync(p) : lstatSync(p);
+      // The top may be reached through a link of the caller's own choosing
+      // (`<PREFIX>_CACHE_DIR=~/.cache/x`); below it, nothing may be.
+      const st = p === top ? statSync(p) : lstatSync(p);
       if (st.isSymbolicLink()) return `${p} is a symbolic link`;
       if (st.uid !== uid) return `${p} belongs to another user`;
       // Owned is not enough when anyone may write it: in a world-writable
