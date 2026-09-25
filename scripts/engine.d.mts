@@ -193,9 +193,10 @@ interface PdfLadderOptions {
 /** Test seam: forget which rungs and OCR binaries were found, and refill the OCR budget. */
 declare function resetPdfLadderCache(): void;
 /**
- * The rungs to try, honouring `<PREFIX>_PDF_ENGINE` (force exactly one) and
- * `<PREFIX>_NO_NPX` (skip the rung that needs an implicit install), where
- * `<PREFIX>` is whatever the consuming skill declared via `configure()`.
+ * The rungs to try, honouring `<PREFIX>_PDF_ENGINE` (a comma list of rungs to
+ * run, in order, or `none`) and `<PREFIX>_NO_NPX` (skip the rungs that need an
+ * implicit install), where `<PREFIX>` is whatever the consuming skill declared
+ * via `configure()`.
  *
  * An explicit `engines` list wins over both: it is the most specific instruction
  * available, and it is how callers and tests drive the ladder deterministically
@@ -206,9 +207,11 @@ declare function enabledExtractors(engines?: PdfExtractorId[]): PdfExtractorId[]
  * Extract text from PDF bytes, trying each enabled rung in order and returning
  * the first result that `assessPdfText` accepts.
  *
- * Never throws. When every rung fails, returns empty text plus the LAST
- * rejection reason, so the caller can say why the source is unusable instead of
- * silently citing nothing.
+ * Never throws. When every rung fails, returns empty text plus the reason — the
+ * last rung's verdict, sharpened where the bytes say more (not a PDF at all, an
+ * encrypted one, a scan that OCR would read), then what the tools themselves
+ * said — so the caller can say why the source is unusable instead of silently
+ * citing nothing.
  */
 declare function extractPdf(bytes: Buffer, opts?: PdfLadderOptions): Promise<PdfExtraction>;
 
@@ -241,8 +244,23 @@ declare const DOC_EXTENSIONS: readonly string[];
 declare function docFormatForUrl(url: string): DocFormat | undefined;
 /** Is this response an office document, judged from its content-type? */
 declare function docFormatForContentType(contentType: string): DocFormat | undefined;
+/**
+ * What these bytes are, when they are a document: `"pdf"`, an office format,
+ * or undefined for anything else (text, HTML, images, plain archives).
+ *
+ * For a response whose URL and headers gave nothing away — a download route
+ * answering `application/octet-stream`, or no type at all — and for a local
+ * file whose name lies. The signatures are the ones the converters themselves
+ * trust, which is why an office match carries no `format`: anydoc reads the
+ * real one from the same bytes.
+ *
+ * A ZIP counts only with a package manifest (`[Content_Types].xml` for OOXML,
+ * a leading `mimetype` entry for OpenDocument and EPUB): a source archive is
+ * not a document, and routing it to the converter would misreport it.
+ */
+declare function sniffDocument(bytes: Buffer): "pdf" | DocFormat | undefined;
 
-type DocExtractorId = "anydoc" | "firecrawl";
+type DocExtractorId = "anydoc" | "firecrawl" | "builtin";
 declare const DOC_EXTRACTORS: DocExtractorId[];
 interface DocExtraction {
     text: string;
@@ -265,10 +283,10 @@ interface DocLadderOptions {
 /** Test seam: forget which rungs were found unavailable. */
 declare function resetDocLadderCache(): void;
 /**
- * The rungs to try, honouring `<PREFIX>_DOC_ENGINE` (force exactly one, or
- * `none` to disable the ladder) and `<PREFIX>_NO_NPX` (skip the rung that
- * needs an implicit install), where `<PREFIX>` is whatever the consuming skill
- * declared via `configure()`.
+ * The rungs to try, honouring `<PREFIX>_DOC_ENGINE` (a comma list of rungs to
+ * run, in order, or `none` to disable the ladder — parsed as `PDF_ENGINE` is)
+ * and `<PREFIX>_NO_NPX` (skip the rung that needs an implicit install), where
+ * `<PREFIX>` is whatever the consuming skill declared via `configure()`.
  *
  * An explicit `engines` list wins over both, exactly as in the PDF ladder: it is
  * the most specific instruction available, and it is how callers and tests drive
@@ -279,11 +297,25 @@ declare function enabledDocExtractors(engines?: DocExtractorId[]): DocExtractorI
  * Convert an office document to Markdown, trying each enabled rung in order and
  * returning the first result that the quality gate accepts.
  *
- * Never throws. When every rung fails, returns empty text plus the reason, so
- * the caller can say why the source is unusable instead of silently citing
- * nothing — or, worse, citing the raw bytes.
+ * Never throws. When every rung fails, returns empty text plus the reason — the
+ * gate's verdict, or what the converter itself said, or why it could not run —
+ * so the caller can say why the source is unusable instead of silently citing
+ * nothing, or, worse, citing the raw bytes.
  */
 declare function extractDocument(bytes: Buffer, fmt: DocFormat, opts?: DocLadderOptions): Promise<DocExtraction>;
+
+/**
+ * The text of an OOXML (.docx, .xlsx, .pptx) or OpenDocument (.odt, .ods, .odp)
+ * file as Markdown: headings, paragraphs, lists, and tables — a spreadsheet's
+ * sheets as one table each, a deck's slides in presentation order with their
+ * speaker notes.
+ *
+ * Undefined when the bytes are not such a file, or break one of the reader's
+ * limits (ZIP64, encryption, an unknown compression method, a decompression
+ * bomb, too many entries). Never throws. The text is not judged here: callers
+ * run it through the same quality gate as every other rung.
+ */
+declare function officeToText(bytes: Buffer): string | undefined;
 
 declare const PDF_INSPECTOR_SPEC = "@firecrawl/pdf-inspector@1";
 declare const ANYDOC_SPEC = "@firecrawl/anydoc@0.1";
@@ -292,13 +324,18 @@ interface RunResult {
     stdout: string;
     /** Short cause when `ok` is false: "not installed", "timed out", "exit 2"… */
     error?: string;
+    /** What the tool wrote to stderr — its first and last ~1 KB — when `ok` is false and it wrote any. */
+    stderr?: string;
 }
 /**
  * Spawn `cmd args…`, write `input` to its stdin, resolve with its stdout.
  * Never throws and never leaves a child behind: a missing binary, a non-zero
- * exit and a timeout all come back as `{ ok: false, error }`.
+ * exit and a timeout all come back as `{ ok: false, error }` — with the tail
+ * of stderr, when the tool wrote one, so a caller can say WHY.
  */
-declare function runWithInput(cmd: string, args: string[], input: Buffer, timeoutMs: number): Promise<RunResult>;
+declare function runWithInput(cmd: string, args: string[], input: Buffer, timeoutMs: number, opts?: {
+    env?: NodeJS.ProcessEnv;
+}): Promise<RunResult>;
 
 /**
  * Decode named and decimal/hex numeric character references, in ONE
@@ -363,6 +400,8 @@ interface HttpResult {
     bytes?: Buffer;
     /** Retained response bytes, before character decoding. */
     bytesRead?: number;
+    /** The name Content-Disposition gives the body, when it gives one — what a download route calls its file. */
+    filename?: string;
     /** The body exceeded the cap; its retained prefix is incomplete. */
     truncated?: boolean;
     error?: string;
@@ -471,7 +510,7 @@ declare const PDF_URL_RE: RegExp;
  * preferred rung — whenever a Firecrawl container happens to be up.
  */
 declare function looksLikePdfUrl(url: string): boolean;
-type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext" | "anydoc" | "ocr";
+type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext" | "anydoc" | "ocr" | "builtin";
 interface ExtractResult {
     text: string;
     consentDropped?: number;
@@ -1108,13 +1147,190 @@ declare function sh(cmd: string, args: string[], opts?: {
  * Preferred wherever several commands could overlap — a synchronous `git clone`
  * freezes everything else in the process for the whole transfer, which is the
  * difference between three clones taking as long as the slowest and taking as
- * long as all of them put together. SIGKILL on timeout, and never an orphan.
+ * long as all of them put together. SIGKILL on timeout — to the command and
+ * everything it started — and never an orphan.
  */
 declare function shAsync(cmd: string, args: string[], opts?: {
     cwd?: string;
     timeoutMs?: number;
     env?: NodeJS.ProcessEnv;
 }): Promise<ShResult>;
+
+type ForgeKind = "github" | "gitlab" | "gitea";
+interface ForgeItem {
+    kind: "issue" | "pr" | "release" | "tag" | "discussion";
+    number?: number;
+    title: string;
+    url: string;
+    state?: string;
+    labels: string[];
+    body: string;
+    updatedAt?: string;
+    /** Whatever the forge scored it, when it scores at all. */
+    score?: number;
+}
+interface ForgeResult {
+    items: ForgeItem[];
+    /** Why it came back thin, in words a caller can show. Never an exception. */
+    note?: string;
+    rateLimited?: boolean;
+    /** The HTTP status of a request that failed — 0 when it got no answer at all. */
+    status?: number;
+    /** When a spent quota resets, as the forge stated it (ISO 8601). */
+    resetAt?: string;
+}
+interface ForgeOptions {
+    /**
+     * Override the API base — a self-hosted GitLab, or GitHub Enterprise. Naming
+     * it is also what sends the forge's token there: the calling code chose this
+     * host, which a repository string alone never proves.
+     */
+    apiBase?: string;
+    /**
+     * Which forge the host runs, for a self-hosted one whose name does not say
+     * (salsa.debian.org is a GitLab). It picks the API to ask and nothing else: a
+     * token still goes only where `forgeAuthHeaders` allows.
+     */
+    kind?: ForgeKind;
+    limit?: number;
+    timeoutMs?: number;
+    /**
+     * searchIssues: when every term together matches nothing, search once more
+     * with the most distinctive half of them, and say so in the note. Default on;
+     * `false` keeps a search to exactly one request.
+     */
+    relax?: boolean;
+}
+/**
+ * Which forge a host is: `opts.kind` when the caller says, then a host declared
+ * in `<PREFIX>_FORGE_HOSTS`, then the host's shape. Unknown hosts get no client.
+ */
+declare function forgeKind(host: string, opts?: Pick<ForgeOptions, "kind">): ForgeKind | undefined;
+/**
+ * The ref a forge can answer for. A local checkout stands for its `origin`
+ * remote — `webindex repo .` means the project this directory is a clone of —
+ * with any credential in that URL dropped, since the ref travels into output. A
+ * checkout with no origin, and every other ref, comes back as it was.
+ */
+declare function forgeRef(ref: RepoRef, opts?: Pick<ForgeOptions, "kind">): RepoRef;
+/**
+ * The API base for a repo's host.
+ *
+ * GitHub Enterprise is the awkward one: github.com serves `api.github.com`,
+ * while a self-hosted install serves `<host>/api/v3`. Getting this wrong is a
+ * 404 that reads like "no such repository".
+ *
+ * Takes a bare host string as well as a ref, because a provider layer routinely
+ * knows the host before it has resolved anything into a `RepoRef` — and having to
+ * fabricate one just to ask this question is exactly why a second copy of this
+ * function grew downstream.
+ */
+declare function apiBase(ref: Pick<RepoRef, "host"> | string, opts?: ForgeOptions): string;
+/**
+ * Auth headers when a token is in the environment; none when it is not.
+ *
+ * Given the `host` a request goes to, a token comes back only for a host it
+ * belongs to (see `TOKEN_HOSTS`). Without one this answers by kind alone, as it
+ * always has — for a caller that decides where the header goes itself.
+ *
+ * Every token travels in `Authorization`, GitLab's included (it accepts a
+ * personal token as a Bearer): that is the header a runtime drops on a
+ * cross-origin redirect, where a custom `private-token` sailed through.
+ */
+declare function forgeAuthHeaders(kind: ForgeKind, host?: string): Record<string, string>;
+/**
+ * Map GitHub's issue-search payload into `ForgeItem`s.
+ *
+ * Exported for the parsing edges it has to survive: labels arriving as strings
+ * or as objects, the draft flag standing in for a state, missing fields. A null
+ * element is filtered first so one bad entry cannot throw away the whole page.
+ */
+declare function mapGithubIssues(raw: unknown[], kind: "issue" | "pr"): ForgeItem[];
+/** Test seam: forget which repositories were resolved. */
+declare function resetCanonicalRepoCache(): void;
+/**
+ * The repository's canonical owner and repo, following renames.
+ *
+ * A moved repository (calcom/cal.com → calcom/cal.diy) still answers on its old
+ * name through a redirect, but every subsequent SEARCH keyed on the old name
+ * fails with a 422 that reads like a malformed query. So this is resolved once
+ * and the answer used everywhere after.
+ *
+ * Prefers the `gh` CLI when it is installed and the host is github.com: it is
+ * already authenticated, so it resolves against a quota far above the anonymous
+ * one this would otherwise spend. Falls back to the keyless REST call — `gh` is
+ * a bonus, never a requirement.
+ *
+ * Returns the parts rather than a slug because a provider layer builds URLs from
+ * them; `canonicalRepo` below joins them for the callers that want the string.
+ */
+declare function canonicalRepoRef(ref: RepoRef, opts?: ForgeOptions): Promise<{
+    owner: string;
+    repo: string;
+}>;
+/** The same answer as `canonicalRepoRef`, as an `owner/repo` slug. */
+declare function canonicalRepo(ref: RepoRef, opts?: ForgeOptions): Promise<string | undefined>;
+/**
+ * Search a repository's issues or pull requests.
+ *
+ * GitHub gets its search API — the only one of the three that ranks by
+ * relevance, and it does so only when left to its default order: terms are
+ * best-match first, a listing with no terms most recently updated first. GitLab
+ * and Gitea have no such endpoint, so they get a scoped list filtered by search
+ * terms, which is why their `score` is absent: they are ordered by recency and
+ * saying otherwise would be a lie the caller might rank on.
+ *
+ * Every term must match, so a natural five-word description often matches
+ * nothing. Then — unless `relax: false` — it searches once more with the most
+ * distinctive half of the words (qualifiers such as `label:bug` kept), and the
+ * note says so: a looser answer must never pass for the one asked for.
+ */
+declare function searchIssues(ref: RepoRef, terms: string[], kind: "issue" | "pr", opts?: ForgeOptions): Promise<ForgeResult>;
+/** A repository's releases, newest first. */
+declare function listReleases(ref: RepoRef, opts?: ForgeOptions): Promise<ForgeResult>;
+/** A repository's tags, which exist even where releases do not. */
+declare function listTags(ref: RepoRef, opts?: ForgeOptions): Promise<ForgeResult>;
+interface RepoFacts {
+    fullName?: string;
+    description?: string;
+    homepage?: string;
+    license?: string;
+    stars?: number;
+    forks?: number;
+    openIssues?: number;
+    defaultBranch?: string;
+    pushedAt?: string;
+    archived?: boolean;
+    topics: string[];
+}
+/** `repoFacts`, with the reason when there are none. */
+interface RepoFactsResult {
+    facts?: RepoFacts;
+    /** Why there are no facts, in words a caller can show. */
+    note?: string;
+    /** The HTTP status of the answer — 0 when there was none; absent when nothing was asked. */
+    status?: number;
+    rateLimited?: boolean;
+    /** When a spent quota resets, as the forge stated it (ISO 8601). */
+    resetAt?: string;
+}
+/**
+ * The repository's own metadata — stars, licence, homepage, whether it is
+ * archived.
+ *
+ * Worth having for a reason beyond curiosity: "is this project maintained" is
+ * otherwise answered by reading a README that says it is. `archived` and
+ * `pushedAt` answer it from the record.
+ *
+ * Undefined for any failure; `repoFactsResult` says which one it was.
+ */
+declare function repoFacts(ref: RepoRef, opts?: ForgeOptions): Promise<RepoFacts | undefined>;
+/**
+ * `repoFacts`, and when it has none, why: no such repository, a rejected token,
+ * a quota (with its reset time), an outage, or no network at all. Each wants a
+ * different response, and all of them used to arrive as the same `undefined`.
+ */
+declare function repoFactsResult(ref: RepoRef, opts?: ForgeOptions): Promise<RepoFactsResult>;
 
 interface RepoRef {
     /** Exactly what the caller passed. */
@@ -1145,13 +1361,17 @@ declare function repoCacheRoot(): string;
  * Parse any repository identifier into a `RepoRef`. Accepts a local directory,
  * `https://host/owner/repo(.git)`, `ssh://`/`git://` URLs, `git@host:owner/repo`,
  * `host/owner/repo`, and the bare `owner/repo` shorthand (which means GitHub).
+ * A URL copied from a browser names its repository, not the page within it.
+ * `opts.kind` says which forge a self-hosted host runs, where its name does not.
  *
  * An unrecognisable seed becomes a `generic` ref with NO synthesised clone URL.
  * That matters: minting `https://github.com/<free text>.git` would turn "some
  * words the user typed" into a plausible-looking URL that 404s later, far from
  * where the mistake was made.
  */
-declare function resolveRepo(raw: string): RepoRef;
+declare function resolveRepo(raw: string, opts?: {
+    kind?: ForgeKind;
+}): RepoRef;
 /**
  * A working tree for `ref`, cloned if needed, returned as an absolute path.
  *
@@ -1161,7 +1381,11 @@ declare function resolveRepo(raw: string): RepoRef;
  * minutes. `ensureHistoryDepth` deepens it when a caller genuinely needs history.
  *
  * Never throws for a reason the caller cannot act on — a missing `git` says so
- * rather than reporting a clone failure.
+ * rather than reporting a clone failure, and a refresh that could not reach the
+ * remote says so rather than returning the old tree as if it were fresh.
+ *
+ * Each `branch` gets its own directory beside the default one: the cache is
+ * keyed by what was cloned, so asking for `v2` never answers with `main`.
  */
 declare function ensureClone(ref: RepoRef, opts?: {
     refresh?: boolean;
@@ -1215,116 +1439,6 @@ declare function originUrl(dir: string): string | undefined;
  */
 declare function sameCommit(a: string | undefined, b: string | undefined): boolean;
 
-type ForgeKind = "github" | "gitlab" | "gitea";
-interface ForgeItem {
-    kind: "issue" | "pr" | "release" | "tag" | "discussion";
-    number?: number;
-    title: string;
-    url: string;
-    state?: string;
-    labels: string[];
-    body: string;
-    updatedAt?: string;
-    /** Whatever the forge scored it, when it scores at all. */
-    score?: number;
-}
-interface ForgeResult {
-    items: ForgeItem[];
-    /** Why it came back thin, in words a caller can show. Never an exception. */
-    note?: string;
-    rateLimited?: boolean;
-}
-interface ForgeOptions {
-    /** Override the API base — a self-hosted GitLab, or GitHub Enterprise. */
-    apiBase?: string;
-    limit?: number;
-    timeoutMs?: number;
-}
-/** Which forge a host is, by its shape. Unknown hosts get no client. */
-declare function forgeKind(host: string): ForgeKind | undefined;
-/**
- * The API base for a repo's host.
- *
- * GitHub Enterprise is the awkward one: github.com serves `api.github.com`,
- * while a self-hosted install serves `<host>/api/v3`. Getting this wrong is a
- * 404 that reads like "no such repository".
- *
- * Takes a bare host string as well as a ref, because a provider layer routinely
- * knows the host before it has resolved anything into a `RepoRef` — and having to
- * fabricate one just to ask this question is exactly why a second copy of this
- * function grew downstream.
- */
-declare function apiBase(ref: Pick<RepoRef, "host"> | string, opts?: ForgeOptions): string;
-/** Auth headers when a token is in the environment; none when it is not. */
-declare function forgeAuthHeaders(kind: ForgeKind): Record<string, string>;
-/**
- * Map GitHub's issue-search payload into `ForgeItem`s.
- *
- * Exported for the parsing edges it has to survive: labels arriving as strings
- * or as objects, the draft flag standing in for a state, missing fields. A null
- * element is filtered first so one bad entry cannot throw away the whole page.
- */
-declare function mapGithubIssues(raw: unknown[], kind: "issue" | "pr"): ForgeItem[];
-/** Test seam: forget which repositories were resolved. */
-declare function resetCanonicalRepoCache(): void;
-/**
- * The repository's canonical owner and repo, following renames.
- *
- * A moved repository (calcom/cal.com → calcom/cal.diy) still answers on its old
- * name through a redirect, but every subsequent SEARCH keyed on the old name
- * fails with a 422 that reads like a malformed query. So this is resolved once
- * and the answer used everywhere after.
- *
- * Prefers the `gh` CLI when it is installed and the host is github.com: it is
- * already authenticated, so it resolves against a quota far above the anonymous
- * one this would otherwise spend. Falls back to the keyless REST call — `gh` is
- * a bonus, never a requirement.
- *
- * Returns the parts rather than a slug because a provider layer builds URLs from
- * them; `canonicalRepo` below joins them for the callers that want the string.
- */
-declare function canonicalRepoRef(ref: RepoRef, opts?: ForgeOptions): Promise<{
-    owner: string;
-    repo: string;
-}>;
-/** The same answer as `canonicalRepoRef`, as an `owner/repo` slug. */
-declare function canonicalRepo(ref: RepoRef, opts?: ForgeOptions): Promise<string | undefined>;
-/**
- * Search a repository's issues or pull requests.
- *
- * GitHub gets its search API — the only one of the three that ranks by
- * relevance. GitLab and Gitea have no such endpoint, so they get a scoped list
- * filtered by search terms, which is why their `score` is absent: they are
- * ordered by recency and saying otherwise would be a lie the caller might rank on.
- */
-declare function searchIssues(ref: RepoRef, terms: string[], kind: "issue" | "pr", opts?: ForgeOptions): Promise<ForgeResult>;
-/** A repository's releases, newest first. */
-declare function listReleases(ref: RepoRef, opts?: ForgeOptions): Promise<ForgeResult>;
-/** A repository's tags, which exist even where releases do not. */
-declare function listTags(ref: RepoRef, opts?: ForgeOptions): Promise<ForgeResult>;
-interface RepoFacts {
-    fullName?: string;
-    description?: string;
-    homepage?: string;
-    license?: string;
-    stars?: number;
-    forks?: number;
-    openIssues?: number;
-    defaultBranch?: string;
-    pushedAt?: string;
-    archived?: boolean;
-    topics: string[];
-}
-/**
- * The repository's own metadata — stars, licence, homepage, whether it is
- * archived.
- *
- * Worth having for a reason beyond curiosity: "is this project maintained" is
- * otherwise answered by reading a README that says it is. `archived` and
- * `pushedAt` answer it from the record.
- */
-declare function repoFacts(ref: RepoRef, opts?: ForgeOptions): Promise<RepoFacts | undefined>;
-
 type RegistryKind = "npm" | "pypi" | "crates";
 interface PackageFacts {
     registry: RegistryKind;
@@ -1334,6 +1448,8 @@ interface PackageFacts {
     homepage?: string;
     /** Normalised to an https URL where the registry gives something git-shaped. */
     repository?: string;
+    /** Where in that repository the package lives — a monorepo's `packages/x`, from npm's `repository.directory`. */
+    repositoryDirectory?: string;
     documentation?: string;
     license?: string;
     /** The registry's own deprecation notice, when there is one. */
@@ -1342,22 +1458,49 @@ interface PackageFacts {
     downloads?: number;
     publishedAt?: string;
 }
+/** One registry's answer: the facts, or its status and why there are none. */
+interface PackageLookup {
+    facts?: PackageFacts;
+    /** The registry's HTTP status — 404 is "no such package (or version)", 0 is no answer at all. */
+    status: number;
+    /** Why a request that was not a plain 404 failed, as the runtime or registry said it. */
+    error?: string;
+}
+/** A name resolved across registries — or why it was not. */
+interface PackageResolution {
+    facts?: PackageFacts;
+    /** Why there are no facts, in words a caller can show. */
+    note?: string;
+    /** Each registry asked, in order, and what it answered. */
+    tried: {
+        registry: RegistryKind;
+        status: number;
+        error?: string;
+    }[];
+}
 /**
  * Turn whatever a registry calls a repository into a browsable https URL.
  *
  * They are wildly inconsistent — `git+https://…​.git`, `git://`, `git@host:…`,
- * a bare `owner/repo`, or a plain URL — and a caller that passes any of those
+ * `ssh://git@host:…`, npm's `github:owner/repo`, a bare `owner/repo`, any of
+ * them upper-cased or with a `#branch` — and a caller that passes any of those
  * to a browser or a clone gets a different failure for each.
  */
 declare function normalizeRepoUrl(raw: unknown): string | undefined;
 /**
  * Look a package up in one registry.
  *
- * Returns undefined for "no such package", which is different from a failed
- * request — a caller resolving a name across several registries needs to know
- * whether to try the next one or to stop and report a network problem.
+ * Returns undefined for "no such package" AND for a request that failed;
+ * `lookupPackageResult` tells the two apart, which a caller resolving a name
+ * across several registries needs — to try the next one, or to stop and report
+ * a network problem.
+ *
+ * With `version`, it is that version or nothing: every registry is asked for
+ * it by name, and one that does not have it answers 404.
  */
 declare function lookupPackage(registry: RegistryKind, name: string, version?: string): Promise<PackageFacts | undefined>;
+/** `lookupPackage`, with the registry's status and, for anything but a 404, why it failed. */
+declare function lookupPackageResult(registry: RegistryKind, name: string, version?: string): Promise<PackageLookup>;
 /**
  * Resolve a bare library name across the registries, in the order most likely to
  * be right, and return the first that knows it.
@@ -1366,11 +1509,26 @@ declare function lookupPackage(registry: RegistryKind, name: string, version?: s
  * so trying it first resolves most lookups without probing another registry. An
  * explicit `registry` skips the guessing entirely, which a caller who knows the
  * ecosystem should always do.
+ *
+ * Undefined when no registry has it — or when one could not be asked;
+ * `resolvePackageResult` says which.
  */
 declare function resolvePackage(name: string, opts?: {
     registry?: RegistryKind;
     version?: string;
 }): Promise<PackageFacts | undefined>;
+/**
+ * `resolvePackage`, with the reason when it finds nothing.
+ *
+ * Only a definite 404 hands the name on to the next registry. A registry that
+ * is down, rate-limited or unreachable STOPS the walk: the next ecosystem's
+ * namesake is a different project, and "npm is down" answered with PyPI's
+ * `react` (python-react 4.3.0) was a wrong answer that looked like a right one.
+ */
+declare function resolvePackageResult(name: string, opts?: {
+    registry?: RegistryKind;
+    version?: string;
+}): Promise<PackageResolution>;
 
 /** The charset named by a Content-Type header, if it names one. */
 declare function charsetFromContentType(contentType: string): string | undefined;
@@ -3057,4 +3215,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, CP1252_C1, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ChangeVerdict, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type Fingerprint, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type Table, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, awaitHostSlot, backOffHost, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, contentHash, cosine, crawlConcurrency, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, decodeLocal, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, extractTables, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, fingerprint, firecrawlBase, firecrawlIsExplicit, fnv1a64, fnv1a64Words, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, hasChanged, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, looksLikeChallenge, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOcrTools, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, tableToMarkdown, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, CP1252_C1, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ChangeVerdict, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type Fingerprint, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PackageLookup, type PackageResolution, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoFactsResult, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type Table, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, awaitHostSlot, backOffHost, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, contentHash, cosine, crawlConcurrency, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, decodeLocal, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, extractTables, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, fingerprint, firecrawlBase, firecrawlIsExplicit, fnv1a64, fnv1a64Words, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, forgeRef, hammingDistance, hasChanged, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, looksLikeChallenge, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, lookupPackageResult, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, officeToText, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, repoFactsResult, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOcrTools, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolvePackageResult, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, sniffDocument, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, tableToMarkdown, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };

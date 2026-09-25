@@ -87,7 +87,7 @@ async function finishRepin(root) {
       const previous = new Set(existing.map((r) => r.databaseId));
       gh(["workflow", "run", workflow, "--ref", "main"]);
       for (let attempt = 0; attempt < 30 && !run; attempt++) {
-        await new Promise((resolve5) => setTimeout(resolve5, 2e3));
+        await new Promise((resolve6) => setTimeout(resolve6, 2e3));
         existing = runs();
         run = existing.find((r) => !previous.has(r.databaseId) && r.event === "workflow_dispatch");
       }
@@ -312,10 +312,10 @@ function checkPins(root, config) {
       };
     }
     for (const f of pin.files ?? []) {
-      const local = join5(root, config.vendorDir, f.local);
+      const local2 = join5(root, config.vendorDir, f.local);
       let actual;
       try {
-        actual = sha256(readFileSync4(local));
+        actual = sha256(readFileSync4(local2));
       } catch {
         problems.push(`${config.vendorDir}/${f.local} is missing \u2014 the pin records it but it is not on disk.`);
         continue;
@@ -425,8 +425,8 @@ async function repinSkill(root, config) {
   const toolUrl = `https://codeload.github.com/maxgfr/webindex/tar.gz/${toolCommit}`;
   const oldTool = pkg.devDependencies?.["@maxgfr/webindex"];
   if (oldTool !== toolUrl) {
-    const installed = JSON.parse(readFileSync5(join6(root, "node_modules/@maxgfr/webindex/package.json"), "utf8"));
-    if (compareTags(toolTag, `v${installed.version}`) < 0) throw new Error("Refusing maintenance-tool downgrade");
+    const installed2 = JSON.parse(readFileSync5(join6(root, "node_modules/@maxgfr/webindex/package.json"), "utf8"));
+    if (compareTags(toolTag, `v${installed2.version}`) < 0) throw new Error("Refusing maintenance-tool downgrade");
     pkg.devDependencies = { ...pkg.devDependencies, "@maxgfr/webindex": toolUrl };
     changes.push(`skillkit -> ${toolTag} (${toolCommit})`);
   }
@@ -436,8 +436,8 @@ async function repinSkill(root, config) {
 }
 
 // src/cli.ts
-import { existsSync as existsSync7, readFileSync as readFileSync12 } from "fs";
-import { basename as basename4, extname, join as join15, relative as relative2, resolve as resolve4 } from "path";
+import { existsSync as existsSync7, readFileSync as readFileSync13 } from "fs";
+import { basename as basename4, extname, join as join15, relative as relative2, resolve as resolve5 } from "path";
 import { pathToFileURL } from "url";
 
 // src/charset.ts
@@ -641,56 +641,277 @@ function docFormatForContentType(contentType) {
   const type = contentType.split(";")[0]?.trim().toLowerCase();
   return type ? BY_CONTENT_TYPE[type] : void 0;
 }
+var PDF_HEADER_RE = /(?:^|[\r\n])%PDF-\d/;
+var OLE_SIGNATURE = Buffer.from([208, 207, 17, 224, 161, 177, 26, 225]);
+function sniffDocument(bytes) {
+  const head = bytes.subarray(0, 1024).toString("latin1");
+  if (PDF_HEADER_RE.test(head)) return "pdf";
+  if (bytes.subarray(0, 8).equals(OLE_SIGNATURE)) return BINARY;
+  if (head.startsWith("{\\rtf")) return BINARY;
+  if (head.startsWith("PK") && (head.startsWith("mimetype", 30) || bytes.includes("[Content_Types].xml"))) return BINARY;
+  return void 0;
+}
 
 // src/pdf/exec.ts
-import { spawn } from "child_process";
+import { spawn as spawn2 } from "child_process";
+
+// src/process-tree.ts
+import { spawn, spawnSync } from "child_process";
+import { readdirSync, readFileSync as readFileSync6 } from "fs";
+function addChild(tree, parent, child) {
+  const siblings = tree.get(parent);
+  if (siblings) siblings.push(child);
+  else tree.set(parent, [child]);
+}
+function treeFromProc() {
+  let entries;
+  try {
+    entries = readdirSync("/proc");
+  } catch {
+    return void 0;
+  }
+  const tree = /* @__PURE__ */ new Map();
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    let stat;
+    try {
+      stat = readFileSync6(`/proc/${entry}/stat`, "latin1");
+    } catch {
+      continue;
+    }
+    const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+    if (ppid > 0) addChild(tree, ppid, Number(entry));
+  }
+  return tree;
+}
+function treeFromPs() {
+  const r = spawnSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8", timeout: 5e3 });
+  if (r.status !== 0 || !r.stdout) return void 0;
+  const tree = /* @__PURE__ */ new Map();
+  for (const line of r.stdout.split("\n")) {
+    const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+    if (pid && ppid) addChild(tree, ppid, pid);
+  }
+  return tree;
+}
+function descendants(pid) {
+  const tree = (process.platform === "linux" ? treeFromProc() : void 0) ?? treeFromPs();
+  if (!tree) return [];
+  const found = /* @__PURE__ */ new Set();
+  const queue = [pid];
+  while (queue.length) {
+    for (const child of tree.get(queue.shift()) ?? []) {
+      if (found.has(child) || child === pid) continue;
+      found.add(child);
+      queue.push(child);
+    }
+  }
+  return [...found];
+}
+function killTree(child) {
+  try {
+    if (process.platform === "win32" && child.pid) {
+      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).on("error", () => child.kill("SIGKILL"));
+    } else {
+      const pids = child.pid ? descendants(child.pid) : [];
+      child.kill("SIGKILL");
+      for (const pid of pids) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+        }
+      }
+    }
+  } catch {
+    child.kill("SIGKILL");
+  }
+  child.stdin?.destroy();
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  child.unref();
+}
+
+// src/pdf/exec.ts
 var PDF_INSPECTOR_SPEC = "@firecrawl/pdf-inspector@1";
 var ANYDOC_SPEC = "@firecrawl/anydoc@0.1";
 var MAX_STDOUT_BYTES = 24 * 1024 * 1024;
+var STDERR_END_CHARS = 1024;
 function binaryName(name) {
   return process.platform === "win32" && name === "npx" ? "npx.cmd" : name;
 }
-function runWithInput(cmd, args, input, timeoutMs) {
-  return new Promise((resolve5) => {
+function runWithInput(cmd, args, input, timeoutMs, opts = {}) {
+  return new Promise((resolve6) => {
     let child;
     try {
-      child = spawn(binaryName(cmd), args, { stdio: ["pipe", "pipe", "pipe"] });
+      const bin = binaryName(cmd);
+      const viaShell = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(bin);
+      const quote = (s) => `"${s.replace(/"/g, '""')}"`;
+      child = spawn2(viaShell ? quote(bin) : bin, viaShell ? args.map(quote) : args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        ...viaShell ? { shell: true, windowsHide: true } : {},
+        ...opts.env ? { env: opts.env } : {}
+      });
     } catch (e) {
-      resolve5({ ok: false, stdout: "", error: e.message });
+      resolve6({ ok: false, stdout: "", error: e.message });
       return;
     }
     const chunks = [];
     let size = 0;
+    let stderrHead = "";
+    let stderrTail = "";
+    let stderrCut = false;
+    const withStderr = (r) => {
+      const stderr = (stderrCut ? `${stderrHead}
+\u2026
+${stderrTail}` : stderrHead + stderrTail).trim();
+      return stderr ? { ...r, stderr } : r;
+    };
     let settled = false;
     const done = (r) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve5(r);
+      resolve6(r);
     };
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      done({ ok: false, stdout: "", error: `timed out after ${Math.round(timeoutMs / 1e3)}s` });
+      killTree(child);
+      done(withStderr({ ok: false, stdout: "", error: `timed out after ${Math.round(timeoutMs / 1e3)}s` }));
     }, timeoutMs);
     child.stdout?.on("data", (d) => {
       if (size >= MAX_STDOUT_BYTES) return;
       size += d.length;
       chunks.push(d);
     });
-    child.stderr?.on("data", () => {
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      let rest = chunk;
+      if (stderrHead.length < STDERR_END_CHARS) {
+        const room = STDERR_END_CHARS - stderrHead.length;
+        stderrHead += rest.slice(0, room);
+        rest = rest.slice(room);
+      }
+      const tail = stderrTail + rest;
+      if (tail.length > STDERR_END_CHARS) stderrCut = true;
+      stderrTail = tail.slice(-STDERR_END_CHARS);
     });
     child.on("error", (e) => {
       done({ ok: false, stdout: "", error: e.code === "ENOENT" ? "not installed" : e.message });
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       const stdout = Buffer.concat(chunks).subarray(0, MAX_STDOUT_BYTES).toString("utf8");
       if (code === 0) done({ ok: true, stdout });
-      else done({ ok: false, stdout, error: `exit ${code}` });
+      else done(withStderr({ ok: false, stdout, error: code === null ? `killed by ${signal}` : `exit ${code}` }));
     });
     child.stdin?.on("error", () => {
     });
     child.stdin?.end(input);
   });
+}
+
+// src/pdf/npx.ts
+import { isAbsolute } from "path";
+function npxTimeoutMs() {
+  return envInt("NPX_TIMEOUT_MS", 9e4, 1e3, 6e5);
+}
+var FAIL_FAST = {
+  npm_config_fetch_retries: "1",
+  npm_config_fetch_retry_mintimeout: "1000",
+  npm_config_fetch_retry_maxtimeout: "2000",
+  npm_config_fetch_timeout: "30000"
+};
+function npxEnv() {
+  const env2 = { ...process.env };
+  for (const [key, value] of Object.entries(FAIL_FAST)) {
+    if (env2[key] === void 0 && env2[key.toUpperCase()] === void 0) env2[key] = value;
+  }
+  return env2;
+}
+var NPM_ERROR_RE = /^npm (?:ERR!|error) code (\S+)/m;
+var NETWORK_CODES = /* @__PURE__ */ new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "ESOCKETTIMEDOUT",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTCACHED",
+  "ERR_SOCKET_TIMEOUT"
+]);
+var proven = /* @__PURE__ */ new Set();
+var registryDown;
+function unavailability(r, spec) {
+  if (r.error === "not installed" || r.error === "exit 127") return "not installed";
+  const stderr = r.stderr ?? "";
+  const code = NPM_ERROR_RE.exec(stderr)?.[1];
+  if (code) {
+    if (!NETWORK_CODES.has(code)) return `could not be installed (npm error ${code})`;
+    registryDown = code;
+    return `could not be installed (npm error ${code} \u2014 offline?)`;
+  }
+  if (/could not determine executable to run/.test(stderr)) return "could not be installed (npm found no executable)";
+  if (!proven.has(spec) && r.error?.startsWith("timed out")) return `${r.error} on first use (raise ${envName("NPX_TIMEOUT_MS")} on a slow network)`;
+  return void 0;
+}
+function npxBinName(spec) {
+  return spec.replace(/^@[^/]+\//, "").replace(/@.*$/, "");
+}
+var installed = /* @__PURE__ */ new Map();
+function findInstalled(spec) {
+  let hit = installed.get(spec);
+  if (!hit) {
+    hit = (async () => {
+      if (process.platform === "win32") return {};
+      const probe = ["-y", "--prefer-offline", "--package", spec, "-c", `command -v ${npxBinName(spec)}`];
+      const r = await runWithInput("npx", probe, Buffer.alloc(0), npxTimeoutMs(), { env: npxEnv() });
+      if (!r.ok) {
+        const why = unavailability(r, spec);
+        return why ? { unavailable: { ...r, unavailable: why } } : {};
+      }
+      const path = r.stdout.trim().split("\n").pop()?.trim();
+      return path && isAbsolute(path) ? { path } : {};
+    })();
+    installed.set(spec, hit);
+  }
+  return hit;
+}
+async function npxCacheState(spec) {
+  if (process.platform === "win32") return "unknown";
+  const probe = ["-y", "--offline", "--package", spec, "-c", `command -v ${npxBinName(spec)}`];
+  const r = await runWithInput("npx", probe, Buffer.alloc(0), 3e4, { env: npxEnv() });
+  if (r.ok) return "cached";
+  if (r.error === "not installed") return "no npx";
+  return NPM_ERROR_RE.exec(r.stderr ?? "")?.[1] === "ENOTCACHED" ? "not cached" : "unknown";
+}
+async function runNpx(spec, args, input) {
+  if (registryDown && !proven.has(spec) && !installed.has(spec)) {
+    const why2 = `could not be installed (npm error ${registryDown} \u2014 offline?)`;
+    return { ok: false, stdout: "", error: why2, unavailable: why2 };
+  }
+  const found = await findInstalled(spec);
+  if (found.unavailable) return found.unavailable;
+  if (found.path) {
+    const run = await runWithInput(found.path, args, input, npxTimeoutMs());
+    if (run.ok) proven.add(spec);
+    if (run.error !== "not installed") return run;
+    installed.delete(spec);
+  }
+  const r = await runWithInput("npx", ["-y", "--prefer-offline", spec, ...args], input, npxTimeoutMs(), { env: npxEnv() });
+  if (r.ok) {
+    proven.add(spec);
+    return r;
+  }
+  const why = unavailability(r, spec);
+  return why ? { ...r, unavailable: why } : r;
+}
+function skipNpxHint() {
+  return `set ${envName("NO_NPX")}=1 to skip the rungs that install through npx`;
+}
+function failureDetail(tool, r) {
+  const line = (r.stderr ?? "").split(/\r?\n/).map((l) => l.trim()).find((l) => l && !/^npm (?:warn|WARN|notice)\b/.test(l));
+  const detail = (line ?? r.error ?? "failed").slice(0, 200);
+  return detail.startsWith(`${tool}:`) ? detail : `${tool}: ${detail}`;
 }
 
 // src/pdf/quality.ts
@@ -700,90 +921,123 @@ var REPLACEMENT_RATIO_MAX = 5e-3;
 var LONGEST_RUN_MAX = 300;
 var LETTER_RATIO_MIN = 0.5;
 function isControlCode(c) {
-  if (c === 9 || c === 10 || c === 13) return false;
+  if (c >= 9 && c <= 13) return false;
   return c < 32 || c >= 127 && c <= 159;
 }
 var REPLACEMENT_CODE = 65533;
-function scanRatios(t) {
+var SPACE_RE = /\s/;
+var isSpace = (c) => c < 128 ? c === 32 || c >= 9 && c <= 13 : SPACE_RE.test(String.fromCharCode(c));
+var LETTER_RE = /[\p{L}\p{N}]/u;
+var isRuleChar = (c) => c === 95 || c === 45 || c === 46 || c === 61;
+function scanShape(t) {
   let control = 0;
   let replacement = 0;
+  let letters = 0;
+  let nonSpace = 0;
+  let run = 0;
+  let runIsRule = true;
+  let longestRun = 0;
+  const endRun = () => {
+    if (!runIsRule && run > longestRun) longestRun = run;
+    run = 0;
+    runIsRule = true;
+  };
   for (let i = 0; i < t.length; i++) {
     const c = t.charCodeAt(i);
+    if (isSpace(c)) {
+      endRun();
+      continue;
+    }
     if (c === REPLACEMENT_CODE) replacement++;
     else if (isControlCode(c)) control++;
+    if (!isRuleChar(c)) runIsRule = false;
+    if (c < 128) {
+      if (c >= 48 && c <= 57 || (c | 32) >= 97 && (c | 32) <= 122) letters++;
+      nonSpace++;
+      run++;
+      continue;
+    }
+    const cp = t.codePointAt(i);
+    const units = cp > 65535 ? 2 : 1;
+    if (LETTER_RE.test(String.fromCodePoint(cp))) letters++;
+    nonSpace += units;
+    run += units;
+    i += units - 1;
   }
-  return { control: control / t.length, replacement: replacement / t.length };
+  endRun();
+  return { control: control / t.length, replacement: replacement / t.length, longestRun, letterRatio: nonSpace ? letters / nonSpace : 0 };
 }
+var NO_TEXT_LAYER = "no text layer (scanned or image-only PDF?)";
 function assessPdfText(text) {
-  return assessExtractedText(text, "no text layer (scanned or image-only PDF?)");
+  return assessExtractedText(text, NO_TEXT_LAYER);
 }
 function assessExtractedText(text, emptyReason) {
   const t = text.trim();
   if (!t) return { ok: false, reason: emptyReason };
-  const { control, replacement } = scanRatios(t);
-  if (control > CONTROL_RATIO_MAX) {
+  const shape = scanShape(t);
+  if (shape.control > CONTROL_RATIO_MAX) {
     return { ok: false, reason: "binary/control characters in the text (undecodable PDF stream)" };
   }
-  if (replacement > REPLACEMENT_RATIO_MAX) {
+  if (shape.replacement > REPLACEMENT_RATIO_MAX) {
     return { ok: false, reason: "replacement characters throughout (wrong character map)" };
   }
   if (t.length < MIN_CHARS_FOR_SHAPE_CHECKS) return { ok: true };
-  let longestRun = 0;
-  for (const w of t.split(/\s+/)) if (w.length > longestRun) longestRun = w.length;
-  const letters = (t.match(new RegExp("\\p{L}|\\p{N}", "gu"))?.length ?? 0) / t.replace(/\s+/g, "").length;
-  if (longestRun > LONGEST_RUN_MAX && letters < LETTER_RATIO_MIN) {
+  if (shape.longestRun > LONGEST_RUN_MAX && shape.letterRatio < LETTER_RATIO_MIN) {
     return { ok: false, reason: "unreadable text layer (garbled glyph encoding)" };
   }
   return { ok: true };
 }
 
-// src/doc/ladder.ts
-var DOC_EXTRACTORS = ["anydoc", "firecrawl"];
-var NPX_TIMEOUT_MS = 9e4;
-var dead = /* @__PURE__ */ new Set();
-function enabledDocExtractors(engines) {
-  if (engines) return engines;
-  const forced = env("DOC_ENGINE");
-  if (forced === "none") return [];
-  if (forced && DOC_EXTRACTORS.includes(forced)) return [forced];
-  if (envFlag("NO_NPX")) return DOC_EXTRACTORS.filter((e) => e !== "anydoc");
-  return DOC_EXTRACTORS;
-}
-async function viaAnydoc(bytes, format) {
-  const args = ["-y", "--prefer-offline", ANYDOC_SPEC, "-"];
-  if (format) args.push("--format", format);
-  const r = await runWithInput("npx", args, bytes, NPX_TIMEOUT_MS);
-  return r.ok ? r.stdout : void 0;
-}
-async function extractDocument(bytes, fmt, opts = {}) {
-  let lastReason;
-  for (const id of enabledDocExtractors(opts.engines)) {
-    if (dead.has(id)) continue;
-    let text;
-    try {
-      if (id === "anydoc") text = await viaAnydoc(bytes, fmt.format);
-      else text = opts.firecrawl ? await opts.firecrawl() : void 0;
-    } catch {
-      text = void 0;
-    }
-    if (text === void 0) {
-      if (id !== "firecrawl") dead.add(id);
-      continue;
-    }
-    const verdict = assessExtractedText(text, "the converter produced no text");
-    if (verdict.ok) return { text: text.trim(), via: id };
-    lastReason = verdict.reason;
-  }
-  return { text: "", reason: lastReason ?? "no document converter available" };
-}
-
 // src/pdf/native.ts
-import { inflateSync, inflateRawSync } from "zlib";
+import { inflateRawSync, inflateSync } from "zlib";
+var MAX_STREAM_BYTES = 32 * 1024 * 1024;
+var MAX_TOTAL_BYTES = 128 * 1024 * 1024;
+var DICT_WINDOW = 4096;
+var WIN_ANSI_C1 = [
+  8364,
+  8226,
+  8218,
+  402,
+  8222,
+  8230,
+  8224,
+  8225,
+  710,
+  8240,
+  352,
+  8249,
+  338,
+  8226,
+  381,
+  8226,
+  8226,
+  8216,
+  8217,
+  8220,
+  8221,
+  8226,
+  8211,
+  8212,
+  732,
+  8482,
+  353,
+  8250,
+  339,
+  8226,
+  382,
+  376
+];
+var winAnsi = (c) => {
+  const code = c.charCodeAt(0);
+  return code === 127 ? "\u2022" : String.fromCharCode(WIN_ANSI_C1[code - 128]);
+};
+var ESCAPES = { n: "\n", r: "\r", t: "	", b: "\b", f: "\f", "(": "(", ")": ")", "\\": "\\" };
 function decodePdfString(tok) {
-  if (tok[0] !== "(") return "";
-  const inner = tok.slice(1, -1);
-  const simple = { n: "\n", r: "\r", t: "	", b: "\b", f: "\f", "(": "(", ")": ")", "\\": "\\" };
-  return inner.replace(/\\([nrtbf()\\])/g, (_m, c) => simple[c] ?? c).replace(/\\([0-7]{1,3})/g, (_m, o) => String.fromCharCode(parseInt(o, 8) & 255));
+  return tok.slice(1, -1).replace(/\\(?:([nrtbf()\\])|([0-7]{1,3})|(\r\n|\r|\n)|([\s\S]))/g, (_m, esc, oct, _eol, other) => {
+    if (esc) return ESCAPES[esc];
+    if (oct) return String.fromCharCode(parseInt(oct, 8) & 255);
+    return other ?? "";
+  });
 }
 function decodeHexString(tok) {
   const hex = tok.slice(1, -1).replace(/\s+/g, "");
@@ -793,78 +1047,250 @@ function decodeHexString(tok) {
   return out;
 }
 function decodeString(tok) {
-  return tok[0] === "<" ? decodeHexString(tok) : decodePdfString(tok);
+  const bytes = tok[0] === "<" ? decodeHexString(tok) : decodePdfString(tok);
+  return bytes.replace(/[\x7f-\x9f]/g, winAnsi);
 }
-function decodeTJArray(tok) {
+function decodeTJArray(items) {
   let out = "";
-  const re = /\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]*>|-?\d+(?:\.\d+)?/g;
-  let m;
-  while (m = re.exec(tok)) {
-    const t = m[0];
-    if (t[0] === "(" || t[0] === "<") out += decodeString(t);
-    else if (Number(t) <= -100) out += " ";
+  for (const item of items) {
+    if (typeof item === "string") out += decodeString(item);
+    else if (item <= -100) out += " ";
   }
   return out;
 }
-var TOKEN_RE = /\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]*>|\[(?:\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]*>|[^\]])*\]|\bT\*|\bTd\b|\bTD\b|\bTj\b|\bTJ\b|'|"/g;
-function extractTextOps(content) {
+var isWhite = (c) => c === 32 || c === 10 || c === 13 || c === 9 || c === 12 || c === 0;
+var isDelimiter = (c) => c === 40 || c === 41 || c === 60 || c === 62 || c === 91 || c === 93 || c === 123 || c === 125 || c === 47 || c === 37;
+var isHexDigit = (c) => c >= 48 && c <= 57 || c >= 65 && c <= 70 || c >= 97 && c <= 102;
+var isNumberChar = (c) => c >= 48 && c <= 57 || c === 45 || c === 43 || c === 46;
+var Lexer = class {
+  constructor(s) {
+    this.s = s;
+  }
+  s;
+  // Cleared by the first literal string whose parentheses never balance: from
+  // then on strings are read flat, which is what every string was before
+  // nesting was supported, and costs no more than the next parenthesis.
+  nested = true;
+  // Cleared by the first array that runs to the end of the stream. Every later
+  // `[` is scanned through the same segmentation and reaches the same end, so
+  // scanning them would re-pay the whole stream each time.
+  arrays = true;
+  /** End (exclusive) of the literal string opening at `i`, or -1. */
+  stringEnd(i) {
+    const s = this.s;
+    if (this.nested) {
+      let depth = 0;
+      for (let j = i; j < s.length; j++) {
+        const c = s.charCodeAt(j);
+        if (c === 92) j++;
+        else if (c === 40) depth++;
+        else if (c === 41 && --depth === 0) return j + 1;
+      }
+      this.nested = false;
+    }
+    for (let j = i + 1; j < s.length; j++) {
+      const c = s.charCodeAt(j);
+      if (c === 92) j++;
+      else if (c === 41) return j + 1;
+      else if (c === 40) return -1;
+    }
+    return -1;
+  }
+  /** End (exclusive) of the hex string opening at `i`, or -1. */
+  hexEnd(i) {
+    const s = this.s;
+    for (let j = i + 1; j < s.length; j++) {
+      const c = s.charCodeAt(j);
+      if (c === 62) return j + 1;
+      if (!isHexDigit(c) && !isWhite(c)) return -1;
+    }
+    return -1;
+  }
+  /**
+   * The array opening at `i`: its strings and numbers, and where it ends.
+   *
+   * A `]` inside one of its strings does not close it. That detail is
+   * load-bearing: `[(] and gated recurrent [)-250(7)]` truncated at the inner
+   * `]` silently dropped the rest of the array — on a real paper, whole clauses
+   * from the middle of sentences, leaving fluent, citable prose.
+   */
+  array(i) {
+    if (!this.arrays) return void 0;
+    const s = this.s;
+    const items = [];
+    for (let j = i + 1; j < s.length; ) {
+      const c = s.charCodeAt(j);
+      if (c === 93) return { end: j + 1, items };
+      const end = c === 40 ? this.stringEnd(j) : c === 60 ? this.hexEnd(j) : -1;
+      if (end > 0) {
+        items.push(s.slice(j, end));
+        j = end;
+      } else if (isNumberChar(c)) {
+        let e = j + 1;
+        while (e < s.length && isNumberChar(s.charCodeAt(e))) e++;
+        items.push(Number(s.slice(j, e)));
+        j = e;
+      } else j++;
+    }
+    this.arrays = false;
+    return void 0;
+  }
+};
+function inlineImageEnd(s, from) {
+  for (let k = s.indexOf("EI", from); k >= 0; k = s.indexOf("EI", k + 1)) {
+    const after = k + 2 >= s.length || isWhite(s.charCodeAt(k + 2)) || isDelimiter(s.charCodeAt(k + 2));
+    if (isWhite(s.charCodeAt(k - 1)) && after) return k + 2;
+  }
+  return s.length;
+}
+function extractTextOps(s) {
+  const lexer = new Lexer(s);
   let out = "";
   let operands = [];
   const take = () => {
-    for (let i = operands.length - 1; i >= 0; i--) {
-      const t = operands[i];
-      if (t[0] === "(" || t[0] === "<") return decodeString(t);
-      if (t[0] === "[") return decodeTJArray(t);
-    }
-    return "";
+    const last = operands[operands.length - 1];
+    if (last === void 0) return "";
+    return typeof last === "string" ? decodeString(last) : decodeTJArray(last);
   };
-  TOKEN_RE.lastIndex = 0;
-  let m;
-  while (m = TOKEN_RE.exec(content)) {
-    const tok = m[0];
-    const c = tok[0];
-    if (c === "(" || c === "<" || c === "[") {
-      operands.push(tok);
+  let i = 0;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c === 40 || c === 60 && s.charCodeAt(i + 1) !== 60) {
+      const end2 = c === 40 ? lexer.stringEnd(i) : lexer.hexEnd(i);
+      if (end2 > 0) {
+        operands.push(s.slice(i, end2));
+        i = end2;
+      } else i++;
       continue;
     }
-    if (tok === "Tj" || tok === "TJ") out += take() + " ";
-    else if (tok === "'" || tok === '"') out += "\n" + take() + " ";
-    else if (tok === "T*") out += "\n";
+    if (c === 91) {
+      const arr = lexer.array(i);
+      if (arr) {
+        operands.push(arr.items);
+        i = arr.end;
+      } else i++;
+      continue;
+    }
+    if (c === 37) {
+      while (i < s.length && s.charCodeAt(i) !== 10 && s.charCodeAt(i) !== 13) i++;
+      continue;
+    }
+    if (isWhite(c) || isDelimiter(c)) {
+      i++;
+      continue;
+    }
+    let end = i + 1;
+    while (end < s.length && !isWhite(s.charCodeAt(end)) && !isDelimiter(s.charCodeAt(end))) end++;
+    const word = s.slice(i, end);
+    i = end;
+    if (word === "Tj" || word === "TJ") out += take() + " ";
+    else if (word === "'" || word === '"') out += "\n" + take() + " ";
+    else if (word === "T*") out += "\n";
+    else if (word === "ID") i = inlineImageEnd(s, i);
+    else if (word !== "Td" && word !== "TD") continue;
     operands = [];
   }
   return out;
 }
-function extractStreams(buf) {
+function ascii85Decode(text) {
   const out = [];
+  let group = 0;
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 126) break;
+    if (isWhite(c)) continue;
+    if (c === 122 && count === 0) {
+      out.push(0, 0, 0, 0);
+      continue;
+    }
+    if (c < 33 || c > 117) return void 0;
+    group = group * 85 + (c - 33);
+    if (++count === 5) {
+      out.push(group >>> 24 & 255, group >>> 16 & 255, group >>> 8 & 255, group & 255);
+      group = 0;
+      count = 0;
+    }
+  }
+  if (count === 1) return void 0;
+  if (count > 1) {
+    for (let k = count; k < 5; k++) group = group * 85 + 84;
+    const bytes = [group >>> 24 & 255, group >>> 16 & 255, group >>> 8 & 255, group & 255];
+    out.push(...bytes.slice(0, count - 1));
+  }
+  return Buffer.from(out);
+}
+function asciiHexDecode(text) {
+  const end = text.indexOf(">");
+  const hex = (end < 0 ? text : text.slice(0, end)).replace(/[^0-9A-Fa-f]/g, "");
+  return Buffer.from(hex.length % 2 ? `${hex}0` : hex, "hex");
+}
+var TOO_BIG = /* @__PURE__ */ Symbol("too big");
+function inflateCapped(data, cap) {
+  for (const inflate of [inflateSync, inflateRawSync]) {
+    try {
+      return inflate(data, { maxOutputLength: cap });
+    } catch (e) {
+      if (e.code === "ERR_BUFFER_TOO_LARGE") return TOO_BIG;
+    }
+  }
+  return void 0;
+}
+function filtersOf(dict) {
+  const m = /\/Filter\s*(\[[^\]]*\]|\/[^\s/<>[\]()]+)/.exec(dict);
+  return m ? (m[1].match(/\/[^\s/<>[\]()]+/g) ?? []).map((f) => f.slice(1)) : void 0;
+}
+var NOT_TEXT_RE = /\/Subtype\s*\/Image\b|\/Length[123]\b/;
+function* contentStreams(buf) {
   const s = buf.toString("latin1");
-  const re = /stream\r?\n/g;
+  const re = /(?<!end)stream\r?\n/g;
+  let budget = MAX_TOTAL_BYTES;
+  let previousEnd = 0;
   let m;
-  while (m = re.exec(s)) {
+  while (budget > 0 && (m = re.exec(s))) {
     const start = m.index + m[0].length;
     const end = s.indexOf("endstream", start);
-    if (end < 0) continue;
+    if (end < 0) return;
+    re.lastIndex = end + "endstream".length;
+    const window = s.slice(Math.max(previousEnd, m.index - DICT_WINDOW), m.index);
+    previousEnd = re.lastIndex;
+    const dict = window.slice(window.lastIndexOf("obj") + 1);
+    if (NOT_TEXT_RE.test(dict)) continue;
     let stop = end;
     if (s[stop - 1] === "\n") stop--;
     if (s[stop - 1] === "\r") stop--;
-    const chunk = buf.subarray(start, stop);
-    let data;
-    try {
-      data = inflateSync(chunk);
-    } catch {
-      try {
-        data = inflateRawSync(chunk);
-      } catch {
-        data = chunk;
+    let data = buf.subarray(start, stop);
+    const filters = filtersOf(dict);
+    if (filters) {
+      for (const f of filters) {
+        if (!data) break;
+        if (f === "ASCII85Decode" || f === "A85") data = ascii85Decode(data.toString("latin1"));
+        else if (f === "ASCIIHexDecode" || f === "AHx") data = asciiHexDecode(data.toString("latin1"));
+        else if (f === "FlateDecode" || f === "Fl") {
+          const cap = Math.min(MAX_STREAM_BYTES, budget);
+          const inflated = inflateCapped(data, cap);
+          if (inflated === TOO_BIG) budget -= cap;
+          data = inflated instanceof Buffer ? inflated : void 0;
+        } else data = void 0;
       }
+    } else {
+      if (/~>\s*$/.test(s.slice(Math.max(start, stop - 8), stop))) data = ascii85Decode(data.toString("latin1")) ?? data;
+      const cap = Math.min(MAX_STREAM_BYTES, budget);
+      const inflated = inflateCapped(data, cap);
+      if (inflated === TOO_BIG) {
+        budget -= cap;
+        data = void 0;
+      } else if (inflated) data = inflated;
     }
-    out.push(data.toString("latin1"));
+    if (!data) continue;
+    budget -= data.length;
+    yield data.toString("latin1");
   }
-  return out;
 }
 function pdfToText(buf) {
   let out = "";
   try {
-    for (const stream of extractStreams(buf)) {
+    for (const stream of contentStreams(buf)) {
       if (/\b(Tj|TJ)\b/.test(stream) || /\)\s*'/.test(stream)) out += extractTextOps(stream) + "\n";
     }
   } catch {
@@ -873,7 +1299,7 @@ function pdfToText(buf) {
 }
 
 // src/pdf/ocr.ts
-import { mkdtempSync, readFileSync as readFileSync6, rmSync, writeFileSync as writeFileSync3, existsSync } from "fs";
+import { mkdtempSync, readFileSync as readFileSync7, rmSync, writeFileSync as writeFileSync3, existsSync } from "fs";
 import { join as join7 } from "path";
 import { tmpdir } from "os";
 var DEFAULT_TIMEOUT_MS = 3e5;
@@ -898,6 +1324,8 @@ async function ocrPdf(bytes) {
   if (ocrBudgetLeft() <= 0) return void 0;
   const { copyablePdf, tesseract } = await ocrTools();
   if (!copyablePdf || !tesseract) return void 0;
+  if (ocrBudgetLeft() <= 0) return void 0;
+  spent++;
   const dir = mkdtempSync(join7(tmpdir(), `${brand().name}-ocr-`));
   try {
     const input = join7(dir, "in.pdf");
@@ -905,10 +1333,10 @@ async function ocrPdf(bytes) {
     writeFileSync3(input, bytes);
     const lang = env("OCR_LANG") || DEFAULT_LANG;
     const r = await runWithInput("copyable-pdf", ["-o", output, "-m", "-l", lang, input], Buffer.alloc(0), envInt("OCR_TIMEOUT_MS", DEFAULT_TIMEOUT_MS));
-    spent++;
+    if (r.error === "not installed") spent = Math.max(0, spent - 1);
     if (!r.ok) return void 0;
     const md = output.replace(/\.pdf$/, ".md");
-    return existsSync(md) ? readFileSync6(md, "utf8") : void 0;
+    return existsSync(md) ? readFileSync7(md, "utf8") : void 0;
   } catch {
     return void 0;
   } finally {
@@ -918,56 +1346,964 @@ async function ocrPdf(bytes) {
 
 // src/pdf/ladder.ts
 var PDF_EXTRACTORS = ["pdf-inspector", "anydoc", "firecrawl", "pdftotext", "native", "ocr"];
-var NPX_TIMEOUT_MS2 = 9e4;
 var PDFTOTEXT_TIMEOUT_MS = 6e4;
-var dead2 = /* @__PURE__ */ new Set();
+var dead = /* @__PURE__ */ new Map();
+var warnedEngineValues = /* @__PURE__ */ new Set();
+function enginesFromEnv(name, known) {
+  const raw = env(name)?.trim();
+  if (!raw) return void 0;
+  const asked = raw.toLowerCase().split(",").map((s) => s.trim()).filter(Boolean);
+  if (asked.length === 1 && asked[0] === "none") return [];
+  const picked = [...new Set(asked.filter((s) => known.includes(s)))];
+  const unknown = asked.filter((s) => !known.includes(s));
+  if (unknown.length && !warnedEngineValues.has(`${name}=${raw}`)) {
+    warnedEngineValues.add(`${name}=${raw}`);
+    const fallback = picked.length ? "" : " \u2014 using the full ladder";
+    process.emitWarning(`${envName(name)}: ignoring unknown rung ${unknown.map((u) => `"${u}"`).join(", ")} (known: ${known.join(", ")}, or none)${fallback}`);
+  }
+  return picked.length ? picked : void 0;
+}
 function enabledExtractors(engines) {
   if (engines) return engines;
-  const forced = env("PDF_ENGINE");
-  if (forced && PDF_EXTRACTORS.includes(forced)) return [forced];
+  const chosen = enginesFromEnv("PDF_ENGINE", PDF_EXTRACTORS);
+  if (chosen) return chosen;
   if (envFlag("NO_NPX")) return PDF_EXTRACTORS.filter((e) => e !== "pdf-inspector" && e !== "anydoc");
   return PDF_EXTRACTORS;
 }
-async function viaAnydoc2(bytes) {
-  const r = await runWithInput("npx", ["-y", "--prefer-offline", ANYDOC_SPEC, "-", "--format", "pdf"], bytes, NPX_TIMEOUT_MS2);
-  return r.ok ? r.stdout : void 0;
-}
-async function viaPdfInspector(bytes) {
-  const r = await runWithInput("npx", ["-y", "--prefer-offline", PDF_INSPECTOR_SPEC, "-"], bytes, NPX_TIMEOUT_MS2);
-  return r.ok ? r.stdout : void 0;
+async function viaNpx(id, spec, args, bytes) {
+  const r = await runNpx(spec, args, bytes);
+  if (r.ok) return { text: r.stdout };
+  if (r.unavailable === "not installed") return { unavailable: true };
+  if (r.unavailable) return { unavailable: true, failure: `${id} ${r.unavailable}`, hint: skipNpxHint() };
+  return { failure: failureDetail(id, r) };
 }
 async function viaPdftotext(bytes) {
   const r = await runWithInput("pdftotext", ["-layout", "-", "-"], bytes, PDFTOTEXT_TIMEOUT_MS);
-  return r.ok ? r.stdout : void 0;
+  if (r.ok) return { text: r.stdout.replace(/\f/g, "\n\n") };
+  return r.error === "not installed" ? { unavailable: true } : { failure: failureDetail("pdftotext", r) };
+}
+async function viaOcr(bytes) {
+  const text = await ocrPdf(bytes);
+  if (text !== void 0) return { text };
+  const { copyablePdf, tesseract } = await ocrTools();
+  if (!copyablePdf || !tesseract) return { unavailable: true };
+  if (ocrBudgetLeft() <= 0) return {};
+  return { failure: "ocr: the conversion failed on this document" };
+}
+async function runRung(id, bytes, opts) {
+  try {
+    if (id === "pdf-inspector") return await viaNpx(id, PDF_INSPECTOR_SPEC, ["-"], bytes);
+    if (id === "anydoc") return await viaNpx(id, ANYDOC_SPEC, ["-", "--format", "pdf"], bytes);
+    if (id === "pdftotext") return await viaPdftotext(bytes);
+    if (id === "ocr") return await viaOcr(bytes);
+    if (id === "firecrawl") {
+      const text = opts.firecrawl ? await opts.firecrawl() : void 0;
+      return text === void 0 ? {} : { text };
+    }
+    return { text: pdfToText(bytes) };
+  } catch {
+    return {};
+  }
 }
 async function extractPdf(bytes, opts = {}) {
+  if (!bytes.subarray(0, 1024).includes("%PDF-")) {
+    return { text: "", reason: "not a PDF (no %PDF- header \u2014 an error page or a login wall?)" };
+  }
   let lastReason;
+  const failures = [];
+  const hints = /* @__PURE__ */ new Set();
+  let ocrMissing = false;
+  const noteFailure = (id, got) => {
+    if (id === "ocr" && got.unavailable) ocrMissing = true;
+    else if (got.failure) failures.push(got.failure);
+    if (got.hint) hints.add(got.hint);
+  };
   for (const id of enabledExtractors(opts.engines)) {
-    if (dead2.has(id)) continue;
+    const known = dead.get(id);
+    if (known) {
+      noteFailure(id, known);
+      continue;
+    }
     if (id === "ocr" && ocrBudgetLeft() <= 0) {
       lastReason = `scanned PDF, and this run's OCR budget is spent (raise ${envName("OCR_MAX")})`;
       continue;
     }
-    let text;
-    try {
-      if (id === "pdf-inspector") text = await viaPdfInspector(bytes);
-      else if (id === "anydoc") text = await viaAnydoc2(bytes);
-      else if (id === "pdftotext") text = await viaPdftotext(bytes);
-      else if (id === "firecrawl") text = opts.firecrawl ? await opts.firecrawl() : void 0;
-      else if (id === "ocr") text = await ocrPdf(bytes);
-      else text = pdfToText(bytes);
-    } catch {
-      text = void 0;
-    }
-    if (text === void 0) {
-      if (id !== "firecrawl") dead2.add(id);
+    const got = await runRung(id, bytes, opts);
+    if (got.text === void 0) {
+      if (got.unavailable) dead.set(id, got);
+      noteFailure(id, got);
       continue;
     }
-    const verdict = assessPdfText(text);
-    if (verdict.ok) return { text: text.trim(), via: id };
+    const verdict = assessPdfText(got.text);
+    if (verdict.ok) return { text: got.text.trim(), via: id };
     lastReason = verdict.reason;
   }
-  return { text: "", reason: lastReason ?? "no PDF extractor available" };
+  if (lastReason === NO_TEXT_LAYER) {
+    if (bytes.includes("/Encrypt")) lastReason = "encrypted PDF (no rung here could decrypt its text)";
+    else if (ocrMissing) lastReason = `${NO_TEXT_LAYER} \u2014 install copyable-pdf and tesseract to OCR it`;
+  }
+  const reason = [...new Set([lastReason, ...failures, ...hints].filter(Boolean))].join("; ");
+  return { text: "", reason: reason || "no PDF extractor available" };
+}
+
+// src/doc/office.ts
+import { inflateRawSync as inflateRawSync2 } from "zlib";
+var MAX_ENTRIES = 1e4;
+var MAX_ENTRY_BYTES = 64 * 1024 * 1024;
+var MAX_TOTAL_BYTES2 = 256 * 1024 * 1024;
+var MAX_OUTPUT_CHARS = 24 * 1024 * 1024;
+var MAX_COLUMNS = 256;
+var MAX_REPEAT = 1e3;
+var Refused = class extends Error {
+};
+var Zip = class {
+  constructor(buf, entries) {
+    this.buf = buf;
+    this.entries = entries;
+  }
+  buf;
+  entries;
+  inflated = 0;
+  has(name) {
+    return this.entries.has(name);
+  }
+  /** An entry's bytes, or undefined when there is no such entry. Throws Refused on anything it will not read. */
+  read(name) {
+    const e = this.entries.get(name);
+    if (!e) return void 0;
+    if (e.flags & 1) throw new Refused("encrypted ZIP entries");
+    if (e.compressedSize === 4294967295 || e.size === 4294967295 || e.localHeader === 4294967295) throw new Refused("ZIP64 archives are not supported");
+    const buf = this.buf;
+    const lh = e.localHeader;
+    if (lh + 30 > buf.length || buf.readUInt32LE(lh) !== 67324752) throw new Refused("truncated or corrupt ZIP archive");
+    const start = lh + 30 + buf.readUInt16LE(lh + 26) + buf.readUInt16LE(lh + 28);
+    const end = start + e.compressedSize;
+    if (end > buf.length) throw new Refused("truncated or corrupt ZIP archive");
+    const cap = Math.min(MAX_ENTRY_BYTES, MAX_TOTAL_BYTES2 - this.inflated);
+    const tooLarge = () => new Refused(
+      cap < MAX_ENTRY_BYTES ? `the archive inflates past ${MAX_TOTAL_BYTES2 >> 20} MB` : `an entry inflates past ${MAX_ENTRY_BYTES >> 20} MB (a decompression bomb?)`
+    );
+    if (cap <= 0) throw tooLarge();
+    let out;
+    if (e.method === 0) {
+      if (e.compressedSize > cap) throw tooLarge();
+      out = buf.subarray(start, end);
+    } else if (e.method === 8) {
+      try {
+        out = inflateRawSync2(buf.subarray(start, end), { maxOutputLength: cap });
+      } catch (err) {
+        throw err.code === "ERR_BUFFER_TOO_LARGE" ? tooLarge() : new Refused("truncated or corrupt ZIP archive");
+      }
+    } else {
+      throw new Refused(`unsupported ZIP compression method ${e.method}`);
+    }
+    this.inflated += out.length;
+    return out;
+  }
+  /** An XML part as text: UTF-8, or UTF-16LE when it says so with a BOM. */
+  text(name) {
+    const b = this.read(name);
+    if (!b) return void 0;
+    if (b[0] === 255 && b[1] === 254) return b.subarray(2).toString("utf16le");
+    const s = b.toString("utf8");
+    return s.charCodeAt(0) === 65279 ? s.slice(1) : s;
+  }
+};
+function openZip(buf) {
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 65535); i--) {
+    if (buf.readUInt32LE(i) === 101010256) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0)
+    throw new Refused(buf.subarray(0, 4).toString("latin1") === "PK" ? "truncated or corrupt ZIP archive" : "not an OOXML or OpenDocument file");
+  if (eocd >= 20 && buf.readUInt32LE(eocd - 20) === 117853008) throw new Refused("ZIP64 archives are not supported");
+  const count = buf.readUInt16LE(eocd + 10);
+  const dirSize = buf.readUInt32LE(eocd + 12);
+  const dirOffset = buf.readUInt32LE(eocd + 16);
+  if (count === 65535 || dirSize === 4294967295 || dirOffset === 4294967295) throw new Refused("ZIP64 archives are not supported");
+  if (count > MAX_ENTRIES) throw new Refused(`more than ${MAX_ENTRIES} ZIP entries`);
+  if (dirOffset + dirSize > eocd) throw new Refused("truncated or corrupt ZIP archive");
+  const entries = /* @__PURE__ */ new Map();
+  let p = dirOffset;
+  for (let n = 0; n < count; n++) {
+    if (p + 46 > eocd || buf.readUInt32LE(p) !== 33639248) throw new Refused("truncated or corrupt ZIP archive");
+    const nameLength = buf.readUInt16LE(p + 28);
+    const next = p + 46 + nameLength + buf.readUInt16LE(p + 30) + buf.readUInt16LE(p + 32);
+    if (next > eocd) throw new Refused("truncated or corrupt ZIP archive");
+    entries.set(buf.toString("utf8", p + 46, p + 46 + nameLength), {
+      flags: buf.readUInt16LE(p + 8),
+      method: buf.readUInt16LE(p + 10),
+      compressedSize: buf.readUInt32LE(p + 20),
+      size: buf.readUInt32LE(p + 24),
+      localHeader: buf.readUInt32LE(p + 42)
+    });
+    p = next;
+  }
+  return new Zip(buf, entries);
+}
+var Budget = class {
+  left = MAX_OUTPUT_CHARS;
+  /** Spend `n` characters: false, and nothing spent, once they no longer fit — the caller drops them. */
+  take(n) {
+    if (n > this.left) {
+      this.left = 0;
+      return false;
+    }
+    this.left -= n;
+    return true;
+  }
+  get spent() {
+    return this.left <= 0;
+  }
+};
+var ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+function decodeXml(s) {
+  if (!s.includes("&")) return s;
+  return s.replace(/&(?:#x([0-9a-fA-F]{1,6})|#([0-9]{1,7})|([a-zA-Z]{2,4}));/g, (m, hex, dec, name) => {
+    if (name) return ENTITIES[name] ?? m;
+    const cp = hex ? parseInt(hex, 16) : Number(dec);
+    return cp > 0 && cp <= 1114111 ? String.fromCodePoint(cp) : m;
+  });
+}
+var local = (name) => name.slice(name.indexOf(":") + 1);
+function walkXml(xml, v) {
+  let i = 0;
+  while (i < xml.length) {
+    const lt = xml.indexOf("<", i);
+    const textEnd = lt < 0 ? xml.length : lt;
+    if (textEnd > i && v.text) v.text(decodeXml(xml.slice(i, textEnd)));
+    if (lt < 0) return;
+    if (xml.startsWith("<!--", lt)) {
+      const end = xml.indexOf("-->", lt + 4);
+      if (end < 0) return;
+      i = end + 3;
+      continue;
+    }
+    if (xml.startsWith("<![CDATA[", lt)) {
+      const end = xml.indexOf("]]>", lt + 9);
+      if (end < 0) return;
+      v.text?.(xml.slice(lt + 9, end));
+      i = end + 3;
+      continue;
+    }
+    const gt = xml.indexOf(">", lt + 1);
+    if (gt < 0) return;
+    i = gt + 1;
+    const first = xml.charCodeAt(lt + 1);
+    if (first === 63 || first === 33) continue;
+    if (first === 47) {
+      v.close?.(xml.slice(lt + 2, gt).trim());
+      continue;
+    }
+    const selfClosing = xml.charCodeAt(gt - 1) === 47;
+    const body = xml.slice(lt + 1, selfClosing ? gt - 1 : gt);
+    const space = body.search(/\s/);
+    const name = space < 0 ? body : body.slice(0, space);
+    v.open?.(name, space < 0 ? "" : body.slice(space));
+    if (selfClosing) v.close?.(name);
+  }
+}
+var attrPatterns = /* @__PURE__ */ new Map();
+function attr(attrs, name) {
+  let re = attrPatterns.get(name);
+  if (!re) {
+    const key = name.startsWith("*:") ? `[\\w.-]+:${name.slice(2)}` : name.replace(/[.]/g, "\\.");
+    re = new RegExp(`(?:^|\\s)${key}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`);
+    attrPatterns.set(name, re);
+  }
+  const m = re.exec(attrs);
+  return m ? decodeXml(m[1] ?? m[2] ?? "") : void 0;
+}
+var cell = (s) => s.replace(/\s+/g, " ").trim().replace(/\|/g, "\\|");
+function markdownTable(rows) {
+  let last = rows.length;
+  while (last > 0 && rows[last - 1].every((c) => !c.trim())) last--;
+  let width = 0;
+  for (let r = 0; r < last; r++) {
+    const row = rows[r];
+    for (let c = Math.min(row.length, MAX_COLUMNS) - 1; c >= width; c--) {
+      if (row[c]?.trim()) {
+        width = c + 1;
+        break;
+      }
+    }
+  }
+  if (!last || !width) return "";
+  const line = (row) => `| ${Array.from({ length: width }, (_, c) => cell(row[c] ?? "")).join(" | ")} |`;
+  const out = [line(rows[0]), `|${" --- |".repeat(width)}`];
+  let size = 0;
+  for (let r = 1; r < last && size < MAX_OUTPUT_CHARS; r++) {
+    const l = line(rows[r]);
+    size += l.length;
+    out.push(l);
+  }
+  return out.join("\n");
+}
+function joinBlocks(blocks) {
+  const out = [];
+  for (const [i, block] of blocks.entries()) {
+    if (i) out.push(block.startsWith("- ") && blocks[i - 1].startsWith("- ") ? "\n" : "\n\n");
+    out.push(block);
+  }
+  return out.join("");
+}
+function relationships(zip, part) {
+  const slash = part.lastIndexOf("/");
+  const dir = part.slice(0, slash + 1);
+  const rels = /* @__PURE__ */ new Map();
+  const xml = zip.text(`${dir}_rels/${part.slice(slash + 1)}.rels`);
+  if (!xml) return rels;
+  walkXml(xml, {
+    open(name, attrs) {
+      if (local(name) !== "Relationship" || attr(attrs, "TargetMode") === "External") return;
+      const id = attr(attrs, "Id");
+      const target = attr(attrs, "Target");
+      if (id && target) rels.set(id, { target: resolvePart(dir, target), type: attr(attrs, "Type") ?? "" });
+    }
+  });
+  return rels;
+}
+function relatedPart(rels, type) {
+  for (const r of rels.values()) if (r.type.endsWith(`/${type}`)) return r.target;
+  return void 0;
+}
+function resolvePart(dir, target) {
+  const segments = [];
+  for (const s of (target.startsWith("/") ? target.slice(1) : dir + target).split("/")) {
+    if (s === "..") segments.pop();
+    else if (s && s !== ".") segments.push(s);
+  }
+  return segments.join("/");
+}
+var HEADING_STYLE_RE = /^(?:heading|titre|berschrift|überschrift|kop|titolo|encabezado|ttulo|título)\s?([1-6])$/i;
+var TITLE_STYLE_RE = /^(?:title|titel|titre|titolo|ttulo|título)$/i;
+var LIST_STYLE_RE = /^list ?(?:bullet|number)/i;
+function stylePrefix(name, outline) {
+  const level = HEADING_STYLE_RE.exec(name)?.[1] ?? (outline !== void 0 && outline >= 0 && outline < 6 ? String(outline + 1) : void 0);
+  if (level) return `${"#".repeat(Number(level))} `;
+  if (TITLE_STYLE_RE.test(name)) return "# ";
+  if (LIST_STYLE_RE.test(name)) return "- ";
+  return void 0;
+}
+function wordStyles(xml) {
+  if (!xml) return void 0;
+  const styles = /* @__PURE__ */ new Map();
+  let current2;
+  walkXml(xml, {
+    open(name, attrs) {
+      const n = local(name);
+      if (n === "style") {
+        const id = attr(attrs, "w:styleId");
+        current2 = id && attr(attrs, "w:type") === "paragraph" ? { name: "" } : void 0;
+        if (current2) styles.set(id, current2);
+      } else if (!current2) return;
+      else if (n === "name") current2.name = attr(attrs, "w:val") ?? "";
+      else if (n === "basedOn") current2.basedOn = attr(attrs, "w:val");
+      else if (n === "outlineLvl") current2.outline = Number(attr(attrs, "w:val"));
+    },
+    close(name) {
+      if (local(name) === "style") current2 = void 0;
+    }
+  });
+  const prefixes = /* @__PURE__ */ new Map();
+  for (const [id, own] of styles) {
+    let style = own;
+    for (let depth = 0; style && depth < 16; depth++) {
+      const prefix = stylePrefix(style.name, style.outline);
+      if (prefix !== void 0) {
+        prefixes.set(id, prefix);
+        break;
+      }
+      style = style.basedOn ? styles.get(style.basedOn) : void 0;
+    }
+    if (!prefixes.has(id)) prefixes.set(id, "");
+  }
+  return prefixes;
+}
+function wordText(xml, budget, styles) {
+  const blocks = [];
+  const paragraphs = [];
+  const tables = [];
+  let inText = 0;
+  let fallback = 0;
+  let tabStops = 0;
+  const add = (p, s) => {
+    if (p && budget.take(s.length)) p.text += s;
+  };
+  const emit = (block) => {
+    const table = tables[tables.length - 1];
+    if (table?.cell) table.cell.push(block);
+    else if (block.trim()) blocks.push(block);
+  };
+  walkXml(xml, {
+    open(name, attrs) {
+      const n = local(name);
+      if (n === "Fallback") fallback++;
+      else if (n === "tabs") tabStops++;
+      if (fallback) return;
+      const p = paragraphs[paragraphs.length - 1];
+      const table = tables[tables.length - 1];
+      if (n === "p") paragraphs.push({ text: "", prefix: "" });
+      else if (n === "t") inText++;
+      else if (n === "tab" && !tabStops) add(p, "	");
+      else if (n === "br" || n === "cr") add(p, "\n");
+      else if (n === "noBreakHyphen") add(p, "-");
+      else if (n === "pStyle" && p) {
+        const id = attr(attrs, "w:val") ?? "";
+        const prefix = styles?.has(id) ? styles.get(id) : stylePrefix(id);
+        if (prefix) p.prefix = prefix;
+      } else if (n === "numPr" && p && !p.prefix) p.prefix = "- ";
+      else if (n === "tbl") tables.push({ rows: [] });
+      else if (n === "tr" && table) table.row = [];
+      else if (n === "tc" && table) table.cell = [];
+    },
+    close(name) {
+      const n = local(name);
+      if (n === "Fallback") {
+        fallback = Math.max(0, fallback - 1);
+        return;
+      }
+      if (n === "tabs") tabStops = Math.max(0, tabStops - 1);
+      if (fallback) return;
+      const table = tables[tables.length - 1];
+      if (n === "t") inText = Math.max(0, inText - 1);
+      else if (n === "p") {
+        const p = paragraphs.pop();
+        if (p?.text.trim()) emit(table?.cell ? p.text.trim() : p.prefix ? p.prefix + p.text.trim() : p.text.trimEnd());
+      } else if (n === "tc" && table?.row && table.cell) {
+        table.row.push(table.cell.join(" "));
+        table.cell = void 0;
+      } else if (n === "tr" && table?.row) {
+        table.rows.push(table.row);
+        table.row = void 0;
+      } else if (n === "tbl") {
+        const done = tables.pop();
+        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows));
+      }
+    },
+    text(s) {
+      if (!fallback && inText) add(paragraphs[paragraphs.length - 1], s);
+    }
+  });
+  return joinBlocks(blocks);
+}
+function sharedStrings(xml) {
+  const strings = [];
+  if (!xml) return strings;
+  let current2;
+  let inText = 0;
+  let phonetic = 0;
+  walkXml(xml, {
+    open(name) {
+      const n = local(name);
+      if (n === "si") current2 = "";
+      else if (n === "t") inText++;
+      else if (n === "rPh") phonetic++;
+    },
+    close(name) {
+      const n = local(name);
+      if (n === "si" && current2 !== void 0) {
+        strings.push(current2);
+        current2 = void 0;
+      } else if (n === "t") inText = Math.max(0, inText - 1);
+      else if (n === "rPh") phonetic = Math.max(0, phonetic - 1);
+    },
+    text(s) {
+      if (current2 !== void 0 && inText && !phonetic) current2 += s;
+    }
+  });
+  return strings;
+}
+function columnOf(ref) {
+  const letters = ref && /^[A-Za-z]{1,3}/.exec(ref)?.[0];
+  if (!letters) return void 0;
+  let col = 0;
+  for (const ch of letters.toUpperCase()) col = col * 26 + (ch.charCodeAt(0) - 64);
+  return col - 1;
+}
+var BUILTIN_TEMPORAL = {
+  14: "date",
+  15: "date",
+  16: "date",
+  17: "date",
+  18: "time",
+  19: "time",
+  20: "time",
+  21: "time",
+  22: "datetime",
+  45: "time",
+  47: "time"
+};
+function temporalOf(code) {
+  if (code.length > 255 || /\[[hms]+\]/i.test(code)) return void 0;
+  const bare = code.replace(/"[^"]*"|[\\_*].|\[[^[\]]*\]|General|E[+-]/gi, "");
+  const time = /[hs]/i.test(bare);
+  const date = /[yd]/i.test(bare) || !time && /m/i.test(bare);
+  return date && time ? "datetime" : date ? "date" : time ? "time" : void 0;
+}
+function cellTemporals(xml) {
+  const kinds = [];
+  if (!xml) return kinds;
+  const custom = /* @__PURE__ */ new Map();
+  let cellXfs = false;
+  walkXml(xml, {
+    open(name, attrs) {
+      const n = local(name);
+      if (n === "numFmt") custom.set(Number(attr(attrs, "numFmtId")), temporalOf(attr(attrs, "formatCode") ?? ""));
+      else if (n === "cellXfs") cellXfs = true;
+      else if (n === "xf" && cellXfs) {
+        const id = Number(attr(attrs, "numFmtId") ?? 0);
+        kinds.push(custom.has(id) ? custom.get(id) : BUILTIN_TEMPORAL[id]);
+      }
+    },
+    close(name) {
+      if (local(name) === "cellXfs") cellXfs = false;
+    }
+  });
+  return kinds;
+}
+var DAY_MS = 864e5;
+var EXCEL_EPOCH = Date.UTC(1899, 11, 30);
+function serialDate(serial, kind, date1904) {
+  const days = date1904 ? serial + 1462 : serial < 60 ? serial + 1 : serial;
+  if (!(serial >= 0 && days <= 2958466)) return void 0;
+  const iso = new Date(Math.round((EXCEL_EPOCH + days * DAY_MS) / 1e3) * 1e3).toISOString();
+  const time = iso.slice(11, iso.endsWith(":00.000Z") ? 16 : 19);
+  return kind === "date" ? iso.slice(0, 10) : kind === "time" ? time : `${iso.slice(0, 10)} ${time}`;
+}
+function sheetRows(xml, shared, styles, budget) {
+  const rows = [];
+  let row;
+  let col = 0;
+  let type;
+  let style = 0;
+  let value;
+  let collecting = 0;
+  walkXml(xml, {
+    open(name, attrs) {
+      const n = local(name);
+      if (n === "row") row = [];
+      else if (n === "c" && row) {
+        col = columnOf(attr(attrs, "r")) ?? row.length;
+        type = attr(attrs, "t");
+        style = Number(attr(attrs, "s") ?? 0);
+        value = "";
+      } else if ((n === "v" || n === "t") && value !== void 0) collecting++;
+    },
+    close(name) {
+      const n = local(name);
+      if ((n === "v" || n === "t") && collecting) collecting--;
+      else if (n === "c" && row && value !== void 0) {
+        let shown = value;
+        const kind = styles.temporal[style];
+        if (type === "s") shown = shared[Number(value)] ?? "";
+        else if (type === "b") shown = value === "1" ? "TRUE" : "FALSE";
+        else if (kind && (type === void 0 || type === "n") && value.trim()) shown = serialDate(Number(value), kind, styles.date1904) ?? value;
+        if (col < MAX_COLUMNS && shown && budget.take(shown.length)) {
+          while (row.length < col) row.push("");
+          row[col] = shown;
+        }
+        value = void 0;
+      } else if (n === "row" && row) {
+        rows.push(row);
+        row = void 0;
+      }
+    },
+    text(s) {
+      if (collecting && value !== void 0 && value.length < MAX_OUTPUT_CHARS) value += s;
+    }
+  });
+  return rows;
+}
+function spreadsheetText(zip, workbookPart, budget) {
+  const rels = relationships(zip, workbookPart);
+  const stringsPart = relatedPart(rels, "sharedStrings");
+  const shared = sharedStrings(stringsPart ? zip.text(stringsPart) : void 0);
+  const stylesPart = relatedPart(rels, "styles");
+  const styles = { temporal: cellTemporals(stylesPart ? zip.text(stylesPart) : void 0), date1904: false };
+  const sheets = [];
+  walkXml(zip.text(workbookPart) ?? "", {
+    open(name, attrs) {
+      const n = local(name);
+      const id = attr(attrs, "*:id");
+      if (n === "sheet" && id) sheets.push({ name: attr(attrs, "name") ?? `Sheet ${sheets.length + 1}`, id });
+      else if (n === "workbookPr") styles.date1904 = /^(?:1|true)$/i.test(attr(attrs, "date1904") ?? "");
+    }
+  });
+  const blocks = [];
+  for (const sheet of sheets) {
+    if (budget.spent) break;
+    const part = rels.get(sheet.id)?.target;
+    const xml = part ? zip.text(part) : void 0;
+    const table = xml ? markdownTable(sheetRows(xml, shared, styles, budget)) : "";
+    if (table) blocks.push(`## ${sheet.name}
+
+${table}`);
+  }
+  return blocks.join("\n\n");
+}
+function drawingText(xml, budget, onlyBody = false) {
+  const lines = [];
+  const titles = [];
+  const shapes = [];
+  const tables = [];
+  let para;
+  let inText = 0;
+  let fallback = 0;
+  const add = (s) => {
+    if (para !== void 0 && budget.take(s.length)) para += s;
+  };
+  const emit = (line) => {
+    const table = tables[tables.length - 1];
+    if (table?.cell) table.cell.push(line);
+    else if (shapes.length) shapes[shapes.length - 1].lines.push(line);
+    else if (!onlyBody) lines.push(line);
+  };
+  walkXml(xml, {
+    open(name, attrs) {
+      const n = local(name);
+      if (n === "Fallback") fallback++;
+      if (fallback) return;
+      const table = tables[tables.length - 1];
+      if (n === "sp") shapes.push({ kind: "other", lines: [] });
+      else if (n === "ph" && shapes.length) {
+        const type = attr(attrs, "type");
+        shapes[shapes.length - 1].kind = type === "title" || type === "ctrTitle" ? "title" : type === "body" ? "body" : "other";
+      } else if (n === "p" && name.startsWith("a:")) para = "";
+      else if (n === "t") inText++;
+      else if (n === "br") add("\n");
+      else if (name === "a:tbl") tables.push({ rows: [] });
+      else if (name === "a:tr" && table) table.row = [];
+      else if (name === "a:tc" && table?.row) table.cell = [];
+    },
+    close(name) {
+      const n = local(name);
+      if (n === "Fallback") {
+        fallback = Math.max(0, fallback - 1);
+        return;
+      }
+      if (fallback) return;
+      const table = tables[tables.length - 1];
+      if (n === "t") inText = Math.max(0, inText - 1);
+      else if (n === "p" && name.startsWith("a:") && para !== void 0) {
+        const line = para.trim();
+        para = void 0;
+        if (line) emit(line);
+      } else if (name === "a:tc" && table?.row && table.cell) {
+        table.row.push(table.cell.join(" "));
+        table.cell = void 0;
+      } else if (name === "a:tr" && table?.row) {
+        table.rows.push(table.row);
+        table.row = void 0;
+      } else if (name === "a:tbl") {
+        const done = tables.pop();
+        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : `
+${markdownTable(done.rows)}
+`);
+      } else if (n === "sp") {
+        const shape = shapes.pop();
+        if (!shape) return;
+        if (shape.kind === "title" && !onlyBody) titles.push(shape.lines.join(" "));
+        else if (!onlyBody || shape.kind === "body") lines.push(...shape.lines);
+      }
+    },
+    text(s) {
+      if (!fallback && inText) add(s);
+    }
+  });
+  return { title: titles.join(" ").trim(), text: lines.join("\n").trim() };
+}
+function presentationText(zip, presentationPart, budget) {
+  const rels = relationships(zip, presentationPart);
+  const order = [];
+  walkXml(zip.text(presentationPart) ?? "", {
+    open(name, attrs) {
+      const target = local(name) === "sldId" ? rels.get(attr(attrs, "*:id") ?? "")?.target : void 0;
+      if (target) order.push(target);
+    }
+  });
+  const blocks = [];
+  for (const [i, part] of order.entries()) {
+    if (budget.spent) break;
+    const slide = drawingText(zip.text(part) ?? "", budget);
+    const notesPart = relatedPart(relationships(zip, part), "notesSlide");
+    const notes = notesPart ? drawingText(zip.text(notesPart) ?? "", budget, true).text : "";
+    const heading = `## Slide ${i + 1}${slide.title ? `: ${slide.title}` : ""}`;
+    if (slide.title || slide.text || notes) blocks.push(`${heading}${slide.text ? `
+
+${slide.text}` : ""}${notes ? `
+
+Notes: ${notes}` : ""}`);
+  }
+  return blocks.join("\n\n");
+}
+function openDocumentText(xml, budget) {
+  const blocks = [];
+  const paragraphs = [];
+  const tables = [];
+  let skip = 0;
+  let listItem = false;
+  let spreadsheet = false;
+  let slide = 0;
+  let heading = -1;
+  let titleFrame = 0;
+  let inNotes = 0;
+  const title = [];
+  const notes = [];
+  const add = (p, s) => {
+    if (p && budget.take(s.length)) p.text += s;
+  };
+  const emit = (block) => {
+    const table = tables[tables.length - 1];
+    if (table?.cell) table.cell.push(block);
+    else if (titleFrame) title.push(block);
+    else if (inNotes) notes.push(block);
+    else if (block.trim()) blocks.push(block);
+  };
+  const repeat = (attrs, name) => Math.min(MAX_REPEAT, Math.max(1, Number(attr(attrs, name)) || 1));
+  walkXml(xml, {
+    open(name, attrs) {
+      if (name === "text:note" || name === "office:annotation") skip++;
+      if (skip) return;
+      const p = paragraphs[paragraphs.length - 1];
+      const table = tables[tables.length - 1];
+      if (name === "text:p" || name === "text:h") {
+        const level = name === "text:h" ? Math.min(6, Number(attr(attrs, "text:outline-level")) || 1) : 0;
+        paragraphs.push({ text: "", prefix: level ? `${"#".repeat(level)} ` : listItem && !table ? "- " : "" });
+        listItem = false;
+      } else if (name === "text:list-item") listItem = true;
+      else if (name === "text:s") add(p, " ".repeat(Math.min(100, Number(attr(attrs, "text:c")) || 1)));
+      else if (name === "text:tab") add(p, "	");
+      else if (name === "text:line-break") add(p, "\n");
+      else if (name === "office:spreadsheet") spreadsheet = true;
+      else if (name === "draw:page") {
+        heading = blocks.push(`## Slide ${++slide}`) - 1;
+        title.length = 0;
+        notes.length = 0;
+      } else if (name === "presentation:notes") inNotes++;
+      else if (name === "draw:frame" && (titleFrame || attr(attrs, "presentation:class") === "title")) titleFrame++;
+      else if (name === "table:table") {
+        const sheet = attr(attrs, "table:name");
+        tables.push({ rows: [], repeatRow: 1, repeatCell: 1 });
+        if (sheet && spreadsheet) blocks.push(`## ${sheet}`);
+      } else if (name === "table:table-row" && table) {
+        table.row = [];
+        table.repeatRow = repeat(attrs, "table:number-rows-repeated");
+      } else if ((name === "table:table-cell" || name === "table:covered-table-cell") && table?.row) {
+        table.cell = [];
+        table.repeatCell = repeat(attrs, "table:number-columns-repeated");
+      }
+    },
+    close(name) {
+      if (name === "text:note" || name === "office:annotation") {
+        skip = Math.max(0, skip - 1);
+        return;
+      }
+      if (skip) return;
+      const table = tables[tables.length - 1];
+      if (name === "text:p" || name === "text:h") {
+        const p = paragraphs.pop();
+        if (p?.text.trim()) emit(table?.cell ? p.text.trim() : p.prefix + p.text.trim());
+      } else if ((name === "table:table-cell" || name === "table:covered-table-cell") && table?.row && table.cell) {
+        const text = table.cell.join(" ");
+        for (let k = 0; k < table.repeatCell && table.row.length < MAX_COLUMNS; k++) {
+          if (k && text && !budget.take(text.length)) break;
+          table.row.push(text);
+        }
+        table.cell = void 0;
+      } else if (name === "table:table-row" && table?.row) {
+        const size = table.row.reduce((n, c) => n + c.length, 0);
+        const times = size ? table.repeatRow : 1;
+        for (let k = 0; k < times; k++) {
+          if (k && !budget.take(size)) break;
+          table.rows.push(table.row);
+        }
+        table.row = void 0;
+      } else if (name === "table:table") {
+        const done = tables.pop();
+        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows));
+      } else if (name === "draw:frame" && titleFrame) titleFrame--;
+      else if (name === "presentation:notes") inNotes = Math.max(0, inNotes - 1);
+      else if (name === "draw:page" && heading >= 0) {
+        if (title.length) blocks[heading] = `## Slide ${slide}: ${title.join(" ")}`;
+        if (notes.length) blocks.push(`Notes: ${notes.join(" ")}`);
+        heading = -1;
+      }
+    },
+    text(s) {
+      if (!skip) add(paragraphs[paragraphs.length - 1], s.replace(/[ \t\r\n]+/g, " "));
+    }
+  });
+  return joinBlocks(blocks);
+}
+var OLE_SIGNATURE2 = Buffer.from([208, 207, 17, 224, 161, 177, 26, 225]);
+function mainPart(zip) {
+  const officeDocument = relatedPart(relationships(zip, ""), "officeDocument");
+  if (officeDocument && zip.has(officeDocument)) return officeDocument;
+  return ["word/document.xml", "xl/workbook.xml", "ppt/presentation.xml"].find((p) => zip.has(p));
+}
+function packageText(bytes, budget) {
+  if (bytes.subarray(0, 8).equals(OLE_SIGNATURE2))
+    throw new Refused("a legacy binary or password-protected Office file (only OOXML and OpenDocument are read here)");
+  const zip = openZip(bytes);
+  const mimetype = zip.has("mimetype") ? zip.text("mimetype")?.trim() : void 0;
+  if (mimetype?.startsWith("application/vnd.oasis.opendocument.")) {
+    const content = zip.text("content.xml");
+    if (content === void 0) throw new Refused("an OpenDocument package with no content.xml");
+    return openDocumentText(content, budget);
+  }
+  const main2 = mainPart(zip);
+  const xml = main2 ? zip.text(main2) : void 0;
+  if (!main2 || xml === void 0) throw new Refused("not an OOXML or OpenDocument file");
+  if (main2.startsWith("word/")) {
+    const stylesPart = relatedPart(relationships(zip, main2), "styles");
+    return wordText(xml, budget, wordStyles(stylesPart ? zip.text(stylesPart) : void 0));
+  }
+  if (main2.startsWith("xl/")) return spreadsheetText(zip, main2, budget);
+  if (main2.startsWith("ppt/")) return presentationText(zip, main2, budget);
+  throw new Refused("not an OOXML or OpenDocument file");
+}
+function readOffice(bytes) {
+  try {
+    const text = packageText(bytes, new Budget()).replace(/\n{3,}/g, "\n\n").trim();
+    return { text: text.length > MAX_OUTPUT_CHARS ? text.slice(0, text.lastIndexOf("\n", MAX_OUTPUT_CHARS)) : text };
+  } catch (e) {
+    return { failure: e instanceof Refused ? e.message : "the built-in reader could not parse it" };
+  }
+}
+
+// src/doc/ladder.ts
+var DOC_EXTRACTORS = ["anydoc", "firecrawl", "builtin"];
+var dead2 = /* @__PURE__ */ new Map();
+function enabledDocExtractors(engines) {
+  if (engines) return engines;
+  const chosen = enginesFromEnv("DOC_ENGINE", DOC_EXTRACTORS);
+  if (chosen) return chosen;
+  if (envFlag("NO_NPX")) return DOC_EXTRACTORS.filter((e) => e !== "anydoc");
+  return DOC_EXTRACTORS;
+}
+async function viaAnydoc(bytes, format) {
+  const args = ["-"];
+  if (format) args.push("--format", format);
+  const r = await runNpx(ANYDOC_SPEC, args, bytes);
+  if (r.ok) return { text: r.stdout };
+  if (r.unavailable === "not installed") return { unavailable: true };
+  if (r.unavailable) return { unavailable: true, failure: `anydoc ${r.unavailable}; ${skipNpxHint()}` };
+  return { failure: failureDetail("anydoc", r) };
+}
+function viaBuiltin(bytes, fmt) {
+  if (fmt.format === "csv") return {};
+  const r = readOffice(bytes);
+  return r.text === void 0 ? { failure: `builtin: ${r.failure}` } : { text: r.text };
+}
+async function extractDocument(bytes, fmt, opts = {}) {
+  let lastReason;
+  const failures = [];
+  for (const id of enabledDocExtractors(opts.engines)) {
+    const known = dead2.get(id);
+    if (known) {
+      if (known.failure) failures.push(known.failure);
+      continue;
+    }
+    let got;
+    try {
+      if (id === "anydoc") got = await viaAnydoc(bytes, fmt.format);
+      else if (id === "builtin") got = viaBuiltin(bytes, fmt);
+      else got = { text: opts.firecrawl ? await opts.firecrawl() : void 0 };
+    } catch {
+      got = {};
+    }
+    if (got.text === void 0) {
+      if (got.unavailable) dead2.set(id, { failure: got.failure });
+      if (got.failure) failures.push(got.failure);
+      continue;
+    }
+    const verdict = assessExtractedText(got.text, "the converter produced no text");
+    if (verdict.ok) return { text: got.text.trim(), via: id };
+    lastReason = verdict.reason;
+  }
+  const reason = [lastReason, ...failures].filter(Boolean).join("; ");
+  return { text: "", reason: reason || "no document converter available" };
+}
+
+// src/exec.ts
+import { spawn as spawn3, spawnSync as spawnSync2 } from "child_process";
+var STDOUT_CAP = 24 * 1024 * 1024;
+var defaultTimeoutMs = () => envInt("SH_TIMEOUT_MS", 6e4, 1e3);
+function toResult(status, stdout, stderr, err) {
+  const missing = err?.code === "ENOENT";
+  return {
+    ok: !missing && status === 0,
+    status: status ?? (missing ? 127 : 1),
+    stdout,
+    stderr: stderr || (err ? err.message : ""),
+    ...missing ? { missing: true } : {}
+  };
+}
+var havePresence = /* @__PURE__ */ new Map();
+function have(cmd) {
+  let hit = havePresence.get(cmd);
+  if (hit === void 0) {
+    const probe = spawnSync2(process.platform === "win32" ? "where" : "which", [cmd], { encoding: "utf8" });
+    hit = probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
+    havePresence.set(cmd, hit);
+  }
+  return hit;
+}
+function sh(cmd, args, opts = {}) {
+  let r;
+  try {
+    r = spawnSync2(cmd, args, {
+      cwd: opts.cwd,
+      input: opts.input,
+      timeout: opts.timeoutMs ?? defaultTimeoutMs(),
+      encoding: "utf8",
+      maxBuffer: STDOUT_CAP,
+      env: opts.env ?? process.env
+    });
+  } catch (e) {
+    return { ok: false, status: 1, stdout: "", stderr: e.message };
+  }
+  return toResult(r.status, String(r.stdout ?? ""), String(r.stderr ?? ""), r.error);
+}
+function shAsync(cmd, args, opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
+  return new Promise((resolve6) => {
+    let settled = false;
+    let timer;
+    const done = (r) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve6(r);
+    };
+    let child;
+    try {
+      child = spawn3(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      done({ ok: false, status: 1, stdout: "", stderr: e.message });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (d) => {
+      if (stdout.length < STDOUT_CAP) stdout += d;
+    });
+    child.stderr?.on("data", (d) => {
+      if (stderr.length < STDOUT_CAP) stderr += d;
+    });
+    timer = setTimeout(() => {
+      killTree(child);
+      done({ ok: false, status: 124, stdout, stderr: stderr || `timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+    child.on("error", (e) => done(toResult(null, stdout, stderr, e)));
+    child.on("close", (code) => done(toResult(code, stdout, stderr)));
+  });
 }
 
 // src/entities.ts
@@ -1431,6 +2767,33 @@ function isStopword(term) {
   const extra = brand().extraStopwords;
   return extra ? extra.some((w) => w.toLowerCase() === t) : false;
 }
+var TOKEN_RE = /(?<![\p{L}\p{N}_])\.net(?![\p{L}\p{N}_])|[\p{L}\p{N}_]+(?:[+#]{1,2}\d*(?![\p{L}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{N}_./]))?/giu;
+function keywords(question) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const [raw] of question.matchAll(TOKEN_RE)) {
+    const lower = raw.toLowerCase();
+    if (raw.length < 2) continue;
+    if (isStopword(lower)) continue;
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    out.push(raw);
+  }
+  return out;
+}
+function rankedKeywords(question) {
+  const base = keywords(question);
+  const score = (raw) => {
+    let s = 0;
+    if (/\d/.test(raw)) s += 3;
+    if (/[A-Z]/.test(raw) && !/^[A-Z0-9]+$/.test(raw)) s += 2;
+    if (/_/.test(raw)) s += 2;
+    if (raw.length >= 8) s += 1.5;
+    else if (raw.length >= 5) s += 0.5;
+    return s;
+  };
+  return base.map((k, i) => ({ k, s: score(k), i })).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.k);
+}
 var ACCENT_CLASSES = {
   a: "a\xE0\xE1\xE2\xE3\xE4\xE5\u0101\u0103\u0105",
   c: "c\xE7\u0107\u0109\u010B\u010D",
@@ -1632,7 +2995,7 @@ function defaultUa() {
 var RETRY_STATUS = /* @__PURE__ */ new Set([429, 503, 502, 504]);
 var maxAttempts = () => envInt("MAX_ATTEMPTS", 2, 1, 5);
 var defaultRetryMs = () => envInt("RETRY_MS", 600, 0, 5e3);
-var defaultTimeoutMs = () => envInt("TIMEOUT_MS", 2e4, 1e3, 3e5);
+var defaultTimeoutMs2 = () => envInt("TIMEOUT_MS", 2e4, 1e3, 3e5);
 function pageDelayMs() {
   return envInt("PAGE_DELAY_MS", 350, 0, 5e3);
 }
@@ -1715,6 +3078,36 @@ var DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 function isBinaryDocument(contentType) {
   return /application\/pdf/i.test(contentType) || docFormatForContentType(contentType) !== void 0;
 }
+var AMBIGUOUS_TYPES = /* @__PURE__ */ new Set([
+  "",
+  "application/octet-stream",
+  "binary/octet-stream",
+  "application/x-download",
+  "application/force-download",
+  "application/download",
+  "application/unknown",
+  "application/zip",
+  "application/x-zip-compressed"
+]);
+var mimeOf = (contentType) => contentType.split(";")[0].trim().toLowerCase();
+function dispositionFilename(header2) {
+  if (!header2) return void 0;
+  let name;
+  const extended = /filename\*\s*=\s*[^'\s;]*'[^']*'([^;\s]+)/i.exec(header2);
+  if (extended) {
+    try {
+      name = decodeURIComponent(extended[1]);
+    } catch {
+      name = void 0;
+    }
+  }
+  if (name === void 0) {
+    const plain = /filename\s*=\s*(?:"((?:\\.|[^"\\])*)"|([^;]+))/i.exec(header2);
+    name = plain ? plain[1]?.replace(/\\(.)/g, "$1") ?? plain[2].trim() : void 0;
+  }
+  return name?.split(/[\\/]/).pop() || void 0;
+}
+var namesDocument = (filename) => filename !== void 0 && (PDF_URL_RE.test(filename) || docFormatForUrl(filename) !== void 0);
 var REDIRECT_STATUS = /* @__PURE__ */ new Set([301, 302, 303, 307, 308]);
 async function authorizedGet(url, init, authorize) {
   let target = url;
@@ -1749,7 +3142,7 @@ async function authorizedGet(url, init, authorize) {
 async function httpGet(url, opts = {}) {
   const attempts = attemptsFor(opts.retries);
   let last = { ok: false, status: 0, body: "", contentType: "", url };
-  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs2();
   for (let attempt = 0; attempt < attempts; attempt++) {
     const ctrl = new AbortController();
     let t;
@@ -1797,27 +3190,39 @@ async function httpGet(url, opts = {}) {
         rateLimited: detectRateLimited(res.status, res.headers),
         retryAfterMs: parseRetryAfter(res.headers, Number.POSITIVE_INFINITY)
       };
-      const max = opts.maxBytes ?? (isBinaryDocument(meta.contentType) ? opts.maxDocumentBytes : void 0) ?? DEFAULT_MAX_RESPONSE_BYTES;
+      const mime = mimeOf(meta.contentType);
+      const filename = dispositionFilename(res.headers.get("content-disposition"));
+      const namedDocument = isBinaryDocument(meta.contentType) || namesDocument(filename);
+      const ambiguous = AMBIGUOUS_TYPES.has(mime);
+      const max = opts.maxBytes ?? (namedDocument || ambiguous ? opts.maxDocumentBytes : void 0) ?? DEFAULT_MAX_RESPONSE_BYTES;
       const declared = Number(res.headers.get("content-length"));
-      const prefixUseless = opts.binary || isBinaryDocument(meta.contentType) || Object.keys(opts.headers ?? {}).some((k) => k.toLowerCase() === "range");
+      const prefixUseless = opts.binary || namedDocument || Object.keys(opts.headers ?? {}).some((k) => k.toLowerCase() === "range");
       if (Number.isFinite(declared) && declared > max && prefixUseless) {
         ctrl.abort();
         return { ok: false, status: res.status, body: "", bytesRead: 0, truncated: true, ...meta, error: `response too large: ${declared} bytes > ${max} cap` };
       }
-      const { bytes, bytesRead, truncated } = res.status === 304 ? { bytes: Buffer.alloc(0), bytesRead: 0, truncated: false } : await readMeasuredBody(res, max);
+      let { bytes, bytesRead, truncated } = res.status === 304 ? { bytes: Buffer.alloc(0), bytesRead: 0, truncated: false } : await readMeasuredBody(res, max);
       countFetch(bytes.length, false);
-      const keepBytes = opts.binary || isBinaryDocument(meta.contentType) && !truncated;
+      const sniffed = ambiguous ? sniffDocument(bytes) : void 0;
+      if (ambiguous && !namedDocument && !sniffed && opts.maxBytes === void 0 && bytes.length > DEFAULT_MAX_RESPONSE_BYTES) {
+        bytes = bytes.subarray(0, DEFAULT_MAX_RESPONSE_BYTES);
+        bytesRead = bytes.length;
+        truncated = true;
+      }
+      const keepBytes = opts.binary || (namedDocument || sniffed !== void 0) && !truncated;
+      const binaryBody = opts.binary || sniffed !== void 0 || isBinaryDocument(meta.contentType) && !mime.startsWith("text/");
       const result = {
         ok: res.ok,
         status: res.status,
         // Decoded per the response's own encoding, not assumed UTF-8. A
         // Windows-1252 page used to come back with every accented character
         // replaced by U+FFFD, and nothing anywhere noticed.
-        body: opts.binary ? "" : decodeBody(bytes, meta.contentType),
+        body: binaryBody ? "" : decodeBody(bytes, meta.contentType),
         bytes: keepBytes ? bytes : void 0,
         bytesRead,
         truncated,
-        ...meta
+        ...meta,
+        ...filename ? { filename } : {}
       };
       const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(meta.retryAfterMs) : void 0;
       if (wait !== void 0) {
@@ -1839,7 +3244,7 @@ async function httpGet(url, opts = {}) {
 async function httpJson(method, url, body, opts = {}) {
   const attempts = attemptsFor(opts.retries);
   let last = { ok: false, status: 0, data: void 0 };
-  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs2();
   for (let attempt = 0; attempt < attempts; attempt++) {
     const ctrl = new AbortController();
     let timedOut = false;
@@ -2162,10 +3567,19 @@ async function fetchAndExtract(url, opts = {}) {
     };
   }
   const validators = res.etag || res.lastModified ? { etag: res.etag, lastModified: res.lastModified } : {};
-  if (res.truncated && (wantsPdf || wantsDoc || isBinaryDocument(res.contentType))) {
+  const mime = mimeOf(res.contentType);
+  const claimsPdf = wantsPdf || /application\/pdf/i.test(res.contentType) || res.filename !== void 0 && PDF_URL_RE.test(res.filename);
+  const claimsDoc = claimsPdf ? void 0 : wantsDoc ?? docFormatForContentType(res.contentType) ?? (res.filename ? docFormatForUrl(res.filename) : void 0);
+  if (res.truncated && (claimsPdf || claimsDoc || !res.body && res.bytesRead)) {
     return { text: "", finalUrl: res.url, status: res.status, note: `Fetched ${url} but the document exceeds the response size cap.` };
   }
-  if (wantsPdf || /application\/pdf/i.test(res.contentType)) {
+  const sniffed = res.bytes ? sniffDocument(res.bytes) : void 0;
+  if (!sniffed && NON_TEXT_TYPE_RE.test(mime)) {
+    return { text: "", finalUrl: res.url, status: res.status, note: `Fetched ${url} but it is ${mime}, not a text document.`, ...validators };
+  }
+  const answeredHtml = !sniffed && (claimsPdf || claimsDoc !== void 0) && HTML_TYPE_RE.test(mime);
+  const route2 = sniffed ?? (answeredHtml ? void 0 : claimsPdf ? "pdf" : claimsDoc);
+  if (route2 === "pdf") {
     const bytes = res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
     const got = bytes ? await extractPdf(bytes, {
       firecrawl: async () => {
@@ -2186,8 +3600,8 @@ async function fetchAndExtract(url, opts = {}) {
       ...validators
     };
   }
-  const docFmt = wantsDoc ?? docFormatForContentType(res.contentType);
-  if (docFmt) {
+  if (route2) {
+    const docFmt = route2;
     const bytes = res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
     const got = bytes ? await extractDocument(bytes, docFmt, {
       firecrawl: async () => {
@@ -2209,14 +3623,24 @@ async function fetchAndExtract(url, opts = {}) {
       ...validators
     };
   }
-  const mime = res.contentType.split(";")[0].trim().toLowerCase();
-  const ambiguousType = !mime || mime === "application/octet-stream";
-  const isHtml = /^(?:text\/html|application\/xhtml\+xml)$/.test(mime) || ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(res.body);
-  const stripped = isHtml ? htmlToText(opts.fullPage ? res.body : extractMainHtml(res.body), opts) : res.body;
+  const ambiguousType = AMBIGUOUS_TYPES.has(mime);
+  if (ambiguousType && res.body.slice(0, 1024).includes("\0")) {
+    return {
+      text: "",
+      finalUrl: res.url,
+      status: res.status,
+      note: `Fetched ${url} but it is binary data (${mime || "no content-type"}), not a text document.`,
+      ...validators
+    };
+  }
+  const body = !res.body && res.bytes ? decodeBody(res.bytes, res.contentType) : res.body;
+  const isHtml = HTML_TYPE_RE.test(mime) || ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(body);
+  const stripped = isHtml ? htmlToText(opts.fullPage ? body : extractMainHtml(body), opts) : body;
   const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped) : { text: stripped, dropped: 0 };
-  const title = isHtml ? pageTitle(res.body) : void 0;
-  const canonical = isHtml ? absoluteCanonical(htmlCanonicalUrl(res.body), res.url) : void 0;
-  const metaDescription = isHtml ? metaDescriptionOf(res.body) : void 0;
+  const title = isHtml ? pageTitle(body) : void 0;
+  const canonical = isHtml ? absoluteCanonical(htmlCanonicalUrl(body), res.url) : void 0;
+  const metaDescription = isHtml ? metaDescriptionOf(body) : void 0;
+  const notDocument = answeredHtml ? `${url} looked like ${claimsPdf ? "a PDF" : "an office document"} but the server returned HTML (a login wall or landing page?), so it was read as a web page.` : void 0;
   const cut = res.truncated ? `Read only the first ${res.bytesRead} bytes of ${url} (the response size cap), so this text is a prefix.` : void 0;
   return {
     text: consent.text,
@@ -2224,14 +3648,16 @@ async function fetchAndExtract(url, opts = {}) {
     title,
     canonical,
     metaDescription,
-    ...opts.keepHtml && isHtml ? { html: res.body } : {},
+    ...opts.keepHtml && isHtml ? { html: body } : {},
     finalUrl: res.url,
     status: res.status,
-    note: [firecrawlNote, cut].filter(Boolean).join(" ") || void 0,
+    note: [firecrawlNote, notDocument, cut].filter(Boolean).join(" ") || void 0,
     ...res.truncated ? { truncated: true } : {},
     ...validators
   };
 }
+var HTML_TYPE_RE = /^(?:text\/html|application\/xhtml\+xml)$/;
+var NON_TEXT_TYPE_RE = /^(?:image\/(?!svg\+xml$)|audio\/|video\/|font\/|model\/|application\/(?:gzip|x-gzip|x-tar|x-bzip2|x-xz|x-7z-compressed|x-rar-compressed|vnd\.rar|java-archive|wasm|x-msdownload|vnd\.android\.package-archive|x-shockwave-flash|ogg)$)/;
 var CONSENT_PATTERNS = [
   /\bcookies?\b/i,
   /\bconsent\b/i,
@@ -2284,8 +3710,8 @@ function metaDescriptionOf(html) {
 }
 
 // src/stack.ts
-import { spawnSync } from "child_process";
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync7, writeFileSync as writeFileSync4 } from "fs";
+import { spawnSync as spawnSync3 } from "child_process";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync8, writeFileSync as writeFileSync4 } from "fs";
 import { tmpdir as tmpdir2 } from "os";
 import { dirname, join as join8 } from "path";
 var COMPOSE_YAML = `# Optional, fully-local, no-API-key stack for a semantic mode, web
@@ -2562,7 +3988,7 @@ function ensureComposeMaterialized() {
 }
 function writeIfChanged(path, content) {
   try {
-    if (existsSync2(path) && readFileSync7(path, "utf8") === content) return;
+    if (existsSync2(path) && readFileSync8(path, "utf8") === content) return;
     mkdirSync2(dirname(path), { recursive: true });
     writeFileSync4(path, content);
   } catch {
@@ -2580,7 +4006,7 @@ function embedModel() {
   return env("EMBED_MODEL") ?? "nomic-embed-text";
 }
 function defaultRun(cmd, args, opts) {
-  const res = spawnSync(cmd, args, {
+  const res = spawnSync3(cmd, args, {
     encoding: "utf8",
     timeout: opts.timeoutMs,
     maxBuffer: 64 * 1024 * 1024,
@@ -3447,13 +4873,13 @@ function expand(rows) {
   for (let r = 0; r < rows.length; r++) {
     const out = grid[r];
     let c = 0;
-    for (const cell of rows[r]) {
+    for (const cell2 of rows[r]) {
       while (out[c] !== void 0) c++;
-      const down = Math.min(cell.rowspan, rows.length - r);
-      slots += down * cell.colspan;
+      const down = Math.min(cell2.rowspan, rows.length - r);
+      slots += down * cell2.colspan;
       if (slots > MAX_SLOTS) return void 0;
-      for (let j = 0; j < down; j++) for (let i = 0; i < cell.colspan; i++) grid[r + j][c + i] = cell.text;
-      c += cell.colspan;
+      for (let j = 0; j < down; j++) for (let i = 0; i < cell2.colspan; i++) grid[r + j][c + i] = cell2.text;
+      c += cell2.colspan;
     }
   }
   const width = grid.reduce((w, row) => Math.max(w, row.length), 0);
@@ -3652,7 +5078,7 @@ async function hasChanged(url, previous, opts = {}) {
 }
 
 // src/skillkit/usage.ts
-import { readdirSync, readFileSync as readFileSync8, statSync } from "fs";
+import { readdirSync as readdirSync2, readFileSync as readFileSync9, statSync } from "fs";
 import { dirname as dirname2, join as join9, relative, resolve } from "path";
 var DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|enum)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm;
 var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']((?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs))["']/g;
@@ -3668,7 +5094,7 @@ function engineExports(dts) {
 function walkSources(dir, skip = "vendor", out = []) {
   let entries;
   try {
-    entries = readdirSync(dir);
+    entries = readdirSync2(dir);
   } catch {
     return out;
   }
@@ -3688,7 +5114,7 @@ function auditEngineUsage(root, config, dts, engineName) {
   const tolerated = [];
   const imported = /* @__PURE__ */ new Set();
   for (const file of files) {
-    const src = readFileSync8(file, "utf8");
+    const src = readFileSync9(file, "utf8");
     const rel = relative(root, file);
     for (const m of src.matchAll(DECL)) {
       const name = m[1] ?? m[2];
@@ -3705,7 +5131,7 @@ function auditEngineUsage(root, config, dts, engineName) {
         } else {
           let shim = "";
           try {
-            shim = readFileSync8(resolve(dirname2(file), spec.replace(/\.js$/, ".ts")), "utf8");
+            shim = readFileSync9(resolve(dirname2(file), spec.replace(/\.js$/, ".ts")), "utf8");
           } catch {
             continue;
           }
@@ -3724,7 +5150,7 @@ function auditEngineUsage(root, config, dts, engineName) {
 }
 
 // src/skillkit/bundle.ts
-import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync9 } from "fs";
+import { existsSync as existsSync3, readdirSync as readdirSync3, readFileSync as readFileSync10 } from "fs";
 import { join as join10 } from "path";
 
 // src/cli-kit.ts
@@ -3845,7 +5271,7 @@ function auditSkillBundle(root, config, cli) {
     check(false, `missing skills/${name}/SKILL.md \u2014 the skill package has no SKILL.md`);
     return out;
   }
-  const raw = readFileSync9(skillMd, "utf8");
+  const raw = readFileSync10(skillMd, "utf8");
   const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
   if (!fm) {
     check(false, `skills/${name}/SKILL.md has no frontmatter block`);
@@ -3870,7 +5296,7 @@ function auditSkillBundle(root, config, cli) {
   }
   const refsDir = join10(skillDir, "references");
   if (existsSync3(refsDir)) {
-    const files = readdirSync2(refsDir).filter((f) => f.endsWith(".md"));
+    const files = readdirSync3(refsDir).filter((f) => f.endsWith(".md"));
     for (const m of new Set(raw.match(/references\/[\w.-]+\.md/g) ?? [])) {
       check(
         existsSync3(join10(skillDir, m)),
@@ -3890,7 +5316,7 @@ function auditSkillBundle(root, config, cli) {
   if (!existsSync3(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
   else if (!existsSync3(pkgBundle)) check(false, `missing skills/${name}/${bundleRel} \u2014 run \`skill copy\``);
   else {
-    const same = readFileSync9(rootBundle).equals(readFileSync9(pkgBundle));
+    const same = readFileSync10(rootBundle).equals(readFileSync10(pkgBundle));
     check(
       same,
       same ? `embedded engine is byte-identical to ${bundleRel}` : `skills/${name}/${bundleRel} differs from ${bundleRel} \u2014 run \`skill copy\` and commit`
@@ -3900,7 +5326,7 @@ function auditSkillBundle(root, config, cli) {
   const universe = /* @__PURE__ */ new Set([...cli.valueFlags, ...cli.boolFlags, "help", "version", ...config.allowedForeignFlags]);
   const docs = [["SKILL.md", raw]];
   if (existsSync3(refsDir)) {
-    for (const f of readdirSync2(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync9(join10(refsDir, f), "utf8")]);
+    for (const f of readdirSync3(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync10(join10(refsDir, f), "utf8")]);
   }
   let unknown = 0;
   for (const [file, text] of docs) {
@@ -4364,7 +5790,7 @@ async function search(query, opts = {}) {
 }
 
 // src/cache.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync10, readdirSync as readdirSync3, rmSync as rmSync2, statSync as statSync2 } from "fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync11, readdirSync as readdirSync4, rmSync as rmSync2, statSync as statSync2 } from "fs";
 import { join as join12 } from "path";
 import { tmpdir as tmpdir3 } from "os";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
@@ -4443,9 +5869,9 @@ function readCache(url, acceptLanguage = "", extractor = "native", variant = "")
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
   if (!existsSync4(meta)) return void 0;
   try {
-    const entry = JSON.parse(readFileSync10(meta, "utf8"));
+    const entry = JSON.parse(readFileSync11(meta, "utf8"));
     if (typeof entry.cachedAt !== "number") return void 0;
-    const text = existsSync4(body) ? readFileSync10(body, "utf8") : entry.text;
+    const text = existsSync4(body) ? readFileSync11(body, "utf8") : entry.text;
     if (!text?.trim()) return void 0;
     return { ...entry, text };
   } catch {
@@ -4548,7 +5974,7 @@ function ownFile(name) {
 }
 function readEntryMeta(abs) {
   try {
-    const entry = JSON.parse(readFileSync10(abs, "utf8"));
+    const entry = JSON.parse(readFileSync11(abs, "utf8"));
     return entry && typeof entry.cachedAt === "number" && typeof entry.finalUrl === "string" ? entry : void 0;
   } catch {
     return void 0;
@@ -4568,7 +5994,7 @@ function cacheStats(now = Date.now()) {
   if (!existsSync4(dir)) return out;
   let oldest = Number.POSITIVE_INFINITY;
   let newest = 0;
-  for (const name of readdirSync3(dir)) {
+  for (const name of readdirSync4(dir)) {
     const own = ownFile(name);
     if (!own) continue;
     const abs = join12(dir, name);
@@ -4594,7 +6020,7 @@ function cacheStats(now = Date.now()) {
 function cacheClean(all = false, now = Date.now()) {
   const dir = cacheDir();
   if (!existsSync4(dir) || isNoWrite()) return 0;
-  const names = readdirSync3(dir);
+  const names = readdirSync4(dir);
   const present = new Set(names);
   const remove = (name) => {
     try {
@@ -4811,64 +6237,38 @@ function resolveUrl(url, base) {
 }
 
 // src/repo.ts
-import { existsSync as existsSync5, mkdirSync as mkdirSync4, readdirSync as readdirSync4, rmSync as rmSync3, statSync as statSync3 } from "fs";
+import { createHash as createHash3, randomBytes } from "crypto";
+import { existsSync as existsSync5, mkdirSync as mkdirSync4, readdirSync as readdirSync5, renameSync as renameSync2, rmSync as rmSync3, statSync as statSync3 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
 import { basename as basename2, join as join13, resolve as resolve2 } from "path";
 
-// src/exec.ts
-import { spawn as spawn2, spawnSync as spawnSync2 } from "child_process";
-var STDOUT_CAP = 24 * 1024 * 1024;
-var defaultTimeoutMs2 = () => envInt("SH_TIMEOUT_MS", 6e4, 1e3);
-function toResult(status, stdout, stderr, err) {
-  const missing = err?.code === "ENOENT";
-  return {
-    ok: !missing && status === 0,
-    status: status ?? (missing ? 127 : 1),
-    stdout,
-    stderr: stderr || (err ? err.message : ""),
-    ...missing ? { missing: true } : {}
-  };
+// src/forge-host.ts
+var KINDS = /* @__PURE__ */ new Set(["github", "gitlab", "gitea"]);
+function normalizeForgeHost(host) {
+  return host.trim().toLowerCase().replace(/^www\./, "");
 }
-var havePresence = /* @__PURE__ */ new Map();
-function have(cmd) {
-  let hit = havePresence.get(cmd);
-  if (hit === void 0) {
-    const probe = spawnSync2(process.platform === "win32" ? "where" : "which", [cmd], { encoding: "utf8" });
-    hit = probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
-    havePresence.set(cmd, hit);
+function configuredForgeHosts() {
+  const out = /* @__PURE__ */ new Map();
+  for (const entry of (env("FORGE_HOSTS") ?? "").split(/[\s,]+/)) {
+    const eq = entry.indexOf("=");
+    if (eq < 1) continue;
+    const kind = entry.slice(eq + 1).trim().toLowerCase();
+    if (KINDS.has(kind)) out.set(normalizeForgeHost(entry.slice(0, eq)), kind);
   }
-  return hit;
+  return out;
 }
-function shAsync(cmd, args, opts = {}) {
-  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs2();
-  return new Promise((resolve5) => {
-    let settled = false;
-    const done = (r) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve5(r);
-    };
-    const child = spawn2(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (d) => {
-      if (stdout.length < STDOUT_CAP) stdout += String(d);
-    });
-    child.stderr?.on("data", (d) => {
-      if (stderr.length < STDOUT_CAP) stderr += String(d);
-    });
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      done({ ok: false, status: 124, stdout, stderr: stderr || `timed out after ${timeoutMs}ms` });
-    }, timeoutMs);
-    child.on("error", (e) => done(toResult(null, stdout, stderr, e)));
-    child.on("close", (code) => done(toResult(code, stdout, stderr)));
-  });
+function hostForgeKind(host) {
+  const h = normalizeForgeHost(host);
+  const declared = configuredForgeHosts().get(h);
+  if (declared) return declared;
+  if (h === "github.com" || h.endsWith(".github.com") || h.startsWith("github.")) return "github";
+  if (h === "gitlab.com" || h.includes("gitlab")) return "gitlab";
+  if (h.includes("gitea") || h.includes("codeberg")) return "gitea";
+  return void 0;
 }
 
 // src/repo.ts
-function resolveRepo(raw) {
+function resolveRepo(raw, opts = {}) {
   const trimmed = raw.trim();
   if (trimmed) {
     const asPath = resolve2(trimmed);
@@ -4876,90 +6276,253 @@ function resolveRepo(raw) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename2(asPath)}-${asPath}`)}` };
     }
   }
-  const file = /^file:\/\/(\/.*)$/.exec(trimmed);
-  if (file) {
-    const p = file[1].replace(/\.git$/, "").replace(/\/+$/, "");
+  const p = filePath(trimmed);
+  if (p !== void 0) {
     return {
       raw: trimmed,
       host: "file",
       ...basename2(p) ? { repo: basename2(p) } : {},
       cloneUrl: trimmed,
       isLocal: false,
-      slug: `file-${slugify(p)}`
+      slug: `file-${repoSlug(p)}`
     };
   }
+  const generic = () => ({ raw: trimmed, host: "generic", isLocal: false, slug: slugify(trimmed) || "seed" });
+  let transport;
   let host;
-  let path;
-  const scp = /^git@([^:]+):(.+)$/.exec(trimmed);
-  const url = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/i.exec(trimmed);
+  let rest;
+  const scp = /^([\w.-]+)@([^:/]+):(.+)$/.exec(trimmed);
+  const url = /^([a-z][a-z0-9+.-]*):\/\/(?:([^@/]+)@)?([^/:?#]+)(?::(\d+))?\/(.+)$/i.exec(trimmed);
   const hostPath = /^([a-z0-9.-]+\.[a-z]{2,})\/(.+)$/i.exec(trimmed);
   if (scp) {
-    host = scp[1];
-    path = scp[2];
+    transport = { kind: "scp", user: scp[1] };
+    host = scp[2];
+    rest = scp[3];
   } else if (url) {
-    host = url[1];
-    path = url[2];
+    const scheme = url[1].toLowerCase();
+    transport = /^(?:https?|ssh|git\+ssh|ssh\+git)$/.test(scheme) ? { kind: "url", scheme: scheme.startsWith("http") ? scheme : "ssh", userinfo: url[2], port: url[4] } : { kind: "https" };
+    host = url[3];
+    rest = url[5];
   } else if (hostPath) {
+    transport = { kind: "https" };
     host = hostPath[1];
-    path = hostPath[2];
+    rest = hostPath[2];
   } else if (/^[\w.-]+\/[\w.-]+$/.test(trimmed)) {
+    transport = { kind: "https" };
     host = "github.com";
-    path = trimmed;
+    rest = trimmed;
   } else {
-    return { raw: trimmed, host: "generic", isLocal: false, slug: slugify(trimmed) || "seed" };
+    return generic();
   }
-  host = host.toLowerCase();
-  path = path.replace(/\.git$/, "").replace(/\/+$/, "");
-  const segments = path.split("/").filter(Boolean);
-  const repo = segments.length ? segments[segments.length - 1] : void 0;
+  const user = transport.kind === "scp" ? transport.user : transport.kind === "url" ? transport.userinfo : void 0;
+  if (host.startsWith("-") || user?.startsWith("-")) return generic();
+  host = normalizeForgeHost(host);
+  const segments = repoSegments(host, rest, opts.kind ?? hostForgeKind(host));
+  if (!segments) return generic();
+  const path = segments.join("/");
+  const repo = segments[segments.length - 1];
   const owner = segments.length > 1 ? segments.slice(0, -1).join("/") : void 0;
-  const base = /^https?:\/\//i.test(trimmed) || scp ? trimmed.replace(/\/+$/, "") : `https://${host}/${path}.git`;
+  const cloneUrl = transport.kind === "scp" ? `${transport.user}@${host}:${path}.git` : transport.kind === "url" ? `${transport.scheme}://${transport.userinfo ? `${transport.userinfo}@` : ""}${host}${transport.port ? `:${transport.port}` : ""}/${path}.git` : `https://${host}/${path}.git`;
   return {
     raw: trimmed,
     host,
     ...owner ? { owner } : {},
     ...repo ? { repo } : {},
-    cloneUrl: base.endsWith(".git") ? base : `${base}.git`,
+    cloneUrl,
     webUrl: `https://${host}/${path}`,
     isLocal: false,
-    slug: slugify(`${host}/${path}`)
+    slug: repoSlug(`${host}/${path}`)
   };
+}
+function filePath(url) {
+  const file = /^file:\/\/(\/.*)$/.exec(url);
+  return file ? file[1].replace(/\.git$/, "").replace(/\/+$/, "") : void 0;
+}
+function repoSlug(key) {
+  const k = key.toLowerCase();
+  const slug = slugify(k);
+  const folded = k.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (/^[a-z0-9._/]+$/.test(k) || slug !== folded) return slug;
+  return `${slugify(k, { max: 111 })}-${createHash3("sha256").update(k).digest("hex").slice(0, 8)}`;
+}
+var DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
+var TWO_SEGMENT_HOSTS = /* @__PURE__ */ new Set(["bitbucket.org"]);
+function repoSegments(host, rest, kind) {
+  let segments = rest.replace(/[?#].*$/s, "").split("/").filter(Boolean);
+  if (segments.some((s) => DOT_SEGMENT.test(s))) return void 0;
+  const dash = segments.indexOf("-");
+  if (dash >= 0) segments = segments.slice(0, dash);
+  if (kind === "github" || kind === "gitea" || TWO_SEGMENT_HOSTS.has(host)) segments = segments.slice(0, 2);
+  const last = segments.length - 1;
+  if (last >= 0) segments[last] = segments[last].replace(/\.git$/i, "");
+  return segments.filter(Boolean).length ? segments.filter(Boolean) : void 0;
+}
+var STALE_STAGING_MS = 24 * 60 * 60 * 1e3;
+function originUrl(dir) {
+  const r = sh("git", ["-C", dir, "remote", "get-url", "origin"], { timeoutMs: 1e4 });
+  return r.ok ? r.stdout.trim() || void 0 : void 0;
 }
 
 // src/forge.ts
-function forgeKind(host) {
-  const h = host.toLowerCase();
-  if (h === "github.com" || h.endsWith(".github.com") || h.startsWith("github.")) return "github";
-  if (h === "gitlab.com" || h.includes("gitlab")) return "gitlab";
-  if (h.includes("gitea") || h.includes("codeberg")) return "gitea";
-  return void 0;
+import { resolve as resolve3 } from "path";
+function forgeKind(host, opts = {}) {
+  return opts.kind ?? hostForgeKind(host);
+}
+function forgeRef(ref, opts = {}) {
+  if (!ref.isLocal) return ref;
+  const origin = originUrl(resolve3(ref.raw));
+  if (!origin) return ref;
+  const remote = resolveRepo(origin.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]*@/i, "$1"), opts);
+  return remote.host === "generic" || remote.isLocal ? ref : remote;
 }
 function apiBase(ref, opts = {}) {
   if (opts.apiBase) return opts.apiBase.replace(/\/+$/, "");
-  const host = typeof ref === "string" ? ref : ref.host;
-  const kind = forgeKind(host);
+  const host = normalizeForgeHost(typeof ref === "string" ? ref : ref.host);
+  const kind = forgeKind(host, opts);
   if (kind === "github") return host === "github.com" ? "https://api.github.com" : `https://${host}/api/v3`;
   if (kind === "gitlab") return `https://${host}/api/v4`;
   return `https://${host}/api/v1`;
 }
-function forgeAuthHeaders(kind) {
-  if (kind === "github") {
-    const t2 = env("GITHUB_TOKEN") ?? process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
-    return t2 ? { authorization: `Bearer ${t2}` } : {};
-  }
-  if (kind === "gitlab") {
-    const t2 = env("GITLAB_TOKEN") ?? process.env.GITLAB_TOKEN;
-    return t2 ? { "private-token": t2 } : {};
-  }
-  const t = env("GITEA_TOKEN") ?? process.env.GITEA_TOKEN;
-  return t ? { authorization: `token ${t}` } : {};
+var TOKEN_HOSTS = {
+  github: ["github.com", "api.github.com"],
+  gitlab: ["gitlab.com"],
+  gitea: []
+};
+function tokenHostAllowed(kind, host) {
+  const h = normalizeForgeHost(host);
+  return TOKEN_HOSTS[kind].includes(h) || configuredForgeHosts().get(h) === kind;
 }
-function reqOpts(kind, opts) {
-  return {
-    timeoutMs: opts.timeoutMs ?? 15e3,
-    userAgent: contactUa(),
-    headers: { ...forgeAuthHeaders(kind), ...kind === "github" ? { accept: "application/vnd.github+json" } : {} }
-  };
+var TOKEN_VARS = {
+  github: ["GITHUB_TOKEN", "GH_TOKEN"],
+  gitlab: ["GITLAB_TOKEN"],
+  gitea: ["GITEA_TOKEN"]
+};
+function forgeToken(kind) {
+  const own = env(TOKEN_VARS[kind][0]);
+  if (own) return { value: own, name: envName(TOKEN_VARS[kind][0]) };
+  for (const name of TOKEN_VARS[kind]) {
+    const value = process.env[name]?.trim();
+    if (value) return { value, name };
+  }
+  return void 0;
+}
+function forgeAuthHeaders(kind, host) {
+  const t = forgeToken(kind);
+  if (!t || host !== void 0 && !tokenHostAllowed(kind, host)) return {};
+  return { authorization: kind === "gitea" ? `token ${t.value}` : `Bearer ${t.value}` };
+}
+function limited(status, headers, data) {
+  if (status === 429) return true;
+  return status === 403 && (headers.get("x-ratelimit-remaining") === "0" || /rate limit/i.test(JSON.stringify(data ?? "")));
+}
+function resetTime(headers) {
+  const epoch = Number(headers.get("x-ratelimit-reset") ?? headers.get("ratelimit-reset"));
+  if (Number.isFinite(epoch) && epoch > 0) return new Date(epoch * 1e3).toISOString();
+  const wait = parseRetryAfter(headers, Number.POSITIVE_INFINITY);
+  return wait === void 0 ? void 0 : new Date(Date.now() + wait).toISOString();
+}
+var REDIRECT_STATUS2 = /* @__PURE__ */ new Set([301, 302, 303, 307, 308]);
+var RETRY_STATUS2 = /* @__PURE__ */ new Set([502, 503, 504]);
+var MAX_REDIRECTS = 5;
+var MAX_BODY_BYTES = 4 * 1024 * 1024;
+function failureText(e) {
+  const err = e;
+  const code = typeof err?.cause?.code === "string" ? err.cause.code : void 0;
+  const detail = typeof err?.cause?.message === "string" && err.cause.message ? err.cause.message : code;
+  if (!detail) return typeof err?.message === "string" ? err.message : String(e);
+  return code && !detail.includes(code) ? `${code}: ${detail}` : detail;
+}
+async function forgeGetOnce(url, headers, timeoutMs) {
+  const ctrl = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctrl.abort();
+  }, timeoutMs);
+  const sent = { ...headers };
+  let target = url;
+  try {
+    for (let hop = 0; ; hop++) {
+      const res = await fetch(target, { headers: sent, redirect: "manual", signal: ctrl.signal });
+      const location = res.headers.get("location");
+      if (REDIRECT_STATUS2.has(res.status) && location) {
+        await res.body?.cancel().catch(() => {
+        });
+        if (hop >= MAX_REDIRECTS) return { ok: false, status: 0, data: void 0, error: `more than ${MAX_REDIRECTS} redirects from ${url}` };
+        const next = new URL(location, target);
+        if (next.protocol !== "https:" && next.protocol !== "http:") return { ok: false, status: 0, data: void 0, error: `redirected to ${next.protocol}` };
+        if (next.origin !== new URL(target).origin) {
+          delete sent.authorization;
+          delete sent["private-token"];
+          delete sent.cookie;
+        }
+        target = next.href;
+        continue;
+      }
+      const bytes = await readCappedBytes(res, MAX_BODY_BYTES + 1);
+      countFetch(Math.min(bytes.length, MAX_BODY_BYTES), false);
+      if (bytes.length > MAX_BODY_BYTES) return { ok: false, status: res.status, data: void 0, error: `response over the ${MAX_BODY_BYTES}-byte cap` };
+      const text = bytes.toString("utf8");
+      let data;
+      try {
+        data = text ? JSON.parse(text) : void 0;
+      } catch {
+        data = text;
+      }
+      const quota = !res.ok && limited(res.status, res.headers, data);
+      return { ok: res.ok, status: res.status, data, ...quota ? { rateLimited: true, resetAt: resetTime(res.headers) } : {} };
+    }
+  } catch (e) {
+    return { ok: false, status: 0, data: void 0, error: timedOut ? `timed out after ${timeoutMs} ms` : failureText(e), timedOut };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function forgeGet(url, kind, ref, opts) {
+  const auth = opts.apiBase ? forgeAuthHeaders(kind) : forgeAuthHeaders(kind, ref.host);
+  const headers = { "user-agent": contactUa(), accept: kind === "github" ? "application/vnd.github+json" : "application/json", ...auth };
+  const tokenVar = auth.authorization ? forgeToken(kind)?.name : void 0;
+  const timeoutMs = opts.timeoutMs ?? 15e3;
+  let r = await forgeGetOnce(url, headers, timeoutMs);
+  if (RETRY_STATUS2.has(r.status) || r.status === 0 && !r.timedOut) {
+    await sleep(envInt("RETRY_MS", 600, 0, 5e3));
+    r = await forgeGetOnce(url, headers, timeoutMs);
+  }
+  return tokenVar ? { ...r, tokenVar } : r;
+}
+var FORGE_NAME = { github: "GitHub", gitlab: "GitLab", gitea: "Gitea" };
+function failure(r, forge, ref, action, opts) {
+  const host = ref.host;
+  const tokenVar = TOKEN_VARS[forge][0];
+  if (r.rateLimited) {
+    const when = r.resetAt ? ` until ${r.resetAt}` : "";
+    const advice = r.tokenVar ? `the quota for ${r.tokenVar} is spent` : opts.apiBase || tokenHostAllowed(forge, host) ? `set ${tokenVar} to raise the anonymous quota` : `list ${host} in ${envName("FORGE_HOSTS")} and set ${tokenVar} to raise the anonymous quota`;
+    return {
+      note: `${FORGE_NAME[forge]} rate-limited this request${when} \u2014 ${advice}.`,
+      status: r.status,
+      rateLimited: true,
+      ...r.resetAt ? { resetAt: r.resetAt } : {}
+    };
+  }
+  if (r.status === 0) {
+    let apiHost = host;
+    try {
+      apiHost = new URL(apiBase(ref, opts)).host;
+    } catch {
+    }
+    return { note: `${action} failed: network error reaching ${apiHost} \u2014 ${r.error ?? "no response"}.`, status: 0 };
+  }
+  const why = r.status === 404 ? `no such repository on ${host}, or it is private` : r.status === 401 ? r.tokenVar ? `${host} rejected ${r.tokenVar} \u2014 refresh it, or unset it to read public repositories anonymously` : `${host} requires authentication \u2014 set ${tokenVar}` : r.status === 403 ? `${host} refused access${r.tokenVar ? ` \u2014 ${r.tokenVar} may lack the scope this needs` : ""}` : r.status === 422 && forge === "github" ? "GitHub cannot search that repository \u2014 it does not exist, or it is private" : r.status >= 500 ? `${host} is unavailable` : r.error ?? `${host} answered with an error`;
+  return { note: `${action} failed (status ${r.status}): ${why}.`, status: r.status };
+}
+function failed(r, forge, ref, action, opts) {
+  return { items: [], ...failure(r, forge, ref, action, opts) };
+}
+var DOT_SEGMENT2 = /^(?:\.|%2e){1,2}$/i;
+function repoPath(ref, forge) {
+  if (!ref.owner || !ref.repo) return void 0;
+  if ([...ref.owner.split("/"), ref.repo].some((s) => !s || DOT_SEGMENT2.test(s))) return void 0;
+  return forge === "gitlab" ? `projects/${encodeURIComponent(`${ref.owner}/${ref.repo}`)}` : `repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}`;
 }
 function clip(s, n = 1200) {
   return String(s ?? "").replace(/\r/g, "").trim().slice(0, n);
@@ -4967,10 +6530,6 @@ function clip(s, n = 1200) {
 function labelsOf(v) {
   if (!Array.isArray(v)) return [];
   return v.map((l) => typeof l === "string" ? l : l?.name ?? "").filter(Boolean);
-}
-function limited(status, data) {
-  if (status === 429) return true;
-  return status === 403 && /rate limit/i.test(JSON.stringify(data ?? ""));
 }
 function mapGithubIssues(raw, kind) {
   return (raw ?? []).filter((it) => !!it && typeof it === "object").map((it) => ({
@@ -4993,53 +6552,74 @@ function splitSlug(full, fallback) {
   const i = full.indexOf("/");
   return i > 0 ? { owner: full.slice(0, i), repo: full.slice(i + 1) } : fallback;
 }
-function canonicalRepoRef(ref, opts = {}) {
+function canonicalLookup(ref, opts) {
   const fallback = { owner: ref.owner ?? "", repo: ref.repo ?? "" };
-  if (!ref.owner || !ref.repo || forgeKind(ref.host) !== "github") return Promise.resolve(fallback);
+  const path = forgeKind(ref.host, opts) === "github" ? repoPath(ref, "github") : void 0;
+  if (!path) return Promise.resolve(fallback);
   const key = `${ref.host}/${ref.owner}/${ref.repo}`;
   let hit = canonCache.get(key);
   if (!hit) {
-    hit = (async () => {
+    const lookup2 = (async () => {
       if (ghUsable(ref.host)) {
-        const r2 = await shAsync("gh", ["api", `repos/${ref.owner}/${ref.repo}`, "--jq", ".full_name"], { timeoutMs: opts.timeoutMs ?? 15e3 });
+        const r2 = await shAsync("gh", ["api", path, "--jq", ".full_name"], { timeoutMs: opts.timeoutMs ?? 15e3 });
         if (r2.ok && r2.stdout.includes("/")) return splitSlug(r2.stdout.trim(), fallback);
       }
-      const r = await httpJson("GET", `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}`, void 0, reqOpts("github", opts));
-      const full = r.ok ? r.data?.full_name : void 0;
+      const r = await forgeGet(`${apiBase(ref, opts)}/${path}`, "github", ref, opts);
+      if (!r.ok) return { ...fallback, failed: r };
+      const full = r.data?.full_name;
       return typeof full === "string" && full.includes("/") ? splitSlug(full, fallback) : fallback;
     })();
-    canonCache.set(key, hit);
+    hit = lookup2;
+    canonCache.set(key, lookup2);
+    void lookup2.then((c) => {
+      if (c.failed && canonCache.get(key) === lookup2) canonCache.delete(key);
+    });
   }
   return hit;
 }
-async function canonicalRepo(ref, opts = {}) {
-  if (!ref.owner || !ref.repo) return void 0;
-  const { owner, repo } = await canonicalRepoRef(ref, opts);
-  return `${owner}/${repo}`;
-}
+var noOrigin = (ref) => `"${ref.raw}" is a local directory with no origin remote \u2014 name the repository it is a clone of.`;
 async function searchIssues(ref, terms, kind, opts = {}) {
-  const forge = forgeKind(ref.host);
+  ref = forgeRef(ref, opts);
+  if (ref.isLocal) return { items: [], note: noOrigin(ref) };
+  const forge = forgeKind(ref.host, opts);
   if (!forge) return { items: [], note: `${ref.host} is not a forge this engine knows how to query.` };
-  if (!ref.owner || !ref.repo) return { items: [], note: `"${ref.raw}" does not name owner/repo.` };
+  const repoAt = repoPath(ref, forge);
+  if (!repoAt) return { items: [], note: `"${ref.raw}" does not name owner/repo.` };
+  const wanted = terms.map((t) => t.trim()).filter(Boolean);
+  const first = await searchOnce(ref, forge, repoAt, wanted, kind, opts);
+  if (first.items.length || first.note || opts.relax === false) return first;
+  const relaxed = relaxTerms(wanted);
+  if (!relaxed) return first;
+  const second = await searchOnce(ref, forge, repoAt, relaxed, kind, opts);
+  if (second.note) return second;
+  return { ...second, note: `No match for all the terms; relaxed to "${relaxed.join(" ")}".` };
+}
+function relaxTerms(terms) {
+  const qualifiers = terms.filter((t) => t.includes(":"));
+  const words = terms.filter((t) => !t.includes(":"));
+  if (words.length < 3) return void 0;
+  const best = rankedKeywords(words.join(" ")).slice(0, Math.max(2, Math.ceil(words.length / 2)));
+  if (best.length < 2 || best.length >= words.length) return void 0;
+  return [...best, ...qualifiers];
+}
+async function searchOnce(ref, forge, repoAt, terms, kind, opts) {
   const limit = Math.max(1, opts.limit ?? 10);
-  const q = terms.filter(Boolean).join(" ");
+  const q = terms.join(" ");
   if (forge === "github") {
-    const slug = await canonicalRepo(ref, opts) ?? `${ref.owner}/${ref.repo}`;
+    const canon = await canonicalLookup(ref, opts);
+    if (canon.failed) return failed(canon.failed, forge, ref, "GitHub search", opts);
     const filter = kind === "pr" ? "is:pr" : "is:issue";
-    const url2 = `${apiBase(ref, opts)}/search/issues?q=${encodeURIComponent(`repo:${slug} ${filter} ${q}`)}&per_page=${limit}&sort=updated&order=desc`;
-    const r2 = await httpJson("GET", url2, void 0, reqOpts(forge, opts));
-    if (limited(r2.status, r2.data))
-      return { items: [], rateLimited: true, note: "GitHub rate-limited this search \u2014 set GITHUB_TOKEN to raise the anonymous quota." };
-    if (!r2.ok) return { items: [], note: `GitHub search failed (status ${r2.status}).` };
+    const order = q ? "" : "&sort=updated&order=desc";
+    const url2 = `${apiBase(ref, opts)}/search/issues?q=${encodeURIComponent(`repo:${canon.owner}/${canon.repo} ${filter} ${q}`.trim())}&per_page=${limit}${order}`;
+    const r2 = await forgeGet(url2, forge, ref, opts);
+    if (!r2.ok) return failed(r2, forge, ref, "GitHub search", opts);
     return { items: mapGithubIssues(r2.data?.items ?? [], kind) };
   }
   if (forge === "gitlab") {
-    const project = encodeURIComponent(`${ref.owner}/${ref.repo}`);
-    const path2 = kind === "pr" ? "merge_requests" : "issues";
-    const url2 = `${apiBase(ref, opts)}/projects/${project}/${path2}?search=${encodeURIComponent(q)}&per_page=${limit}&order_by=updated_at`;
-    const r2 = await httpJson("GET", url2, void 0, reqOpts(forge, opts));
-    if (limited(r2.status, r2.data)) return { items: [], rateLimited: true, note: "GitLab rate-limited this search." };
-    if (!r2.ok) return { items: [], note: `GitLab request failed (status ${r2.status}).` };
+    const path = kind === "pr" ? "merge_requests" : "issues";
+    const url2 = `${apiBase(ref, opts)}/${repoAt}/${path}?search=${encodeURIComponent(q)}&per_page=${limit}&order_by=updated_at`;
+    const r2 = await forgeGet(url2, forge, ref, opts);
+    if (!r2.ok) return failed(r2, forge, ref, "GitLab search", opts);
     const items2 = (Array.isArray(r2.data) ? r2.data : []).map((it) => ({
       kind,
       number: typeof it.iid === "number" ? it.iid : void 0,
@@ -5052,11 +6632,9 @@ async function searchIssues(ref, terms, kind, opts = {}) {
     }));
     return { items: items2 };
   }
-  const path = kind === "pr" ? "pulls" : "issues";
-  const url = `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}/${path}?state=all&limit=${limit}&q=${encodeURIComponent(q)}`;
-  const r = await httpJson("GET", url, void 0, reqOpts(forge, opts));
-  if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: "Gitea rate-limited this request." };
-  if (!r.ok) return { items: [], note: `Gitea request failed (status ${r.status}).` };
+  const url = `${apiBase(ref, opts)}/${repoAt}/issues?state=all&type=${kind === "pr" ? "pulls" : "issues"}&limit=${limit}&q=${encodeURIComponent(q)}`;
+  const r = await forgeGet(url, forge, ref, opts);
+  if (!r.ok) return failed(r, forge, ref, "Gitea search", opts);
   const items = (Array.isArray(r.data) ? r.data : []).map((it) => ({
     kind,
     number: typeof it.number === "number" ? it.number : void 0,
@@ -5070,17 +6648,20 @@ async function searchIssues(ref, terms, kind, opts = {}) {
   return { items };
 }
 async function listReleases(ref, opts = {}) {
-  const forge = forgeKind(ref.host);
-  if (!forge || !ref.owner || !ref.repo) return { items: [], note: `Cannot list releases for "${ref.raw}".` };
+  ref = forgeRef(ref, opts);
+  if (ref.isLocal) return { items: [], note: noOrigin(ref) };
+  const forge = forgeKind(ref.host, opts);
+  const repoAt = forge && repoPath(ref, forge);
+  if (!forge || !repoAt) return { items: [], note: `Cannot list releases for "${ref.raw}".` };
   const limit = Math.max(1, opts.limit ?? 20);
-  const url = forge === "gitlab" ? `${apiBase(ref, opts)}/projects/${encodeURIComponent(`${ref.owner}/${ref.repo}`)}/releases?per_page=${limit}` : `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}/releases?per_page=${limit}&limit=${limit}`;
-  const r = await httpJson("GET", url, void 0, reqOpts(forge, opts));
-  if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: `${forge} rate-limited the release list.` };
-  if (!r.ok) return { items: [], note: `Could not list releases (status ${r.status}).` };
+  const url = `${apiBase(ref, opts)}/${repoAt}/releases?per_page=${limit}${forge === "gitlab" ? "" : `&limit=${limit}`}`;
+  const r = await forgeGet(url, forge, ref, opts);
+  if (!r.ok) return failed(r, forge, ref, "Listing releases", opts);
   const items = (Array.isArray(r.data) ? r.data : []).map((it) => ({
     kind: "release",
     title: String(it.name ?? it.tag_name ?? it.tag ?? "").trim() || String(it.tag_name ?? ""),
-    url: String(it.html_url ?? it._links ?? it.web_url ?? ref.webUrl ?? ""),
+    // GitLab has no html_url; its page is `_links.self`, an object's field.
+    url: String(it.html_url ?? it._links?.self ?? it.web_url ?? ref.webUrl ?? ""),
     state: it.prerelease ? "prerelease" : "released",
     labels: [],
     body: clip(it.body ?? it.description),
@@ -5088,44 +6669,109 @@ async function listReleases(ref, opts = {}) {
   }));
   return { items };
 }
-async function repoFacts(ref, opts = {}) {
-  const forge = forgeKind(ref.host);
-  if (!forge || !ref.owner || !ref.repo) return void 0;
-  const url = forge === "gitlab" ? `${apiBase(ref, opts)}/projects/${encodeURIComponent(`${ref.owner}/${ref.repo}`)}` : `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}`;
-  const r = await httpJson("GET", url, void 0, reqOpts(forge, opts));
-  if (!r.ok || !r.data || typeof r.data !== "object") return void 0;
-  const d = r.data;
+async function listTags(ref, opts = {}) {
+  ref = forgeRef(ref, opts);
+  if (ref.isLocal) return { items: [], note: noOrigin(ref) };
+  const forge = forgeKind(ref.host, opts);
+  const repoAt = forge && repoPath(ref, forge);
+  if (!forge || !repoAt) return { items: [], note: `Cannot list tags for "${ref.raw}".` };
+  const limit = Math.max(1, opts.limit ?? 50);
+  const url = forge === "gitlab" ? `${apiBase(ref, opts)}/${repoAt}/repository/tags?per_page=${limit}` : `${apiBase(ref, opts)}/${repoAt}/tags?per_page=${limit}&limit=${limit}`;
+  const r = await forgeGet(url, forge, ref, opts);
+  if (!r.ok) return failed(r, forge, ref, "Listing tags", opts);
+  const tagPage = forge === "gitlab" ? "-/tags" : "releases/tag";
+  const items = (Array.isArray(r.data) ? r.data : []).map((it) => {
+    const name = String(it.name ?? "").trim();
+    const commit = it.commit;
+    const at = commit?.created_at ?? commit?.created;
+    return {
+      kind: "tag",
+      title: name,
+      url: ref.webUrl ? `${ref.webUrl}/${tagPage}/${name.split("/").map(encodeURIComponent).join("/")}` : "",
+      labels: [],
+      body: "",
+      ...typeof at === "string" ? { updatedAt: at } : {}
+    };
+  });
+  return { items };
+}
+async function repoFactsResult(ref, opts = {}) {
+  ref = forgeRef(ref, opts);
+  if (ref.isLocal) return { note: noOrigin(ref) };
+  const forge = forgeKind(ref.host, opts);
+  if (!forge) return { note: `${ref.host} is not a forge this engine knows how to query.` };
+  const repoAt = repoPath(ref, forge);
+  if (!repoAt) return { note: `"${ref.raw}" does not name owner/repo.` };
+  const r = await forgeGet(`${apiBase(ref, opts)}/${repoAt}${forge === "gitlab" ? "?license=true" : ""}`, forge, ref, opts);
+  if (!r.ok) return failure(r, forge, ref, `Reading ${ref.webUrl ?? ref.raw}`, opts);
+  if (!r.data || typeof r.data !== "object") return { status: r.status, note: `${ref.host} answered with something other than a repository record.` };
+  return { status: r.status, facts: mapRepoFacts(forge, r.data) };
+}
+var str = (v) => typeof v === "string" && v.trim() ? v : void 0;
+var num = (v) => typeof v === "number" ? v : void 0;
+function mapRepoFacts(forge, d) {
+  const topics = (v) => Array.isArray(v) ? v.filter((t) => typeof t === "string") : [];
+  const shared = {
+    description: str(d.description),
+    forks: num(d.forks_count),
+    openIssues: num(d.open_issues_count),
+    defaultBranch: str(d.default_branch),
+    archived: typeof d.archived === "boolean" ? d.archived : void 0
+  };
+  if (forge === "gitlab") {
+    return {
+      ...shared,
+      fullName: str(d.path_with_namespace),
+      // A project has no homepage field; its page is the closest thing it states.
+      homepage: str(d.web_url),
+      license: str(d.license?.name) ?? str(d.license?.key),
+      stars: num(d.star_count),
+      pushedAt: str(d.last_activity_at),
+      topics: topics(d.topics).length ? topics(d.topics) : topics(d.tag_list)
+    };
+  }
+  if (forge === "gitea") {
+    return {
+      ...shared,
+      fullName: str(d.full_name),
+      homepage: str(d.website),
+      license: Array.isArray(d.licenses) ? str(d.licenses[0]) : void 0,
+      stars: num(d.stars_count),
+      pushedAt: str(d.updated_at),
+      topics: topics(d.topics)
+    };
+  }
+  const spdx = str(d.license?.spdx_id);
   return {
-    fullName: d.full_name ?? d.path_with_namespace,
-    description: d.description ?? void 0,
-    homepage: d.homepage ?? d.web_url ?? void 0,
-    license: d.license?.spdx_id ?? d.license?.name ?? void 0,
-    stars: d.stargazers_count ?? d.star_count,
-    forks: d.forks_count,
-    openIssues: d.open_issues_count,
-    defaultBranch: d.default_branch,
-    pushedAt: d.pushed_at ?? d.last_activity_at,
-    archived: d.archived,
-    topics: Array.isArray(d.topics) ? d.topics : Array.isArray(d.tag_list) ? d.tag_list : []
+    ...shared,
+    fullName: str(d.full_name),
+    homepage: str(d.homepage),
+    license: spdx && spdx !== "NOASSERTION" ? spdx : str(d.license?.name),
+    stars: num(d.stargazers_count),
+    pushedAt: str(d.pushed_at),
+    topics: topics(d.topics)
   };
 }
 
 // src/registry.ts
-var REGISTRY_URL = {
-  npm: (n) => `https://registry.npmjs.org/${encodeURIComponent(n).replace(/^%40/, "@")}`,
-  pypi: (n) => `https://pypi.org/pypi/${encodeURIComponent(n)}/json`,
-  crates: (n) => `https://crates.io/api/v1/crates/${encodeURIComponent(n)}`
-};
+var REGISTRIES = ["npm", "pypi", "crates"];
+var NPM = (n) => `https://registry.npmjs.org/${encodeURIComponent(n).replace(/^%40/, "@")}`;
+var PYPI = (n, version) => `https://pypi.org/pypi/${encodeURIComponent(n)}/${version ? `${encodeURIComponent(version)}/` : ""}json`;
+var CRATES = (n) => `https://crates.io/api/v1/crates/${encodeURIComponent(n)}`;
+var SHORTHAND_HOST = { github: "github.com", gitlab: "gitlab.com", bitbucket: "bitbucket.org" };
 function normalizeRepoUrl(raw) {
   const s = typeof raw === "string" ? raw.trim() : typeof raw?.url === "string" ? String(raw.url).trim() : "";
   if (!s) return void 0;
-  let out = s.replace(/^git\+/, "").replace(/^git:\/\//, "https://").replace(/^ssh:\/\/git@/, "https://").replace(/^git@([^:]+):/, "https://$1/").replace(/\.git$/, "");
+  const short = /^(github|gitlab|bitbucket):([\w.-]+\/[\w.-]+?)(?:\.git)?(?:#.*)?$/i.exec(s);
+  if (short) return `https://${SHORTHAND_HOST[short[1].toLowerCase()]}/${short[2]}`;
+  let out = s.replace(/#.*$/s, "").replace(/^git\+/i, "").replace(/^git:\/\//i, "https://").replace(/^ssh:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\//i, "https://$1/").replace(/^ssh:\/\/(?:[^@/]+@)?([^/:]+):/i, "https://$1/").replace(/^[\w.-]+@([^:/]+):/, "https://$1/").replace(/\/+$/, "").replace(/\.git$/i, "");
   if (/^[\w.-]+\/[\w.-]+$/.test(out)) out = `https://github.com/${out}`;
-  return /^https?:\/\//i.test(out) ? out : void 0;
+  return /^https?:\/\//i.test(out) ? out.replace(/^https?:\/\//i, (scheme) => scheme.toLowerCase()) : void 0;
 }
-function reqOpts2() {
+function reqOpts() {
   return { timeoutMs: 12e3, userAgent: contactUa(), accept: "application/json" };
 }
+var NPM_TIME_TAIL_FIRST_BYTES = 256 * 1024;
 var NPM_TIME_TAIL_BYTES = 2 * 1024 * 1024;
 var isWs = (c) => c === " " || c === "	" || c === "\n" || c === "\r";
 function opensTimeMap(text, i) {
@@ -5139,6 +6785,7 @@ function opensTimeMap(text, i) {
 var MAX_OPEN_TIME_MAPS = 16;
 function scanTimeMap(text, version, phase) {
   let publishedAt;
+  let closed = false;
   let depth = 0;
   let quoted = phase !== "outside";
   let escaped = phase === "escape";
@@ -5162,7 +6809,10 @@ function scanTimeMap(text, version, phase) {
         open.pop();
         try {
           const time = JSON.parse(text.slice(top.at, i + 1));
-          if (time && typeof time === "object" && !Array.isArray(time) && typeof time[version] === "string") publishedAt = time[version];
+          if (time && typeof time === "object" && !Array.isArray(time)) {
+            closed = true;
+            if (typeof time[version] === "string") publishedAt = time[version];
+          }
         } catch (err) {
           if (!(err instanceof SyntaxError)) throw err;
         }
@@ -5170,86 +6820,185 @@ function scanTimeMap(text, version, phase) {
       while (open.length && open[open.length - 1].depth > depth) open.pop();
     }
   }
-  return publishedAt;
+  return { publishedAt, closed };
 }
 function npmTimeFromTail(text, version) {
-  return scanTimeMap(text, version, "outside") ?? scanTimeMap(text, version, "string") ?? scanTimeMap(text, version, "escape");
+  let closed = false;
+  for (const phase of ["outside", "string", "escape"]) {
+    const found = scanTimeMap(text, version, phase);
+    if (found.publishedAt) return found;
+    closed ||= found.closed;
+  }
+  return { closed };
 }
 async function npmPublishedAt(packageUrl, version) {
   if (!version) return void 0;
-  const tail = await httpGet(packageUrl, {
-    ...reqOpts2(),
-    // Optional enrichment must not inherit the primary lookup's retry budget:
-    // package facts are already usable if this suffix is slow or unavailable.
-    timeoutMs: 2500,
-    retries: 0,
-    headers: { range: `bytes=-${NPM_TIME_TAIL_BYTES}` },
-    maxBytes: NPM_TIME_TAIL_BYTES
-  });
-  return tail.ok ? npmTimeFromTail(tail.body, version) : void 0;
+  for (const bytes of [NPM_TIME_TAIL_FIRST_BYTES, NPM_TIME_TAIL_BYTES]) {
+    const tail = await httpGet(packageUrl, {
+      ...reqOpts(),
+      // Optional enrichment must not inherit the primary lookup's retry budget:
+      // package facts are already usable if this suffix is slow or unavailable.
+      timeoutMs: 2500,
+      retries: 0,
+      headers: { range: `bytes=-${bytes}` },
+      maxBytes: bytes
+    });
+    if (!tail.ok) return void 0;
+    const found = npmTimeFromTail(tail.body, version);
+    if (found.publishedAt || found.closed || tail.status !== 206) return found.publishedAt;
+  }
+  return void 0;
 }
-async function lookupPackage(registry, name, version) {
+function record(r) {
+  return r.ok && r.data && typeof r.data === "object" && !Array.isArray(r.data) ? r.data : void 0;
+}
+var ABSENT = /* @__PURE__ */ new Set([400, 404, 410]);
+var str2 = (v) => typeof v === "string" && v.trim() ? v.trim() : void 0;
+function miss(r) {
+  if (ABSENT.has(r.status)) return { status: r.status };
+  const said = r.data && typeof r.data === "object" ? str2(r.data.errors?.[0]?.detail) ?? str2(r.data.message) ?? str2(r.data.error) : void 0;
+  return { status: r.status, error: r.error ?? said ?? (r.ok ? "the registry answered with something other than a package record" : `status ${r.status}`) };
+}
+async function lookupPackageResult(registry, name, version) {
+  if (!REGISTRIES.includes(registry)) return { status: 0, error: `unknown registry "${String(registry)}" \u2014 expected ${REGISTRIES.join(", ")}` };
   const n = name.trim();
-  if (!n) return void 0;
-  const url = registry === "npm" ? `${REGISTRY_URL.npm(n)}/${encodeURIComponent(version ?? "latest")}` : REGISTRY_URL[registry](n);
-  const r = await httpJson("GET", url, void 0, reqOpts2());
-  if (!r.ok || !r.data || typeof r.data !== "object") return void 0;
-  const d = r.data;
-  if (registry === "npm") {
-    const latest2 = version ?? d["dist-tags"]?.latest ?? d.version;
-    const v = latest2 && d.versions?.[latest2] || d;
-    const stated = latest2 ? d.time?.[latest2] : void 0;
-    const publishedAt = typeof stated === "string" ? stated : await npmPublishedAt(REGISTRY_URL.npm(n), latest2);
-    const deprecated = typeof v.deprecated === "string" ? v.deprecated : v.deprecated === true ? "deprecated" : void 0;
-    return {
-      registry,
+  if (!n) return { status: 0, error: "no package name given" };
+  const v = version?.trim() || void 0;
+  if (registry === "npm") return npmLookup(n, v);
+  if (registry === "pypi") return pypiLookup(n, v);
+  return cratesLookup(n, v);
+}
+async function npmLookup(n, version) {
+  const r = await httpJson("GET", `${NPM(n)}/${encodeURIComponent(version ?? "latest")}`, void 0, reqOpts());
+  const d = record(r);
+  if (!d) return miss(r);
+  const asked = version ?? "latest";
+  const tags = d["dist-tags"] ?? {};
+  const resolved = str2(d.version) ?? (typeof tags[asked] === "string" ? tags[asked] : void 0) ?? (d.versions?.[asked] ? asked : void 0);
+  const v = resolved && d.versions?.[resolved] || d;
+  const stated = resolved ? d.time?.[resolved] : void 0;
+  const publishedAt = typeof stated === "string" ? stated : await npmPublishedAt(NPM(n), resolved);
+  const deprecated = typeof v.deprecated === "string" ? v.deprecated : v.deprecated === true ? "deprecated" : void 0;
+  const repository = v.repository ?? d.repository;
+  const directory = str2(repository?.directory);
+  return {
+    status: r.status,
+    facts: {
+      registry: "npm",
       name: d.name ?? n,
-      version: latest2,
+      version: resolved,
       description: v.description ?? d.description,
       homepage: v.homepage ?? d.homepage,
-      repository: normalizeRepoUrl(v.repository ?? d.repository),
+      repository: normalizeRepoUrl(repository),
+      ...directory ? { repositoryDirectory: directory } : {},
       documentation: typeof v.documentation === "string" ? v.documentation : void 0,
       license: typeof v.license === "string" ? v.license : v.license?.type,
       ...deprecated ? { deprecated } : {},
       publishedAt
-    };
+    }
+  };
+}
+var FORGE_URL = /^https?:\/\/(?:www\.)?(?:github\.com|gitlab\.com|codeberg\.org|bitbucket\.org)\/[^/]+\/[^/]+/i;
+var PYPI_REPO_LABELS = ["source", "sourcecode", "repository", "code", "github", "gitlab"];
+function projectUrls(raw) {
+  const out = /* @__PURE__ */ new Map();
+  if (!raw || typeof raw !== "object") return out;
+  for (const [label, url] of Object.entries(raw)) {
+    const key = label.toLowerCase().replace(/[^a-z]/g, "");
+    if (typeof url === "string" && url.trim() && !out.has(key)) out.set(key, url.trim());
   }
-  if (registry === "pypi") {
-    const info = d.info ?? {};
-    const urls = info.project_urls ?? {};
-    const yanked = Array.isArray(d.urls) && d.urls.length ? d.urls.every((u) => u.yanked) : false;
-    return {
-      registry,
+  return out;
+}
+function pypiLicense(info, classifiers) {
+  const expression = str2(info.license_expression);
+  if (expression) return expression;
+  const license = str2(info.license);
+  if (license && license.length <= 100 && !license.includes("\n")) return license;
+  const named = classifiers.filter((c) => c.startsWith("License ::")).map((c) => c.split("::").pop().trim());
+  return named.filter(Boolean).join(", ") || void 0;
+}
+async function pypiLookup(n, version) {
+  const r = await httpJson("GET", PYPI(n, version), void 0, reqOpts());
+  const d = record(r);
+  if (!d) return miss(r);
+  const info = d.info ?? {};
+  const urls = projectUrls(info.project_urls);
+  const classifiers = Array.isArray(info.classifiers) ? info.classifiers.filter((c) => typeof c === "string") : [];
+  const homepage = str2(info.home_page) ?? urls.get("homepage");
+  const labelled = PYPI_REPO_LABELS.map((k) => urls.get(k)).find(Boolean);
+  const repository = labelled ?? [info.home_page, urls.get("homepage")].find((u) => typeof u === "string" && FORGE_URL.test(u));
+  const filesYanked = Array.isArray(d.urls) && d.urls.length ? d.urls.every((u) => u.yanked) : false;
+  const yanked = info.yanked === true ? `this release is yanked${str2(info.yanked_reason) ? `: ${str2(info.yanked_reason)}` : ""}` : filesYanked ? "every file for this release is yanked" : void 0;
+  const inactive = classifiers.find((c) => /^Development Status :: 7 - Inactive/.test(c));
+  const deprecated = yanked ?? (inactive ? `the project declares itself inactive (${inactive})` : void 0);
+  return {
+    status: r.status,
+    facts: {
+      registry: "pypi",
       name: info.name ?? n,
       version: info.version,
       description: info.summary,
-      homepage: info.home_page || urls.Homepage || urls.homepage,
-      repository: normalizeRepoUrl(urls.Source ?? urls.Repository ?? urls["Source Code"] ?? urls.Code ?? info.home_page),
-      documentation: info.docs_url || urls.Documentation || urls.documentation,
-      license: info.license || void 0,
-      ...yanked ? { deprecated: "every file for this release is yanked" } : {}
-    };
-  }
-  const c = d.crate ?? {};
-  return {
-    registry,
-    name: c.name ?? n,
-    version: version ?? c.max_stable_version ?? c.newest_version,
-    description: c.description,
-    homepage: c.homepage,
-    repository: normalizeRepoUrl(c.repository),
-    documentation: c.documentation,
-    downloads: typeof c.downloads === "number" ? c.downloads : void 0,
-    publishedAt: c.updated_at
+      homepage,
+      repository: normalizeRepoUrl(repository),
+      documentation: str2(info.docs_url) ?? urls.get("documentation") ?? urls.get("docs"),
+      license: pypiLicense(info, classifiers),
+      ...deprecated ? { deprecated } : {}
+    }
   };
 }
-async function resolvePackage(name, opts = {}) {
-  const order = opts.registry ? [opts.registry] : ["npm", "pypi", "crates"];
-  for (const r of order) {
-    const found = await lookupPackage(r, name, opts.version);
-    if (found) return found;
+async function cratesLookup(n, version) {
+  const [crateAnswer, pinnedAnswer] = await Promise.all([
+    httpJson("GET", `${CRATES(n)}?include=default_version`, void 0, reqOpts()),
+    version ? httpJson("GET", `${CRATES(n)}/${encodeURIComponent(version)}`, void 0, reqOpts()) : void 0
+  ]);
+  const d = record(crateAnswer);
+  if (!d) return miss(crateAnswer);
+  let v;
+  if (pinnedAnswer) {
+    const pinned = record(pinnedAnswer);
+    if (!pinned) return miss(pinnedAnswer);
+    v = pinned.version ?? {};
   }
-  return void 0;
+  const c = d.crate ?? {};
+  const listed = Array.isArray(d.versions) ? str2(d.versions[0]?.num) : void 0;
+  const newest = str2(c.newest_version) === "0.0.0" ? void 0 : str2(c.newest_version);
+  const num2 = version ? str2(v?.num) ?? version : str2(c.default_version) ?? listed ?? str2(c.max_stable_version) ?? newest;
+  v ??= Array.isArray(d.versions) ? d.versions.find((x) => x?.num === num2) : void 0;
+  const yanked = v?.yanked === true ? `this version is yanked${str2(v.yank_message) ? `: ${str2(v.yank_message)}` : ""}` : void 0;
+  return {
+    status: crateAnswer.status,
+    facts: {
+      registry: "crates",
+      name: c.name ?? n,
+      version: num2,
+      description: str2(c.description) ?? str2(v?.description),
+      homepage: str2(c.homepage) ?? str2(v?.homepage),
+      repository: normalizeRepoUrl(c.repository ?? v?.repository),
+      documentation: str2(c.documentation) ?? str2(v?.documentation),
+      license: str2(v?.license),
+      downloads: typeof c.downloads === "number" ? c.downloads : void 0,
+      publishedAt: str2(v?.created_at) ?? (version ? void 0 : str2(c.updated_at)),
+      ...yanked ? { deprecated: yanked } : {}
+    }
+  };
+}
+async function resolvePackageResult(name, opts = {}) {
+  if (!name.trim()) return { tried: [], note: "no package name given" };
+  const order = opts.registry ? [opts.registry] : REGISTRIES;
+  const tried = [];
+  for (const registry of order) {
+    const r = await lookupPackageResult(registry, name, opts.version);
+    tried.push({ registry, status: r.status, ...r.error ? { error: r.error } : {} });
+    if (r.facts) return { facts: r.facts, tried };
+    if (!REGISTRIES.includes(registry)) return { tried, note: r.error };
+    if (!ABSENT.has(r.status)) {
+      const why = r.status ? ` (status ${r.status})` : "";
+      return { tried, note: `${registry} could not be asked${why}: ${r.error ?? "no answer"} \u2014 retry, or name the registry the package is on.` };
+    }
+  }
+  const at = opts.version ? ` at version ${opts.version}` : "";
+  const range = opts.version && /[\^~<>=*|\s]|^[xX]$|\.[xX]\b/.test(opts.version) ? " (a version range is not resolved \u2014 pass an exact version, or an npm dist-tag)" : "";
+  return { tried, note: `no registry knows a package called "${name.trim()}"${at}${range}` };
 }
 
 // src/mcp/protocol.ts
@@ -5336,15 +7085,15 @@ function isOriginAllowed(origin, allowed = []) {
 }
 
 // src/mcp/resources.ts
-import { existsSync as existsSync6, readdirSync as readdirSync5, readFileSync as readFileSync11, realpathSync, statSync as statSync4 } from "fs";
-import { basename as basename3, dirname as dirname3, join as join14, resolve as resolve3, sep } from "path";
+import { existsSync as existsSync6, readdirSync as readdirSync6, readFileSync as readFileSync12, realpathSync, statSync as statSync4 } from "fs";
+import { basename as basename3, dirname as dirname3, join as join14, resolve as resolve4, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
 function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname3(fileURLToPath(import.meta.url));
   const name = brand().name;
-  const candidates = [resolve3(here, ".."), resolve3(here, "..", "skills", name), resolve3(here, "..", "..", "skills", name)];
+  const candidates = [resolve4(here, ".."), resolve4(here, "..", "skills", name), resolve4(here, "..", "..", "skills", name)];
   return candidates.find((dir) => existsSync6(join14(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
@@ -5353,7 +7102,7 @@ function listResources(moduleDir) {
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
   const refDir = join14(root, "references");
   if (!existsSync6(refDir)) return out;
-  for (const file of readdirSync5(refDir).sort()) {
+  for (const file of readdirSync6(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
     out.push(describe(root, join14("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
   }
@@ -5367,7 +7116,7 @@ function readResource(uri, moduleDir) {
   if (!root) throw new ResourceError("no skill payload found next to this build \u2014 nothing to read");
   const rel = uri.slice(URI_SCHEME.length);
   if (!rel) throw new ResourceError("empty resource path");
-  const target = resolve3(root, rel);
+  const target = resolve4(root, rel);
   const rootReal = realpathSync(root);
   let targetReal;
   try {
@@ -5379,7 +7128,7 @@ function readResource(uri, moduleDir) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
   if (!statSync4(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
-  return { uri, mimeType: "text/markdown", text: readFileSync11(targetReal, "utf8") };
+  return { uri, mimeType: "text/markdown", text: readFileSync12(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
 };
@@ -5397,7 +7146,7 @@ function describe(root, rel, fallbackTitle) {
 function firstProse(file) {
   let text;
   try {
-    text = readFileSync11(file, "utf8");
+    text = readFileSync12(file, "utf8");
   } catch {
     return void 0;
   }
@@ -5605,7 +7354,7 @@ async function runStdioServer(adapter, opts = {}) {
   let active = 0;
   const waiting = [];
   const runHandler = async (msg, send2) => {
-    while (active >= MAX_IN_FLIGHT) await new Promise((resolve5) => waiting.push(resolve5));
+    while (active >= MAX_IN_FLIGHT) await new Promise((resolve6) => waiting.push(resolve6));
     active++;
     try {
       await server.handle(msg, send2);
@@ -5658,7 +7407,7 @@ function reportInternal(send) {
 // src/mcp/http.ts
 import { createServer as createHttpServer } from "http";
 var MCP_PATH = "/mcp";
-var MAX_BODY_BYTES = 4 * 1024 * 1024;
+var MAX_BODY_BYTES2 = 4 * 1024 * 1024;
 var CORS_HEADERS = "content-type, accept, mcp-protocol-version, mcp-session-id, authorization, last-event-id";
 var LOOPBACK_BIND = /* @__PURE__ */ new Set(["127.0.0.1", "::1", "localhost"]);
 function startHttpServer(adapter, opts = {}) {
@@ -5682,14 +7431,14 @@ function startHttpServer(adapter, opts = {}) {
   server.requestTimeout = 0;
   server.headersTimeout = 6e4;
   server.keepAliveTimeout = 12e4;
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     server.once("error", reject);
     server.listen(opts.port ?? 0, bind, () => {
       server.removeListener("error", reject);
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : opts.port ?? 0;
       const host = bind.includes(":") ? `[${bind}]` : bind;
-      resolve5({
+      resolve6({
         server,
         port,
         url: `http://${host}:${port}${MCP_PATH}`,
@@ -5753,7 +7502,7 @@ async function route(req, res, adapter, opts) {
     raw = await readBody(req);
   } catch (e) {
     if (e.message === "too large") {
-      sendJson(res, 413, { error: `request body exceeds ${MAX_BODY_BYTES} bytes` }, origin);
+      sendJson(res, 413, { error: `request body exceeds ${MAX_BODY_BYTES2} bytes` }, origin);
       return;
     }
     sendJson(res, 400, { error: `could not read request body: ${e.message}` }, origin);
@@ -5796,14 +7545,14 @@ function sendJson(res, status, body, origin, extra = {}) {
   });
   res.end(text);
 }
-var DRAIN_LIMIT = MAX_BODY_BYTES * 8;
+var DRAIN_LIMIT = MAX_BODY_BYTES2 * 8;
 function readBody(req) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const chunks = [];
     let size = 0;
     let over = false;
     const declared = Number(req.headers["content-length"]);
-    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) over = true;
+    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES2) over = true;
     req.on("data", (c) => {
       size += c.length;
       if (over) {
@@ -5813,7 +7562,7 @@ function readBody(req) {
         }
         return;
       }
-      if (size > MAX_BODY_BYTES) {
+      if (size > MAX_BODY_BYTES2) {
         over = true;
         chunks.length = 0;
         return;
@@ -5822,7 +7571,7 @@ function readBody(req) {
     });
     req.on("end", () => {
       if (over) reject(new Error("too large"));
-      else resolve5(Buffer.concat(chunks).toString("utf8"));
+      else resolve6(Buffer.concat(chunks).toString("utf8"));
     });
     req.on("error", reject);
     req.on("aborted", () => reject(new Error("client aborted the request")));
@@ -5843,10 +7592,11 @@ USAGE
                        [--cache] [--refresh] [--offline] [--timeout <ms>]
   webindex extract <file> [--json] [--full-page]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--json]
-  webindex repo <ref> [--json]
-  webindex issues <ref> [--terms "<words>"] [--limit <n>] [--json]
-  webindex prs <ref> [--terms "<words>"] [--limit <n>] [--json]
-  webindex releases <ref> [--limit <n>] [--json]
+  webindex repo <ref> [--forge github|gitlab|gitea] [--json]
+  webindex issues <ref> [--terms "<words>"] [--limit <n>] [--forge <kind>] [--json]
+  webindex prs <ref> [--terms "<words>"] [--limit <n>] [--forge <kind>] [--json]
+  webindex releases <ref> [--limit <n>] [--forge <kind>] [--json]
+  webindex tags <ref> [--limit <n>] [--forge <kind>] [--json]
   webindex package <name> [--registry npm|pypi|crates] [--version <semver>] [--json]
   webindex meta <url> [--json]
   webindex robots <url> [--json]
@@ -5876,7 +7626,9 @@ COMMANDS
              then Firecrawl. Prints what it found, or says which backend was
              missing and how to start it \u2014 those are different answers.
   fetch      Fetch a URL and print the extracted text. Routes PDFs and office
-             documents to their ladders automatically. Uses Firecrawl when
+             documents to their ladders automatically \u2014 by URL, content-type,
+             download filename or the bytes themselves; images, media and
+             archives get a note, never their bytes. Uses Firecrawl when
              available, with built-in extraction as fallback. HTML is reduced
              to main content with consent banners dropped. Caching is opt-in:
              --cache reuses a fresh copy for the TTL (24 h) and revalidates a
@@ -5884,20 +7636,32 @@ COMMANDS
              304; --refresh re-fetches and rewrites the entry; --offline
              serves only what the cache holds. --json adds finalUrl (after
              redirects), canonical, documentType and cached.
-  extract    Same extraction, on a file already on disk. For both, --full-page
-             keeps the whole HTML page through the built-in reader: navigation,
-             footer and consent banners included.
+  extract    Same extraction, on a file already on disk, recognised by its bytes
+             when its name says otherwise. For both, --full-page keeps the
+             whole HTML page through the built-in reader: navigation, footer
+             and consent banners included.
   rank       Order candidate documents against a question \u2014 BM25F, then a
              near-duplicate collapse, then MMR so the top says several
              different things. Reads a JSON array of {url,title,text} from
              --docs or stdin. Deterministic; no model, no network.
   repo       A repository's own facts: stars, licence, default branch, last
              push, and whether it is archived \u2014 the record, not the README.
-  issues     Search a repository's issues on GitHub, GitLab or Gitea.
+             A <ref> is owner/repo, any repository URL (one copied from a
+             browser works), git@host:owner/repo, or a local checkout, read as
+             its origin. --forge names what a self-hosted host runs when its
+             name does not say (salsa.debian.org is a GitLab).
+  issues     Search a repository's issues on GitHub, GitLab or Gitea. Every
+             term must match; when together they match nothing, it searches
+             once more with the most distinctive ones and says so on stderr.
   prs        The same, over pull or merge requests.
   releases   Its releases, newest first, with their notes.
+  tags       Its tags \u2014 the versions of a project that tags without
+             publishing releases.
   package    A library NAME resolved through npm, PyPI or crates.io to its
              repository, docs, current version, licence and deprecation.
+             --version answers for that version (or an npm dist-tag) or not
+             at all. A registry that cannot be reached stops the search, so
+             another ecosystem's namesake never answers in its place.
   meta       What a page says about itself: JSON-LD, OpenGraph and meta tags \u2014
              author, dates, type, canonical URL.
   robots     Whether robots.txt permits fetching that URL. Exits non-zero when
@@ -5944,14 +7708,22 @@ COMMANDS
              working skill rather than a lone SKILL.md; 'copy' embeds the built
              engine in the package; 'init' scaffolds a new skill repository.
              Dev-time only \u2014 it reads a repo, it never runs inside one.
-  doctor     Report which optional helpers are reachable and which extraction
-             rungs are available on this machine.
+  doctor     Report which optional helpers are reachable, and what each
+             extraction rung will do on this machine: installed, downloads on
+             first use, not installed, built-in, or switched off (and by which
+             variable). The npx rungs are checked against npm's cache, never
+             installed.
 
 ENVIRONMENT
   WEBINDEX_FIRECRAWL     Firecrawl base URL, or "off"  (default http://localhost:3002)
-  WEBINDEX_PDF_ENGINE    force one PDF rung: native|pdf-inspector|anydoc|firecrawl|pdftotext|ocr
-  WEBINDEX_DOC_ENGINE    force one office rung, or "none" to disable
+  WEBINDEX_PDF_ENGINE    the PDF rungs to run, in order: a comma list of
+                         pdf-inspector|anydoc|firecrawl|pdftotext|native|ocr, or "none"
+  WEBINDEX_DOC_ENGINE    the office rungs to run, in order: a comma list of
+                         anydoc|firecrawl|builtin, or "none" to disable
+                         (builtin reads OOXML and OpenDocument with no network)
   WEBINDEX_NO_NPX        skip the rungs that would install through npx
+  WEBINDEX_NPX_TIMEOUT_MS  how long one npx rung may run, first download included
+                         (default 90000)
   WEBINDEX_OCR_MAX       documents this process may OCR (default 3)
   WEBINDEX_ENGINES       keyless engines to try: a comma list, or "off"  (default all)
   WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
@@ -5964,6 +7736,11 @@ ENVIRONMENT
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
   WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
   WEBINDEX_UA            override the browser User-Agent
+  GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, GITEA_TOKEN
+                         optional forge tokens; each goes only to github.com, gitlab.com,
+                         or a host listed in WEBINDEX_FORGE_HOSTS
+  WEBINDEX_FORGE_HOSTS   self-hosted forges, e.g. "salsa.debian.org=gitlab,git.corp=github":
+                         each is queried as that forge and receives that forge's token
 
 Every optional helper degrades to a note. Nothing here needs an API key.`;
 var VALUE_FLAGS = [
@@ -5989,7 +7766,8 @@ var VALUE_FLAGS = [
   "version",
   "terms",
   "max",
-  "timeout"
+  "timeout",
+  "forge"
 ];
 var BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page", "cache", "refresh", "offline"];
 var COMMANDS = [
@@ -6001,6 +7779,7 @@ var COMMANDS = [
   "issues",
   "prs",
   "releases",
+  "tags",
   "package",
   "meta",
   "robots",
@@ -6038,26 +7817,41 @@ function toolTimeoutMs(value) {
   const n = typeof value === "string" ? Number(value) : value;
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(3e5, Math.max(1, Math.round(n))) : void 0;
 }
+var FORGE_KINDS = ["github", "gitlab", "gitea"];
+var isForgeKind = (v) => FORGE_KINDS.includes(v);
+var isRegistryKind = (v) => v === "npm" || v === "pypi" || v === "crates";
+var FORGE_ARG = {
+  type: "string",
+  description: "Which forge a self-hosted host runs when its name does not say (salsa.debian.org is gitlab). Omit for github.com, gitlab.com, Codeberg.",
+  enum: [...FORGE_KINDS]
+};
+function forgeTarget(raw, kind) {
+  const opts = kind ? { kind } : {};
+  return forgeRef(resolveRepo(raw, opts), opts);
+}
 async function extractLocal(path, fullPage = false) {
   let bytes;
   try {
-    bytes = readFileSync12(path);
+    bytes = readFileSync13(path);
   } catch (e) {
     throw new ToolError(`cannot read ${path}: ${e.message}`);
   }
   const asUrl = pathToFileURL(path).href;
-  if (looksLikePdfUrl(asUrl) || bytes.subarray(0, 5).toString("latin1") === "%PDF-") {
+  const sniffed = sniffDocument(bytes);
+  if (sniffed === "pdf" || !sniffed && looksLikePdfUrl(asUrl)) {
     const r = await extractPdf(bytes);
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
-  const fmt = docFormatForUrl(asUrl);
+  const fmt = sniffed ?? docFormatForUrl(asUrl);
   if (fmt) {
     const r = await extractDocument(bytes, fmt);
+    if (!r.text && fmt.textFallback) return { text: decodeLocal(bytes, { sniffHtmlCharset: false }), extractor: "plain", consentDropped: 0 };
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
   const extension = extname(path).toLowerCase();
   const explicitText = [".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".xml", ".yaml", ".yml"].includes(extension);
   const raw = decodeLocal(bytes, { sniffHtmlCharset: !explicitText });
+  if (raw.slice(0, 1024).includes("\0")) return { text: "", extractor: "none", reason: "binary data, not a text document", consentDropped: 0 };
   const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
   const text = looksHtml ? htmlToText(fullPage ? raw : extractMainHtml(raw), { fullPage }) : raw;
   const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text) : { text, dropped: 0 };
@@ -6129,7 +7923,7 @@ function webindexAdapter() {
       {
         name: "webindex_fetch",
         title: "Fetch a URL as clean text",
-        description: "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector \u2192 anydoc \u2192 Firecrawl \u2192 pdftotext \u2192 native \u2192 OCR) and office documents, and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text, then a trailer with the final URL after redirects, the page's canonical URL and title, any note, and which rung produced it \u2014 never raw bytes. Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
+        description: "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector \u2192 anydoc \u2192 Firecrawl \u2192 pdftotext \u2192 native \u2192 OCR) and office documents (anydoc \u2192 Firecrawl \u2192 a built-in OOXML/OpenDocument reader), and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text, then a trailer with the final URL after redirects, the page's canonical URL and title, any note, and which rung produced it \u2014 never raw bytes. Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
         inputSchema: {
           type: "object",
           properties: {
@@ -6181,21 +7975,25 @@ function webindexAdapter() {
         description: "Read a repository's record from GitHub, GitLab or Gitea: description, stars, licence, default branch, last push, topics, and whether it is ARCHIVED. Answers 'is this maintained' from the forge rather than from a README that says it is. Keyless; a token only raises the quota.",
         inputSchema: {
           type: "object",
-          properties: { repo: { type: "string", description: "owner/repo, a URL, or git@host:owner/repo." } },
+          properties: {
+            repo: { type: "string", description: "owner/repo, a URL (a browser URL works), git@host:owner/repo, or a local checkout (read as its origin)." },
+            forge: FORGE_ARG
+          },
           required: ["repo"]
         }
       },
       {
         name: "webindex_issues",
         title: "Search a repository's issues or pull requests",
-        description: "Search issues (or pull/merge requests) in one repository across GitHub, GitLab and Gitea. Returns number, title, state, labels and body. GitHub results are relevance-ranked and carry a score; GitLab and Gitea have no search endpoint, so theirs are recency-ordered and carry none \u2014 deliberately, rather than inventing one.",
+        description: "Search issues (or pull/merge requests) in one repository across GitHub, GitLab and Gitea. Returns number, title, state, labels and body. GitHub results for `terms` are relevance-ranked and carry a score; GitLab and Gitea have no search endpoint, so theirs are recency-ordered and carry none \u2014 deliberately, rather than inventing one. Every term must match; when all of them together match nothing, it searches once more with the most distinctive ones and says so in `note`.",
         inputSchema: {
           type: "object",
           properties: {
             repo: { type: "string", description: "owner/repo, or a repository URL." },
             terms: { type: "string", description: "What to look for." },
             kind: { type: "string", description: "issue (default) or pr.", enum: ["issue", "pr"] },
-            limit: { type: "number", description: "How many to return (default 10)." }
+            limit: { type: "number", description: "How many to return (default 10)." },
+            forge: FORGE_ARG
           },
           required: ["repo"]
         }
@@ -6203,12 +8001,27 @@ function webindexAdapter() {
       {
         name: "webindex_releases",
         title: "A repository's releases",
-        description: "List releases newest-first with their notes and dates \u2014 the authoritative answer to 'what changed', and to 'when was X added'.",
+        description: "List releases newest-first with their notes and dates \u2014 the authoritative answer to 'what changed', and to 'when was X added'. A project that tags versions without publishing releases has none: use webindex_tags for it.",
         inputSchema: {
           type: "object",
           properties: {
             repo: { type: "string", description: "owner/repo, or a repository URL." },
-            limit: { type: "number", description: "How many (default 20)." }
+            limit: { type: "number", description: "How many (default 20)." },
+            forge: FORGE_ARG
+          },
+          required: ["repo"]
+        }
+      },
+      {
+        name: "webindex_tags",
+        title: "A repository's tags",
+        description: "List a repository's tags with a link to each \u2014 the versions of a project that tags without publishing forge releases, where webindex_releases finds nothing.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            repo: { type: "string", description: "owner/repo, or a repository URL." },
+            limit: { type: "number", description: "How many (default 50)." },
+            forge: FORGE_ARG
           },
           required: ["repo"]
         }
@@ -6301,6 +8114,7 @@ function webindexAdapter() {
       webindex_repo: "this repository's record is unusually large; ask for what you need instead",
       webindex_issues: "lower `limit`, or narrow `terms`",
       webindex_releases: "lower `limit` \u2014 release notes are long",
+      webindex_tags: "lower `limit`",
       webindex_package: "this package's registry record is unusually large; pin a `version`",
       webindex_meta: "the page is very large; this reads only its head, so a cap here means the document itself is enormous",
       webindex_robots: "this site's robots.txt is unusually large; read it directly",
@@ -6384,27 +8198,38 @@ extractor: ${r.extractor}` };
       if (name === "webindex_package") {
         const pkg = String(args.name ?? "").trim();
         if (!pkg) throw new ToolError("`name` is required.");
-        const reg = args.registry ? String(args.registry) : void 0;
-        const p = await resolvePackage(pkg, { ...reg ? { registry: reg } : {}, ...args.version ? { version: String(args.version) } : {} });
-        if (!p) throw new ToolError(`No registry knows a package called "${pkg}".`);
+        const reg = args.registry === void 0 ? void 0 : String(args.registry);
+        if (reg !== void 0 && !isRegistryKind(reg)) throw new InvalidParamsError("`registry` must be one of: npm, pypi, crates");
+        const { facts: p, note } = await resolvePackageResult(pkg, {
+          ...reg ? { registry: reg } : {},
+          ...args.version ? { version: String(args.version) } : {}
+        });
+        if (!p) throw new ToolError(note ?? `No registry knows a package called "${pkg}".`);
         return { text: JSON.stringify(p, null, 2) };
       }
-      if (name === "webindex_repo" || name === "webindex_issues" || name === "webindex_releases") {
-        const ref = resolveRepo(String(args.repo ?? ""));
+      if (name === "webindex_repo" || name === "webindex_issues" || name === "webindex_releases" || name === "webindex_tags") {
+        const forge = args.forge === void 0 ? void 0 : String(args.forge);
+        if (forge !== void 0 && !isForgeKind(forge)) throw new InvalidParamsError(`\`forge\` must be one of: ${FORGE_KINDS.join(", ")}`);
+        const ref = forgeTarget(String(args.repo ?? ""), forge);
         if (ref.host === "generic") throw new ToolError(`"${String(args.repo ?? "")}" does not name a repository.`);
         const limit = typeof args.limit === "number" ? args.limit : void 0;
+        const opts = { ...limit ? { limit } : {}, ...forge ? { kind: forge } : {} };
         if (name === "webindex_repo") {
-          const f = await repoFacts(ref);
-          if (!f) throw new ToolError(`Could not read ${ref.webUrl ?? ref.raw} \u2014 is it public, and is ${ref.host} a forge?`);
+          const { facts: f, note } = await repoFactsResult(ref, opts);
+          if (!f) throw new ToolError(note ?? `Could not read ${ref.webUrl ?? ref.raw}.`);
           return { text: JSON.stringify({ ref, ...f }, null, 2) };
         }
-        const r = name === "webindex_releases" ? await listReleases(ref, { ...limit ? { limit } : {} }) : await searchIssues(
+        const r = name === "webindex_releases" ? await listReleases(ref, opts) : name === "webindex_tags" ? await listTags(ref, opts) : await searchIssues(
           ref,
           String(args.terms ?? "").split(/\s+/).filter(Boolean),
           args.kind === "pr" ? "pr" : "issue",
-          { ...limit ? { limit } : {} }
+          opts
         );
-        if (!r.items.length) throw new ToolError(r.note ?? `Nothing found for ${ref.raw}.`);
+        if (!r.items.length) {
+          if (!r.note && name === "webindex_releases")
+            throw new ToolError(`No releases published for ${ref.raw} \u2014 its versions may only be tags: try webindex_tags.`);
+          throw new ToolError(r.note ?? `Nothing found for ${ref.raw}.`);
+        }
         return { text: JSON.stringify(r, null, 2) };
       }
       if (name === "webindex_meta" || name === "webindex_robots" || name === "webindex_sitemap" || name === "webindex_feed") {
@@ -6636,7 +8461,7 @@ async function dispatch(argv) {
     const src = argValue(args, "docs") ?? "-";
     let payload;
     try {
-      payload = src === "-" ? readFileSync12(0, "utf8") : readFileSync12(src, "utf8");
+      payload = src === "-" ? readFileSync13(0, "utf8") : readFileSync13(src, "utf8");
     } catch (e) {
       fail(`cannot read ${src === "-" ? "stdin" : src}: ${e.message}`);
     }
@@ -6665,7 +8490,7 @@ async function dispatch(argv) {
     }
     return;
   }
-  if (cmd === "repo" || cmd === "issues" || cmd === "prs" || cmd === "releases" || cmd === "package") {
+  if (cmd === "repo" || cmd === "issues" || cmd === "prs" || cmd === "releases" || cmd === "tags" || cmd === "package") {
     const target = positionalText(args);
     if (!target) usage(`usage: webindex ${cmd} <${cmd === "package" ? "name" : "repo"}> [--json]`);
     const asJson = argBool(args, "json");
@@ -6674,13 +8499,16 @@ async function dispatch(argv) {
 `);
     if (cmd === "package") {
       const reg = argValue(args, "registry");
-      const p = await resolvePackage(target, {
+      if (reg !== void 0 && !isRegistryKind(reg)) usage(`--registry expects npm, pypi or crates, got "${reg}"`);
+      const { facts: p, note } = await resolvePackageResult(target, {
         ...reg ? { registry: reg } : {},
         ...argValue(args, "version") ? { version: argValue(args, "version") } : {}
       });
-      if (!p) fail(`no registry knows a package called "${target}"`);
+      if (!p) fail(note ?? `no registry knows a package called "${target}"`);
       emit(p, [
+        `  name        ${p.name}`,
         `  registry    ${p.registry}`,
+        `  description ${p.description ?? "\u2014"}`,
         `  version     ${p.version ?? "\u2014"}`,
         `  repository  ${p.repository ?? "\u2014"}`,
         `  homepage    ${p.homepage ?? "\u2014"}`,
@@ -6690,11 +8518,14 @@ async function dispatch(argv) {
       ]);
       return;
     }
-    const ref = resolveRepo(target);
+    const forge = argValue(args, "forge");
+    if (forge !== void 0 && !isForgeKind(forge)) usage(`--forge expects github, gitlab or gitea, got "${forge}"`);
+    const ref = forgeTarget(target, forge);
     if (ref.host === "generic") fail(`"${target}" does not name a repository`);
+    const opts = { ...limit ? { limit } : {}, ...forge ? { kind: forge } : {} };
     if (cmd === "repo") {
-      const f = await repoFacts(ref);
-      if (!f) fail(`could not read ${ref.webUrl ?? target} \u2014 is it public, and is ${ref.host} a forge?`);
+      const { facts: f, note } = await repoFactsResult(ref, opts);
+      if (!f) fail(note ?? `could not read ${ref.webUrl ?? target}`);
       emit({ ref, ...f }, [
         `  name        ${f.fullName ?? `${ref.owner}/${ref.repo}`}`,
         `  description ${f.description ?? "\u2014"}`,
@@ -6706,10 +8537,11 @@ async function dispatch(argv) {
       ]);
       return;
     }
-    const r = cmd === "releases" ? await listReleases(ref, { ...limit ? { limit } : {} }) : await searchIssues(ref, (argValue(args, "terms") ?? "").split(/\s+/).filter(Boolean), cmd === "prs" ? "pr" : "issue", {
-      ...limit ? { limit } : {}
-    });
-    if (!r.items.length) fail(r.note ?? `nothing found for ${target}`);
+    const r = cmd === "releases" ? await listReleases(ref, opts) : cmd === "tags" ? await listTags(ref, opts) : await searchIssues(ref, (argValue(args, "terms") ?? "").split(/\s+/).filter(Boolean), cmd === "prs" ? "pr" : "issue", opts);
+    if (!r.items.length) {
+      if (!r.note && cmd === "releases") fail(`no releases published for ${target} \u2014 try \`webindex tags ${target}\``);
+      fail(r.note ?? `nothing found for ${target}`);
+    }
     emit(
       r,
       r.items.map((i) => `${i.number ? `#${i.number} ` : ""}${i.title}${i.state ? ` [${i.state}]` : ""}
@@ -6873,7 +8705,7 @@ async function dispatch(argv) {
     const src = argValue(args, "docs") ?? "-";
     let payload;
     try {
-      payload = src === "-" ? readFileSync12(0, "utf8") : readFileSync12(src, "utf8");
+      payload = src === "-" ? readFileSync13(0, "utf8") : readFileSync13(src, "utf8");
     } catch (e) {
       fail(`cannot read ${src === "-" ? "stdin" : src}: ${e.message}`);
     }
@@ -6937,7 +8769,7 @@ async function dispatch(argv) {
   }
   if (cmd === "skill") {
     const action = args.positional[0] ?? "";
-    const root = resolve4(argValue(args, "root") ?? process.cwd());
+    const root = resolve5(argValue(args, "root") ?? process.cwd());
     const asJson = argBool(args, "json");
     if (action === "init") {
       const name = args.positional[1];
@@ -6975,7 +8807,7 @@ async function dispatch(argv) {
     if (action === "vendor") {
       if (argBool(args, "list")) {
         for (const [name, pin] of Object.entries(config.engines)) {
-          const meta = JSON.parse(readFileSync12(join15(root, config.vendorDir, pin.meta), "utf8"));
+          const meta = JSON.parse(readFileSync13(join15(root, config.vendorDir, pin.meta), "utf8"));
           process.stdout.write(`${name} ${pin.repo} ${meta.tag}
 `);
         }
@@ -7028,7 +8860,7 @@ async function dispatch(argv) {
         const dtsFile = pin?.files?.find((f) => f.local.endsWith(".d.mts"))?.local;
         let dts = "";
         try {
-          dts = readFileSync12(join15(root, config.vendorDir, dtsFile ?? ""), "utf8");
+          dts = readFileSync13(join15(root, config.vendorDir, dtsFile ?? ""), "utf8");
         } catch {
           fail(`cannot read the vendored declarations for "${engineName}" \u2014 run \`webindex skill vendor --ref <tag>\` first`);
         }
@@ -7048,8 +8880,8 @@ async function dispatch(argv) {
             process.stderr.write("       A layer stopped being used. If that was deliberate, lower the floor in the same commit.\n");
           }
         }
-        const failed = report.collisions.length > 0 || report.stale.length > 0 || report.imported.length < usageConfig.usageFloor;
-        failedAny ||= failed;
+        const failed2 = report.collisions.length > 0 || report.stale.length > 0 || report.imported.length < usageConfig.usageFloor;
+        failedAny ||= failed2;
         if (!asJson) {
           const forks = report.tolerated.length ? `, ${report.tolerated.length} known fork(s) still to adopt` : ", no local re-declarations";
           process.stdout.write(
@@ -7103,7 +8935,7 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
       if (!existsSync7(from)) fail(`missing ${relative2(root, from)} \u2014 run the build first`);
       const to = join15(root, "skills", config.name, "scripts", `${config.name}.mjs`);
       ensureDir(join15(to, ".."));
-      writeArtifact(to, readFileSync12(from, "utf8"));
+      writeArtifact(to, readFileSync13(from, "utf8"));
       process.stdout.write(`  copied ${relative2(root, from)} -> ${relative2(root, to)}
 `);
       return;
@@ -7135,18 +8967,45 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
     const sx = searxngBase();
     const ol = ollamaBase();
     const qd = qdrantBase();
-    const [fc, sxUp, olUp, qdUp] = await Promise.all([base ? probeFirecrawl(base) : false, sx ? probeSearxng(sx) : false, probeOllama(ol), probeQdrant(qd)]);
+    const pdfRungs = enabledExtractors();
+    const docRungs = enabledDocExtractors();
+    const cacheState = (id, spec) => pdfRungs.includes(id) || docRungs.includes(id) ? npxCacheState(spec) : void 0;
+    const [fc, sxUp, olUp, qdUp, inspectorCache, anydocCache, ocr] = await Promise.all([
+      base ? probeFirecrawl(base) : false,
+      sx ? probeSearxng(sx) : false,
+      probeOllama(ol),
+      probeQdrant(qd),
+      cacheState("pdf-inspector", PDF_INSPECTOR_SPEC),
+      cacheState("anydoc", ANYDOC_SPEC),
+      ocrTools()
+    ]);
     const off = (s) => s.toLowerCase() === "off";
-    const ocr = await ocrTools();
+    const npxRung = (state) => state === "cached" ? "installed (npx cache)" : state === "not cached" ? "downloads on first use (npx)" : state === "no npx" ? "npx not found" : "runs through npx";
+    const rungState = (id) => {
+      if (id === "pdf-inspector") return npxRung(inspectorCache);
+      if (id === "anydoc") return npxRung(anydocCache);
+      if (id === "firecrawl") return base ? fc ? `answering at ${base}` : `not reachable at ${base}` : "disabled";
+      if (id === "pdftotext") return have("pdftotext") ? "installed" : "not installed";
+      if (id === "ocr") {
+        if (ocrBudgetLeft() <= 0) return `off (${envName("OCR_MAX")}=${env("OCR_MAX")})`;
+        return ocr.copyablePdf && ocr.tesseract ? "available" : `unavailable (copyable-pdf: ${ocr.copyablePdf ? "yes" : "no"}, tesseract: ${ocr.tesseract ? "yes" : "no"})`;
+      }
+      if (id === "builtin") return "built-in (OOXML and OpenDocument)";
+      return "built-in";
+    };
+    const rungLines = (label, all, enabled, engineVar) => {
+      const why = env(engineVar)?.trim() ? `${envName(engineVar)}=${env(engineVar).trim()}` : envName("NO_NPX");
+      const rows = [...enabled.map((id) => [id, rungState(id)]), ...all.filter((id) => !enabled.includes(id)).map((id) => [id, `off (${why})`])];
+      return rows.map(([id, state], i) => `  ${(i ? "" : label).padEnd(12)}${id.padEnd(15)}${state}`);
+    };
     const lines = [
       `webindex ${ENGINE_VERSION}`,
       `  searxng     ${sx ? sxUp ? `answering at ${sx}` : `not reachable at ${sx} \u2014 \`webindex searxng up\` starts it` : "disabled"}`,
       `  firecrawl   ${base ? fc ? `answering at ${base}` : `not reachable at ${base} \u2014 the built-in extractor is used instead` : "disabled"}`,
       `  ollama      ${off(ol) ? "disabled" : olUp ? `answering at ${ol} (model ${embedModel()})` : `not reachable at ${ol} \u2014 \`webindex semantic up\` starts it`}`,
       `  qdrant      ${off(qd) ? "disabled" : qdUp ? `answering at ${qd}` : `not reachable at ${qd} \u2014 \`webindex semantic up\` starts it`}`,
-      `  pdf rungs   ${enabledExtractors().join(", ")}`,
-      `  doc rungs   ${enabledDocExtractors().join(", ") || "none (disabled)"}`,
-      `  ocr         ${ocr.copyablePdf && ocr.tesseract ? "available" : `unavailable (copyable-pdf: ${ocr.copyablePdf ? "yes" : "no"}, tesseract: ${ocr.tesseract ? "yes" : "no"})`}`,
+      ...rungLines("pdf rungs", PDF_EXTRACTORS, pdfRungs, "PDF_ENGINE"),
+      ...rungLines("doc rungs", DOC_EXTRACTORS, docRungs, "DOC_ENGINE"),
       "",
       "  Everything optional degrades to a note \u2014 nothing above is required, and none of it needs a key."
     ];
