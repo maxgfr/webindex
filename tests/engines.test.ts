@@ -296,6 +296,76 @@ describe("searchViaKeyless", () => {
   });
 });
 
+describe("DuckDuckGo pagination follows the page's own Next form", () => {
+  // Both endpoints serve 10 results on a first page, whose Next form posts
+  // `s=10, dc=11` plus a `vqd` session token. The arithmetic this replaced sent
+  // `s=30` for page two and skipped results 11 to 30.
+  const params = (url: string) => new URL(url).searchParams;
+  // A later page: new destinations, a Previous form first, then a Next form.
+  const PAGE_TWO = DDG_LITE.replaceAll("uddg=https%3A%2F%2F", "uddg=https%3A%2F%2Fp2.")
+    .replace('value="Next Page &gt;"', 'value="&lt; Previous Page"')
+    .replace('name="s" value="10"', 'name="s" value="0"')
+    .replace('name="s" value="10"', 'name="s" value="20"');
+  const LAST_PAGE = DDG_LITE.replaceAll("uddg=https%3A%2F%2F", "uddg=https%3A%2F%2Fend.").replaceAll('value="Next Page &gt;"', 'value="&lt; Previous Page"');
+
+  it("asks for the offset the page names, with its dc and vqd", async () => {
+    const bodies = [DDG_LITE, PAGE_TWO, LAST_PAGE];
+    const spy = installFetchMock(() => ({ body: bodies.shift() ?? "" }));
+    const r = await searchViaKeyless("ddglite", "speed test", { pages: 5, limit: 50 });
+    const urls = spy.mock.calls.map((c) => String(c[0]));
+    expect(urls).toHaveLength(3); // the third page has no Next form: that is the end
+    expect(params(urls[1]!).get("s")).toBe("10");
+    expect(params(urls[1]!).get("dc")).toBe("11");
+    expect(params(urls[1]!).get("vqd")).toBe("4-268808268255134853854469240455883644435");
+    expect(params(urls[1]!).get("q")).toBe("speed test");
+    // Page two carries a Previous form too; the offset comes from Next.
+    expect(params(urls[2]!).get("s")).toBe("20");
+    expect(r.hits).toHaveLength(9);
+  });
+
+  it("stops at a page with no Next form rather than asking again", async () => {
+    const spy = installFetchMock(() => ({ body: LAST_PAGE }));
+    const r = await searchViaKeyless("ddglite", "x", { pages: 5, limit: 50 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(r.hits).toHaveLength(3);
+  });
+
+  it("reads the Next form on the HTML endpoint too", async () => {
+    const bodies = [DDG_HTML_PAGE, "<html>nothing more</html>"];
+    const spy = installFetchMock(() => ({ body: bodies.shift() ?? "" }));
+    await searchViaKeyless("ddg", "foo", { pages: 2, limit: 50 });
+    const second = String(spy.mock.calls[1]![0]);
+    expect(second).toMatch(/^https:\/\/html\.duckduckgo\.com\/html\/\?/);
+    expect(params(second).get("s")).toBe("10");
+    expect(params(second).get("dc")).toBe("11");
+    expect(params(second).get("vqd")).toBe("4-147952856996157918820153826655300912381");
+  });
+
+  it("keeps Mojeek's own 1-based offset", async () => {
+    const bodies = [MOJEEK_PAGE, "<html>nothing more</html>"];
+    const spy = installFetchMock(() => ({ body: bodies.shift() ?? "" }));
+    await searchViaKeyless("mojeek", "host:microsoft.com", { pages: 2, limit: 50 });
+    expect(params(String(spy.mock.calls[1]![0])).get("s")).toBe("11");
+  });
+});
+
+describe("an unlocalised query asks DuckDuckGo for no region", () => {
+  // `us-en` for a caller who named no locale biased every such query toward
+  // American pages. `wt-wt` is DuckDuckGo's own "All Regions".
+  it("sends kl=wt-wt when neither a language nor a region was given", async () => {
+    const spy = installFetchMock(() => ({ body: "<html></html>" }));
+    await searchViaKeyless("ddg", "boulangerie");
+    await searchViaKeyless("ddglite", "boulangerie");
+    for (const [u] of spy.mock.calls) expect(new URL(String(u)).searchParams.get("kl")).toBe("wt-wt");
+  });
+
+  it("still localises when asked", async () => {
+    const spy = installFetchMock(() => ({ body: "<html></html>" }));
+    await searchViaKeyless("ddg", "boulangerie", { lang: "fr-FR" });
+    expect(new URL(String(spy.mock.calls[0]![0])).searchParams.get("kl")).toBe("fr-fr");
+  });
+});
+
 describe("an engine that refuses to answer says so, rather than reporting an empty web", () => {
   // The failure this guards against is the one nobody downstream can detect.
   //

@@ -160,6 +160,9 @@ export function looksLikeChallenge(body: string): boolean {
 const attrPattern = (name: string) => new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'<>=\`]+))`, "i");
 const HREF_ATTR = attrPattern("href");
 const CLASS_ATTR = attrPattern("class");
+const NAME_ATTR = attrPattern("name");
+const TYPE_ATTR = attrPattern("type");
+const VALUE_ATTR = attrPattern("value");
 
 function attr(attrs: string, re: RegExp): string | undefined {
   const m = re.exec(attrs);
@@ -269,11 +272,65 @@ export function parseMojeek(body: string, limit = 50): EngineHit[] {
   });
 }
 
+const OPEN_FORM = /<form\b[^<>]*>/gi;
+const INPUT = /<input\b([^<>]*)>/gi;
+
+/**
+ * The fields DuckDuckGo's own "Next" form would submit, or undefined when the
+ * page has none — which is what its last page looks like.
+ *
+ * DDG pages by a result offset `s`, alongside a `dc` counter and a `vqd`
+ * session token, and the only source that knows all three is the page itself.
+ * Captured first pages of both endpoints carry 10 results and a form posting
+ * `s=10, dc=11`; the fixed "30 a page" this replaced asked for `s=30` and
+ * skipped results 11 to 30. A later page also carries a "Previous" form, so the
+ * form is chosen by its submit button, not by position.
+ */
+function ddgNextForm(body: string): Record<string, string> | undefined {
+  const forms = [...body.matchAll(OPEN_FORM)];
+  for (let i = 0; i < forms.length; i++) {
+    const chunk = body.slice(forms[i]!.index! + forms[i]![0].length, forms[i + 1]?.index ?? body.length);
+    const end = chunk.search(/<\/form\s*>/i);
+    const fields: Record<string, string> = {};
+    let next = false;
+    for (const m of (end < 0 ? chunk : chunk.slice(0, end)).matchAll(INPUT)) {
+      const value = attr(m[1]!, VALUE_ATTR) ?? "";
+      if (attr(m[1]!, TYPE_ATTR)?.toLowerCase() === "submit") next ||= /^\s*next\b/i.test(value);
+      else {
+        const name = attr(m[1]!, NAME_ATTR);
+        if (name) fields[name] = value;
+      }
+    }
+    if (next) return fields;
+  }
+  return undefined;
+}
+
+// The next DuckDuckGo page, as the page itself describes it. Sent as a GET: the
+// form posts, but the same page links the identical query string as a
+// `<a rel="next" href="/lite/?…">`, and httpGet is the polite, capped client.
+// Our own query and region win over the form's echo of them.
+function ddgNext(endpoint: string): EngineSpec["next"] {
+  return (body, q, kl, p) => {
+    const form = ddgNextForm(body);
+    if (!form) return null;
+    // `s` is the field the next page cannot do without. Only a form that lacks
+    // it falls back to arithmetic — 10 results a page, as both endpoints serve.
+    return `${endpoint}?${new URLSearchParams({ ...form, q, kl, s: form.s || String((p + 1) * 10) })}`;
+  };
+}
+
 interface EngineSpec {
   label: string;
   /** Build the URL for page `p` (0-based). `locale` is undefined when the caller asked for no particular one. */
   url: (query: string, p: number, kl: string, locale?: { lang: string; region: string }) => string;
   parse: (body: string, limit: number) => EngineHit[];
+  /**
+   * The URL of the page after page `p`, as that page names it, or null when it
+   * names none — the last page. Absent for an engine whose offset arithmetic
+   * holds, which then gets `url(p + 1)`.
+   */
+  next?: (body: string, query: string, kl: string, p: number) => string | null;
 }
 
 /**
@@ -295,16 +352,19 @@ function mojeekLocaleParams(locale?: { lang: string; region: string }): string {
 }
 
 const SPECS: Record<KeylessEngine, EngineSpec> = {
-  // `s` is a 0-based result offset, ~30 per page.
+  // Page one only: every later page is the one the previous page's own Next
+  // form names (see ddgNextForm).
   ddg: {
     label: "DuckDuckGo",
-    url: (q, p, kl) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}&kl=${encodeURIComponent(kl)}${p > 0 ? `&s=${p * 30}` : ""}`,
+    url: (q, _p, kl) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}&kl=${encodeURIComponent(kl)}`,
     parse: parseDdgHtml,
+    next: ddgNext("https://html.duckduckgo.com/html/"),
   },
   ddglite: {
     label: "DuckDuckGo Lite",
-    url: (q, p, kl) => `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}&kl=${encodeURIComponent(kl)}${p > 0 ? `&s=${p * 30}` : ""}`,
+    url: (q, _p, kl) => `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}&kl=${encodeURIComponent(kl)}`,
     parse: parseDdgLite,
+    next: ddgNext("https://lite.duckduckgo.com/lite/"),
   },
   // Mojeek's `s` is the 1-BASED index of the first result, 10 per page — so
   // page 2 starts at 11, not 10. Its own crawler and index, which is why it is
@@ -319,9 +379,10 @@ const SPECS: Record<KeylessEngine, EngineSpec> = {
 /**
  * Ask one keyless engine, walking `pages` result pages.
  *
- * Pagination stops as soon as a page adds no NEW canonical URL. An engine that
- * ignores the offset parameter and re-serves page one would otherwise be walked
- * to the requested depth, paying a request per page for the same ten results.
+ * Pagination stops at a page that names no next page, and as soon as a page
+ * adds no NEW canonical URL. An engine that ignores the offset parameter and
+ * re-serves page one would otherwise be walked to the requested depth, paying a
+ * request per page for the same ten results.
  */
 export async function searchViaKeyless(
   engine: KeylessEngine,
@@ -334,19 +395,22 @@ export async function searchViaKeyless(
 
   const pages = Math.max(1, opts.pages ?? 1);
   const limit = Math.max(1, opts.limit ?? 10);
-  const kl = ddgRegion(opts.lang, opts.region);
-  const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
   // Only pass a locale on when the caller actually asked for one. `ddgRegion`
   // has a default to fall back on; a search-time preference does not need one,
   // and inventing "us-en" for a caller who said nothing would bias every
-  // unlocalised query toward American pages.
-  const locale = opts.lang || opts.region ? { lang: baseLang(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : undefined;
+  // unlocalised query toward American pages. `wt-wt` is DuckDuckGo's own
+  // "All Regions".
+  const localised = !!(opts.lang || opts.region);
+  const kl = localised ? ddgRegion(opts.lang, opts.region) : "wt-wt";
+  const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
+  const locale = localised ? { lang: baseLang(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : undefined;
 
   const seen = new Set<string>();
   const hits: EngineHit[] = [];
 
+  let url = spec.url(q, 0, kl, locale);
   for (let p = 0; p < pages && hits.length < limit; p++) {
-    const r = await httpGet(spec.url(q, p, kl, locale), { accept: "text/html", acceptLanguage, timeoutMs: opts.timeoutMs ?? 12000 });
+    const r = await httpGet(url, { accept: "text/html", acceptLanguage, timeoutMs: opts.timeoutMs ?? 12000 });
     if (!r.ok || !r.body) {
       // A later page failing is not a failure — page one's results stand.
       if (p > 0) break;
@@ -384,8 +448,13 @@ export async function searchViaKeyless(
       hits.push(f);
       if (hits.length >= limit) break;
     }
-    if (hits.length === before) break;
-    if (p < pages - 1 && pageDelayMs()) await sleep(pageDelayMs());
+    if (hits.length === before || p + 1 >= pages || hits.length >= limit) break;
+    // A page that names no next page was the last one: stopping here is exact,
+    // and a request cheaper than waiting for a page that adds nothing new.
+    const next = spec.next ? spec.next(r.body, q, kl, p) : spec.url(q, p + 1, kl, locale);
+    if (!next) break;
+    url = next;
+    if (pageDelayMs()) await sleep(pageDelayMs());
   }
 
   return hits.length ? { hits } : { hits: [], note: `${spec.label} returned no results.` };

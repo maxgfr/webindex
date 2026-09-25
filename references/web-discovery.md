@@ -49,7 +49,12 @@ single ones, and every Lite snippet came back empty while the suite stayed green
 ## Politeness
 
 - `WEBINDEX_PAGE_DELAY_MS` (350) between result pages.
+- DuckDuckGo's next page is the one its own "Next" form names (offset `s`, `dc`
+  and the `vqd` token), and a page without one is the last. Mojeek's offset is
+  arithmetic (1-based, 10 a page).
 - Pagination stops as soon as a page adds no NEW canonical URL — an engine that
   ignores the offset parameter costs one extra request, not one per page.
+- With no `--lang` or `--region`, DuckDuckGo is asked for `kl=wt-wt` (all
+  regions) and Mojeek for no locale: nothing is biased toward one country.
 - `webindex robots <url>` before enumerating a site. It is advisory and `fetch`
   does not consult it: following a citation is not crawling.
