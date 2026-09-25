@@ -348,7 +348,9 @@ interface EngineSpec {
  */
 function mojeekLocaleParams(locale?: { lang: string; region: string }): string {
   if (!locale) return "";
-  return `&lb=${encodeURIComponent(locale.lang)}&lbb=100&rb=${encodeURIComponent(locale.region)}&rbb=10`;
+  const lang = `&lb=${encodeURIComponent(locale.lang)}&lbb=100`;
+  // `--region wt` asks for no region, so there is no country to boost.
+  return locale.region === "WT" ? lang : `${lang}&rb=${encodeURIComponent(locale.region)}&rbb=10`;
 }
 
 const SPECS: Record<KeylessEngine, EngineSpec> = {

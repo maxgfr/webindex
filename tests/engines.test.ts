@@ -493,6 +493,15 @@ describe("Mojeek is asked in the territory's language", () => {
     expect(url).not.toMatch(/[?&]lb=/);
     expect(url).not.toMatch(/[?&]rb=/);
   });
+
+  it("keeps the language but boosts no region under --region wt", async () => {
+    // `wt` is "no region": boosting a country called WT would be a guess.
+    const spy = installFetchMock(() => ({ body: MOJEEK }));
+    await searchViaKeyless("mojeek", "x", { lang: "fr", region: "wt" });
+    const url = String(spy.mock.calls[0]![0]);
+    expect(url).toMatch(/[?&]lb=fr\b/);
+    expect(url).not.toMatch(/[?&]rb=/);
+  });
 });
 
 describe("keylessEngines", () => {
