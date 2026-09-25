@@ -105,7 +105,8 @@ class Zip {
     const b = this.read(name);
     if (!b) return undefined;
     if (b[0] === 0xff && b[1] === 0xfe) return b.subarray(2).toString("utf16le");
-    return b.toString("utf8").replace(/^﻿/, "");
+    const s = b.toString("utf8");
+    return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s; // a UTF-8 byte-order mark
   }
 }
 
