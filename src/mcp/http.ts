@@ -225,7 +225,8 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
   // JSON body they always did, with nothing but responses in it.
   const single = Array.isArray(parsed) ? undefined : (parsed as JsonRpcMessage);
   const token = single?.params?._meta as Record<string, unknown> | undefined;
-  if (single?.id !== undefined && token?.progressToken !== undefined && accept.includes("text/event-stream")) {
+  const asked = typeof single?.id === "string" || typeof single?.id === "number";
+  if (asked && token?.progressToken !== undefined && accept.includes("text/event-stream")) {
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", ...corsHeaders(origin) });
     const event = (m: JsonRpcMessage) => {
       if (!res.writableEnded && !res.destroyed) res.write(`event: message\ndata: ${JSON.stringify(m)}\n\n`);

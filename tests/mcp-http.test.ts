@@ -149,6 +149,20 @@ describe("progress and cancellation over HTTP", () => {
     }
   });
 
+  it("opens no stream for a message that will never be answered", async () => {
+    const s = await startHttpServer(progressing(), { port: 0 });
+    try {
+      const res = await fetch(s.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ ...asking, id: null }),
+      });
+      expect(res.status).toBe(202);
+    } finally {
+      await s.close();
+    }
+  });
+
   it("answers plain JSON, with no progress mixed in, to a client that accepts only JSON", async () => {
     const s = await startHttpServer(progressing(), { port: 0 });
     try {
