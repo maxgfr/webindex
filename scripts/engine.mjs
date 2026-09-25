@@ -6168,6 +6168,9 @@ var SPECS = {
     parse: parseMojeek
   }
 };
+function spentSlackMs(budgetMs) {
+  return budgetMs === void 0 ? 0 : Math.min(25, budgetMs / 4);
+}
 async function searchViaKeyless(engine, query, opts = {}) {
   const spec = SPECS[engine];
   const q = query.trim();
@@ -6183,7 +6186,7 @@ async function searchViaKeyless(engine, query, opts = {}) {
   const deadline = opts.budgetMs === void 0 ? Number.POSITIVE_INFINITY : Date.now() + opts.budgetMs;
   let url = spec.url(q, 0, kl, locale);
   for (let p = 0; p < pages && hits.length < limit; p++) {
-    if (opts.signal?.aborted || Date.now() >= deadline) {
+    if (opts.signal?.aborted || Date.now() >= deadline - spentSlackMs(opts.budgetMs)) {
       if (p > 0) break;
       return { hits: [], note: `${spec.label} was not asked: ${opts.signal?.aborted ? "the search was cancelled" : "no time was left"}.` };
     }
@@ -6357,9 +6360,12 @@ function searxngLanguage(opts) {
 function budgetDeadline(opts) {
   return opts.timeoutMs !== void 0 && opts.timeoutMs > 0 ? Date.now() + opts.timeoutMs : Number.POSITIVE_INFINITY;
 }
+function spentSlackMs2(budgetMs) {
+  return budgetMs === void 0 ? 0 : Math.min(25, budgetMs / 4);
+}
 function halted(opts, deadline) {
   if (opts.signal?.aborted) return "cancelled";
-  return Date.now() >= deadline ? "out of time" : void 0;
+  return Date.now() >= deadline - spentSlackMs2(opts.timeoutMs) ? "out of time" : void 0;
 }
 function rungResult(rung, outcome, hits, notes) {
   return { hits, notes, rungs: [report(rung, outcome, hits.length, notes.join(" "))], searched: answered(outcome) };

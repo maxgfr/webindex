@@ -600,6 +600,36 @@ describe("a search is bounded in time", () => {
     expect(r.searched).toBe(false);
   });
 
+  // A timer can fire a millisecond before Date.now() reaches the instant it was
+  // set for, so the rung aborted AT the deadline used to see ~1 ms left and
+  // start the next engine with a request that could only fail — flaky on a
+  // busy runner, and a wasted request against a real engine.
+  it("counts a sliver of budget left after an abort as spent", async () => {
+    const start = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+    try {
+      const spy = vi.fn(async () => {
+        clock.mockReturnValue(start + 149); // the abort fired 1 ms "early"
+        throw new DOMException("This operation was aborted", "AbortError");
+      });
+      vi.stubGlobal("fetch", spy);
+      const r = await search("x", { ...ALL, timeoutMs: 150 });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(r.rungs?.find((x) => x.rung === "ddglite")?.outcome).toBe("not-tried");
+
+      clock.mockReturnValue(start);
+      const paged = vi.fn(async () => {
+        clock.mockReturnValue(start + 149);
+        return new Response(DDG_LITE, { status: 200, headers: { "content-type": "text/html" } });
+      });
+      vi.stubGlobal("fetch", paged);
+      await searchViaKeyless("ddglite", "x", { pages: 3, limit: 50, budgetMs: 150 });
+      expect(paged).toHaveBeenCalledTimes(1); // page two would have had 1 ms
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("does not start once the caller's signal has fired", async () => {
     const spy = installFetchMock(() => ({ body: DDG_LITE }));
     const ctrl = new AbortController();
