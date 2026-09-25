@@ -16,43 +16,105 @@ tool ends up documenting a fork, an abandoned mirror or a name-squat.
 
 | Registry | Notes |
 |---|---|
-| npm | Deprecation lives on the **version**, not the package — a package whose latest release is deprecated looks healthy at the top level. |
-| PyPI | The repository is in `project_urls`, not `home_page`, which is usually a docs site. |
-| crates.io | Publishes download counts. |
+| npm | Deprecation lives on the **version**, not the package — a package whose latest release is deprecated looks healthy at the top level. A dist-tag (`next`, `beta`) resolves to the version it stands for; a monorepo package carries `repositoryDirectory`. |
+| PyPI | The repository is in `project_urls` (any label spelling: `Source`, `source`, `Source Code`), not `home_page`, which is usually a docs site. The licence is PEP 639's `license_expression` where set, never a whole licence text. A project classified "7 - Inactive" is reported as deprecated. |
+| crates.io | Publishes download counts. Only the crate and its default version are fetched; the licence and date are that version's. |
 
 Order without `--registry` is npm → PyPI → crates, because npm has the most
 names. Pass `--registry` when you know the ecosystem.
 
+Only a definite 404 moves on to the next registry. A registry that is down,
+rate-limited or unreachable **stops** the search and says so: the next
+ecosystem's namesake is a different project (`react` on PyPI is
+python-react). `--version` is asked of each registry by name — that version
+or nothing, never the latest one with the asked-for number pasted on.
+
 ## Forges
 
-`repo`, `issues`, `prs`, `releases` work against GitHub, GitLab and Gitea.
+`repo`, `issues`, `prs`, `releases` and `tags` work against GitHub, GitLab and
+Gitea (`webindex_repo`, `webindex_issues`, `webindex_releases`, `webindex_tags`
+over MCP).
+
+- **Any repository string.** `owner/repo`, a URL copied from a browser
+  (`…/tree/main/src`, `…/issues/12`, `?tab=readme` — the repository, not the page
+  inside it), `git@host:owner/repo`, or a local checkout, which stands for its
+  `origin` remote.
+- **Self-hosted forges.** A host whose name does not say what it runs
+  (salsa.debian.org, invent.kde.org, git.company.example) is queried with
+  `--forge github|gitlab|gitea` (MCP: `forge`), or declared once in
+  `WEBINDEX_FORGE_HOSTS`. Only the declaration also sends it a token.
+- **Tags where there are no releases.** Plenty of projects tag every version and
+  never publish a forge release; `releases` then points at `tags`.
 
 - **Renames are followed.** A moved repository still answers on its old name, but
   every search keyed on that name returns nothing. The canonical `owner/repo` is
   resolved once and used for the search.
 - **GitHub Enterprise** serves `<host>/api/v3`; github.com serves
   `api.github.com`. Getting this wrong is a 404 that reads like "no such repo".
-- **Only GitHub ranks.** GitLab and Gitea have no search endpoint, so their
-  results are recency-ordered and carry **no score** — deliberately, rather than
-  inventing one a caller might rank on.
+- **Only GitHub ranks.** A search with terms comes back best match first, with
+  GitHub's `score`; a listing with no terms, most recently updated first. GitLab
+  and Gitea have no search endpoint, so their results are recency-ordered and
+  carry **no score** — deliberately, rather than inventing one a caller might
+  rank on.
+- **Every term must match**, so a natural five-word description often matches
+  nothing. Then the search runs once more with the most distinctive half of the
+  words (qualifiers such as `label:bug` kept), and `note` says what it was
+  relaxed to. `relax: false` keeps it to one request.
 - **`archived` and `pushedAt`** answer "is this maintained" from the record. A
   README that says the project is active is not evidence.
 
 ## Quotas
 
-A quota answer is reported as `rateLimited`, never retried. Retrying a quota you
-have already exhausted only exhausts it further, and the two failures need
-opposite handling: "wait" versus "this request is wrong".
+A quota answer is reported as `rateLimited`, never retried, with `resetAt` when
+the forge says when it ends. Retrying a quota you have already exhausted only
+exhausts it further, and the two failures need opposite handling: "wait" versus
+"this request is wrong". Only a gateway error (502/503/504) or a dropped
+connection gets one more try; a timeout gets none, so a dead network costs one
+timeout per command.
 
-GitHub's anonymous search quota is small. Set `GITHUB_TOKEN` (or
+## When a call fails, it says which failure
+
+`repo`, `issues`, `prs`, `releases` and `tags` name the cause, because each
+wants a different response: **no such repository** (or a private one), a
+**rejected token** (named — GitHub answers 401 even for a public repository when
+the token is bad), a **quota** and when it resets, the forge **unavailable**, or
+a **network error** with its cause. `repoFactsResult` and every `ForgeResult`
+carry the same `note` and `status` for a library caller.
+
+GitHub's anonymous search quota is small. Set `GITHUB_TOKEN` (or `GH_TOKEN`, or
 `WEBINDEX_GITHUB_TOKEN`) to raise it; `GITLAB_TOKEN` and `GITEA_TOKEN` work the
 same way.
+
+## Where a token goes
+
+A token is sent to **its own host only**: `GITHUB_TOKEN` to github.com
+(`api.github.com`), `GITLAB_TOKEN` to gitlab.com. Never to a host that merely
+looks like a forge — anyone can register `github.<anything>`, and a repository
+string in a prompt is enough to point an agent at one.
+
+A self-hosted forge receives its token once you declare it:
+
+```bash
+export WEBINDEX_FORGE_HOSTS="ghe.corp.example=github,salsa.debian.org=gitlab,codeberg.org=gitea"
+```
+
+Each listed host is queried as that forge (so a GitLab whose name does not say
+"gitlab" works) and gets that forge's token. `GITEA_TOKEN` has no default host at
+all: Codeberg is one Gitea among many. A library caller that passes `apiBase`
+has named the host itself, so the token goes there too.
+
+Every token travels in the `Authorization` header — GitLab's as a Bearer — and is
+dropped the moment a redirect leaves the API's origin.
 
 ## Getting the source itself
 
 `resolveRepo` parses every identifier shape — a URL in any scheme, `git@host:…`,
 `host/owner/repo`, the bare `owner/repo` shorthand, or a local directory — onto
-one ref with a stable slug, so all of them share one on-disk clone.
+one ref with a stable slug, so all of them share one on-disk clone. Two
+repositories never share one: `a-b/c` and `a/b-c` get different slugs. A named
+branch gets its own clone beside the default one; concurrent callers share one
+clone in flight; and `refresh` keeps a deepened history deep and throws, naming
+the remote, when it cannot fetch — rather than returning the old tree as fresh.
 
 `ensureClone` is shallow and blobless (`--depth 1 --filter=blob:none`): reading a
 repository's current state needs neither its history nor every past version of

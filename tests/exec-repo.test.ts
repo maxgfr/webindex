@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +8,7 @@ import { fetchFeed, fetchSitemap } from "../src/feed.js";
 import { listTags } from "../src/forge.js";
 import { lookupPackage } from "../src/registry.js";
 import { ensureClone, ensureHistoryDepth, headCommit, originUrl, repoCacheRoot, resetHistoryDepthCache, resolveRepo, sameCommit } from "../src/repo.js";
+import { slugify } from "../src/text.js";
 import { installFetchMock } from "./fetchmock.js";
 
 afterEach(() => {
@@ -326,12 +327,16 @@ describe("the branches a forge and a repo ref actually take", () => {
 
   it("uses a token when one is in the environment, and none when there is not", async () => {
     const { forgeAuthHeaders } = await import("../src/forge.js");
+    // Both, blank: an empty GITHUB_TOKEN no longer hides a GH_TOKEN the machine set.
     vi.stubEnv("GITHUB_TOKEN", "");
+    vi.stubEnv("GH_TOKEN", "");
     expect(forgeAuthHeaders("github")).toEqual({});
     vi.stubEnv("GITHUB_TOKEN", "tok");
     expect(forgeAuthHeaders("github")).toEqual({ authorization: "Bearer tok" });
     vi.stubEnv("GITLAB_TOKEN", "gl");
-    expect(forgeAuthHeaders("gitlab")).toEqual({ "private-token": "gl" });
+    // Authorization, not GitLab's own `private-token`: a runtime strips the
+    // former on a cross-origin redirect and forwarded the latter.
+    expect(forgeAuthHeaders("gitlab")).toEqual({ authorization: "Bearer gl" });
     vi.stubEnv("GITEA_TOKEN", "gt");
     expect(forgeAuthHeaders("gitea")).toEqual({ authorization: "token gt" });
     vi.unstubAllEnvs();
@@ -381,16 +386,34 @@ describe("the branches a forge and a repo ref actually take", () => {
       license: "Apache-2.0",
       publishedAt: "2026-07-08T15:55:18.431Z",
     });
+    // 256 KiB first: the map opens 80–190 KB from the end of the biggest
+    // packuments, and a 2 MiB read did not finish inside the budget on a slow link.
     expect(seen).toEqual([
       { url: "https://registry.npmjs.org/typescript/latest", range: undefined },
-      { url: "https://registry.npmjs.org/typescript", range: "bytes=-2097152" },
+      { url: "https://registry.npmjs.org/typescript", range: "bytes=-262144" },
     ]);
+  });
+
+  it("reads further back only when a real range came back without a closed time map", async () => {
+    const ranges: string[] = [];
+    installFetchMock((url, init) => {
+      const range = (init?.headers as Record<string, string> | undefined)?.range;
+      if (url.endsWith("/deep/latest")) return json({ name: "deep", version: "2.0.0", license: "MIT" });
+      if (!url.endsWith("/deep") || !range) return { status: 404, body: "{}", contentType: "application/json" };
+      ranges.push(range);
+      // The short suffix opens INSIDE the time map, so no map closes in it.
+      return range === "bytes=-262144"
+        ? { status: 206, body: '"1.0.0":"2020-01-01T00:00:00.000Z","2.0.0":"2021-0', contentType: "application/json" }
+        : { status: 206, body: '"x":1,"time":{"2.0.0":"2021-02-03T04:05:06.000Z"}}', contentType: "application/json" };
+    });
+    expect((await lookupPackage("npm", "deep"))?.publishedAt).toBe("2021-02-03T04:05:06.000Z");
+    expect(ranges).toEqual(["bytes=-262144", "bytes=-2097152"]);
   });
 
   it("preserves npm publication time for an explicit scoped version", async () => {
     installFetchMock((url, init) => {
       if (url.endsWith("/@types%2Fnode/22.0.0")) return json({ name: "@types/node", version: "22.0.0", license: "MIT" });
-      if (url.endsWith("/@types%2Fnode") && (init?.headers as Record<string, string> | undefined)?.range === "bytes=-2097152") {
+      if (url.endsWith("/@types%2Fnode") && (init?.headers as Record<string, string> | undefined)?.range === "bytes=-262144") {
         return json({ time: { "22.0.0": "2024-07-22T17:04:35.367Z" } });
       }
       return { status: 404, body: "{}", contentType: "application/json" };
@@ -463,17 +486,21 @@ describe("the branches a forge and a repo ref actually take", () => {
       if (url.endsWith("/wide/latest")) return json({ name: "wide", version: "9.9.9", license: "MIT" });
       if (url.endsWith("/wide")) {
         // The header went out; this registry simply answers 200 with everything.
-        expect((init?.headers as Record<string, string> | undefined)?.range).toBe("bytes=-2097152");
+        ranges.push((init?.headers as Record<string, string> | undefined)?.range);
         return { body: oversized, contentType: "application/json", chunkSize: CHUNK, onPull: (n: number) => (pulled += n) };
       }
       return { status: 404, body: "{}", contentType: "application/json" };
     });
+    const ranges: (string | undefined)[] = [];
 
     const p = await lookupPackage("npm", "wide");
     expect(p).toMatchObject({ registry: "npm", name: "wide", version: "9.9.9", license: "MIT" });
     expect(p?.publishedAt).toBeUndefined();
-    // At most the 2 MiB cap plus the chunk that crossed it — not the whole 6 MiB.
-    expect(pulled).toBeLessThanOrEqual(2 * 1024 * 1024 + CHUNK);
+    // One read: a 200 is the document's head, and reading more of it cannot
+    // reach the tail. At most the 256 KiB cap plus the chunk that crossed it —
+    // not the whole 6 MiB.
+    expect(ranges).toEqual(["bytes=-262144"]);
+    expect(pulled).toBeLessThanOrEqual(256 * 1024 + CHUNK);
   });
 
   it("degrades to no timestamp when a proxy declares a packument larger than the cap", async () => {
@@ -581,9 +608,17 @@ describe("the branches a forge and a repo ref actually take", () => {
     // the three phases finds a timestamp and all three run the body end to end.
     const CHUNK = `"time":${" ".repeat(55)}{}`;
     const adversarial = `\\${CHUNK.repeat((2 * 1024 * 1024 - 64) / CHUNK.length)}`;
-    installFetchMock((url) => {
+    const ranges: string[] = [];
+    installFetchMock((url, init) => {
       if (url.endsWith("/adversarial/latest")) return json({ name: "adversarial", version: "1.0.0", license: "MIT" });
-      if (url.endsWith("/adversarial")) return { body: adversarial, contentType: "application/json" };
+      if (url.endsWith("/adversarial")) {
+        const range = (init?.headers as Record<string, string> | undefined)?.range ?? "";
+        ranges.push(range);
+        // The short suffix closes no map, so the full-cap one is read after it.
+        return range === "bytes=-262144"
+          ? { status: 206, body: '"readme":"no braces here', contentType: "application/json" }
+          : { status: 206, body: adversarial, contentType: "application/json" };
+      }
       return { status: 404, body: "{}", contentType: "application/json" };
     });
 
@@ -594,6 +629,7 @@ describe("the branches a forge and a repo ref actually take", () => {
     expect(p).toMatchObject({ name: "adversarial", version: "1.0.0", license: "MIT" });
     // Every `time` map here is empty, so no timestamp is the honest answer.
     expect(p?.publishedAt).toBeUndefined();
+    expect(ranges).toEqual(["bytes=-262144", "bytes=-2097152"]);
     // Three linear passes over 2 MiB are tens of milliseconds; the bound is
     // loose enough that only a superlinear scan can cross it.
     expect(elapsed).toBeLessThan(2_000);
@@ -772,5 +808,115 @@ describe("cloning, against a real local repository", () => {
     expect(r.ok).toBe(true);
     // Two commits reachable once it is no longer shallow.
     expect(sh("git", ["-C", dir, "rev-list", "--count", "HEAD"]).stdout.trim()).toBe("2");
+  });
+
+  /** A second origin repository at `rel` under a fresh parent, saying who it is. */
+  function originAt(parent: string, rel: string): string {
+    const at = join(parent, rel);
+    mkdirSync(at, { recursive: true });
+    sh("git", ["-C", at, "init", "-q", "-b", "main"]);
+    sh("git", ["-C", at, "config", "user.email", "t@t.test"]);
+    sh("git", ["-C", at, "config", "user.name", "T"]);
+    writeFileSync(join(at, "WHO"), `I am ${rel}\n`);
+    sh("git", ["-C", at, "add", "-A"]);
+    sh("git", ["-C", at, "commit", "-q", "-m", "who"]);
+    return at;
+  }
+
+  it("gives two repositories whose names differ only in '/' versus '-' two clones", async () => {
+    // slugify folds both to "-": a-b/c and a/b-c shared one cache directory,
+    // and the second was handed the first one's tree — a squatter's too.
+    expect(resolveRepo("github.com/a-b/c").slug).not.toBe(resolveRepo("github.com/a/b-c").slug);
+    expect(resolveRepo("gitlab.com/g/sub/p").slug).not.toBe(resolveRepo("gitlab.com/g-sub/p").slug);
+    // A name slugify keeps exactly stays readable and unsuffixed.
+    expect(resolveRepo("github.com/expressjs/express").slug).toBe("github.com-expressjs-express");
+
+    const parent = mkdtempSync(join(tmpdir(), "wi-twins-"));
+    try {
+      const one = resolveRepo(`file://${originAt(parent, "a-b/c")}`);
+      const two = resolveRepo(`file://${originAt(parent, "a/b-c")}`);
+      const d1 = await ensureClone(one);
+      const d2 = await ensureClone(two);
+      expect(d1).not.toBe(d2);
+      expect(readFileSync(join(d2, "WHO"), "utf8")).toBe("I am a/b-c\n");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps using a clone made under the old slug when its origin is this repository", async () => {
+    // Otherwise every existing checkout of a hyphenated repository is orphaned
+    // and fetched again.
+    const ref = resolveRepo(`file://${origin}`);
+    const legacy = join(cacheDir, `file-${slugify(origin)}`);
+    expect(legacy).not.toBe(join(cacheDir, ref.slug));
+    sh("git", ["clone", "-q", "--depth", "1", ref.cloneUrl!, legacy]);
+    writeFileSync(join(legacy, "MARKER"), "old");
+    expect(await ensureClone(ref)).toBe(legacy);
+
+    // A legacy directory holding ANOTHER repository is not adopted.
+    rmSync(legacy, { recursive: true, force: true });
+    const parent = mkdtempSync(join(tmpdir(), "wi-other-"));
+    try {
+      sh("git", ["clone", "-q", `file://${originAt(parent, "other")}`, legacy]);
+      const dir = await ensureClone(ref);
+      expect(dir).toBe(join(cacheDir, ref.slug));
+      expect(existsSync(join(dir, "README.md"))).toBe(true);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("clones a named branch beside the default one, not in place of it", async () => {
+    sh("git", ["-C", origin, "checkout", "-q", "-b", "side"]);
+    writeFileSync(join(origin, "SIDE.md"), "s\n");
+    sh("git", ["-C", origin, "add", "-A"]);
+    sh("git", ["-C", origin, "commit", "-q", "-m", "side"]);
+    sh("git", ["-C", origin, "checkout", "-q", "main"]);
+
+    const ref = resolveRepo(`file://${origin}`);
+    const main = await ensureClone(ref);
+    // The cache used to answer any branch with whatever clone it already had.
+    const side = await ensureClone(ref, { branch: "side" });
+    expect(side).not.toBe(main);
+    expect(existsSync(join(side, "SIDE.md"))).toBe(true);
+    expect(existsSync(join(main, "SIDE.md"))).toBe(false);
+    // An empty branch is no branch — the default clone, as it always was.
+    expect(await ensureClone(ref, { branch: "" })).toBe(main);
+    await expect(ensureClone(ref, { branch: "--upload-pack=touch /tmp/x" })).rejects.toThrow(/not a branch name/);
+  });
+
+  it("refreshes a deepened clone without cutting its history back to one commit", async () => {
+    writeFileSync(join(origin, "b.md"), "b\n");
+    sh("git", ["-C", origin, "add", "-A"]);
+    sh("git", ["-C", origin, "commit", "-q", "-m", "second"]);
+    const ref = resolveRepo(`file://${origin}`);
+    const dir = await ensureClone(ref);
+    expect(await ensureHistoryDepth(dir)).toEqual({ ok: true });
+
+    writeFileSync(join(origin, "c.md"), "c\n");
+    sh("git", ["-C", origin, "add", "-A"]);
+    sh("git", ["-C", origin, "commit", "-q", "-m", "third"]);
+    await ensureClone(ref, { refresh: true });
+    expect(existsSync(join(dir, "c.md"))).toBe(true);
+    expect(sh("git", ["-C", dir, "rev-parse", "--is-shallow-repository"]).stdout.trim()).toBe("false");
+    expect(sh("git", ["-C", dir, "rev-list", "--count", "HEAD"]).stdout.trim()).toBe("3");
+  });
+
+  it("says a refresh failed instead of returning the stale tree as fresh", async () => {
+    const ref = resolveRepo(`file://${origin}`);
+    const dir = await ensureClone(ref);
+    rmSync(origin, { recursive: true, force: true });
+    await expect(ensureClone(ref, { refresh: true })).rejects.toThrow(/refresh failed for .*unchanged/s);
+    expect(existsSync(join(dir, "README.md"))).toBe(true);
+  });
+
+  it("clones once when several callers ask at the same moment", async () => {
+    // Each one used to run its own `git clone` into the same directory; the
+    // losers failed, deleted the winner's half-written tree and retried.
+    const ref = resolveRepo(`file://${origin}`);
+    const dirs = await Promise.all([ensureClone(ref), ensureClone(ref), ensureClone(ref)]);
+    expect(new Set(dirs).size).toBe(1);
+    expect(existsSync(join(dirs[0]!, "README.md"))).toBe(true);
   });
 });

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -124,6 +125,7 @@ describe("help and version", () => {
       "issues",
       "prs",
       "releases",
+      "tags",
       "package",
       "meta",
       "robots",
@@ -570,6 +572,7 @@ describe("the MCP tools", () => {
       "webindex_repo",
       "webindex_issues",
       "webindex_releases",
+      "webindex_tags",
       "webindex_package",
       "webindex_meta",
       "webindex_robots",
@@ -817,7 +820,7 @@ describe("rank", () => {
 });
 
 describe("the forge, registry and page-metadata commands", () => {
-  const json = (o: unknown) => ({ body: JSON.stringify(o), contentType: "application/json" });
+  const json = (o: unknown, status = 200) => ({ status, body: JSON.stringify(o), contentType: "application/json" });
 
   it("prints a repository's record, and flags an archived one", async () => {
     vi.stubGlobal(
@@ -832,6 +835,85 @@ describe("the forge, registry and page-metadata commands", () => {
     expect(await run(["repo", "github.com/a/b"])).toBe(0);
     expect(stdout()).toContain("ARCHIVED");
     expect(stdout()).toContain("MIT");
+  });
+
+  it("says why a repository could not be read, not 'is it public?' for everything", async () => {
+    installFetchMock(() => ({ status: 404, body: JSON.stringify({ message: "Not Found" }), contentType: "application/json" }));
+    expect(await run(["repo", "github.com/missing/x"])).toBe(1);
+    expect(stderr()).toMatch(/no such repository on github\.com/);
+    await expect(webindexAdapter().callTool("webindex_repo", { repo: "github.com/missing/x" })).rejects.toThrow(/no such repository/);
+
+    err = [];
+    installFetchMock(() => ({
+      status: 403,
+      body: JSON.stringify({ message: "API rate limit exceeded" }),
+      contentType: "application/json",
+      headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1893456000" },
+    }));
+    expect(await run(["repo", "github.com/a/b"])).toBe(1);
+    expect(stderr()).toMatch(/rate-limited this request until 2030-01-01T00:00:00\.000Z/);
+
+    err = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.github.com"), { code: "ENOTFOUND" }) });
+      }),
+    );
+    expect(await run(["repo", "github.com/a/b"])).toBe(1);
+    expect(stderr()).toMatch(/network error reaching api\.github\.com — getaddrinfo ENOTFOUND/);
+  });
+
+  it("lists tags, and points at them when a project publishes no releases", async () => {
+    installFetchMock((url) =>
+      url.includes("/tags") ? json([{ name: "3.8.13" }, { name: "3.8.12" }]) : url.includes("/releases") ? json([]) : json({ full_name: "a/b" }),
+    );
+    expect(await run(["tags", "gitlab.com/gnutls/gnutls", "--limit", "2"])).toBe(0);
+    expect(stdout()).toContain("3.8.13\n  https://gitlab.com/gnutls/gnutls/-/tags/3.8.13");
+
+    expect(await run(["releases", "gitlab.com/gnutls/gnutls"])).toBe(1);
+    expect(stderr()).toMatch(/no releases published for gitlab\.com\/gnutls\/gnutls — try `webindex tags/);
+
+    const r = await webindexAdapter().callTool("webindex_tags", { repo: "gitlab.com/gnutls/gnutls", limit: 2 });
+    expect(JSON.parse(r.text).items.map((i: { title: string }) => i.title)).toEqual(["3.8.13", "3.8.12"]);
+    await expect(webindexAdapter().callTool("webindex_releases", { repo: "gitlab.com/gnutls/gnutls" })).rejects.toThrow(/webindex_tags/);
+  });
+
+  it("queries a self-hosted forge as the forge --forge names", async () => {
+    const seen: string[] = [];
+    installFetchMock((url) => {
+      seen.push(url);
+      return json({ path_with_namespace: "debian/dpkg", star_count: 3 });
+    });
+    expect(await run(["repo", "https://salsa.debian.org/debian/dpkg/-/tree/main", "--forge", "gitlab"])).toBe(0);
+    expect(seen[0]).toBe("https://salsa.debian.org/api/v4/projects/debian%2Fdpkg?license=true");
+    await webindexAdapter().callTool("webindex_repo", { repo: "salsa.debian.org/debian/dpkg", forge: "gitlab" });
+    expect(seen[1]).toBe(seen[0]);
+
+    err = [];
+    expect(await run(["repo", "salsa.debian.org/debian/dpkg", "--forge", "bitbucket"])).toBe(2);
+    expect(stderr()).toMatch(/--forge expects github, gitlab or gitea/);
+    await expect(webindexAdapter().callTool("webindex_repo", { repo: "salsa.debian.org/debian/dpkg", forge: "bitbucket" })).rejects.toThrow(
+      /`forge` must be one of/,
+    );
+  });
+
+  it("reads a local checkout as the repository it is a clone of", async () => {
+    const checkout = mkdtempSync(join(tmpdir(), "webindex-checkout-"));
+    try {
+      execFileSync("git", ["-C", checkout, "init", "-q"]);
+      execFileSync("git", ["-C", checkout, "remote", "add", "origin", "git@github.com:maxgfr/webindex.git"]);
+      const seen: string[] = [];
+      installFetchMock((url) => {
+        seen.push(url);
+        return json({ full_name: "maxgfr/webindex", stargazers_count: 1 });
+      });
+      expect(await run(["repo", checkout, "--json"])).toBe(0);
+      expect(seen[0]).toBe("https://api.github.com/repos/maxgfr/webindex");
+      expect(JSON.parse(stdout()).ref).toMatchObject({ host: "github.com", owner: "maxgfr", repo: "webindex" });
+    } finally {
+      rmSync(checkout, { recursive: true, force: true });
+    }
   });
 
   it("refuses free text rather than inventing a repository", async () => {
@@ -865,6 +947,28 @@ describe("the forge, registry and page-metadata commands", () => {
     );
     expect(await run(["package", "p", "--json"])).toBe(0);
     expect(JSON.parse(stdout())).toMatchObject({ registry: "npm", version: "2.0.0", repository: "https://github.com/a/b" });
+  });
+
+  it("names the package it found, so a namesake from another ecosystem shows", async () => {
+    installFetchMock((url) =>
+      url.includes("pypi.org") ? json({ info: { name: "react", version: "4.3.0", summary: "Server-side rendering of React components" } }) : json({}, 404),
+    );
+    expect(await run(["package", "react"])).toBe(0);
+    expect(stdout()).toMatch(/name {8}react\n/);
+    expect(stdout()).toMatch(/registry {4}pypi/);
+    expect(stdout()).toContain("Server-side rendering of React components");
+  });
+
+  it("says a registry was down rather than that it had no such package", async () => {
+    installFetchMock(() => json({}, 503));
+    expect(await run(["package", "react"])).toBe(1);
+    expect(stderr()).toMatch(/npm could not be asked \(status 503\)/);
+    await expect(webindexAdapter().callTool("webindex_package", { name: "react" })).rejects.toThrow(/npm could not be asked/);
+  });
+
+  it("refuses a registry it does not know as a usage error, not a TypeError", async () => {
+    expect(await run(["package", "react", "--registry", "foo"])).toBe(2);
+    expect(stderr()).toMatch(/--registry expects npm, pypi or crates/);
   });
 
   it("says so when no registry knows the name", async () => {

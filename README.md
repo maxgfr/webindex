@@ -13,7 +13,7 @@ brew install maxgfr/tap/webindex
 
 ## Everything it does
 
-Three surfaces over one engine: **308 library exports**, **26 CLI commands**, **15 MCP
+Three surfaces over one engine: **308 library exports**, **27 CLI commands**, **16 MCP
 tools**. Nothing below needs an API key, and every optional helper degrades to a note
 rather than an error.
 
@@ -23,9 +23,9 @@ rather than an error.
 | **Retrieval** | HTTP with retry, **streaming byte caps** (the transfer is cancelled at the cap, not trimmed after), **conditional GET** (a stale cache entry costs a 304, not a re-download), rate-limit and `Retry-After` semantics, and **encoding detection** — BOM, `Content-Type` charset, the XML declaration, `<meta charset>` (HTML only), then a UTF-8 validity check that falls back to Windows-1252 — so an undeclared Latin-1 page or feed is not silently mojibake. `fetch` · `webindex_fetch` |
 | **Extraction** | HTML→text with main-content isolation and consent-banner stripping; the **PDF ladder** (`pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → native → **OCR**) with a length-independent garbage gate; the **office ladder** over 20 formats (`anydoc` → Firecrawl → a built-in OOXML/OpenDocument reader that needs no network); an explicit library primitive for Wayback rescue. `extract` · `webindex_extract` |
 | **Ranking** | RRF fusion, **BM25F** with title/heading weighting and an off-topic floor, **SimHash** near-duplicate collapse, **MMR** diversification so the top of a list says several different things. Generic over your item type — the engine ranks, it never sees your evidence model. `rank` · `webindex_rank` |
-| **Forges** | GitHub, GitLab and Gitea: issues, pull requests, releases, tags, and a repository's own record — stars, licence, last push, **archived**. Rename-following, GitHub Enterprise bases, and a quota reported rather than retried. `repo` `issues` `prs` `releases` |
+| **Forges** | GitHub, GitLab and Gitea: issues, pull requests, releases, tags, and a repository's own record — stars, licence, last push, **archived**. Rename-following, GitHub Enterprise and self-hosted forges (`--forge`, `WEBINDEX_FORGE_HOSTS`), a token sent only to its own host, a quota reported rather than retried, and every failure named — no such repository, rejected token, quota and its reset, outage, network. `repo` `issues` `prs` `releases` `tags` · `webindex_repo` `webindex_issues` `webindex_releases` `webindex_tags` |
 | **Registries** | A library **name** → its repository, homepage, docs, current version, licence and **deprecation**, through npm, PyPI or crates.io. Bounded registry requests instead of a web search and a guess. `package` · `webindex_package` |
-| **Repositories** | Every identifier shape — any URL scheme, `git@host:…`, `owner/repo`, `file://`, a local directory — onto one ref with a stable slug. Shallow blobless clones, deepened on demand. |
+| **Repositories** | Every identifier shape — any URL scheme (ssh remotes keep their transport), `git@host:…`, `owner/repo`, a URL copied from a browser, `file://`, a local directory — onto one ref with a stable slug that two repositories never share. Shallow blobless clones, one per branch, cloned once however many callers ask, deepened on demand. |
 | **What a site publishes** | JSON-LD, OpenGraph and meta tags (author, dates, type, canonical); **robots.txt** with a real prefix-matcher; **sitemaps**, index-following bounded by your budget; **RSS/Atom** feeds and their discovery. `meta` `robots` `sitemap` `feed` |
 | **Cache** | On-disk, keyed by canonical URL + locale + extractor (and consent-stripped or full-page reads apart), revalidating rather than re-downloading — a failing origin is asked once before the stale copy is served — with `stats` and eviction. `cache status\|clean` |
 | **The container stack** | SearXNG, Firecrawl and the semantic pair, **embedded in the binary** — no checkout needed. `searxng` `firecrawl` `semantic` `stack` |
@@ -45,6 +45,7 @@ rather than an error.
 | `webindex rank --query <q>` | Order candidate documents against a question — BM25F with title and heading weighting, a SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. Reads a JSON array of `{url,title,text}` from `--docs <file>` or stdin. Deterministic: no model, no network. |
 | `webindex fetch <url>` | Fetch a URL and print its readable text. Routes PDFs and office documents to their ladders — by URL, content-type, download filename or the bytes themselves; images, media and archives get a note, never their bytes. HTML uses Firecrawl when available, then the built-in extractor, reducing the page to main content with consent banners dropped. `--full-page` keeps all page text through the built-in reader, including navigation and consent banners. `--json` adds `finalUrl` (where the text came from, after redirects), `canonical`, the title, status, extractor, `documentType`, `cached`, any note, `fullPage` and `consentDropped` (lines removed by the consent filter; 0 when skipped). Caching is opt-in: `--cache` reuses a fresh copy for the TTL (24 h) and revalidates a stale one with a conditional GET, so an unchanged page costs a 304; `--refresh` re-fetches and rewrites the entry; `--offline` serves only what the cache holds. `--lang fr-FR` sets Accept-Language, `--firecrawl <base>\|off` overrides the extractor. `--timeout <ms>` abandons a host that stays silent that long (default 20000, or `WEBINDEX_TIMEOUT_MS`); a timed-out request is not retried, so that is the real worst case. A failure names its cause — a refused connection, an unknown host, a redirect loop, a timeout — and one that cannot change on a second try is not retried. |
 | `webindex extract <file>` | The same extraction on a file already on disk — PDF, office document, HTML or plain text, recognised by its bytes when its name says otherwise; a CSV nothing can convert is read as its text, and a binary file is refused rather than printed. HTML is reduced to main content with consent banners dropped; `--full-page` keeps all page text, including navigation and consent banners. `--json` includes `fullPage` and `consentDropped` as above (0 for non-HTML). |
+| `webindex repo\|issues\|prs\|releases\|tags <ref>` | What GitHub, GitLab or Gitea records about a repository: its facts (stars, licence, last push, archived), an issue or PR search (`--terms`; relaxed once to the most distinctive terms, and said so, when all of them match nothing), releases, tags. `<ref>` is `owner/repo`, any repository URL — one copied from a browser works — `git@host:owner/repo`, or a local checkout, read as its origin. `--forge github\|gitlab\|gitea` names what a self-hosted host runs; `WEBINDEX_FORGE_HOSTS` declares it once, and is also what lets a token go there. A failure says which one it was. |
 | `webindex mcp` | Serve the tools below to an agent. `--transport stdio` (default) or `http` with `--port`, `--bind`, `--allow-remote`. |
 | `webindex searxng up\|down\|status` | Drive the keyless SearXNG container. |
 | `webindex semantic up\|down\|status` | Drive Qdrant and Ollama, and pull the embedding model once they answer. |
@@ -100,7 +101,7 @@ call a ChatGPT or Claude search API itself. See the
 
 ## The MCP server
 
-`webindex mcp` exposes fifteen tools — primitives only. Point any MCP client at it:
+`webindex mcp` exposes sixteen tools — primitives only. Point any MCP client at it:
 
 ```bash
 claude mcp add webindex -- webindex mcp                    # stdio
