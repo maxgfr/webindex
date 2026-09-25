@@ -1403,6 +1403,31 @@ describe("the new commands", () => {
     expect(stderr()).toMatch(/needs --max/);
   });
 
+  it("refuses a budget below one page, as the MCP tool does", async () => {
+    // `--max 0` used to run a one-page crawl while MCP refused `max: 0`.
+    expect(await run(["crawl", "https://s.test/", "--max", "0"])).toBe(2);
+    expect(stderr()).toMatch(/--max must be a positive whole number/);
+    await expect(webindexAdapter().callTool("webindex_crawl", { url: "https://s.test/", max: 0 })).rejects.toThrow(/positive whole number/);
+  });
+
+  it("keeps a crawl under a path prefix, and off the sitemap when asked", async () => {
+    const site = () =>
+      installFetchMock((url) => {
+        if (url.includes("robots.txt")) return { status: 404, body: "", contentType: "text/plain" };
+        if (url.includes("sitemap")) return { body: "<urlset><url><loc>https://sc.test/docs/listed</loc></url></urlset>", contentType: "application/xml" };
+        if (url === "https://sc.test/") return page('<a href="/docs/a">a</a><a href="/shop/b">b</a>');
+        return page("<p>ok</p>");
+      });
+    const spy = site();
+    expect(await run(["crawl", "https://sc.test/", "--max", "10", "--depth", "1", "--prefix", "/docs/", "--no-sitemap", "--json"])).toBe(0);
+    expect(JSON.parse(stdout()).pages.map((p: { url: string }) => p.url)).toEqual(["https://sc.test/", "https://sc.test/docs/a"]);
+    expect(spy.mock.calls.map((c) => String(c[0])).filter((u) => u.includes("sitemap"))).toEqual([]);
+
+    site();
+    const r = await webindexAdapter().callTool("webindex_crawl", { url: "https://sc.test/", max: 10, depth: 1, prefix: "/docs/", sitemap: true });
+    expect(JSON.parse(r.text).pages.map((p: { url: string }) => p.url)).toEqual(["https://sc.test/", "https://sc.test/docs/listed", "https://sc.test/docs/a"]);
+  });
+
   it("walks a site within its budget and reports what it was refused", async () => {
     installFetchMock((url) => {
       if (url.includes("robots.txt")) return { status: 200, body: "User-agent: *\nDisallow: /private", contentType: "text/plain" };

@@ -94,7 +94,8 @@ USAGE
   webindex semantic  up|down|status
   webindex stack     up|down|status|path
   webindex cache     status|clean [--all] [--json]
-  webindex crawl <url> --max <n> [--depth <n>] [--cross-origin] [--json]
+  webindex crawl <url> --max <n> [--depth <n>] [--prefix <path>] [--no-sitemap]
+                       [--cross-origin] [--json]
   webindex tables <url> [--markdown] [--json]
   webindex embed <text> [--json]
   webindex hybrid --query <q> [--docs <file.json|->] [--limit <n>] [--json]
@@ -174,7 +175,14 @@ COMMANDS
              every hop. --max is REQUIRED: following one citation is not
              crawling and needs no permission, but enumerating a site is, and
              an unbounded walk is the one thing here that can inconvenience
-             somebody else's server.
+             somebody else's server. --max counts pages returned; a failed
+             fetch costs none, but a crawl makes at most 3 x --max page
+             requests. The walk stays on the origin the seed lands on (its
+             http->https or www redirect included), seeds itself from the
+             sitemap (--no-sitemap to skip it; a seed below the root takes only
+             its own section's entries), and --prefix /docs/ keeps it under a
+             path. Links to images, media and archives are not fetched. A
+             robots.txt that errors, or a Crawl-delay over 60 s, stops it.
   tables     The tables on a page as headers and rows, with colspan and rowspan
              resolved. Plain extraction flattens a table into prose in which
              every figure has lost its row and column.
@@ -225,6 +233,8 @@ ENVIRONMENT
   WEBINDEX_CACHE_TTL_HOURS  how long a cached page stays fresh (default 24; fractions allowed)
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
   WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
+  WEBINDEX_MAX_CRAWL_DELAY_MS the longest robots.txt Crawl-delay a crawl waits out, in ms
+                              (default 60000); a site asking for more is not crawled
   WEBINDEX_UA            override the browser User-Agent
   GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, GITEA_TOKEN
                          optional forge tokens; each goes only to github.com, gitlab.com,
@@ -269,8 +279,9 @@ export const VALUE_FLAGS = [
   "max",
   "timeout",
   "forge",
+  "prefix",
 ];
-export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page", "cache", "refresh", "offline"];
+export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "no-sitemap", "full-page", "cache", "refresh", "offline"];
 export const COMMANDS = [
   "search",
   "fetch",
@@ -706,14 +717,22 @@ export function webindexAdapter(): McpAdapter {
         name: "webindex_crawl",
         title: "Walk a site, within a budget",
         description:
-          "Follow links from a seed page, breadth-first, honouring robots.txt at EVERY hop and staying on the seed's origin. `max` pages is required — enumerating " +
+          "Follow links from a seed page, breadth-first, honouring robots.txt at EVERY hop and staying on the origin the seed lands on. `max` pages is required — enumerating " +
           "someone else's site is the one operation here that can inconvenience them, so the budget is not optional. Returns each page's URL, title and text.",
         inputSchema: {
           type: "object",
           properties: {
             url: { type: "string", description: "The seed page." },
-            max: { type: "number", description: "Hard ceiling on pages fetched. Required." },
+            max: {
+              type: "number",
+              description: "Pages to return. Required. A failed fetch costs no page, but the crawl makes at most 3 × `max` page requests in all.",
+            },
             depth: { type: "number", description: "How many links deep to follow (default 2)." },
+            prefix: { type: "string", description: "Only follow URLs whose path starts with this, e.g. `/docs/`." },
+            sitemap: {
+              type: "boolean",
+              description: "Seed the walk from the site's sitemap too (default true; a seed below the root takes only its own section's entries).",
+            },
           },
           required: ["url", "max"],
         },
@@ -895,8 +914,13 @@ export function webindexAdapter(): McpAdapter {
         const max = Number(args.max);
         if (!Number.isInteger(max) || max < 1)
           throw new ToolError("`max` is required and must be a positive whole number — a crawl without a budget is not one.");
-        const r = await crawlSite(url, { maxPages: max, ...(args.depth !== undefined ? { maxDepth: Number(args.depth) } : {}) });
-        if (!r.pages.length) throw new ToolError(`nothing readable from ${url}${r.notes.length ? ` — ${r.notes[0]}` : ""}`);
+        const r = await crawlSite(url, {
+          maxPages: max,
+          ...(args.depth !== undefined ? { maxDepth: Number(args.depth) } : {}),
+          ...(typeof args.prefix === "string" && args.prefix ? { prefix: args.prefix } : {}),
+          ...(args.sitemap === false ? { useSitemap: false } : {}),
+        });
+        if (!r.pages.length) throw new ToolError(`nothing readable from ${url}${r.notes.length ? ` — ${r.notes.join(" ")}` : ""}`);
         return {
           text: JSON.stringify(
             {
@@ -1328,10 +1352,15 @@ async function dispatch(argv: string[]): Promise<void> {
     // operation here that can inconvenience them, so the budget is a decision
     // the caller makes rather than one this command makes for them.
     if (max === undefined) usage("crawl needs --max <n> — an unbounded walk of somebody else's site is not something to do by accident");
+    // The same answer the MCP tool gives: a budget of nothing is not a budget.
+    if (max < 1) usage("--max must be a positive whole number — a crawl without a budget is not one");
+    const prefix = argValue(args, "prefix");
     const r = await crawlSite(seed, {
       maxPages: max,
       ...(argInt(args, "depth") !== undefined ? { maxDepth: argInt(args, "depth") as number } : {}),
       crossOrigin: argBool(args, "cross-origin"),
+      useSitemap: !argBool(args, "no-sitemap"),
+      ...(prefix ? { prefix } : {}),
     });
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));

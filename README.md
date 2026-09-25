@@ -52,7 +52,7 @@ rather than an error.
 | `webindex firecrawl up\|down\|status` | Drive Firecrawl, which cleans a page with a real headless browser. It delegates its own search to SearXNG, so this starts both. |
 | `webindex stack up\|down\|status\|path` | Everything at once. `path` prints where the compose file was written. |
 | `webindex cache status\|clean` | What the on-disk fetch cache holds — entries, size, how many are still fresh. `clean` drops the stale ones, `--all` drops every one, and either sweeps the cache's own orphaned bodies and temp files. Both count and remove only files the cache wrote, never anything else in the directory. The directory is `WEBINDEX_CACHE_DIR`, else per user under the temp dir (`webindex-<uid>/cache`); `WEBINDEX_CACHE_TTL_HOURS` (fractions allowed) sets how long an entry stays fresh. |
-| `webindex crawl <url> --max <n>` | Walk a site from a seed, breadth-first, consulting robots.txt at **every hop** (and per origin with `--cross-origin`). `--max` is required: following one citation needs no permission, enumerating a site does, and an unbounded walk is the one thing here that can inconvenience somebody else's server. `--depth`, `--cross-origin`. Each depth is fetched as one wave, `WEBINDEX_CRAWL_CONCURRENCY` pages in flight (default 4), while one host still departs single-file. |
+| `webindex crawl <url> --max <n>` | Walk a site from a seed, breadth-first, consulting robots.txt at **every hop** (and per origin with `--cross-origin`). `--max` is required: following one citation needs no permission, enumerating a site does, and an unbounded walk is the one thing here that can inconvenience somebody else's server. `--max` counts pages returned: a failed fetch costs none, but a crawl makes at most **3 × `--max` page requests**, so a sitemap full of dead links cannot run it on. The walk stays on the origin the seed lands on — its own `http`→`https` or `www` redirect included — and seeds itself from the sitemap (`--no-sitemap` skips it; a seed below the root, `/docs/`, takes only its own section's entries, after its own links). `--prefix /docs/` keeps links and sitemap entries under a path; `--depth`, `--cross-origin`. Links to images, media, fonts and archives are not fetched, and a page reached through two redirects is read once. A robots.txt that answers 5xx or not at all stops the crawl (RFC 9309), as does a `Crawl-delay` over `WEBINDEX_MAX_CRAWL_DELAY_MS` (default 60 s). Each depth is fetched as one wave, `WEBINDEX_CRAWL_CONCURRENCY` pages in flight (default 4), while one host still departs single-file, and a `Retry-After` holds the whole host. |
 | `webindex tables <url>` | The page's tables as headers and rows, `colspan` and `rowspan` resolved. `--json` for the rows, otherwise markdown. |
 | `webindex embed <text>` | A vector from the local Ollama — no key, nothing leaves the machine. Needs `webindex semantic up`. |
 | `webindex hybrid --query <q>` | Rank documents with BM25F **and** a dense lane, fused by RRF. Each hit reports its rank in each lane. Degrades to the lexical half, with a note on stderr, when no embedding server answers. |
@@ -197,7 +197,9 @@ still need `anydoc` or Firecrawl.
 A `Retry-After` of up to 5 s is waited out and retried once; a longer one is
 not slept through and not retried early — the call returns at once with the
 server's own `retryAfterMs` (and `rateLimited`), which `fetchAndExtract` carries
-on its result and `crawlSite` turns into a back-off for the whole host.
+on its result and `crawlSite` turns into a back-off for the whole host. The short
+wait does too: `httpGet`'s `onBackOff` reports it before sleeping, so a crawl's
+other requests to that host wait with it instead of going out inside the window.
 
 The crawler checks its origin and robots restrictions before each redirected
 request, including sitemap requests, and resolves links against the final URL.
