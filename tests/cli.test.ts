@@ -779,6 +779,65 @@ describe("the MCP tools", () => {
     await expect(adapter.callTool("webindex_nope", {})).rejects.toBeInstanceOf(ToolError);
   });
 
+  describe("cancellation and progress", () => {
+    // The server hands every call a signal its client's cancel aborts; a tool
+    // that does not pass it on keeps fetching for nobody.
+    const ctx = (signal: AbortSignal, onProgress: (p: number, total?: number, message?: string) => void = () => {}) => ({
+      signal,
+      progress: onProgress,
+    });
+    const site = () =>
+      installFetchMock((url) => {
+        if (url.includes("robots.txt")) return { status: 404, body: "", contentType: "text/plain" };
+        if (url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+        if (url === "https://cx.test/") return { body: '<html><body><p>root</p><a href="/a">a</a><a href="/b">b</a></body></html>', contentType: "text/html" };
+        return { body: "<html><body><p>leaf</p></body></html>", contentType: "text/html" };
+      });
+
+    it("webindex_crawl reports each page it read, and stops when cancelled", async () => {
+      process.env[envName("POLITE_DELAY_MS")] = "0";
+      const spy = site();
+      const ctrl = new AbortController();
+      const seen: [number, number | undefined, string | undefined][] = [];
+      const r = await adapter.callTool(
+        "webindex_crawl",
+        { url: "https://cx.test/", max: 5, depth: 1 },
+        ctx(ctrl.signal, (p, total, message) => {
+          seen.push([p, total, message]);
+          ctrl.abort();
+        }),
+      );
+      expect(seen).toEqual([[1, 5, "https://cx.test/"]]);
+      const pages = spy.mock.calls.map((c) => String(c[0])).filter((u) => !/robots|sitemap/.test(u));
+      expect(pages).toEqual(["https://cx.test/"]);
+      expect(JSON.parse(r.text).notes.join(" ")).toMatch(/cancelled/);
+    });
+
+    it("webindex_fetch abandons its request", async () => {
+      const spy = vi.fn(
+        (_input: unknown, init?: RequestInit) =>
+          new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })))),
+      );
+      vi.stubGlobal("fetch", spy);
+      try {
+        const ctrl = new AbortController();
+        setTimeout(() => ctrl.abort(), 10);
+        await expect(adapter.callTool("webindex_fetch", { url: "https://hang.test/p" }, ctx(ctrl.signal))).rejects.toThrow(/cancelled/);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("webindex_search, webindex_sitemap and webindex_tables ask nothing once cancelled", async () => {
+      const spy = installFetchMock(() => ({ body: "<table><tr><td>1</td></tr></table>", contentType: "text/html" }));
+      const done = AbortSignal.abort();
+      await expect(adapter.callTool("webindex_tables", { url: "https://t.test/" }, ctx(done))).rejects.toThrow(/cancelled/);
+      await expect(adapter.callTool("webindex_sitemap", { url: "https://t.test/" }, ctx(done))).rejects.toBeInstanceOf(ToolError);
+      await expect(adapter.callTool("webindex_search", { query: "q", engine: "ddg" }, ctx(done))).rejects.toThrow(/cancelled/);
+      expect(spy.mock.calls.map((c) => String(c[0])).filter((u) => !u.includes("robots.txt"))).toEqual([]);
+    });
+  });
+
   it("carries narrowing advice for both tools", () => {
     // The engine detects an oversized response; only this adapter knows how to
     // make it smaller.

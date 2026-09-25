@@ -110,6 +110,97 @@ describe("JSON-RPC over POST", () => {
   });
 });
 
+describe("progress and cancellation over HTTP", () => {
+  const progressing = () =>
+    testAdapter({
+      callTool: async (_name, _args, ctx) => {
+        ctx!.progress(1, 2, "half");
+        ctx!.progress(2, 2);
+        return { text: "done" };
+      },
+    });
+  const asking = { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "probe_echo", arguments: { text: "x" }, _meta: { progressToken: "p" } } };
+
+  it("streams progress, then the answer, as SSE to a client that asked for progress and accepts a stream", async () => {
+    const s = await startHttpServer(progressing(), { port: 0 });
+    try {
+      const res = await fetch(s.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify(asking),
+      });
+      expect(res.headers.get("content-type")).toMatch(/^text\/event-stream/);
+      const events = (await res.text())
+        .split("\n\n")
+        .filter(Boolean)
+        .map((e) =>
+          JSON.parse(
+            e
+              .split("\n")
+              .find((l) => l.startsWith("data: "))!
+              .slice(6),
+          ),
+        );
+      expect(events.map((e) => e.method ?? `reply ${e.id}`)).toEqual(["notifications/progress", "notifications/progress", "reply 5"]);
+      expect(events[0].params).toEqual({ progressToken: "p", progress: 1, total: 2, message: "half" });
+      expect(events[2].result.content[0].text).toBe("done");
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("answers plain JSON, with no progress mixed in, to a client that accepts only JSON", async () => {
+    const s = await startHttpServer(progressing(), { port: 0 });
+    try {
+      const res = await fetch(s.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify(asking),
+      });
+      expect(res.headers.get("content-type")).toMatch(/^application\/json/);
+      expect(await json(res)).toMatchObject({ id: 5, result: { content: [{ text: "done" }] } });
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("aborts the tool's signal when the client hangs up before the answer", async () => {
+    // Stateless: a notifications/cancelled in another POST cannot name this
+    // request, so the connection closing is the only cancel there is.
+    let aborted!: () => void;
+    const stopped = new Promise<void>((resolve) => {
+      aborted = resolve;
+    });
+    const s = await startHttpServer(
+      testAdapter({
+        callTool: (_name, _args, ctx) =>
+          new Promise((resolve) => {
+            ctx!.signal.addEventListener("abort", () => {
+              aborted();
+              resolve({ text: "stopped" });
+            });
+          }),
+      }),
+      { port: 0 },
+    );
+    try {
+      const ctrl = new AbortController();
+      const pending = fetch(s.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(rpc(1, "tools/call", { name: "probe_echo", arguments: { text: "x" } })),
+        signal: ctrl.signal,
+      }).catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 50));
+      ctrl.abort();
+      await pending;
+      await Promise.race([stopped, new Promise((_, reject) => setTimeout(() => reject(new Error("the tool was never told")), 2000))]);
+    } finally {
+      await s.close();
+    }
+  });
+});
+
 describe("protocol version per request", () => {
   it("takes the negotiated version from the header, since there is no session", async () => {
     // Stateless: two overlapping requests on different revisions must not read

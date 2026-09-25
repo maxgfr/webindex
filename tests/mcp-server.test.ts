@@ -67,6 +67,48 @@ describe("notifications", () => {
     expect(await call(rpc("ping", {}, 7), server)).toMatchObject({ id: 7, result: {} });
   });
 
+  it("aborts the signal the tool was handed, so the work stops and not only the answer", async () => {
+    // Suppressing the response left the fetch, the crawl or the search running
+    // to its own budget for a client that had already moved on.
+    let seen: AbortSignal | undefined;
+    const server = createServer(
+      testAdapter({
+        callTool: (_name, _args, ctx) =>
+          new Promise((resolve) => {
+            seen = ctx!.signal;
+            ctx!.signal.addEventListener("abort", () => resolve({ text: "stopped" }));
+          }),
+      }),
+    );
+    const pending = call(rpc("tools/call", { name: "probe_echo", arguments: { text: "hi" } }, 8), server);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(seen?.aborted).toBe(false);
+    await call({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 8, reason: "user" } }, server);
+    expect(seen?.aborted).toBe(true);
+    expect(await pending).toBeUndefined();
+  });
+
+  it("aborts it too when the transport loses the request", async () => {
+    let seen: AbortSignal | undefined;
+    const server = createServer(
+      testAdapter({
+        callTool: (_name, _args, ctx) =>
+          new Promise((resolve) => {
+            seen = ctx!.signal;
+            ctx!.signal.addEventListener("abort", () => resolve({ text: "stopped" }));
+          }),
+      }),
+    );
+    const lost = new AbortController();
+    const out: JsonRpcMessage[] = [];
+    const pending = server.handle(rpc("tools/call", { name: "probe_echo", arguments: { text: "hi" } }, 9), (m) => void out.push(m), { signal: lost.signal });
+    await new Promise((r) => setTimeout(r, 5));
+    lost.abort();
+    await pending;
+    expect(seen?.aborted).toBe(true);
+    expect(out).toEqual([]);
+  });
+
   it("ignores unknown and already-completed cancellation ids", async () => {
     const server = createServer(testAdapter());
     for (const id of [7, "ghost"]) {
@@ -75,6 +117,70 @@ describe("notifications", () => {
       await call({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id } }, server);
       expect(await call(rpc("ping", {}, id), server)).toMatchObject({ id, result: {} });
     }
+  });
+});
+
+describe("progress", () => {
+  const reporting = () =>
+    createServer(
+      testAdapter({
+        callTool: async (_name, _args, ctx) => {
+          ctx!.progress(1, 3, "first page");
+          ctx!.progress(1, 3, "not forward: dropped");
+          ctx!.progress(2);
+          return { text: "done" };
+        },
+      }),
+    );
+  const withToken = (token: unknown, id = 1) => rpc("tools/call", { name: "probe_echo", arguments: { text: "x" }, _meta: { progressToken: token } }, id);
+
+  it("sends notifications/progress for a request that asked with a progressToken, and only forward", async () => {
+    const server = reporting();
+    const replies: JsonRpcMessage[] = [];
+    const notes: JsonRpcMessage[] = [];
+    await server.handle(withToken("tok"), (m) => void replies.push(m), { notify: (m) => void notes.push(m) });
+    expect(notes).toEqual([
+      { jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: "tok", progress: 1, total: 3, message: "first page" } },
+      { jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: "tok", progress: 2 } },
+    ]);
+    expect(replies).toHaveLength(1);
+  });
+
+  it("sends them through `send` when the transport names no other channel", async () => {
+    const server = reporting();
+    const all: JsonRpcMessage[] = [];
+    await server.handle(withToken(7), (m) => void all.push(m));
+    expect(all.map((m) => m.method ?? "reply")).toEqual(["notifications/progress", "notifications/progress", "reply"]);
+  });
+
+  it("leaves out the message for a 2024-11-05 client, whose notification has none", async () => {
+    const server = reporting();
+    await call(rpc("initialize", { protocolVersion: "2024-11-05" }), server);
+    const notes: JsonRpcMessage[] = [];
+    await server.handle(withToken("tok"), () => {}, { notify: (m) => void notes.push(m) });
+    expect((notes[0]!.params as any).message).toBeUndefined();
+  });
+
+  it("sends nothing to a request that did not ask", async () => {
+    const all: JsonRpcMessage[] = [];
+    await reporting().handle(rpc("tools/call", { name: "probe_echo", arguments: { text: "x" } }), (m) => void all.push(m));
+    expect(all.map((m) => m.method ?? "reply")).toEqual(["reply"]);
+  });
+
+  it("sends nothing once the call was answered", async () => {
+    let late!: () => void;
+    const server = createServer(
+      testAdapter({
+        callTool: async (_name, _args, ctx) => {
+          late = () => ctx!.progress(5);
+          return { text: "done" };
+        },
+      }),
+    );
+    const all: JsonRpcMessage[] = [];
+    await server.handle(withToken("tok"), (m) => void all.push(m));
+    late();
+    expect(all).toHaveLength(1);
   });
 });
 

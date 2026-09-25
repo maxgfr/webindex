@@ -236,8 +236,10 @@ export {
   ERR_INVALID_PARAMS,
   ERR_INVALID_REQUEST,
   ERR_METHOD_NOT_FOUND,
+  InvalidParamsError,
   PromptError,
   ToolError,
+  type HandleOptions,
   type JsonRpcMessage,
   type McpAdapter,
   type McpServer,
@@ -245,6 +247,7 @@ export {
   type PromptResult,
   type ServerOptions,
   type ToolAnnotations,
+  type ToolCallContext,
   type ToolDecl,
   type ToolOutcome,
 } from "./mcp/server.js";

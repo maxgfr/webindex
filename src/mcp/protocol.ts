@@ -29,6 +29,9 @@ export const ASSUMED_HTTP_PROTOCOL: ProtocolVersion = "2025-03-26";
 export const ANNOTATIONS_SINCE = "2025-03-26";
 export const RICH_TOOLS_SINCE = "2025-06-18";
 
+// notifications/progress gained its human-readable `message` in 2025-03-26.
+export const PROGRESS_MESSAGE_SINCE = "2025-03-26";
+
 // JSON-RPC batches: 2025-03-26 spelled them out, 2025-06-18 removed them.
 export const BATCHES_REMOVED_IN = "2025-06-18";
 

@@ -83,6 +83,9 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
   // The revision `initialize` settled, which decides whether batches exist.
   let negotiated: ProtocolVersion | undefined;
 
+  // `reply` is where the answer goes — a batch collects it — while progress
+  // notifications always go straight out as frames of their own.
+  const handleOpts = { notify: send };
   const runToolCall = async (msg: JsonRpcMessage, id: string | number, reply: (out: JsonRpcMessage) => void): Promise<void> => {
     const ticket = { cancelled: false };
     queued.set(id, ticket);
@@ -98,7 +101,7 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
     }
     active++;
     try {
-      await server.handle(msg, reply);
+      await server.handle(msg, reply, handleOpts);
     } finally {
       active--;
       waiting.shift()?.();
@@ -117,7 +120,7 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
         return;
       }
     }
-    await server.handle(msg, reply);
+    await server.handle(msg, reply, handleOpts);
     if (msg?.method === "initialize") negotiated = server.protocolVersion();
   };
 

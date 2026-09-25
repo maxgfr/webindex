@@ -404,6 +404,9 @@ const FORGE_ARG: JsonSchemaProp = {
   enum: [...FORGE_KINDS],
 };
 
+/** Why an httpGet failed: the status a server gave, or — when none answered — what went wrong instead. */
+const fetchFailure = (r: { status: number; error?: string }): string => (r.status ? `status ${r.status}` : (r.error ?? "no answer"));
+
 /** A repository argument as the forge commands read it: parsed, and a local checkout read as its origin. */
 function forgeTarget(raw: string, kind: ForgeKind | undefined): RepoRef {
   const opts = kind ? { kind } : {};
@@ -913,14 +916,18 @@ export function webindexAdapter(): McpAdapter {
       webindex_embed: "send fewer `texts` — a vector per input is large, and they are rarely worth reading inline",
       webindex_crawl: "lower `max`, or `depth` — a crawl's whole output is the sum of its pages",
     },
-    async callTool(name, args) {
+    async callTool(name, args, ctx) {
+      // What the server hands every call: the client's cancel, and a way to
+      // report progress. Passed on to whatever takes it — a cancelled call must
+      // stop fetching, not only have its answer dropped.
+      const signal = ctx?.signal;
       if (name === "webindex_fetch") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
         const fullPage = args.fullPage === true;
         const r = await cachedFetchAndExtract(
           url,
-          { acceptLanguage: args.lang ? String(args.lang) : undefined, fullPage, stripConsent: !fullPage, timeoutMs: toolTimeoutMs(args.timeoutMs) },
+          { acceptLanguage: args.lang ? String(args.lang) : undefined, fullPage, stripConsent: !fullPage, timeoutMs: toolTimeoutMs(args.timeoutMs), signal },
           args.cache === true,
         );
         if (!r.text) throw new ToolError(`Nothing readable at ${url}${r.note ? ` — ${r.note}` : ""}.`);
@@ -957,6 +964,7 @@ export function webindexAdapter(): McpAdapter {
           // timeouts would: better a partial answer that says where it
           // stopped than none at all.
           timeoutMs: SEARCH_TOOL_BUDGET_MS,
+          signal,
           ...(engines ? { engines } : {}),
         });
         // The notes are prose; this line is the same facts in a form an agent
@@ -1042,12 +1050,18 @@ export function webindexAdapter(): McpAdapter {
         }
         if (name === "webindex_sitemap") {
           const robots = await fetchRobots(url);
-          const s = await fetchSitemap(url, { sitemaps: robots.sitemaps, max: typeof args.max === "number" ? args.max : undefined });
+          const max = typeof args.max === "number" ? args.max : undefined;
+          const s = await fetchSitemap(url, {
+            sitemaps: robots.sitemaps,
+            max,
+            signal,
+            onDocument: (doc, fetched) => ctx?.progress(fetched, max ?? 3, doc),
+          });
           if (!s.urls.length && !s.sitemaps.length) throw new ToolError(`No sitemap found for ${url}.${s.notes?.length ? ` ${s.notes.join(" ")}` : ""}`);
           return { text: JSON.stringify(s, null, 2) };
         }
-        const page = await httpGet(url, { accept: "text/html,application/xml,application/feed+json,*/*" });
-        if (!page.ok) throw new ToolError(`Could not fetch ${url} (status ${page.status}).`);
+        const page = await httpGet(url, { accept: "text/html,application/xml,application/feed+json,*/*", signal });
+        if (!page.ok) throw new ToolError(`Could not fetch ${url} (${fetchFailure(page)}).`);
         if (name === "webindex_meta") return { text: JSON.stringify(pageMetadata(page.body, { baseUrl: page.url }), null, 2) };
 
         const direct = parseFeed(page.body, page.url);
@@ -1057,7 +1071,7 @@ export function webindexAdapter(): McpAdapter {
         if (!found.length) throw new ToolError(`${url} is not a feed and advertises none.`);
         const feeds = [];
         for (const f of found) {
-          const parsed = await fetchFeed(f);
+          const parsed = await fetchFeed(f, { signal });
           if (parsed) feeds.push({ url: f, ...parsed });
         }
         if (!feeds.length) throw new ToolError(`${url} advertises ${found.length} feed(s), none of which parsed.`);
@@ -1066,8 +1080,8 @@ export function webindexAdapter(): McpAdapter {
       if (name === "webindex_tables") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
-        const page = await httpGet(url, { accept: "text/html,*/*" });
-        if (!page.ok) throw new ToolError(`could not fetch ${url} (status ${page.status})`);
+        const page = await httpGet(url, { accept: "text/html,*/*", signal });
+        if (!page.ok) throw new ToolError(`could not fetch ${url} (${fetchFailure(page)})`);
         const tables = extractTables(page.body);
         if (!tables.length) throw new ToolError(`${url} has no tables — use webindex_fetch for its text.`);
         return { text: args.markdown ? tables.map(tableToMarkdown).join("\n\n") : JSON.stringify(tables, null, 2) };
@@ -1085,8 +1099,11 @@ export function webindexAdapter(): McpAdapter {
         const max = Number(args.max);
         if (!Number.isInteger(max) || max < 1)
           throw new ToolError("`max` is required and must be a positive whole number — a crawl without a budget is not one.");
+        let read = 0;
         const r = await crawlSite(url, {
           maxPages: max,
+          signal,
+          onPage: (page) => ctx?.progress(++read, max, page.url),
           ...(args.depth !== undefined ? { maxDepth: Number(args.depth) } : {}),
           ...(typeof args.prefix === "string" && args.prefix ? { prefix: args.prefix } : {}),
           ...(args.sitemap === false ? { useSitemap: false } : {}),

@@ -68,6 +68,39 @@ describe("request timeouts", () => {
   });
 });
 
+describe("cancellation", () => {
+  // An MCP client that cancels a call used to have only its answer dropped:
+  // the request itself ran on to its timeout, and a crawl to its budget.
+  it("abandons a request in flight when the caller's signal aborts, and does not retry it", async () => {
+    const spy = installHangingFetch();
+    vi.stubEnv(envName("MAX_ATTEMPTS"), "3");
+    const ctrl = new AbortController();
+    const pending = httpGet("https://blackhole.test/x", { timeoutMs: 60_000, signal: ctrl.signal });
+    await new Promise((r) => setTimeout(r, 5));
+    ctrl.abort();
+    const r = await pending;
+    expect(r).toMatchObject({ ok: false, status: 0, error: "cancelled" });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends nothing at all for a signal that has already aborted", async () => {
+    const spy = installHangingFetch();
+    const r = await httpGet("https://blackhole.test/x", { signal: AbortSignal.abort() });
+    expect(r).toMatchObject({ ok: false, status: 0, error: "cancelled" });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("carries the signal through fetchAndExtract and the cache", async () => {
+    installHangingFetch();
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 5);
+    expect((await fetchAndExtract("https://blackhole.test/page", { signal: ctrl.signal })).note).toMatch(/cancelled/);
+    const again = new AbortController();
+    setTimeout(() => again.abort(), 5);
+    expect((await cachedFetchAndExtract("https://blackhole.test/page2", { signal: again.signal }, true)).note).toMatch(/cancelled/);
+  });
+});
+
 // undici reports every network failure as "fetch failed" and keeps the reason
 // on `cause`. These stubs throw exactly that shape.
 function failingFetch(cause: Error & { code?: string }) {

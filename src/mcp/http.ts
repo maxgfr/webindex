@@ -13,10 +13,11 @@ import { ASSUMED_HTTP_PROTOCOL, batchRefusal, isOriginAllowed, isProtocolVersion
 // semantics) for no capability. Revisit only when something genuinely spans
 // calls.
 //
-// No SSE either: nothing here sends server-initiated messages, and the spec's
-// answer for a server with no stream to offer is 405 on GET, which is what this
-// does. server.ts already routes replies through a callback, so adding a stream
-// later is a change to this file alone.
+// SSE only where it carries something: a request that asked for progress, from
+// a client that accepts a stream, is answered as one (progress, then the
+// response). Nothing here sends server-initiated messages outside a request,
+// and the spec's answer for a server with no such stream is 405 on GET, which
+// is what this does.
 
 const MCP_PATH = "/mcp";
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -194,10 +195,35 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
   const mcp = createMcpServer(adapter, opts);
   mcp.setProtocolVersion(protocol);
 
+  // The client hanging up is the only cancel this server can receive: being
+  // stateless, a notifications/cancelled POSTed separately cannot name this
+  // request — ids are only unique per client, and there is no session to say
+  // whose. Nobody is left to read the answer, so the work stops.
+  const lost = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) lost.abort();
+  });
+
+  // Progress needs a stream to travel on. A single request that asked for it,
+  // from a client that accepts one, is answered as SSE: its progress events,
+  // then its response, then the end of the stream. Everyone else gets the one
+  // JSON body they always did, with nothing but responses in it.
+  const single = Array.isArray(parsed) ? undefined : (parsed as JsonRpcMessage);
+  const token = single?.params?._meta as Record<string, unknown> | undefined;
+  if (single?.id !== undefined && token?.progressToken !== undefined && accept.includes("text/event-stream")) {
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", ...corsHeaders(origin) });
+    const event = (m: JsonRpcMessage) => {
+      if (!res.writableEnded) res.write(`event: message\ndata: ${JSON.stringify(m)}\n\n`);
+    };
+    await mcp.handle(single, event, { signal: lost.signal, notify: event });
+    res.end();
+    return;
+  }
+
   const out: JsonRpcMessage[] = [];
   const collect = (m: JsonRpcMessage) => void out.push(m);
   const messages: JsonRpcMessage[] = Array.isArray(parsed) ? (parsed as JsonRpcMessage[]) : [parsed as JsonRpcMessage];
-  for (const m of messages) await mcp.handle(m, collect);
+  for (const m of messages) await mcp.handle(m, collect, { signal: lost.signal, notify: () => {} });
 
   // Nothing to answer means the body held only notifications or responses —
   // `notifications/initialized` arrives exactly this way, and a 200 with a body
