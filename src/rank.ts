@@ -539,33 +539,38 @@ export function hammingDistance(a: bigint, b: bigint): number {
  * Collapse near-duplicate items by SimHash over their text, keeping the
  * best-scored copy. Items shorter than `minChars` carry too little signal and
  * are never collapsed. Expects best-first input and preserves that order.
+ *
+ * `duplicates` names each dropped URL and the kept one it duplicated: a mirror
+ * is an alternate citation, and the evidence when a collapse was wrong.
  */
 export function dedupeNearDuplicates<T extends Ranked>(
   items: readonly T[],
   opts: { maxBits?: number; minChars?: number } = {},
-): { items: T[]; dropped: number } {
+): { items: T[]; dropped: number; duplicates: { url: string; of: string }[] } {
   const maxBits = opts.maxBits ?? 3;
   const minChars = opts.minChars ?? 500;
   const better = (a: T, b: T): boolean => (a.score !== b.score ? a.score > b.score : byCodeUnit(a.url, b.url) < 0);
   const kept: { it: T; hash: bigint | null }[] = [];
-  let dropped = 0;
+  // Each dropped URL, and the cluster it joined — resolved at the end, because
+  // a later, better copy can still displace the one it was collapsed into.
+  const dups: { url: string; cluster: { it: T } }[] = [];
   for (const it of items) {
     const text = it.text || "";
     const hash = text.length >= minChars ? simhash(text) : null;
     if (hash !== null) {
       const dup = kept.find((k) => k.hash !== null && hammingDistance(k.hash, hash) <= maxBits);
       if (dup) {
-        dropped++;
         if (better(it, dup.it)) {
+          dups.push({ url: dup.it.url, cluster: dup });
           dup.it = it;
           dup.hash = hash;
-        }
+        } else dups.push({ url: it.url, cluster: dup });
         continue;
       }
     }
     kept.push({ it, hash });
   }
-  return { items: kept.map((k) => k.it), dropped };
+  return { items: kept.map((k) => k.it), dropped: dups.length, duplicates: dups.map((d) => ({ url: d.url, of: d.cluster.it.url })) };
 }
 
 /**

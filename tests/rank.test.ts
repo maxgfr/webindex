@@ -386,6 +386,24 @@ describe("simhash near-duplicate detection", () => {
     expect(kept.map((k) => k.url)).toEqual(["https://origin.test/a", "https://other.test/b"]);
   });
 
+  it("reports which URL each dropped copy duplicated", () => {
+    // A mirror is an alternate citation, and the evidence when a collapse was wrong.
+    const other = "Something entirely different. ".repeat(40);
+    const items = [
+      src("https://origin.test/a", 0.9, article),
+      src("https://mirror.test/a", 0.4, `${article} `),
+      src("https://other.test/b", 0.5, other),
+      src("https://better.test/b", 0.8, other),
+    ];
+    const r = dedupeNearDuplicates(items);
+    expect(r.dropped).toBe(2);
+    expect(r.duplicates).toEqual([
+      { url: "https://mirror.test/a", of: "https://origin.test/a" },
+      // A later, better copy displaces the kept one: the displaced URL is the duplicate.
+      { url: "https://other.test/b", of: "https://better.test/b" },
+    ]);
+  });
+
   it("breaks a score tie between copies by code unit, whatever the machine's locale", () => {
     // localeCompare read LANG: under da_DK "aa" sorts after "ab". Code units
     // put "B" (0x42) before "a" (0x61) everywhere.

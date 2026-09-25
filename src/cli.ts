@@ -129,7 +129,8 @@ COMMANDS
   rank       Order candidate documents against a question — BM25F, then a
              near-duplicate collapse, then MMR so the top says several
              different things. Reads a JSON array of {url,title,text} from
-             --docs or stdin. Deterministic; no model, no network.
+             --docs or stdin. Each collapsed mirror is named on stderr (in
+             "duplicates" with --json). Deterministic; no model, no network.
   repo       A repository's own facts: stars, licence, default branch, last
              push, and whether it is archived — the record, not the README.
              A <ref> is owner/repo, any repository URL (one copied from a
@@ -417,7 +418,11 @@ interface RankedOut {
  * pool max, so "0.7" means "70% as relevant as the best thing here" rather than
  * an uncalibrated BM25 magnitude nobody can compare across runs.
  */
-function rankDocuments(question: string, docs: RankInput[], limit?: number): { ranked: RankedOut[]; collapsed: number; queryTerms: string[] } {
+function rankDocuments(
+  question: string,
+  docs: RankInput[],
+  limit?: number,
+): { ranked: RankedOut[]; collapsed: number; duplicates: { url: string; of: string }[]; queryTerms: string[] } {
   const bm = docs.map((d, i) => ({ id: String(i), title: d.title ?? "", headings: d.headings ?? "", body: d.text ?? "" }));
   const index = buildBm25Index(question, bm);
   const raw = docs.map((_, i) => bm25Score(index, bm[i]!));
@@ -433,7 +438,7 @@ function rankDocuments(question: string, docs: RankInput[], limit?: number): { r
   // Code-unit tie-break: localeCompare reads LANG, and two machines disagreed.
   scored.sort((a, b) => b.score - a.score || (a.url < b.url ? -1 : a.url > b.url ? 1 : 0));
 
-  const { items: unique, dropped } = dedupeNearDuplicates(scored);
+  const { items: unique, dropped, duplicates } = dedupeNearDuplicates(scored);
   const ordered = diversify(unique, (it) => new Set(bm25Tokenize(it.text)));
 
   const ranked = ordered.slice(0, limit && limit > 0 ? limit : undefined).map((it, i) => ({
@@ -443,7 +448,7 @@ function rankDocuments(question: string, docs: RankInput[], limit?: number): { r
     score: Number(it.score.toFixed(4)),
     matched: it.matched,
   }));
-  return { ranked, collapsed: dropped, queryTerms: index.queryTerms };
+  return { ranked, collapsed: dropped, duplicates, queryTerms: index.queryTerms };
 }
 
 /** Parse and validate the `documents` payload both entry points accept. */
@@ -537,7 +542,7 @@ export function webindexAdapter(): McpAdapter {
         title: "Rank candidate documents against a question",
         description:
           "Order a pool of documents by relevance to a question: BM25F (title and headings weighted above body), then SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. " +
-          "Returns the ranking with a score, the matched query terms, and what was collapsed — deterministic, no model, no network. Use it after gathering pages from any search provider to decide what to actually read. Scores measure relevance within this pool, not factual accuracy.",
+          "Returns the ranking with a score, the matched query terms, and what was collapsed (each dropped mirror's URL and the URL it duplicated) — deterministic, no model, no network. Use it after gathering pages from any search provider to decide what to actually read. Scores measure relevance within this pool, not factual accuracy.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1117,7 +1122,10 @@ async function dispatch(argv: string[]): Promise<void> {
           .map((x) => `${x.rank}. [${x.score.toFixed(3)}] ${x.title ?? x.url}\n   ${x.url}${x.matched.length ? `\n   matched: ${x.matched.join(", ")}` : ""}`)
           .join("\n\n") + "\n",
       );
-      if (r.collapsed) process.stderr.write(`${r.collapsed} near-duplicate(s) collapsed.\n`);
+      if (r.collapsed) {
+        process.stderr.write(`${r.collapsed} near-duplicate(s) collapsed.\n`);
+        for (const d of r.duplicates) process.stderr.write(`  ${d.url} duplicates ${d.of}\n`);
+      }
     }
     if (!r.queryTerms.length) {
       process.stderr.write("The question has no rankable terms once stopwords are removed — the order is arbitrary.\n");

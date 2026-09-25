@@ -28,7 +28,9 @@ dictionary, still deterministic.
 **SimHash collapse** — the same CONTENT syndicated across different URLs:
 mirrors, scraper copies, a press release reprinted verbatim. Identity dedup
 (`dedupeByUrl`, DOI/arXiv) catches the same *resource*; this catches the same
-*words*. Texts under `minChars` are never collapsed — too little signal.
+*words*. Texts under `minChars` are never collapsed — too little signal. Each
+dropped copy is reported in `duplicates` with the URL it duplicated: a mirror is
+an alternate citation, and the evidence when a collapse was wrong.
 
 **MMR diversification** — the pass that is easiest to misread. It does not remove
 redundancy in the near-duplicate sense: eight independent pages can each restate

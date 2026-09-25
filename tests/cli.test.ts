@@ -836,6 +836,26 @@ describe("rank", () => {
     expect(ranked.slice(0, 3).map((r) => r.url)).toContain("https://e.test/5");
   });
 
+  it("names each collapsed mirror and the URL it duplicated", async () => {
+    const article = `A token bucket refills at a fixed rate and caps at its burst size. ${"Each request removes one token from the bucket. ".repeat(20)}`;
+    const pool = JSON.stringify([
+      { url: "https://origin.test/a", title: "Token bucket", text: article },
+      { url: "https://mirror.test/a", title: "Token bucket (mirror)", text: `${article} ` },
+      { url: "https://other.test/b", title: "Leaky bucket", text: "A leaky bucket drains at a constant rate." },
+    ]);
+    await run(["rank", "--query", "token bucket", "--docs", withDocs(pool), "--json"]);
+    const j = JSON.parse(stdout());
+    expect(j.collapsed).toBe(1);
+    expect(j.duplicates).toEqual([{ url: "https://mirror.test/a", of: "https://origin.test/a" }]);
+
+    out = [];
+    err = [];
+    await run(["rank", "--query", "token bucket", "--docs", withDocs(pool)]);
+    expect(stderr()).toMatch(/1 near-duplicate\(s\) collapsed/);
+    expect(stderr()).toContain("https://mirror.test/a");
+    expect(stdout()).not.toContain("https://mirror.test/a");
+  });
+
   it("orders tied documents the same on every machine", async () => {
     // Code units, not localeCompare: "B" (0x42) sorts before "a" (0x61) whatever
     // LANG says. Two documents, so the order is the pipeline's own sort.
