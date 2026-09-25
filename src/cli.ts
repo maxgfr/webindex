@@ -305,7 +305,21 @@ export const VALUE_FLAGS = [
   "forge",
   "prefix",
 ];
-export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "no-sitemap", "full-page", "cache", "refresh", "offline", "dense", "lines"];
+export const BOOL_FLAGS = [
+  "json",
+  "allow-remote",
+  "all",
+  "check",
+  "markdown",
+  "cross-origin",
+  "no-sitemap",
+  "full-page",
+  "cache",
+  "refresh",
+  "offline",
+  "dense",
+  "lines",
+];
 export const COMMANDS = [
   "search",
   "fetch",
