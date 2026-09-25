@@ -996,10 +996,80 @@ describe("the forge, registry and page-metadata commands", () => {
     expect(await run(["robots", "https://ex.test/public"])).toBe(0);
   });
 
+  it("says a robots.txt that errored forbids everything, rather than calling it missing", async () => {
+    installFetchMock(() => ({ status: 503, body: "", contentType: "text/plain" }));
+    expect(await run(["robots", "https://down.test/page"])).toBe(1);
+    expect(stdout()).toContain("allowed   no");
+    expect(stdout()).toMatch(/HTTP 503.*RFC 9309/);
+  });
+
+  it("says robots checks were switched off, rather than that there was no file", async () => {
+    installFetchMock(() => ({ body: "User-agent: *\nDisallow: /", contentType: "text/plain" }));
+    process.env[envName("NO_ROBOTS")] = "1";
+    expect(await run(["robots", "https://off.test/x"])).toBe(0);
+    expect(stdout()).toMatch(/not consulted \(WEBINDEX_TEST_NO_ROBOTS\)/);
+    expect(stdout()).not.toMatch(/no robots\.txt/);
+  });
+
   it("lists the URLs a sitemap declares", async () => {
     installFetchMock((url) => (url.endsWith("robots.txt") ? { status: 404, body: "" } : { body: "<urlset><url><loc>https://ex.test/p1</loc></url></urlset>" }));
     expect(await run(["sitemap", "https://ex.test/x"])).toBe(0);
     expect(stdout()).toContain("https://ex.test/p1");
+  });
+
+  it("names the child sitemaps --max did not reach, rather than printing an empty line", async () => {
+    const index = "<sitemapindex><sitemap><loc>https://sm.test/a.xml</loc></sitemap><sitemap><loc>https://sm.test/b.xml</loc></sitemap></sitemapindex>";
+    installFetchMock((url) =>
+      url.endsWith("robots.txt")
+        ? { body: "Sitemap: https://sm.test/index.xml", contentType: "text/plain" }
+        : url.endsWith("/index.xml")
+          ? { body: index, contentType: "application/xml" }
+          : { body: `<urlset><url><loc>${url.replace(".xml", "-page")}</loc></url></urlset>`, contentType: "application/xml" },
+    );
+    expect(await run(["sitemap", "https://sm.test/", "--max", "1"])).toBe(1);
+    expect(stderr()).toMatch(/2 child sitemap\(s\) not read.*raise --max/s);
+    expect(stderr()).toContain("https://sm.test/b.xml");
+
+    out = [];
+    err = [];
+    expect(await run(["sitemap", "https://sm.test/", "--max", "2"])).toBe(0);
+    expect(stdout().trim()).toBe("https://sm.test/a-page");
+    expect(stderr()).toMatch(/1 child sitemap\(s\) not read.*raise --max/s);
+  });
+
+  it("resolves a feed's relative links, reads JSON Feed, and looks past a page that only looks like a feed", async () => {
+    installFetchMock(() => ({ body: '<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Rel</title><link href="/blog/post-2"/></entry></feed>' }));
+    expect(await run(["feed", "https://ex.test/atom.xml"])).toBe(0);
+    expect(stdout()).toContain("https://ex.test/blog/post-2");
+
+    out = [];
+    installFetchMock(() => ({
+      body: JSON.stringify({ version: "https://jsonfeed.org/version/1.1", items: [{ id: "1", title: "Jay", url: "/j" }] }),
+      contentType: "application/feed+json",
+    }));
+    expect(await run(["feed", "https://ex.test/feed.json"])).toBe(0);
+    expect(stdout()).toContain("https://ex.test/j");
+
+    out = [];
+    installFetchMock((url) =>
+      url.includes("feed.xml")
+        ? { body: "<rss><channel><title>B</title><item><title>Real</title><link>https://ex.test/r</link></item></channel></rss>" }
+        : {
+            body: "<!doctype html><html><head><link rel=alternate type=application/rss+xml href=/feed.xml></head><body><channel-nav></channel-nav></body></html>",
+          },
+    );
+    expect(await run(["feed", "https://ex.test/page"])).toBe(0);
+    expect(stdout()).toContain("Real");
+  });
+
+  it("follows the feed an empty feed points to", async () => {
+    installFetchMock((url) =>
+      url.includes("full.xml")
+        ? { body: "<rss><channel><title>B</title><item><title>Moved here</title><link>https://ex.test/m</link></item></channel></rss>" }
+        : { body: '<feed xmlns="http://www.w3.org/2005/Atom"><title>Stub</title><link rel="alternate" type="application/rss+xml" href="/full.xml"/></feed>' },
+    );
+    expect(await run(["feed", "https://ex.test/stub.xml"])).toBe(0);
+    expect(stdout()).toContain("Moved here");
   });
 
   it("parses a feed directly, and discovers one from a page", async () => {
@@ -1339,6 +1409,31 @@ describe("the new commands", () => {
     // inconvenience them, so the ceiling is the caller's decision.
     expect(await run(["crawl", "https://s.test/"])).toBe(2);
     expect(stderr()).toMatch(/needs --max/);
+  });
+
+  it("refuses a budget below one page, as the MCP tool does", async () => {
+    // `--max 0` used to run a one-page crawl while MCP refused `max: 0`.
+    expect(await run(["crawl", "https://s.test/", "--max", "0"])).toBe(2);
+    expect(stderr()).toMatch(/--max must be a positive whole number/);
+    await expect(webindexAdapter().callTool("webindex_crawl", { url: "https://s.test/", max: 0 })).rejects.toThrow(/positive whole number/);
+  });
+
+  it("keeps a crawl under a path prefix, and off the sitemap when asked", async () => {
+    const site = () =>
+      installFetchMock((url) => {
+        if (url.includes("robots.txt")) return { status: 404, body: "", contentType: "text/plain" };
+        if (url.includes("sitemap")) return { body: "<urlset><url><loc>https://sc.test/docs/listed</loc></url></urlset>", contentType: "application/xml" };
+        if (url === "https://sc.test/") return page('<a href="/docs/a">a</a><a href="/shop/b">b</a>');
+        return page("<p>ok</p>");
+      });
+    const spy = site();
+    expect(await run(["crawl", "https://sc.test/", "--max", "10", "--depth", "1", "--prefix", "/docs/", "--no-sitemap", "--json"])).toBe(0);
+    expect(JSON.parse(stdout()).pages.map((p: { url: string }) => p.url)).toEqual(["https://sc.test/", "https://sc.test/docs/a"]);
+    expect(spy.mock.calls.map((c) => String(c[0])).filter((u) => u.includes("sitemap"))).toEqual([]);
+
+    site();
+    const r = await webindexAdapter().callTool("webindex_crawl", { url: "https://sc.test/", max: 10, depth: 1, prefix: "/docs/", sitemap: true });
+    expect(JSON.parse(r.text).pages.map((p: { url: string }) => p.url)).toEqual(["https://sc.test/", "https://sc.test/docs/listed", "https://sc.test/docs/a"]);
   });
 
   it("walks a site within its budget and reports what it was refused", async () => {

@@ -383,6 +383,11 @@ export async function httpGet(
      *  Per-call because the right number is per-endpoint: a probe wants 0, a
      *  paper download off a flaky mirror wants 2. */
     retries?: number;
+    /** Told, BEFORE the wait, that a transient answer (429, 502–504) will be
+     *  retried after `waitMs` — so a caller queueing other requests for that
+     *  host (crawlSite) holds them for the same window instead of sending them
+     *  into it while this one sleeps. */
+    onBackOff?: (url: string, waitMs: number) => void;
   } = {},
 ): Promise<HttpResult> {
   const attempts = attemptsFor(opts.retries);
@@ -509,6 +514,7 @@ export async function httpGet(
       const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(meta.retryAfterMs) : undefined;
       if (wait !== undefined) {
         last = result;
+        if (wait > 0) opts.onBackOff?.(result.url, wait);
         await sleep(wait);
         continue;
       }
@@ -1120,6 +1126,8 @@ export async function fetchAndExtract(
      * the page it just read; see ExtractResult.html for why it is opt-in.
      */
     keepHtml?: boolean;
+    /** Passed to httpGet: told before a transient answer is waited out and retried. */
+    onBackOff?: (url: string, waitMs: number) => void;
   } = {},
 ): Promise<ExtractResult> {
   const wantsPdf = looksLikePdfUrl(url);
@@ -1148,7 +1156,14 @@ export async function fetchAndExtract(
     firecrawlNote = fc.data ? `Firecrawl got HTTP ${fc.data.statusCode} for ${url} — fell back to the built-in extractor.` : fc.why;
   }
   const base = wantsPdf ? PDF_FETCH_OPTS : wantsDoc ? DOC_FETCH_OPTS : { accept: "text/html,text/plain,*/*", acceptLanguage: opts.acceptLanguage };
-  const fetchOpts = { ...base, maxDocumentBytes: PDF_FETCH_OPTS.maxBytes, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs };
+  const fetchOpts = {
+    ...base,
+    maxDocumentBytes: PDF_FETCH_OPTS.maxBytes,
+    headers: opts.headers,
+    authorizeUrl: opts.authorizeUrl,
+    timeoutMs: opts.timeoutMs,
+    onBackOff: opts.onBackOff,
+  };
   let res = await httpGet(url, fetchOpts);
   // A brand that identifies itself honestly gets refused by some hosts. Retry
   // once wearing a browser UA before giving up — but only for a brand that had

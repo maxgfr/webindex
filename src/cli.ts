@@ -16,7 +16,7 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { configure, env, envName } from "./brand.js";
+import { configure, env, envFlag, envName } from "./brand.js";
 import { decodeLocal } from "./charset.js";
 import { ENGINE_VERSION } from "./version.js";
 import { DOC_EXTRACTORS, docFormatForUrl, extractDocument, enabledDocExtractors, sniffDocument } from "./doc.js";
@@ -94,7 +94,8 @@ USAGE
   webindex semantic  up|down|status
   webindex stack     up|down|status|path
   webindex cache     status|clean [--all] [--json]
-  webindex crawl <url> --max <n> [--depth <n>] [--cross-origin] [--json]
+  webindex crawl <url> --max <n> [--depth <n>] [--prefix <path>] [--no-sitemap]
+                       [--cross-origin] [--json]
   webindex tables <url> [--markdown] [--json]
   webindex embed <text> [--json]
   webindex hybrid --query <q> [--docs <file.json|->] [--limit <n>] [--json]
@@ -152,9 +153,13 @@ COMMANDS
              author, dates, type, canonical URL.
   robots     Whether robots.txt permits fetching that URL. Exits non-zero when
              it does not, so it composes in a shell.
-  sitemap    The URLs a site lists in its sitemap, following the index at most
-             --max documents deep (default 3).
-  feed       A site's RSS/Atom feed, or the feeds the page advertises.
+  sitemap    The URLs a site lists in its sitemap: the ones robots.txt names,
+             and an index's children, reading at most --max documents
+             (default 3); /sitemap.xml is guessed only when robots.txt names
+             none. Gzipped and plain-text sitemaps too, up to the protocol's
+             50 MB. The children --max did not reach are named on stderr.
+  feed       A site's RSS, Atom or JSON Feed, or the feeds the page
+             advertises. Relative entry links are resolved.
   mcp        Serve fetch/extract to an agent over MCP (stdio by default).
   searxng    Bring the keyless SearXNG container up or down, or show it.
   firecrawl  Same for Firecrawl, which cleans a page with a real browser. It
@@ -170,7 +175,14 @@ COMMANDS
              every hop. --max is REQUIRED: following one citation is not
              crawling and needs no permission, but enumerating a site is, and
              an unbounded walk is the one thing here that can inconvenience
-             somebody else's server.
+             somebody else's server. --max counts pages returned; a failed
+             fetch costs none, but a crawl makes at most 3 x --max page
+             requests. The walk stays on the origin the seed lands on (its
+             http->https or www redirect included), seeds itself from the
+             sitemap (--no-sitemap to skip it; a seed below the root takes only
+             its own section's entries), and --prefix /docs/ keeps it under a
+             path. Links to images, media and archives are not fetched. A
+             robots.txt that errors, or a Crawl-delay over 60 s, stops it.
   tables     The tables on a page as headers and rows, with colspan and rowspan
              resolved. Plain extraction flattens a table into prose in which
              every figure has lost its row and column.
@@ -221,6 +233,8 @@ ENVIRONMENT
   WEBINDEX_CACHE_TTL_HOURS  how long a cached page stays fresh (default 24; fractions allowed)
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
   WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
+  WEBINDEX_MAX_CRAWL_DELAY_MS the longest robots.txt Crawl-delay a crawl waits out, in ms
+                              (default 60000); a site asking for more is not crawled
   WEBINDEX_UA            override the browser User-Agent
   GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, GITEA_TOKEN
                          optional forge tokens; each goes only to github.com, gitlab.com,
@@ -265,8 +279,9 @@ export const VALUE_FLAGS = [
   "max",
   "timeout",
   "forge",
+  "prefix",
 ];
-export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page", "cache", "refresh", "offline"];
+export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "no-sitemap", "full-page", "cache", "refresh", "offline"];
 export const COMMANDS = [
   "search",
   "fetch",
@@ -652,8 +667,8 @@ export function webindexAdapter(): McpAdapter {
         name: "webindex_sitemap",
         title: "What pages does this site list?",
         description:
-          "Fetch and parse the site's sitemap (following the ones robots.txt names first), returning page URLs with their last-modified dates. " +
-          "A sitemap index is followed at most `max` documents deep — enumerating a site is a budget you set, not something this does on its own.",
+          "Fetch and parse the site's sitemap (the ones robots.txt names, else /sitemap.xml; gzipped and plain-text ones too), returning page URLs with their last-modified dates. " +
+          "At most `max` documents are read — enumerating a site is a budget you set, not something this does on its own — and the child sitemaps it did not reach come back in `unfetched`.",
         inputSchema: {
           type: "object",
           properties: {
@@ -665,9 +680,9 @@ export function webindexAdapter(): McpAdapter {
       },
       {
         name: "webindex_feed",
-        title: "A site's RSS or Atom feed",
+        title: "A site's RSS, Atom or JSON feed",
         description:
-          "Parse a feed URL, or discover and parse the feeds a page advertises. Returns dated, ordered entries — the site telling you what it published and when, " +
+          "Parse a feed URL (RSS, Atom or JSON Feed), or discover and parse the feeds a page advertises. Returns dated, ordered entries with absolute URLs — the site telling you what it published and when, " +
           "instead of a web search guessing.",
         inputSchema: { type: "object", properties: { url: { type: "string", description: "A feed URL, or a page that links to one." } }, required: ["url"] },
       },
@@ -702,14 +717,22 @@ export function webindexAdapter(): McpAdapter {
         name: "webindex_crawl",
         title: "Walk a site, within a budget",
         description:
-          "Follow links from a seed page, breadth-first, honouring robots.txt at EVERY hop and staying on the seed's origin. `max` pages is required — enumerating " +
+          "Follow links from a seed page, breadth-first, honouring robots.txt at EVERY hop and staying on the origin the seed lands on. `max` pages is required — enumerating " +
           "someone else's site is the one operation here that can inconvenience them, so the budget is not optional. Returns each page's URL, title and text.",
         inputSchema: {
           type: "object",
           properties: {
             url: { type: "string", description: "The seed page." },
-            max: { type: "number", description: "Hard ceiling on pages fetched. Required." },
+            max: {
+              type: "number",
+              description: "Pages to return. Required. A failed fetch costs no page, but the crawl makes at most 3 × `max` page requests in all.",
+            },
             depth: { type: "number", description: "How many links deep to follow (default 2)." },
+            prefix: { type: "string", description: "Only follow URLs whose path starts with this, e.g. `/docs/`." },
+            sitemap: {
+              type: "boolean",
+              description: "Seed the walk from the site's sitemap too (default true; a seed below the root takes only its own section's entries).",
+            },
           },
           required: ["url", "max"],
         },
@@ -849,16 +872,17 @@ export function webindexAdapter(): McpAdapter {
         if (name === "webindex_sitemap") {
           const robots = await fetchRobots(url);
           const s = await fetchSitemap(url, { sitemaps: robots.sitemaps, max: typeof args.max === "number" ? args.max : undefined });
-          if (!s.urls.length && !s.sitemaps.length) throw new ToolError(`No sitemap found for ${url}.`);
+          if (!s.urls.length && !s.sitemaps.length) throw new ToolError(`No sitemap found for ${url}.${s.notes?.length ? ` ${s.notes.join(" ")}` : ""}`);
           return { text: JSON.stringify(s, null, 2) };
         }
-        const page = await httpGet(url, { accept: "text/html,application/xml,*/*" });
+        const page = await httpGet(url, { accept: "text/html,application/xml,application/feed+json,*/*" });
         if (!page.ok) throw new ToolError(`Could not fetch ${url} (status ${page.status}).`);
         if (name === "webindex_meta") return { text: JSON.stringify(pageMetadata(page.body, { baseUrl: page.url }), null, 2) };
 
-        const direct = parseFeed(page.body);
-        if (direct) return { text: JSON.stringify(direct, null, 2) };
-        const found = discoverFeeds(page.body, page.url);
+        const direct = parseFeed(page.body, page.url);
+        // A feed with no entries may still point at the one that has them.
+        const found = direct?.items.length ? [] : discoverFeeds(page.body, page.url);
+        if (direct && !found.length) return { text: JSON.stringify(direct, null, 2) };
         if (!found.length) throw new ToolError(`${url} is not a feed and advertises none.`);
         const feeds = [];
         for (const f of found) {
@@ -890,8 +914,13 @@ export function webindexAdapter(): McpAdapter {
         const max = Number(args.max);
         if (!Number.isInteger(max) || max < 1)
           throw new ToolError("`max` is required and must be a positive whole number — a crawl without a budget is not one.");
-        const r = await crawlSite(url, { maxPages: max, ...(args.depth !== undefined ? { maxDepth: Number(args.depth) } : {}) });
-        if (!r.pages.length) throw new ToolError(`nothing readable from ${url}${r.notes.length ? ` — ${r.notes[0]}` : ""}`);
+        const r = await crawlSite(url, {
+          maxPages: max,
+          ...(args.depth !== undefined ? { maxDepth: Number(args.depth) } : {}),
+          ...(typeof args.prefix === "string" && args.prefix ? { prefix: args.prefix } : {}),
+          ...(args.sitemap === false ? { useSitemap: false } : {}),
+        });
+        if (!r.pages.length) throw new ToolError(`nothing readable from ${url}${r.notes.length ? ` — ${r.notes.join(" ")}` : ""}`);
         return {
           text: JSON.stringify(
             {
@@ -1213,7 +1242,15 @@ async function dispatch(argv: string[]): Promise<void> {
       const allowed = isAllowed(r, target);
       emit({ url: target, allowed, ...r }, [
         `  allowed   ${allowed ? "yes" : "no"}`,
-        `  rules     ${r.absent ? "none (no robots.txt)" : r.rules.length}`,
+        `  rules     ${
+          envFlag("NO_ROBOTS")
+            ? `not consulted (${envName("NO_ROBOTS")})`
+            : r.unreachable
+              ? `none readable (${r.status ? `HTTP ${r.status}` : "no answer"}) — RFC 9309 says to assume nothing may be crawled`
+              : r.absent
+                ? `none (no robots.txt${r.status ? `, HTTP ${r.status}` : ""})`
+                : r.rules.length
+        }`,
         ...(r.crawlDelayMs ? [`  delay     ${r.crawlDelayMs}ms`] : []),
         ...(r.sitemaps.length ? [`  sitemaps  ${r.sitemaps.join("\n            ")}`] : []),
       ]);
@@ -1223,25 +1260,33 @@ async function dispatch(argv: string[]): Promise<void> {
     if (cmd === "sitemap") {
       const robots = await fetchRobots(target);
       const s = await fetchSitemap(target, { sitemaps: robots.sitemaps, max: argInt(args, "max") });
+      if (!asJson) for (const n of s.notes ?? []) process.stderr.write(`${n}\n`);
       if (!s.urls.length && !s.sitemaps.length) fail(`no sitemap found for ${target}`);
+      // An index whose children the budget did not reach is not an empty
+      // site: say which documents are left, and what reads them.
+      const unread = s.unfetched ?? [];
+      if (!asJson && unread.length)
+        process.stderr.write(`${unread.length} child sitemap(s) not read — raise --max to follow them:\n  ${unread.join("\n  ")}\n`);
+      if (!s.urls.length && !asJson) fail(`no page URLs in the ${s.sitemaps.length ? "sitemap index" : "sitemap"} read so far`);
       emit(
         s,
         s.urls.map((u) => u.loc),
       );
       return;
     }
-    const page = await httpGet(target, { accept: "text/html,application/xml,*/*" });
+    const page = await httpGet(target, { accept: "text/html,application/xml,application/feed+json,*/*" });
     if (!page.ok) fail(`could not fetch ${target} (status ${page.status})`);
     if (cmd === "feed") {
-      const direct = parseFeed(page.body);
-      if (direct) {
+      const direct = parseFeed(page.body, page.url);
+      // A feed with no entries may still point at the one that has them.
+      const found = direct?.items.length ? [] : discoverFeeds(page.body, page.url);
+      if (direct && !found.length) {
         emit(
           direct,
           direct.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}\n  ${i.url ?? ""}`),
         );
         return;
       }
-      const found = discoverFeeds(page.body, page.url);
       if (!found.length) fail(`${target} advertises no feed`);
       const feeds = [];
       for (const f of found) {
@@ -1309,10 +1354,15 @@ async function dispatch(argv: string[]): Promise<void> {
     // operation here that can inconvenience them, so the budget is a decision
     // the caller makes rather than one this command makes for them.
     if (max === undefined) usage("crawl needs --max <n> — an unbounded walk of somebody else's site is not something to do by accident");
+    // The same answer the MCP tool gives: a budget of nothing is not a budget.
+    if (max < 1) usage("--max must be a positive whole number — a crawl without a budget is not one");
+    const prefix = argValue(args, "prefix");
     const r = await crawlSite(seed, {
       maxPages: max,
       ...(argInt(args, "depth") !== undefined ? { maxDepth: argInt(args, "depth") as number } : {}),
       crossOrigin: argBool(args, "cross-origin"),
+      useSitemap: !argBool(args, "no-sitemap"),
+      ...(prefix ? { prefix } : {}),
     });
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));

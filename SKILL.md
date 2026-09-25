@@ -68,7 +68,7 @@ webindex rank --query <q> --docs <f> # BM25F + near-dup collapse + MMR
 webindex repo|issues|prs|releases|tags <ref> [--forge github|gitlab|gitea]  # a browser URL or a local checkout works
 webindex package <name> [--registry npm|pypi|crates]
 webindex meta|robots|sitemap|feed <url>
-webindex crawl <url> --max <n>       # bounded site walk, robots at every hop
+webindex crawl <url> --max <n>       # bounded site walk, robots at every hop; --prefix /docs/, --no-sitemap
 webindex tables <url>                # tables as data, not flattened prose
 webindex embed <text>                # local vectors, no key
 webindex hybrid --query <q>          # BM25F + dense, fused by RRF

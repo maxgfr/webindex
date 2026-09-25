@@ -14,12 +14,17 @@
 /**
  * Map `items` through `fn` with at most `limit` in flight, preserving order.
  *
- * A rejecting `fn` rejects the whole call, the same contract as `Promise.all`.
- * A caller that must degrade per item catches inside `fn` — which is what
- * retrieval wants, since one unreachable page should never abandon the rest.
+ * A rejecting `fn` rejects the whole call, the same contract as `Promise.all`,
+ * and no further item is started — the same at every width. A caller that must
+ * degrade per item catches inside `fn` — which is what retrieval wants, since
+ * one unreachable page should never abandon the rest.
+ *
+ * A `limit` that is not a number runs sequentially.
  */
 export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
-  const width = Math.max(1, Math.floor(limit));
+  // Math.max(1, NaN) is NaN, which started no workers and resolved to an
+  // array of holes without calling fn once — a wrong answer, not an error.
+  const width = Number.isNaN(limit) ? 1 : Math.max(1, Math.floor(limit));
   if (items.length <= 1 || width === 1) {
     const out: R[] = [];
     for (let i = 0; i < items.length; i++) out.push(await fn(items[i]!, i));
@@ -34,7 +39,14 @@ export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (it
     for (;;) {
       const i = next++;
       if (i >= items.length) return;
-      results[i] = await fn(items[i]!, i);
+      try {
+        results[i] = await fn(items[i]!, i);
+      } catch (e) {
+        // The caller is about to be handed this rejection. Items nobody will
+        // read must not keep going out — they are network requests, in practice.
+        next = items.length;
+        throw e;
+      }
     }
   });
   await Promise.all(workers);
