@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -15,7 +15,8 @@ import {
   renderAsset,
   stackControl,
 } from "../src/stack.js";
-import { envName } from "../src/brand.js";
+import { configure, envName } from "../src/brand.js";
+import { cacheDir } from "../src/cache.js";
 
 // The stack is EMBEDDED so the commands work from any install rather than only
 // from a checkout with docker-compose.yml beside the source. These pin that it
@@ -87,6 +88,23 @@ describe("materialisation", () => {
     expect(ensureComposeMaterialized()).toContain("webindex-tests");
   });
 
+  it("sits beside the fetch cache by default, per user, where the fetch cache does", () => {
+    // The fetch cache moved to <tmp>/<brand>-<uid>/ because one fixed name in
+    // the shared temp dir is a directory any other user can create first. The
+    // compose file stayed at <tmp>/<brand>/ while this comment claimed the two
+    // resolved alike — and a compose file someone else wrote is one `docker
+    // compose up` runs with the caller's Docker rights.
+    delete process.env[envName("CACHE_DIR")];
+    configure({ name: "webindex-tests", envPrefix: "WEBINDEX_TEST", cli: "webindex-tests" });
+    const path = ensureComposeMaterialized();
+    try {
+      expect(path).toBe(join(cacheDir(), "compose", "docker-compose.yml"));
+      if (typeof process.getuid === "function") expect(path).toContain(`webindex-tests-${process.getuid()}`);
+    } finally {
+      rmSync(dirname(path), { recursive: true, force: true });
+    }
+  });
+
   it("follows <PREFIX>_CACHE_DIR, like every other durable thing", () => {
     // Without this, redirecting the cache moved the fetch cache and left the
     // compose file behind in the temp dir — surprising, and on a machine that
@@ -104,13 +122,18 @@ describe("materialisation", () => {
 describe("stackControl", () => {
   // A recording fake docker. Every case asserts on the argv it would have run,
   // so the whole orchestration is pinned without a daemon anywhere near it.
-  function fake(over: { fails?: string; missingDocker?: boolean; ps?: string } = {}) {
+  function fake(over: { fails?: string; missingDocker?: boolean; ps?: string; timedOut?: boolean } = {}) {
     const calls: string[][] = [];
     const run: NonNullable<StackDeps["run"]> = (cmd, args): StackRun => {
       calls.push([cmd, ...args]);
-      const verb = args.find((a) => ["pull", "up", "down", "ps", "exec"].includes(a)) ?? "";
+      const verb = args.find((a) => ["pull", "up", "down", "ps", "exec", "info"].includes(a)) ?? "";
       const ok = over.fails !== verb;
-      return { ok, stdout: verb === "ps" ? (over.ps ?? "") : "", stderr: ok ? "" : `${verb} exploded` };
+      return {
+        ok,
+        stdout: verb === "ps" ? (over.ps ?? "") : "",
+        stderr: ok ? "" : `${verb} exploded`,
+        ...(!ok && over.timedOut ? { timedOut: true } : {}),
+      };
     };
     return { calls, deps: { run, has: () => !over.missingDocker } as StackDeps };
   }
@@ -147,7 +170,8 @@ describe("stackControl", () => {
     // slow network looks exactly like a broken stack.
     const { calls, deps } = fake();
     expect(stackControl("searxng", "up", deps).code).toBe(0);
-    expect(calls.map((c) => c.find((a) => ["pull", "up"].includes(a)))).toEqual(["pull", "up"]);
+    const compose = calls.filter((c) => c.includes("compose"));
+    expect(compose.map((c) => c.find((a) => ["pull", "up"].includes(a)))).toEqual(["pull", "up"]);
   });
 
   it("waits for the healthchecks rather than reporting a container that merely started", () => {
@@ -157,17 +181,51 @@ describe("stackControl", () => {
   });
 
   it("blames the pull budget by name when the pull times out", () => {
-    const { calls, deps } = fake({ fails: "pull" });
+    const { calls, deps } = fake({ fails: "pull", timedOut: true });
     const r = stackControl("firecrawl", "up", deps);
     expect(r.code).toBe(1);
     expect(r.message).toContain(envName("DOCKER_PULL_TIMEOUT_MS"));
     expect(argvOf(calls, "up")).toBeUndefined(); // never attempted
   });
 
+  it("does not blame the budget for a pull that failed on its own", () => {
+    // An unknown image or a registry that refused is not fixed by waiting
+    // longer, and telling the user to raise a timeout sends them the wrong way.
+    const { deps } = fake({ fails: "pull" });
+    const r = stackControl("searxng", "up", deps);
+    expect(r.code).toBe(1);
+    expect(r.message).toMatch(/pulling the images failed/);
+    expect(r.message).not.toContain(envName("DOCKER_PULL_TIMEOUT_MS"));
+  });
+
   it("honours the consumer's own pull budget", () => {
     process.env[envName("DOCKER_PULL_TIMEOUT_MS")] = "1234";
-    const { deps } = fake({ fails: "pull" });
+    const { deps } = fake({ fails: "pull", timedOut: true });
     expect(stackControl("searxng", "up", deps).message).toContain("1234ms");
+  });
+
+  it("says the Docker daemon is not answering, whatever the action, before trying any of it", () => {
+    // The client on PATH with no daemon behind it is the common state of a
+    // laptop where Docker Desktop is not running. `status` used to exit 0 on
+    // it, and `up` blamed the image-pull budget for a pull that never started.
+    for (const action of ["up", "down", "status"]) {
+      const { calls, deps } = fake({ fails: "info" });
+      const r = stackControl("searxng", action, deps);
+      expect(r.code, action).toBe(1);
+      expect(r.message, action).toMatch(/daemon is not answering/);
+      expect(r.message, action).not.toContain(envName("DOCKER_PULL_TIMEOUT_MS"));
+      expect(
+        calls.filter((c) => c.includes("compose")),
+        action,
+      ).toEqual([]);
+    }
+  });
+
+  it("fails a status that could not be read, rather than reporting it as data", () => {
+    const { deps } = fake({ fails: "ps" });
+    const r = stackControl("searxng", "status", deps);
+    expect(r.code).toBe(1);
+    expect(r.message).toMatch(/status failed/);
   });
 
   it("pulls the embedding model once the semantic containers answer", () => {
@@ -218,12 +276,15 @@ describe("stackControl", () => {
     stackControl("searxng", "up", deps);
     stackControl("searxng", "status", deps);
     stackControl("searxng", "down", deps);
-    expect(seen).toEqual([
+    // Each action first asks the daemon whether it is there — captured, since
+    // its answer is read.
+    expect(seen.filter((s) => s.verb !== "?")).toEqual([
       { verb: "pull", capture: undefined },
       { verb: "up", capture: undefined },
       { verb: "ps", capture: true },
       { verb: "down", capture: true },
     ]);
+    expect(seen.filter((s) => s.verb === "?").every((s) => s.capture)).toBe(true);
   });
 
   it("folds several services into ONE compose call", () => {
@@ -251,6 +312,62 @@ describe("stackControl", () => {
     const { calls, deps } = fake();
     stackControl("searxng", "status", deps);
     expect(argvOf(calls, "ps")).toEqual(expect.arrayContaining(["-f", ensureComposeMaterialized()]));
+  });
+
+  describe("a compose file it cannot vouch for", () => {
+    // `docker compose -f <file>` runs whatever that file says with the caller's
+    // Docker rights, which are root's. The file is written into a directory
+    // whose name anyone can predict, and a write that failed was swallowed —
+    // so a file planted there first was the one docker ran.
+    const withCacheDir = (fn: (dir: string) => void) => {
+      const dir = mkdtempSync(join(tmpdir(), "wi-stack-trust-"));
+      process.env[envName("CACHE_DIR")] = dir;
+      try {
+        fn(dir);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    it("refuses one it could not write", () => {
+      withCacheDir((dir) => {
+        // A directory where the file should be: the write fails, as it does
+        // on a file another user owns.
+        mkdirSync(join(dir, "compose", "docker-compose.yml"), { recursive: true });
+        const { calls, deps } = fake();
+        const r = stackControl("searxng", "up", deps);
+        expect(r.code).toBe(1);
+        expect(r.message).toMatch(/refusing to run docker/);
+        expect(r.message).toContain(envName("CACHE_DIR"));
+        expect(calls.filter((c) => c.includes("compose"))).toEqual([]);
+      });
+    });
+
+    it("refuses one reached through a symbolic link", () => {
+      withCacheDir((dir) => {
+        // Whoever owns the link's target can change the file after it was
+        // checked and before docker reads it.
+        const elsewhere = mkdtempSync(join(tmpdir(), "wi-stack-elsewhere-"));
+        try {
+          symlinkSync(elsewhere, join(dir, "compose"));
+          const { calls, deps } = fake();
+          const r = stackControl("searxng", "status", deps);
+          expect(r.code).toBe(1);
+          expect(r.message).toMatch(/refusing to run docker.*symbolic link/);
+          expect(calls.filter((c) => c.includes("compose"))).toEqual([]);
+        } finally {
+          rmSync(elsewhere, { recursive: true, force: true });
+        }
+      });
+    });
+
+    it("still runs against the one it wrote itself", () => {
+      withCacheDir(() => {
+        const { calls, deps } = fake();
+        expect(stackControl("searxng", "status", deps).code).toBe(0);
+        expect(argvOf(calls, "ps")).toBeDefined();
+      });
+    });
   });
 
   it("names the consumer's command, not the engine's", () => {

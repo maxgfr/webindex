@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { brand, env, envInt, envName } from "./brand.js";
+import { cacheDir } from "./cache.js";
 
 // The optional local Docker stack, embedded so `webindex semantic up|down|status`
 // and `webindex firecrawl up|down|status` work from ANY install location (npx
@@ -279,10 +279,6 @@ MAX_RAM=0.8
 LOGGING_LEVEL=info
 `;
 
-// Materialize the compose stack under <cacheRoot>/compose/ (rewriting only when
-// content changed, so an upgrade refreshes it) and return the compose file path.
-// The searxng settings and the firecrawl env file keep their ./docker/...
-// relative paths, so the embedded copies stay byte-identical to the repo files.
 /**
  * The embedded assets with `{{CLI}}` resolved to the consumer's command.
  *
@@ -296,28 +292,87 @@ export function renderAsset(template: string): string {
 }
 
 /**
- * Where this brand keeps durable state. Resolved exactly as the fetch cache
- * resolves it — `<PREFIX>_CACHE_DIR`, then the declared cacheDir, then a
- * per-brand directory under the OS temp dir.
+ * The files the stack is materialised as, and what each must hold.
  *
- * Reading the env var matters: without it a caller who redirected the cache got
- * their fetch cache moved and their compose file left behind in the temp dir,
- * which is both surprising and, on a machine that sweeps /tmp, a stack that
- * quietly stops being controllable from its own state.
+ * They live in `compose/` under the fetch cache's own directory, resolved by
+ * the very function the cache uses — `<PREFIX>_CACHE_DIR`, then the declared
+ * cacheDir, then a per-user directory under the OS temp dir. An earlier copy of
+ * that resolution here claimed to match it and did not: when the cache moved to
+ * `<tmp>/<brand>-<uid>/` because one fixed name in the shared temp dir is a name
+ * any other user can take first, the compose file stayed at `<tmp>/<brand>/` —
+ * and a compose file is a thing `docker compose up` runs with the caller's
+ * Docker rights.
+ *
+ * Reading the env var matters too: without it a caller who redirected the cache
+ * got their fetch cache moved and their compose file left behind in the temp
+ * dir, which on a machine that sweeps /tmp is a stack that quietly stops being
+ * controllable from its own state. The cache never touches `compose/`: it only
+ * counts and removes files named the way it names them.
  */
-function cacheRoot(): string {
-  return env("CACHE_DIR") ?? brand().cacheDir ?? join(tmpdir(), brand().name);
+function composeAssets(): { path: string; content: string }[] {
+  const base = join(cacheDir(), "compose");
+  return [
+    { path: join(base, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
+    { path: join(base, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
+    { path: join(base, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) },
+  ];
 }
 
+/**
+ * Write the stack out under the cache dir's `compose/` (rewriting only what
+ * changed, so an upgrade refreshes it) and return the compose file's path. The
+ * SearXNG settings and the Firecrawl env file sit at the `./docker/...` paths
+ * the compose file names relative to itself.
+ */
 export function ensureComposeMaterialized(): string {
-  const base = join(cacheRoot(), "compose");
-  const composePath = join(base, "docker-compose.yml");
-  const settingsPath = join(base, "docker", "searxng", "settings.yml");
-  const firecrawlEnvPath = join(base, "docker", "firecrawl", "firecrawl.env");
-  writeIfChanged(composePath, renderAsset(COMPOSE_YAML));
-  writeIfChanged(settingsPath, renderAsset(SEARXNG_SETTINGS_YAML));
-  writeIfChanged(firecrawlEnvPath, renderAsset(FIRECRAWL_ENV));
-  return composePath;
+  const assets = composeAssets();
+  for (const a of assets) writeIfChanged(a.path, a.content);
+  return assets[0]!.path;
+}
+
+/**
+ * Why the materialised stack must not be handed to docker, or undefined when
+ * it may.
+ *
+ * `docker compose -f <file>` does whatever that file says — mount the host's
+ * root, run a privileged container — with rights that amount to root's. The
+ * writes above are best-effort, so a file planted in a predictable directory
+ * before the first run, which the write then failed to replace, used to be the
+ * one docker ran. So the content is read back, and on a platform with uids every
+ * directory from the cache root down, and every file, must belong to the caller
+ * and be no symbolic link: whoever owns any of them can swap the file after
+ * this check and before docker reads it.
+ */
+function untrustedStack(): string | undefined {
+  const assets = composeAssets();
+  for (const a of assets) {
+    let body: string | undefined;
+    try {
+      body = readFileSync(a.path, "utf8");
+    } catch {
+      /* reported below */
+    }
+    if (body !== a.content) return `${a.path} does not hold the stack this binary ships, and could not be rewritten`;
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (uid === undefined) return undefined;
+  const root = cacheDir();
+  const paths = new Set<string>();
+  for (const a of assets) {
+    for (let p = a.path; p !== root && p !== dirname(p); p = dirname(p)) paths.add(p);
+  }
+  for (const p of [root, ...paths]) {
+    try {
+      // The root itself may be reached through a link of the caller's own
+      // choosing (`<PREFIX>_CACHE_DIR=~/.cache/x`); below it, nothing may be.
+      const st = p === root ? statSync(p) : lstatSync(p);
+      if (st.isSymbolicLink()) return `${p} is a symbolic link`;
+      if (st.uid !== uid) return `${p} belongs to another user`;
+    } catch (e) {
+      return `${p} cannot be inspected (${(e as Error).message})`;
+    }
+  }
+  return undefined;
 }
 
 function writeIfChanged(path: string, content: string): void {
@@ -339,6 +394,8 @@ export interface StackRun {
   stderr: string;
   /** The binary was not on PATH — a different problem from a non-zero exit. */
   missing?: boolean;
+  /** It was killed at its budget — the one failure a longer budget fixes. */
+  timedOut?: boolean;
 }
 
 /**
@@ -366,6 +423,7 @@ const UP_TIMEOUT_MS = 300_000;
 const DOWN_TIMEOUT_MS = 120_000;
 const PS_TIMEOUT_MS = 30_000;
 const MODEL_PULL_TIMEOUT_MS = 600_000;
+const DAEMON_PROBE_TIMEOUT_MS = 15_000;
 
 function pullTimeoutMs(): number {
   return envInt("DOCKER_PULL_TIMEOUT_MS", DEFAULT_PULL_TIMEOUT_MS);
@@ -386,12 +444,13 @@ function defaultRun(cmd: string, args: string[], opts: { timeoutMs: number; capt
     maxBuffer: 64 * 1024 * 1024,
     stdio: opts.capture ? "pipe" : "inherit",
   });
-  const missing = !!res.error && (res.error as NodeJS.ErrnoException).code === "ENOENT";
+  const code = (res.error as NodeJS.ErrnoException | undefined)?.code;
   return {
     ok: !res.error && res.status === 0,
     stdout: res.stdout ?? "",
     stderr: res.stderr ?? (res.error ? String(res.error.message) : ""),
-    missing,
+    missing: code === "ENOENT",
+    ...(code === "ETIMEDOUT" ? { timedOut: true } : {}),
   };
 }
 
@@ -504,6 +563,27 @@ export function stackControl(service: string | string[], action: string, deps: S
   }
 
   const file = ensureComposeMaterialized();
+  const distrust = untrustedStack();
+  if (distrust) {
+    return {
+      message: `${tag}: refusing to run docker against the stack in ${dirname(file)} — ${distrust}. Set ${envName("CACHE_DIR")} to a directory only you can write.`,
+      code: 1,
+    };
+  }
+
+  // The client on PATH with no daemon behind it is the ordinary state of a
+  // laptop where Docker Desktop is not running. Asked first, it is one clear
+  // sentence; left to each action, `status` reported it as a status and `up`
+  // blamed the image-pull budget for a pull that never started.
+  const daemon = run("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: DAEMON_PROBE_TIMEOUT_MS, capture: true });
+  if (!daemon.ok) {
+    const why = daemon.stderr.trim().split("\n")[0];
+    return {
+      message: `${tag}: docker is installed but its daemon is not answering — start Docker (Docker Desktop, colima, or \`systemctl start docker\`) and retry.${why ? `\n${why}` : ""}`,
+      code: 1,
+    };
+  }
+
   const profiles = spec.profiles.flatMap((p) => ["--profile", p]);
 
   if (action === "down") {
@@ -513,8 +593,9 @@ export function stackControl(service: string | string[], action: string, deps: S
 
   if (action === "status") {
     const r = run("docker", ["compose", "-f", file, ...profiles, "ps"], { timeoutMs: PS_TIMEOUT_MS, capture: true });
-    // Not an error: "nothing is running" is a legitimate answer to a question.
-    return { message: r.ok ? r.stdout.trim() || `${tag}: no services running.` : `${tag}: status failed.\n${r.stderr}`, code: 0 };
+    // "Nothing is running" is a legitimate answer to a question, so an empty
+    // listing is a zero exit. A listing that could not be read is not one.
+    return { message: r.ok ? r.stdout.trim() || `${tag}: no services running.` : `${tag}: status failed.\n${r.stderr}`, code: r.ok ? 0 : 1 };
   }
 
   // Pull FIRST, on a budget that assumes a cold machine. `up` carries its own
@@ -522,19 +603,23 @@ export function stackControl(service: string | string[], action: string, deps: S
   // partway through a multi-gigabyte pull and reports it as a failed start.
   const pulled = run("docker", ["compose", "-f", file, ...profiles, "pull"], { timeoutMs: pullTimeoutMs() });
   if (!pulled.ok) {
-    return {
-      message:
-        `${tag}: pulling the images failed (they are large — raise ${envName("DOCKER_PULL_TIMEOUT_MS")}, currently ${pullTimeoutMs()}ms).` +
-        (pulled.stderr ? `\n${pulled.stderr}` : ""),
-      code: 1,
-    };
+    // Only a pull that ran out of time is fixed by more time. The rest —
+    // an unknown tag, a registry that refused — are in docker's own output,
+    // which streamed to the terminal above.
+    const why = pulled.timedOut
+      ? ` after ${pullTimeoutMs()}ms (the images are large — raise ${envName("DOCKER_PULL_TIMEOUT_MS")})`
+      : " — docker's output above says why";
+    return { message: `${tag}: pulling the images failed${why}.${pulled.stderr ? `\n${pulled.stderr}` : ""}`, code: 1 };
   }
 
   // `--wait` blocks until every healthcheck passes, so a green `up` means the
   // endpoints actually answer — without it the very next probe can fail against
   // a container that is merely "started".
   const up = run("docker", ["compose", "-f", file, ...profiles, "up", "-d", "--wait"], { timeoutMs: UP_TIMEOUT_MS });
-  if (!up.ok) return { message: `${tag}: up failed.${up.stderr ? `\n${up.stderr}` : ""}`, code: 1 };
+  if (!up.ok) {
+    const why = up.timedOut ? ` — the services were not healthy within ${UP_TIMEOUT_MS / 1000}s` : "";
+    return { message: `${tag}: up failed${why}.${up.stderr ? `\n${up.stderr}` : ""}`, code: 1 };
+  }
 
   return { message: [`${tag}: ${spec.summary}`, ...(spec.postUp?.(file, run) ?? [])].join("\n"), code: 0 };
 }
