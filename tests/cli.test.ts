@@ -395,6 +395,20 @@ describe("fetch argument handling", () => {
     }
   });
 
+  it("says on stderr what it had to say about the text it printed", async () => {
+    // The note reached --json and the MCP trailer, and was dropped here: a PDF
+    // link that served a login page printed that page's text as the document.
+    installFetchMock(routes([["x.test/paper.pdf", { body: articlePage(), contentType: "text/html" }]]));
+    try {
+      expect(await run(["fetch", "https://x.test/paper.pdf"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stdout()).toContain("Token buckets");
+    expect(stdout()).not.toMatch(/looked like a PDF/);
+    expect(stderr()).toMatch(/looked like a PDF but the server returned HTML/);
+  });
+
   it("gives up on a silent host after --timeout, and says so", async () => {
     vi.stubGlobal("fetch", hangingFetch());
     try {

@@ -1400,6 +1400,10 @@ async function dispatch(argv: string[]): Promise<void> {
       );
     } else if (r.text) {
       process.stdout.write(r.text + "\n");
+      // A prefix cut at the size cap, a document link that served a web page,
+      // a Firecrawl fallback: said beside the text, as search says its notes,
+      // rather than only when there is no text at all.
+      if (r.note) process.stderr.write(`  ${r.note}\n`);
     }
     if (!r.text) fail(`nothing readable at ${url}${r.note ? ` — ${r.note}` : ""}`);
     return;
