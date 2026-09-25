@@ -46,6 +46,27 @@ describe("the built CLI as a process", () => {
     expect(child.stderr).not.toMatch(/EPIPE|Unhandled|node:events/);
   });
 
+  it("reads a page or a document from stdin for `-`", () => {
+    const env = { ...process.env, WEBINDEX_CACHE_DIR: dir, WEBINDEX_NO_NPX: "1" };
+    const tables = spawnSync(process.execPath, [binary, "tables", "-", "--json"], {
+      input: "<table><tr><th>a</th></tr><tr><td>1</td></tr></table>",
+      encoding: "utf8",
+      timeout: 10_000,
+      env,
+    });
+    expect(tables.status, tables.stderr).toBe(0);
+    expect(JSON.parse(tables.stdout)[0]).toEqual({ headers: ["a"], rows: [["1"]] });
+
+    const extracted = spawnSync(process.execPath, [binary, "extract", "-"], {
+      input: "<html><body><article><p>Read from a pipe, not a file.</p></article></body></html>",
+      encoding: "utf8",
+      timeout: 10_000,
+      env,
+    });
+    expect(extracted.status, extracted.stderr).toBe(0);
+    expect(extracted.stdout).toContain("Read from a pipe, not a file.");
+  });
+
   it("answers `version` without loading the HTTP server it only needs for `mcp --transport http`", () => {
     // node:http is the costliest builtin to import — ~40 ms of a 130 ms cold
     // start, undici included — and every command paid it because the MCP HTTP

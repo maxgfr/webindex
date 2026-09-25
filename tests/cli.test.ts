@@ -448,6 +448,13 @@ describe("fetch argument handling", () => {
     expect(stderr()).toMatch(/http\(s\) URL/);
   });
 
+  it("points a file on disk at extract", async () => {
+    const path = join(dir, "page.html");
+    writeFileSync(path, "<p>hi</p>");
+    expect(await run(["fetch", path])).toBe(1);
+    expect(stderr()).toMatch(/`webindex extract/);
+  });
+
   it("needs a url", async () => {
     expect(await run(["fetch"])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex fetch/);
@@ -1299,11 +1306,28 @@ describe("the forge, registry and page-metadata commands", () => {
     expect(stderr()).toMatch(/advertises no feed/);
   });
 
-  it("insists on an http(s) URL for the page-level lookups", async () => {
-    for (const cmd of ["meta", "robots", "sitemap", "feed"]) {
+  it("insists on an http(s) URL for the site-level lookups", async () => {
+    for (const cmd of ["robots", "sitemap", "feed"]) {
       err = [];
       expect(await run([cmd, "not-a-url"]), cmd).toBe(1);
       expect(stderr(), cmd).toMatch(/expected an http\(s\) URL/);
+    }
+  });
+
+  it("reads what a page on disk says about itself", async () => {
+    // A saved page — or one only a logged-in browser could fetch — answered
+    // "expected an http(s) URL", though nothing here needs the network.
+    const path = join(dir, "saved.html");
+    writeFileSync(path, '<html><head><title>Saved</title><link rel="canonical" href="https://ex.test/saved"></head><body></body></html>');
+    expect(await run(["meta", path, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ title: "Saved", canonicalUrl: "https://ex.test/saved" });
+  });
+
+  it("says a target is neither a URL nor a file, rather than that it is not a URL", async () => {
+    for (const cmd of ["meta", "tables"]) {
+      err = [];
+      expect(await run([cmd, join(dir, "nowhere.html")]), cmd).toBe(1);
+      expect(stderr(), cmd).toMatch(/neither an http\(s\) URL nor a readable file/);
     }
   });
 });
@@ -1602,6 +1626,29 @@ describe("the new commands", () => {
     out = [];
     await run(["tables", "https://t.test/"]);
     expect(stdout()).toContain("| --- | --- |");
+  });
+
+  it("reads the tables of a page on disk, decoded as extract decodes it", async () => {
+    // A Latin-1 page that declares its charset: read as UTF-8 it would turn
+    // every accented figure label into U+FFFD.
+    const path = join(dir, "latin1.html");
+    writeFileSync(
+      path,
+      Buffer.concat([
+        Buffer.from('<html><head><meta charset="iso-8859-1"></head><body><table><tr><th>Ann'),
+        Buffer.from([0xe9]),
+        Buffer.from("e</th><th>Total</th></tr><tr><td>2024</td><td>12</td></tr></table></body></html>"),
+      ]),
+    );
+    expect(await run(["tables", path, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())[0]).toEqual({ headers: ["Année", "Total"], rows: [["2024", "12"]] });
+  });
+
+  it("refuses a file on disk that is not a web page", async () => {
+    const path = join(dir, "blob.bin");
+    writeFileSync(path, Buffer.from([0x00, 0x01, 0x02, 0x03, 0x00]));
+    expect(await run(["tables", path])).toBe(1);
+    expect(stderr()).toMatch(/binary data, not an HTML page/);
   });
 
   it("says so when a page has no tables, rather than printing nothing", async () => {

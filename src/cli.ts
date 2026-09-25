@@ -15,7 +15,7 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // text, drive the containers, and serve all of that to an agent over MCP.
 import { existsSync, readFileSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { configure, env, envFlag, envInt, envName } from "./brand.js";
 import { decodeLocal } from "./charset.js";
 import { ENGINE_VERSION } from "./version.js";
@@ -79,7 +79,7 @@ USAGE
                           [--timeout <ms>]
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>] [--full-page]
                        [--cache] [--refresh] [--offline] [--timeout <ms>]
-  webindex extract <file> [--json] [--full-page]
+  webindex extract <file|-> [--json] [--full-page]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--dense] [--json]
   webindex repo <ref> [--forge github|gitlab|gitea] [--json]
   webindex issues <ref> [--terms "<words>"] [--limit <n>] [--forge <kind>] [--json]
@@ -87,7 +87,7 @@ USAGE
   webindex releases <ref> [--limit <n>] [--forge <kind>] [--json]
   webindex tags <ref> [--limit <n>] [--forge <kind>] [--json]
   webindex package <name> [--registry npm|pypi|crates] [--version <semver>] [--json]
-  webindex meta <url> [--json]
+  webindex meta <url|file|-> [--json]
   webindex robots <url> [--json]
   webindex sitemap <url> [--max <n>] [--json]
   webindex feed <url> [--json]
@@ -99,7 +99,7 @@ USAGE
   webindex cache     status|clean [--all] [--json]
   webindex crawl <url> --max <n> [--depth <n>] [--prefix <path>] [--no-sitemap]
                        [--cross-origin] [--json]
-  webindex tables <url> [--markdown] [--json]
+  webindex tables <url|file|-> [--markdown] [--json]
   webindex embed <text> | --docs <file.json|-> [--lines] [--json]
   webindex hybrid --query <q> [--docs <file.json|->] [--limit <n>] [--json]
   webindex changed <url> [--etag <v>] [--last-modified <date>] [--hash <sha256>]
@@ -131,10 +131,10 @@ COMMANDS
              304; --refresh re-fetches and rewrites the entry; --offline
              serves only what the cache holds. --json adds finalUrl (after
              redirects), canonical, documentType and cached.
-  extract    Same extraction, on a file already on disk, recognised by its bytes
-             when its name says otherwise. For both, --full-page keeps the
-             whole HTML page through the built-in reader: navigation, footer
-             and consent banners included.
+  extract    Same extraction, on a file already on disk (- reads stdin),
+             recognised by its bytes when its name says otherwise. For both,
+             --full-page keeps the whole HTML page through the built-in reader:
+             navigation, footer and consent banners included.
   rank       Order candidate documents against a question — BM25F, then a
              near-duplicate collapse, then MMR so the top says several
              different things. Reads a JSON array of {url,title,text} from
@@ -166,7 +166,8 @@ COMMANDS
              at all. A registry that cannot be reached stops the search, so
              another ecosystem's namesake never answers in its place.
   meta       What a page says about itself: JSON-LD, OpenGraph and meta tags —
-             author, dates, type, canonical URL.
+             author, dates, type, canonical URL. A saved page on disk (- reads
+             stdin) is decoded as extract decodes it.
   robots     Whether robots.txt permits fetching that URL. Exits non-zero when
              it does not, so it composes in a shell.
   sitemap    The URLs a site lists in its sitemap: the ones robots.txt names,
@@ -201,7 +202,8 @@ COMMANDS
              robots.txt that errors, or a Crawl-delay over 60 s, stops it.
   tables     The tables on a page as headers and rows, with colspan and rowspan
              resolved. Plain extraction flattens a table into prose in which
-             every figure has lost its row and column.
+             every figure has lost its row and column. A saved page on disk (-
+             reads stdin) is decoded as extract decodes it.
   embed      Vectors for a text, from the local Ollama. No key, and nothing
              leaves the machine. Needs \`webindex semantic up\`. --docs embeds a
              JSON array of strings (--lines: one text per non-empty line) in
@@ -411,11 +413,19 @@ function forgeTarget(raw: string, kind: ForgeKind | undefined): RepoRef {
   return forgeRef(resolveRepo(raw, opts), opts);
 }
 
-/** Extraction over bytes already in hand — the shared half of `extract`. */
-async function extractLocal(path: string, fullPage = false): Promise<{ text: string; extractor: string; reason?: string; consentDropped: number }> {
+/**
+ * Extraction over a file on disk — the shared half of `extract` and
+ * `webindex_extract`. `given` is bytes already in hand (the CLI's stdin), for
+ * which `path` is only a name to route by.
+ */
+async function extractLocal(
+  path: string,
+  fullPage = false,
+  given?: Buffer,
+): Promise<{ text: string; extractor: string; reason?: string; consentDropped: number }> {
   let bytes: Buffer;
   try {
-    bytes = readFileSync(path);
+    bytes = given ?? readFileSync(path);
   } catch (e) {
     throw new ToolError(`cannot read ${path}: ${(e as Error).message}`);
   }
@@ -605,6 +615,47 @@ function readDocsInput(args: CommandArgs, usageLine: string): { text: string; la
   } catch (e) {
     fail(`cannot read ${src === undefined || src === "-" ? "stdin" : src}: ${(e as Error).message}`);
   }
+}
+
+/** Stdin's bytes, for a `-` argument. A terminal would never send any, so it is a usage error. */
+function readStdin(usageLine: string): Buffer {
+  if (process.stdin.isTTY) usage(usageLine);
+  try {
+    return readFileSync(0);
+  } catch (e) {
+    fail(`cannot read stdin: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * The HTML a page-level command reads: an http(s) URL fetched, or a file on
+ * disk (stdin for `-`) decoded exactly as `extract` decodes one — BOM, then the
+ * declared charset, then UTF-8 with a Windows-1252 fallback.
+ *
+ * A saved page, or one only a logged-in browser could fetch, used to be refused
+ * with "needs an http(s) URL", though reading its tables or its metadata needs
+ * no network at all. `url` is set only for a fetched page: resolving a relative
+ * canonical against a file:// address would invent a URL the page never had.
+ */
+async function readPage(target: string, accept: string, usageLine: string): Promise<{ body: string; url?: string }> {
+  if (/^https?:\/\//i.test(target)) {
+    const page = await httpGet(target, { accept });
+    if (!page.ok) fail(`could not fetch ${target} (status ${page.status})`);
+    return { body: page.body, url: page.url };
+  }
+  let bytes: Buffer;
+  if (target === "-") bytes = readStdin(usageLine);
+  else {
+    try {
+      bytes = readFileSync(target.startsWith("file:") ? fileURLToPath(target) : target);
+    } catch (e) {
+      fail(`${target} is neither an http(s) URL nor a readable file (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`);
+    }
+  }
+  const body = decodeLocal(bytes, { sniffHtmlCharset: true });
+  // Decoded text keeps no NUL; an image or an archive has one early.
+  if (body.slice(0, 1024).includes("\u0000")) fail(`${target === "-" ? "stdin" : target} is binary data, not an HTML page`);
+  return { body };
 }
 
 const RANK_DOCS_SHAPE = "pass a JSON array of {url, text} via --docs <file> or stdin";
@@ -1173,7 +1224,7 @@ async function dispatch(argv: string[]): Promise<void> {
   if (cmd === "fetch") {
     const url = args.positional[0];
     if (!url) usage("usage: webindex fetch <url>");
-    if (!/^https?:\/\//i.test(url)) fail("fetch needs an http(s) URL");
+    if (!/^https?:\/\//i.test(url)) fail(`fetch needs an http(s) URL${existsSync(url) ? ` — for a file on disk, \`webindex extract ${url}\`` : ""}`);
     const fullPage = argBool(args, "full-page");
     const refresh = argBool(args, "refresh");
     const offline = argBool(args, "offline");
@@ -1224,10 +1275,13 @@ async function dispatch(argv: string[]): Promise<void> {
   }
 
   if (cmd === "extract") {
+    const EXTRACT_USAGE = "usage: webindex extract <file|-> [--full-page] [--json]";
     const path = args.positional[0];
-    if (!path) usage("usage: webindex extract <file>");
+    if (!path) usage(EXTRACT_USAGE);
     const fullPage = argBool(args, "full-page");
-    const r = await extractLocal(path, fullPage);
+    // `-` reads stdin, so another tool's output can be extracted without a
+    // temp file; its bytes are routed by what they are, having no name.
+    const r = await extractLocal(path, fullPage, path === "-" ? readStdin(EXTRACT_USAGE) : undefined);
     if (argBool(args, "json")) {
       process.stdout.write(
         JSON.stringify(
@@ -1406,8 +1460,11 @@ async function dispatch(argv: string[]): Promise<void> {
   // a full extraction.
   if (cmd === "meta" || cmd === "robots" || cmd === "sitemap" || cmd === "feed") {
     const target = positionalText(args);
-    if (!target) usage(`usage: webindex ${cmd} <url>`);
-    if (!/^https?:\/\//i.test(target)) fail("expected an http(s) URL");
+    const usageLine = `usage: webindex ${cmd} <url${cmd === "meta" ? "|file|-" : ""}>`;
+    if (!target) usage(usageLine);
+    // A page's own metadata is in its HTML, wherever that came from; robots,
+    // sitemaps and feeds are things a SITE serves.
+    if (cmd !== "meta" && !/^https?:\/\//i.test(target)) fail("expected an http(s) URL");
     const asJson = argBool(args, "json");
     const emit = (obj: unknown, human: string[]) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}\n`);
 
@@ -1448,42 +1505,44 @@ async function dispatch(argv: string[]): Promise<void> {
       );
       return;
     }
+    if (cmd === "meta") {
+      const page = await readPage(target, "text/html,*/*", usageLine);
+      const m = pageMetadata(page.body, page.url ? { baseUrl: page.url } : {});
+      emit(m, [
+        `  title      ${m.title ?? "—"}`,
+        `  type       ${m.type ?? "—"}`,
+        `  site       ${m.siteName ?? "—"}`,
+        `  published  ${m.publishedAt ?? "—"}`,
+        `  modified   ${m.modifiedAt ?? "—"}`,
+        `  authors    ${m.authors.join(", ") || "—"}`,
+        `  canonical  ${m.canonicalUrl ?? "—"}`,
+      ]);
+      return;
+    }
     const page = await httpGet(target, { accept: "text/html,application/xml,application/feed+json,*/*" });
     if (!page.ok) fail(`could not fetch ${target} (status ${page.status})`);
-    if (cmd === "feed") {
-      const direct = parseFeed(page.body, page.url);
-      // A feed with no entries may still point at the one that has them.
-      const found = direct?.items.length ? [] : discoverFeeds(page.body, page.url);
-      if (direct && !found.length) {
-        emit(
-          direct,
-          direct.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}\n  ${i.url ?? ""}`),
-        );
-        return;
-      }
-      if (!found.length) fail(`${target} advertises no feed`);
-      const feeds = [];
-      for (const f of found) {
-        const parsed = await fetchFeed(f);
-        if (parsed) feeds.push({ url: f, ...parsed });
-      }
-      if (!feeds.length) fail(`${target} advertises ${found.length} feed(s), none of which parsed`);
+    // What is left is `feed`.
+    const direct = parseFeed(page.body, page.url);
+    // A feed with no entries may still point at the one that has them.
+    const found = direct?.items.length ? [] : discoverFeeds(page.body, page.url);
+    if (direct && !found.length) {
       emit(
-        feeds,
-        feeds.flatMap((f) => [`# ${f.title ?? f.url}`, ...f.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}\n  ${i.url ?? ""}`)]),
+        direct,
+        direct.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}\n  ${i.url ?? ""}`),
       );
       return;
     }
-    const m = pageMetadata(page.body, { baseUrl: page.url });
-    emit(m, [
-      `  title      ${m.title ?? "—"}`,
-      `  type       ${m.type ?? "—"}`,
-      `  site       ${m.siteName ?? "—"}`,
-      `  published  ${m.publishedAt ?? "—"}`,
-      `  modified   ${m.modifiedAt ?? "—"}`,
-      `  authors    ${m.authors.join(", ") || "—"}`,
-      `  canonical  ${m.canonicalUrl ?? "—"}`,
-    ]);
+    if (!found.length) fail(`${target} advertises no feed`);
+    const feeds = [];
+    for (const f of found) {
+      const parsed = await fetchFeed(f);
+      if (parsed) feeds.push({ url: f, ...parsed });
+    }
+    if (!feeds.length) fail(`${target} advertises ${found.length} feed(s), none of which parsed`);
+    emit(
+      feeds,
+      feeds.flatMap((f) => [`# ${f.title ?? f.url}`, ...f.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}\n  ${i.url ?? ""}`)]),
+    );
     return;
   }
 
@@ -1550,11 +1609,10 @@ async function dispatch(argv: string[]): Promise<void> {
   }
 
   if (cmd === "tables") {
+    const TABLES_USAGE = "usage: webindex tables <url|file|-> [--json]";
     const url = positionalText(args);
-    if (!url) usage("usage: webindex tables <url>");
-    if (!/^https?:\/\//i.test(url)) fail("tables needs an http(s) URL");
-    const page = await httpGet(url, { accept: "text/html,*/*" });
-    if (!page.ok) fail(`could not fetch ${url} (status ${page.status})`);
+    if (!url) usage(TABLES_USAGE);
+    const page = await readPage(url, "text/html,*/*", TABLES_USAGE);
     const tables = extractTables(page.body);
     if (!tables.length) fail(`no tables on ${url}`);
     process.stdout.write(argBool(args, "json") ? jsonLine(tables) : `${tables.map(tableToMarkdown).join("\n\n")}\n`);
