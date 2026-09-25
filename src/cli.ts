@@ -13,7 +13,7 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // What it offers is what the engine actually does today: discover candidate
 // URLs through the local keyless stack, turn a URL or a local file into clean
 // text, drive the containers, and serve all of that to an agent over MCP.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { configure, env, envFlag, envInt, envName } from "./brand.js";
@@ -2148,9 +2148,26 @@ async function dispatch(argv: string[]): Promise<void> {
   fail(`unknown command "${cmd}" — run \`webindex --help\``);
 }
 
+/**
+ * Whether node was started with THIS file, under whatever name it has.
+ *
+ * isInvokedDirectly() matches the basename against the brand, which covers the
+ * installed `webindex`, a Homebrew symlink and an npm shim — but a release
+ * asset saved as `webindex-1.20.0.mjs` matched nothing, and running it printed
+ * nothing and exited 0. The module's own URL against the started file's real
+ * path answers for any name, and is still false when the file is imported.
+ */
+function isStartedFile(): boolean {
+  try {
+    return !!process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
 // Only when run as a program. Importing this module must not start anything —
 // the skill-bundle gate imports the built artifact to read its flag tables.
-if (isInvokedDirectly()) {
+if (isInvokedDirectly() || isStartedFile()) {
   // A reader that stops early — `webindex extract big.pdf | head -1` — closes
   // the pipe, and the next write fails with EPIPE. That is the reader's answer,
   // not a failure of ours: stop quietly, as `cat` does, rather than end in a

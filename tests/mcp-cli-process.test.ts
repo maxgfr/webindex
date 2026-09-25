@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { build } from "tsup";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -65,6 +66,26 @@ describe("the built CLI as a process", () => {
     });
     expect(extracted.status, extracted.stderr).toBe(0);
     expect(extracted.stdout).toContain("Read from a pipe, not a file.");
+  });
+
+  it("runs under whatever name the file was saved as", () => {
+    // Only a file NAMED webindex ran: a release asset saved as
+    // webindex-1.20.0.mjs printed nothing at all and exited 0.
+    const renamed = join(dir, "webindex-1.2.3.mjs");
+    copyFileSync(binary, renamed);
+    const child = spawnSync(process.execPath, [renamed, "version"], { encoding: "utf8", timeout: 10_000 });
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it("does not run when it is imported rather than started", () => {
+    // The skill-bundle gate imports a built CLI to read its flag tables.
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", `const m = await import(${JSON.stringify(pathToFileURL(binary).href)}); console.log(typeof m.HELP);`], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.stdout).toBe("string\n");
   });
 
   it("answers `version` without loading the HTTP server it only needs for `mcp --transport http`", () => {
