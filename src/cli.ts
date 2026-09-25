@@ -130,7 +130,9 @@ COMMANDS
              near-duplicate collapse, then MMR so the top says several
              different things. Reads a JSON array of {url,title,text} from
              --docs or stdin. Each collapsed mirror is named on stderr (in
-             "duplicates" with --json). Deterministic; no model, no network.
+             "duplicates" with --json). MMR reorders the best max(5 × --limit,
+             100); the rest follow by relevance. Deterministic; no model, no
+             network.
   repo       A repository's own facts: stars, licence, default branch, last
              push, and whether it is archived — the record, not the README.
              A <ref> is owner/repo, any repository URL (one copied from a
@@ -410,6 +412,12 @@ interface RankedOut {
   matched: string[];
 }
 
+// MMR is quadratic in what it diversifies, and diversity is read at the top of
+// a list: it reorders the best max(5 × limit, MMR_WINDOW) candidates and the
+// rest follow in relevance order. At 2 000 documents that is milliseconds
+// instead of seconds, and the top of the list barely moves.
+const MMR_WINDOW = 100;
+
 /**
  * The shared ranking pipeline behind `webindex rank` and `webindex_rank`.
  *
@@ -424,9 +432,14 @@ function rankDocuments(
   limit?: number,
 ): { ranked: RankedOut[]; collapsed: number; duplicates: { url: string; of: string }[]; queryTerms: string[] } {
   const bm = docs.map((d, i) => ({ id: String(i), title: d.title ?? "", headings: d.headings ?? "", body: d.text ?? "" }));
-  const index = buildBm25Index(question, bm);
-  const raw = docs.map((_, i) => bm25Score(index, bm[i]!));
-  const max = Math.max(...raw, 1e-9);
+  // Each body is tokenised ONCE, and the tokens shared by the index, the
+  // near-duplicate hash and the diversity pass — it used to be read three times.
+  const bodyTokens = bm.map((d) => bm25Tokenize(d.body));
+  const index = buildBm25Index(question, bm, { tokensOf: (d) => bodyTokens[Number(d.id)]! });
+  const raw = bm.map((d) => bm25Score(index, d));
+  // A loop, not Math.max(...raw): spreading a very large pool overflows the stack.
+  let max = 1e-9;
+  for (const r of raw) if (r > max) max = r;
 
   const scored = docs.map((d, i) => ({
     url: d.url,
@@ -434,12 +447,14 @@ function rankDocuments(
     text: d.text ?? "",
     score: (raw[i] ?? 0) / max,
     matched: bm25MatchedTerms(index, bm[i]!),
+    tokens: bodyTokens[i]!,
   }));
   // Code-unit tie-break: localeCompare reads LANG, and two machines disagreed.
   scored.sort((a, b) => b.score - a.score || (a.url < b.url ? -1 : a.url > b.url ? 1 : 0));
 
-  const { items: unique, dropped, duplicates } = dedupeNearDuplicates(scored);
-  const ordered = diversify(unique, (it) => new Set(bm25Tokenize(it.text)));
+  const { items: unique, dropped, duplicates } = dedupeNearDuplicates(scored, { tokensOf: (it) => it.tokens });
+  const window = Math.max((limit && limit > 0 ? limit : 0) * 5, MMR_WINDOW);
+  const ordered = diversify(unique, (it) => it.tokens, 0.75, { window });
 
   const ranked = ordered.slice(0, limit && limit > 0 ? limit : undefined).map((it, i) => ({
     rank: i + 1,

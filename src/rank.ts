@@ -296,8 +296,8 @@ function foldCached(raw: string): string {
 
 // Field-weighted token stream: body once, headings ×headingWeight, title
 // ×titleWeight — a query term in the title outranks the same term buried deep.
-function docTokens(doc: Bm25Doc, titleWeight: number, headingWeight: number): string[] {
-  const out = bm25Tokenize(doc.body);
+function docTokens(doc: Bm25Doc, titleWeight: number, headingWeight: number, body?: readonly string[]): string[] {
+  const out = body ? [...body] : bm25Tokenize(doc.body);
   const headings = bm25Tokenize(doc.headings);
   for (let r = 0; r < headingWeight; r++) out.push(...headings);
   const title = bm25Tokenize(doc.title);
@@ -330,8 +330,16 @@ function proximityBonus(tokens: string[], queryTerms: string[], window = 6, cap 
  * Below three documents IDF is too noisy to mean anything, so it degrades to
  * uniform (pure TF). A three-result pool where one term happens to be missing
  * from two of them would otherwise assign that term a huge weight on no evidence.
+ *
+ * `tokensOf` supplies a body's tokens, exactly as `bm25Tokenize(doc.body)`
+ * returns them, when the caller already has them — so a pipeline that also
+ * hashes and diversifies the same bodies tokenises each one once.
  */
-export function buildBm25Index(question: string, docs: readonly Bm25Doc[], opts: { k1?: number; b?: number } = {}): Bm25Index {
+export function buildBm25Index(
+  question: string,
+  docs: readonly Bm25Doc[],
+  opts: { k1?: number; b?: number; tokensOf?: (doc: Bm25Doc) => readonly string[] } = {},
+): Bm25Index {
   const k1 = opts.k1 ?? 1.2;
   const b = opts.b ?? 0.75;
   const titleWeight = 3;
@@ -342,7 +350,7 @@ export function buildBm25Index(question: string, docs: readonly Bm25Doc[], opts:
   const tokenCache = new WeakMap<Bm25Doc, CachedDocTokens>();
   let totalLen = 0;
   for (const doc of docs) {
-    const toks = docTokens(doc, titleWeight, headingWeight);
+    const toks = docTokens(doc, titleWeight, headingWeight, opts.tokensOf?.(doc));
     tokenCache.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens: toks });
     totalLen += toks.length;
     for (const t of new Set(toks)) df.set(t, (df.get(t) ?? 0) + 1);
@@ -465,17 +473,30 @@ export function recencyScore(meta: { year?: number } | undefined, minYear: numbe
 /**
  * 64-bit SimHash over 3-gram shingles. Near-duplicate documents land a few bits
  * apart; unrelated ones sit around 32.
+ *
+ * `tokens` hashes words the caller already has instead of tokenising `text`
+ * again — a pipeline that indexed a document need not read it a second time.
+ * Only hashes built from the same kind of tokens are comparable.
  */
-export function simhash(text: string): bigint {
-  // The unexpanded words: an identifier's inner words would add shingles, and a
-  // hash that moves between engine versions changes what `maxBits` means.
-  const toks = tokenize(text, false);
-  if (!toks.length) return 0n;
+export function simhash(text: string, opts: { tokens?: readonly string[] } = {}): bigint {
+  const lanes = new Uint32Array(2);
+  // The unexpanded words by default: an identifier's inner words would add
+  // shingles, and a hash that moves between engine versions changes what
+  // `maxBits` means.
+  simhashLanes(opts.tokens ?? tokenize(text, false), lanes);
+  return (BigInt(lanes[0]!) << 32n) | BigInt(lanes[1]!);
+}
+
+/** SimHash as two 32-bit lanes, [hi, lo] — no BigInt, for the comparison hot path. */
+function simhashLanes(toks: readonly string[], out: Uint32Array): void {
+  out[0] = 0;
+  out[1] = 0;
+  if (!toks.length) return;
   // Each shingle is hashed as `${a} ${b} ${c}` — fed to FNV piecewise, which is
   // the same bytes without building the string. The 64 counters are read off
-  // two 32-bit words: no BigInt until the very end. Bit-exact with the BigInt
-  // reference (pinned in tests); on a 2 MB page this is the difference between
-  // 300 ms and a few ms.
+  // two 32-bit words: no BigInt at all. Bit-exact with the BigInt reference
+  // (pinned in tests); on a 2 MB page this is the difference between 300 ms
+  // and a few ms.
   const v = new Int32Array(64);
   const words = new Uint32Array(2);
   const pieces: string[] = toks.length < 3 ? [""] : ["", " ", "", " ", ""];
@@ -503,7 +524,8 @@ export function simhash(text: string): bigint {
     if (2 * v[b]! > n) lo |= 1 << b;
     if (2 * v[b + 32]! > n) hi |= 1 << b;
   }
-  return (BigInt(hi >>> 0) << 32n) | BigInt(lo >>> 0);
+  out[0] = hi;
+  out[1] = lo;
 }
 
 const MASK32 = 0xffffffffn;
@@ -542,33 +564,59 @@ export function hammingDistance(a: bigint, b: bigint): number {
  *
  * `duplicates` names each dropped URL and the kept one it duplicated: a mirror
  * is an alternate citation, and the evidence when a collapse was wrong.
+ *
+ * `tokensOf` hands over words the caller already tokenised (see `simhash`), so
+ * a pipeline reads each text once.
  */
 export function dedupeNearDuplicates<T extends Ranked>(
   items: readonly T[],
-  opts: { maxBits?: number; minChars?: number } = {},
+  opts: { maxBits?: number; minChars?: number; tokensOf?: (it: T) => readonly string[] } = {},
 ): { items: T[]; dropped: number; duplicates: { url: string; of: string }[] } {
   const maxBits = opts.maxBits ?? 3;
   const minChars = opts.minChars ?? 500;
   const better = (a: T, b: T): boolean => (a.score !== b.score ? a.score > b.score : byCodeUnit(a.url, b.url) < 0);
-  const kept: { it: T; hash: bigint | null }[] = [];
+  const kept: { it: T }[] = [];
+  // The hashed clusters, as two 32-bit lanes each: comparing numbers with two
+  // popcounts, rather than BigInts through an XOR, shifts and a Number
+  // conversion per pair, is what the n·kept scan spends its time on.
+  const hashed: { it: T }[] = [];
+  const his: number[] = [];
+  const los: number[] = [];
+  const lanes = new Uint32Array(2);
   // Each dropped URL, and the cluster it joined — resolved at the end, because
   // a later, better copy can still displace the one it was collapsed into.
   const dups: { url: string; cluster: { it: T } }[] = [];
   for (const it of items) {
     const text = it.text || "";
-    const hash = text.length >= minChars ? simhash(text) : null;
-    if (hash !== null) {
-      const dup = kept.find((k) => k.hash !== null && hammingDistance(k.hash, hash) <= maxBits);
-      if (dup) {
-        if (better(it, dup.it)) {
-          dups.push({ url: dup.it.url, cluster: dup });
-          dup.it = it;
-          dup.hash = hash;
-        } else dups.push({ url: it.url, cluster: dup });
-        continue;
+    if (text.length < minChars) {
+      kept.push({ it });
+      continue;
+    }
+    simhashLanes(opts.tokensOf ? opts.tokensOf(it) : tokenize(text, false), lanes);
+    const hi = lanes[0]!;
+    const lo = lanes[1]!;
+    let at = -1;
+    for (let k = 0; k < hashed.length; k++) {
+      if (popcount32(his[k]! ^ hi) + popcount32(los[k]! ^ lo) <= maxBits) {
+        at = k;
+        break;
       }
     }
-    kept.push({ it, hash });
+    if (at < 0) {
+      const cluster = { it };
+      kept.push(cluster);
+      hashed.push(cluster);
+      his.push(hi);
+      los.push(lo);
+      continue;
+    }
+    const dup = hashed[at]!;
+    if (better(it, dup.it)) {
+      dups.push({ url: dup.it.url, cluster: dup });
+      dup.it = it;
+      his[at] = hi;
+      los[at] = lo;
+    } else dups.push({ url: it.url, cluster: dup });
   }
   return { items: kept.map((k) => k.it), dropped: dups.length, duplicates: dups.map((d) => ({ url: d.url, of: d.cluster.it.url })) };
 }
@@ -588,71 +636,130 @@ export function dedupeNearDuplicates<T extends Ranked>(
  *
  * It REORDERS ONLY. Every input comes back exactly once: this changes what you
  * read first, never what you have. λ = 0.75 keeps relevance dominant, so
- * diversity breaks ties and demotes redundancy rather than promoting noise.
+ * diversity breaks ties and demotes redundancy rather than promoting noise —
+ * and every item scoring above zero is placed before any item that does not.
+ *
+ * MMR is quadratic in the pool. `window` bounds it: only the `window` most
+ * relevant items are diversified, and the rest follow in relevance order — the
+ * top of a long list is where diversity is read, and a 2 000-document pool then
+ * costs what a `window`-sized one does.
  */
-export function diversify<T extends Ranked>(items: readonly T[], tokensOf: (it: T) => Set<string>, lambda = 0.75): T[] {
+export function diversify<T extends Ranked>(items: readonly T[], tokensOf: (it: T) => Iterable<string>, lambda = 0.75, opts: { window?: number } = {}): T[] {
   if (items.length <= 2) return [...items];
-  const toks = new Map<T, Set<string>>(items.map((it) => [it, tokensOf(it)]));
-  const max = Math.max(...items.map((it) => it.score), 1e-9);
-  const rel = (it: T): number => it.score / max;
+  // The best-scored item always leads: the most relevant result is never demoted
+  // for being similar to nothing.
+  const sorted = [...items].sort((a, b) => b.score - a.score || byCodeUnit(a.url, b.url));
+  const window = opts.window !== undefined && opts.window > 0 ? Math.floor(opts.window) : sorted.length;
+  if (window >= sorted.length) return mmr(sorted, tokensOf, lambda);
+  // The tail is lower-scored than all of the window, so the relevant-first
+  // rule holds across the seam without further work.
+  return [...(window > 2 ? mmr(sorted.slice(0, window), tokensOf, lambda) : sorted.slice(0, window)), ...sorted.slice(window)];
+}
 
-  const jaccard = (a: Set<string>, b: Set<string>): number => {
-    if (!a.size || !b.size) return 0;
-    const [small, large] = a.size <= b.size ? [a, b] : [b, a];
-    let inter = 0;
-    for (const t of small) if (large.has(t)) inter++;
-    return inter / (a.size + b.size - inter);
-  };
+// Pairs whose similarities are kept after the normalising pass rather than
+// computed twice: 2 048 items is ~2.1 M pairs, 16 MB of doubles.
+const PAIR_CACHE_MAX = 2_048;
+
+/** Greedy MMR over items already sorted best-first. */
+function mmr<T extends Ranked>(sorted: readonly T[], tokensOf: (it: T) => Iterable<string>, lambda: number): T[] {
+  const m = sorted.length;
+  let max = 1e-9;
+  for (const it of sorted) if (it.score > max) max = it.score;
+
+  // Each token set as a sorted array of interned ids: Jaccard is then a merge
+  // of two integer arrays instead of a string-hash lookup per token.
+  const ids = new Map<string, number>();
+  const sets: Int32Array[] = [];
+  for (const it of sorted) {
+    const raw: number[] = [];
+    for (const t of tokensOf(it)) {
+      let id = ids.get(t);
+      if (id === undefined) {
+        id = ids.size;
+        ids.set(t, id);
+      }
+      raw.push(id);
+    }
+    const all = Int32Array.from(raw).sort();
+    let k = 0;
+    for (let j = 0; j < all.length; j++) if (j === 0 || all[j] !== all[j - 1]) all[k++] = all[j]!;
+    sets.push(all.subarray(0, k));
+  }
 
   // Similarity is normalised WITHIN the pool. Raw Jaccard between two long
   // documents is small even when they are redundant, so a raw penalty of ~0.06
   // is lost against a relevance range of 0..1. Dividing by the pool's own maximum
   // makes "as similar as anything here gets" equal 1, which is the quantity λ is
   // actually trading against.
+  const cache = m <= PAIR_CACHE_MAX ? new Float64Array((m * (m - 1)) / 2) : undefined;
+  const pair = (i: number, j: number): number => (i < j ? (i * (2 * m - i - 1)) / 2 + (j - i - 1) : (j * (2 * m - j - 1)) / 2 + (i - j - 1));
   let simMax = 0;
-  for (let i = 0; i < items.length; i++) {
-    for (let j = i + 1; j < items.length; j++) {
-      const v = jaccard(toks.get(items[i]!)!, toks.get(items[j]!)!);
+  for (let i = 0; i < m; i++) {
+    for (let j = i + 1; j < m; j++) {
+      const v = jaccardSorted(sets[i]!, sets[j]!);
+      if (cache) cache[pair(i, j)] = v;
       if (v > simMax) simMax = v;
     }
   }
-  const sim = (a: T, b: T): number => (simMax > 0 ? jaccard(toks.get(a)!, toks.get(b)!) / simMax : 0);
+  const sim = (i: number, j: number): number => (simMax > 0 ? (cache ? cache[pair(i, j)]! : jaccardSorted(sets[i]!, sets[j]!)) / simMax : 0);
 
-  const remaining = [...items];
-  const out: T[] = [];
-  // The best-scored item always leads: the most relevant result is never demoted
-  // for being similar to nothing.
-  remaining.sort((a, b) => b.score - a.score || byCodeUnit(a.url, b.url));
-  out.push(remaining.shift()!);
+  const out: T[] = [sorted[0]!];
+  const remaining: number[] = [];
+  for (let i = 1; i < m; i++) remaining.push(i);
   // Running max-similarity to the selected set, updated incrementally — what
   // keeps this O(n²) rather than O(n³).
-  const maxSim = new Map<T, number>(remaining.map((it) => [it, sim(it, out[0]!)]));
+  const maxSim = new Float64Array(m);
+  for (const i of remaining) maxSim[i] = sim(i, 0);
   // Relevant items are placed before any irrelevant one. With similarity
   // normalised to the pool's maximum, any overlap with the picked set can carry
   // the full penalty, so a relevant page with rel < sim/3 went negative while an
   // off-topic page (rel 0, sim 0) sat at 0 and was picked first — promoting
   // noise, and with a `limit` cutting the relevant page altogether. Diversity
   // still reorders freely within each tier.
-  let relevantLeft = remaining.filter((it) => it.score > 0).length;
+  let relevantLeft = 0;
+  for (const i of remaining) if (sorted[i]!.score > 0) relevantLeft++;
 
   while (remaining.length) {
-    let bestIdx = -1;
+    let bestPos = -1;
     let bestVal = Number.NEGATIVE_INFINITY;
-    for (let i = 0; i < remaining.length; i++) {
-      const it = remaining[i]!;
+    for (let p = 0; p < remaining.length; p++) {
+      const it = sorted[remaining[p]!]!;
       if (relevantLeft > 0 && !(it.score > 0)) continue;
-      const val = lambda * rel(it) - (1 - lambda) * (maxSim.get(it) ?? 0);
-      if (bestIdx < 0 || val > bestVal || (val === bestVal && byCodeUnit(it.url, remaining[bestIdx]!.url) < 0)) {
+      const val = lambda * (it.score / max) - (1 - lambda) * maxSim[remaining[p]!]!;
+      if (bestPos < 0 || val > bestVal || (val === bestVal && byCodeUnit(it.url, sorted[remaining[bestPos]!]!.url) < 0)) {
         bestVal = val;
-        bestIdx = i;
+        bestPos = p;
       }
     }
-    const picked = remaining.splice(bestIdx, 1)[0]!;
-    if (picked.score > 0) relevantLeft--;
-    out.push(picked);
-    for (const it of remaining) maxSim.set(it, Math.max(maxSim.get(it) ?? 0, sim(it, picked)));
+    const picked = remaining.splice(bestPos, 1)[0]!;
+    if (sorted[picked]!.score > 0) relevantLeft--;
+    out.push(sorted[picked]!);
+    for (const i of remaining) {
+      const v = sim(i, picked);
+      if (v > maxSim[i]!) maxSim[i] = v;
+    }
   }
   return out;
+}
+
+function jaccardSorted(a: Int32Array, b: Int32Array): number {
+  const na = a.length;
+  const nb = b.length;
+  if (!na || !nb) return 0;
+  let i = 0;
+  let j = 0;
+  let inter = 0;
+  while (i < na && j < nb) {
+    const x = a[i]!;
+    const y = b[j]!;
+    if (x === y) {
+      inter++;
+      i++;
+      j++;
+    } else if (x < y) i++;
+    else j++;
+  }
+  return inter / (na + nb - inter);
 }
 
 // ── Attribution ─────────────────────────────────────────────────────────────

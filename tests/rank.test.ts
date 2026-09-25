@@ -252,6 +252,13 @@ describe("BM25F", () => {
     expect(bm25Score(idx, changing)).toBeGreaterThan(0);
   });
 
+  it("scores the same from body tokens the caller already has", () => {
+    const docs = [doc("a", "Token buckets", "Rate limits", "a bucket refills"), doc("b", "", "", "cooking"), doc("c", "", "", "token weather")];
+    const plain = buildBm25Index("token bucket", docs);
+    const shared = buildBm25Index("token bucket", docs, { tokensOf: (d) => bm25Tokenize(d.body) });
+    expect(docs.map((d) => bm25Score(shared, d))).toEqual(docs.map((d) => bm25Score(plain, d)));
+  });
+
   it("scores zero for an empty query or an empty document", () => {
     const d = doc("a", "", "", "some prose");
     expect(bm25Score(buildBm25Index("", [d]), d)).toBe(0);
@@ -411,6 +418,15 @@ describe("simhash near-duplicate detection", () => {
     expect(dedupeNearDuplicates(tie).items.map((i) => i.url)).toEqual(["https://m.test/B"]);
   });
 
+  it("hashes tokens a caller already has exactly as it hashes the text", () => {
+    // A pipeline that indexed a document need not tokenise it again.
+    const plain = bm25Tokenize(article, { subtokens: false });
+    expect(simhash(article, { tokens: plain })).toBe(simhash(article));
+    const items = [src("https://origin.test/a", 0.9, article), src("https://mirror.test/a", 0.4, `${article} `)];
+    const tokens = new Map(items.map((it) => [it, bm25Tokenize(it.text, { subtokens: false })]));
+    expect(dedupeNearDuplicates(items, { tokensOf: (it) => tokens.get(it)! })).toEqual(dedupeNearDuplicates(items));
+  });
+
   it("never collapses short texts, which carry too little signal", () => {
     const items = [src("https://a.test/1", 0.9, "short"), src("https://b.test/2", 0.5, "short")];
     expect(dedupeNearDuplicates(items).dropped).toBe(0);
@@ -496,6 +512,37 @@ describe("diversify", () => {
   it("breaks ties by code unit, not by the machine's locale", () => {
     const items = [src("https://s.test/a", 0.5, ""), src("https://s.test/B", 0.5, ""), src("https://s.test/c", 0.5, "")];
     expect(diversify(items, () => new Set(["t"])).map((i) => i.url)).toEqual(["https://s.test/B", "https://s.test/a", "https://s.test/c"]);
+  });
+
+  it("diversifies only the window, and keeps the tail in relevance order", () => {
+    const items = Array.from({ length: 10 }, (_, i) => src(`https://w${i}.test/`, 1 - i * 0.05, ""));
+    const tokens = (it: { url: string }) => (it.url < "https://w4" ? ["same", "words"] : [it.url]);
+    const out = diversify(items, tokens, 0.75, { window: 4 });
+    expect(out).toHaveLength(10);
+    expect(new Set(out.slice(0, 4))).toEqual(new Set(items.slice(0, 4)));
+    expect(out.slice(4)).toEqual(items.slice(4));
+    // A window at least as large as the pool is the exact pass.
+    expect(diversify(items, tokens, 0.75, { window: 50 })).toEqual(diversify(items, tokens));
+  });
+
+  it("stays fast on a large pool when windowed, and tractable when exact", () => {
+    // MMR is quadratic: 2 000 documents took 35 s in `webindex rank` with
+    // string-set Jaccard computed twice per pair.
+    let seed = 7;
+    const rnd = () => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed / 2_147_483_648;
+    };
+    const pool = Array.from({ length: 2_000 }, (_, i) => ({
+      ...src(`https://p${i}.test/`, rnd(), ""),
+      tokens: Array.from({ length: 300 }, () => `t${Math.floor(rnd() * 5_000)}`),
+    }));
+    let started = performance.now();
+    expect(diversify(pool, (it) => it.tokens, 0.75, { window: 100 })).toHaveLength(2_000);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    started = performance.now();
+    expect(diversify(pool.slice(0, 400), (it) => it.tokens)).toHaveLength(400);
+    expect(performance.now() - started).toBeLessThan(2_000);
   });
 
   it("is deterministic — the same pool ranks identically twice", () => {

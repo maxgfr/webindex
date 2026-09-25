@@ -44,6 +44,12 @@ placed before any candidate scoring zero, and diversity reorders within each
 group. And it **reorders only** — every input comes back exactly once. This
 changes what you read first, never what you have.
 
+MMR is quadratic in what it diversifies, and diversity is read at the top of a
+list. `diversify(items, tokensOf, λ, { window })` diversifies only the `window`
+most relevant items and appends the rest in relevance order; `webindex rank`
+uses a window of max(5 × limit, 100), which ranks 2 000 documents in about a
+second. Without a window the pass is exact.
+
 ## The relevance floor
 
 `applyRelevanceFloor` drops candidates whose query-term overlap is empty, or is
