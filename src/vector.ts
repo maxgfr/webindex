@@ -18,8 +18,9 @@
 // ranking, never an exception.
 
 import { brand, env, envInt } from "./brand.js";
-import { cosine, embed } from "./embed.js";
+import { cosine, embed, embedPrefixes } from "./embed.js";
 import { httpJson } from "./fetch.js";
+import { cachedProbe, type ProbeEntry } from "./probe.js";
 import { type Bm25Doc, bm25Score, buildBm25Index, rrf } from "./rank.js";
 
 /** Where the local Qdrant answers. `off` disables the store. */
@@ -29,22 +30,18 @@ export function qdrantBase(): string {
 
 const clean = (base: string) => base.replace(/\/+$/, "");
 
-const probed = new Map<string, boolean>();
+const probed = new Map<string, ProbeEntry>();
 
 /** Test seam, and the escape hatch for a store that came up mid-run. */
 export function resetQdrantProbe(): void {
   probed.clear();
 }
 
-/** Whether the local vector store answers. Cached per base for the process, like the Ollama probe. */
+/** Whether the local vector store answers. Cached per base like the Ollama probe: a "no" is asked again after 30 s. */
 export async function probeQdrant(base: string = qdrantBase()): Promise<boolean> {
   const key = clean(base);
   if (key.toLowerCase() === "off") return false;
-  const cached = probed.get(key);
-  if (cached !== undefined) return cached;
-  const r = await httpJson("GET", `${key}/collections`, undefined, { timeoutMs: 2_000, retries: 0 });
-  probed.set(key, r.ok);
-  return r.ok;
+  return cachedProbe(probed, key, async () => (await httpJson("GET", `${key}/collections`, undefined, { timeoutMs: 2_000, retries: 0 })).ok);
 }
 
 export interface VectorPoint {
@@ -71,6 +68,10 @@ export interface VectorHit {
  * Distance defaults to cosine because that is what `nomic-embed-text` is trained
  * for and what `cosine()` here computes; a caller using a dot-product model says
  * so explicitly.
+ *
+ * An existing collection is checked against both: one built by another
+ * embedding model (768 dimensions where 1024 are asked) is refused here, by
+ * name, instead of every later upsert failing with an opaque 400.
  */
 export async function ensureCollection(
   name: string,
@@ -81,24 +82,55 @@ export async function ensureCollection(
   if (base.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
   if (!(await probeQdrant(base))) return { ok: false, note: unreachable(base) };
 
+  const distance = opts.distance ?? "Cosine";
   const existing = await httpJson("GET", `${base}/collections/${encodeURIComponent(name)}`, undefined, { retries: 0 });
-  if (existing.ok) return { ok: true };
+  if (existing.ok) {
+    // A single unnamed vector reports {size, distance}; named vectors are a
+    // map of those, which this function never creates and cannot judge.
+    const have = existing.data?.result?.config?.params?.vectors as { size?: unknown; distance?: unknown } | undefined;
+    if (typeof have?.size === "number" && have.size !== size) {
+      return {
+        ok: false,
+        note: `collection "${name}" exists with size ${have.size}, not ${size} — was it built with another embedding model? deleteCollection and re-index.`,
+      };
+    }
+    if (typeof have?.distance === "string" && have.distance !== distance) {
+      return { ok: false, note: `collection "${name}" exists with distance ${have.distance}, not ${distance} — deleteCollection and re-index.` };
+    }
+    return { ok: true };
+  }
 
-  const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}`, { vectors: { size, distance: opts.distance ?? "Cosine" } });
+  const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}`, { vectors: { size, distance } });
   return r.ok ? { ok: true } : { ok: false, note: `could not create collection "${name}" at ${base}: ${r.error ?? `status ${r.status}`}` };
 }
 
-/** Insert or replace points. Waits for the write, so a search right after sees them. */
+/**
+ * Insert or replace points. Waits for the write, so a search right after sees them.
+ *
+ * Sent in chunks of `${PREFIX}_QDRANT_UPSERT_BATCH` points (default 256), one
+ * after another: 3 000 nomic vectors in one request is ~47 MB, and Qdrant
+ * refuses anything over 32 MB by default. A failed chunk stops the upsert and
+ * is named; the chunks before it are written, and re-running is safe, since an
+ * upsert of the same ids replaces them.
+ */
 export async function upsert(name: string, points: readonly VectorPoint[], opts: { base?: string } = {}): Promise<{ ok: boolean; note?: string }> {
   if (points.length === 0) return { ok: true };
   const base = clean(opts.base ?? qdrantBase());
   if (base.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
   if (!(await probeQdrant(base))) return { ok: false, note: unreachable(base) };
 
-  // `wait=true` matters: without it Qdrant acknowledges before the write is
-  // searchable, and an index-then-query in one run finds nothing at all.
-  const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}/points?wait=true`, { points });
-  return r.ok ? { ok: true } : { ok: false, note: `upsert into "${name}" failed: ${r.error ?? `status ${r.status}`}` };
+  const width = Math.max(1, envInt("QDRANT_UPSERT_BATCH", 256));
+  for (let i = 0; i < points.length; i += width) {
+    const chunk = points.slice(i, i + width);
+    // `wait=true` matters: without it Qdrant acknowledges before the write is
+    // searchable, and an index-then-query in one run finds nothing at all.
+    const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}/points?wait=true`, { points: chunk }, { timeoutMs: 60_000 });
+    if (!r.ok) {
+      const which = points.length > width ? ` at points ${i + 1}–${i + chunk.length} of ${points.length}` : "";
+      return { ok: false, note: `upsert into "${name}" failed${which}: ${r.error ?? `status ${r.status}`}` };
+    }
+  }
+  return { ok: true };
 }
 
 /** Nearest neighbours of a vector. Empty with a note when the store is absent. */
@@ -166,13 +198,27 @@ export interface HybridHit<D extends HybridDoc> {
  * With the embedding server absent, this degrades to exactly the lexical
  * ranking the caller would have got from `bm25Score` alone, plus a note. It
  * never throws and never returns fewer documents than it was given.
+ *
+ * The question and the documents are embedded with the model's task prefixes
+ * (`embedPrefixes`; `queryPrefix`/`docPrefix` override them verbatim), and each
+ * document is cut to `maxChars` (`${PREFIX}_EMBED_MAX_CHARS`, default 8 000,
+ * 0 for no cut) — the model truncates to its context window anyway, so the rest
+ * was bandwidth.
+ *
+ * Fusion is by POSITION in `docs`, not by `id`: two documents sharing an id
+ * (the same URL from two engines) are still two documents, each with its own
+ * ranks.
  */
 export async function hybridSearch<D extends HybridDoc>(
   question: string,
   docs: readonly D[],
-  opts: { limit?: number; base?: string; model?: string; k?: number } = {},
+  opts: { limit?: number; base?: string; model?: string; k?: number; queryPrefix?: string; docPrefix?: string; maxChars?: number } = {},
 ): Promise<{ hits: HybridHit<D>[]; note?: string }> {
   if (docs.length === 0) return { hits: [] };
+  const prefixes = embedPrefixes(opts.model);
+  const queryPrefix = opts.queryPrefix ?? prefixes.query;
+  const docPrefix = opts.docPrefix ?? prefixes.doc;
+  const maxChars = opts.maxChars ?? envInt("EMBED_MAX_CHARS", 8_000);
 
   // Started before the lexical lane so what it does before its first await —
   // building the input, and on a cold base the `/api/tags` probe — happens
@@ -183,7 +229,7 @@ export async function hybridSearch<D extends HybridDoc>(
   // microtask that cannot run until the synchronous scoring below yields. One
   // thread, one turn. The ordering costs nothing and buys the probe; the real
   // saving in this function is scoring each document once.
-  const embedding = embed([question, ...docs.map((d) => [d.title, d.headings, d.body].filter(Boolean).join("\n"))], {
+  const embedding = embed([queryPrefix + question, ...docs.map((d) => docPrefix + clip([d.title, d.headings, d.body].filter(Boolean).join("\n"), maxChars))], {
     ...(opts.base !== undefined ? { base: opts.base } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
   });
@@ -194,36 +240,44 @@ export async function hybridSearch<D extends HybridDoc>(
   // so the order is deterministic without a further tiebreak.
   const index = buildBm25Index(question, docs);
   const lexical = docs
-    .map((doc) => ({ doc, score: bm25Score(index, doc) }))
+    .map((doc, i) => ({ i, score: bm25Score(index, doc) }))
     .sort((a, b) => b.score - a.score)
-    .map((s) => s.doc);
+    .map((s) => s.i);
 
   const embedded = await embedding;
 
-  let dense: D[] = [];
+  let dense: number[] = [];
   let note = embedded.note;
   if (embedded.vectors.length === docs.length + 1) {
     const q = embedded.vectors[0] as number[];
-    const scored = docs.map((doc, i) => ({ doc, sim: cosine(q, embedded.vectors[i + 1] as number[]) }));
-    dense = scored.sort((a, b) => b.sim - a.sim).map((s) => s.doc);
+    const scored = docs.map((_, i) => ({ i, sim: cosine(q, embedded.vectors[i + 1] as number[]) }));
+    dense = scored.sort((a, b) => b.sim - a.sim).map((s) => s.i);
   } else if (!note) {
     note = "the dense lane returned an unexpected number of vectors — ranking lexically only.";
   }
 
+  // Keyed by position: an id is the caller's, and two documents may share one.
   const lists = dense.length ? [lexical, dense] : [lexical];
-  const fused = rrf<D>(lists, (d) => d.id, opts.k ?? envInt("RRF_K", 60));
+  const fused = rrf<number>(lists, (i) => String(i), opts.k ?? envInt("RRF_K", 60));
+  const lexRank = new Map(lexical.map((i, r) => [i, r + 1]));
+  const denseRank = new Map(dense.map((i, r) => [i, r + 1]));
 
-  const lexRank = new Map(lexical.map((d, i) => [d.id, i + 1]));
-  const denseRank = new Map(dense.map((d, i) => [d.id, i + 1]));
-
-  const hits = [...docs]
-    .map((doc) => ({
+  const hits = docs
+    .map((doc, i) => ({
       doc,
-      score: fused.get(doc.id) ?? 0,
-      ...(lexRank.has(doc.id) ? { lexicalRank: lexRank.get(doc.id) as number } : {}),
-      ...(denseRank.has(doc.id) ? { denseRank: denseRank.get(doc.id) as number } : {}),
+      score: fused.get(String(i)) ?? 0,
+      ...(lexRank.has(i) ? { lexicalRank: lexRank.get(i) as number } : {}),
+      ...(denseRank.has(i) ? { denseRank: denseRank.get(i) as number } : {}),
     }))
     .sort((a, b) => b.score - a.score);
 
-  return { hits: opts.limit ? hits.slice(0, opts.limit) : hits, ...(note ? { note } : {}) };
+  // Only a positive limit trims: slice(0, -1) dropped the last hit.
+  return { hits: opts.limit !== undefined && opts.limit > 0 ? hits.slice(0, opts.limit) : hits, ...(note ? { note } : {}) };
+}
+
+/** At most `max` UTF-16 units (0 = no cut), never splitting a surrogate pair. */
+function clip(text: string, max: number): string {
+  if (max <= 0 || text.length <= max) return text;
+  const code = text.charCodeAt(max - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max);
 }

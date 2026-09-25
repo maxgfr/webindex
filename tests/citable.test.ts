@@ -21,8 +21,27 @@ describe("isApiEndpoint", () => {
     "https://dblp.org/pid/12/3456.html",
     "https://example.test/article?utm_source=x",
     "nonsense",
+    // CGI is how Bugzilla, man.cgi and gitweb serve people, not machines.
+    "https://bugzilla.mozilla.org/show_bug.cgi?id=1234567",
+    "https://gcc.gnu.org/bugzilla/show_bug.cgi?id=12345",
+    "https://sourceware.org/bugzilla/show_bug.cgi?id=12345",
+    "https://man.openbsd.org/cgi-bin/man.cgi",
   ])("does not flag %s", (url) => {
     expect(isApiEndpoint(url)).toBe(false);
+  });
+
+  it.each([
+    // The JSON endpoints this engine itself calls.
+    "https://api.github.com/repos/nodejs/node",
+    "https://registry.npmjs.org/react",
+    "https://pypi.org/pypi/requests/json",
+    "https://crates.io/api/v1/crates/serde",
+    "https://archive.org/wayback/available?url=x.test",
+    "https://www.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=1",
+    "https://bugzilla.mozilla.org/show_bug.cgi?id=1&format=xml",
+  ])("flags the machine endpoint %s", (url) => {
+    expect(isApiEndpoint(url)).toBe(true);
+    expect(isCitableUrl(url)).toBe(false);
   });
 });
 
@@ -66,6 +85,18 @@ describe("deriveCitableUrl", () => {
   it("falls back to an arXiv id, then to a PMID", () => {
     expect(deriveCitableUrl("Preprint arXiv:2401.01234v2 — no doi here")).toBe("https://arxiv.org/abs/2401.01234v2");
     expect(deriveCitableUrl("Some record.\n\nPMID: 34397876")).toBe("https://pubmed.ncbi.nlm.nih.gov/34397876/");
+  });
+
+  it("reads an arXiv id out of an arxiv.org link, the commonest way a payload names one", () => {
+    expect(deriveCitableUrl("Preprint: https://arxiv.org/abs/2408.05636")).toBe("https://arxiv.org/abs/2408.05636");
+    expect(deriveCitableUrl("https://arxiv.org/pdf/2408.05636v2")).toBe("https://arxiv.org/abs/2408.05636v2");
+    expect(deriveCitableUrl("Available at arxiv.org/abs/2408.05636")).toBe("https://arxiv.org/abs/2408.05636");
+    expect(deriveCitableUrl("arxiv.org/abs/hep-th/9901001")).toBe("https://arxiv.org/abs/hep-th/9901001");
+  });
+
+  it("falls back to a PMC id after a PMID", () => {
+    expect(deriveCitableUrl("Free full text. PMCID: PMC1234567")).toBe("https://pmc.ncbi.nlm.nih.gov/articles/PMC1234567/");
+    expect(deriveCitableUrl("PMID: 34397876 PMCID: PMC1234567")).toBe("https://pubmed.ncbi.nlm.nih.gov/34397876/");
   });
 
   it("only looks at the record's head, so a DOI cited deep in a bibliography can't win", () => {

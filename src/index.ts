@@ -61,6 +61,7 @@ export {
   type FirecrawlHit,
   type FirecrawlOptions,
   type FirecrawlScrape,
+  type FirecrawlSearchOptions,
   type ScrapeAttempt,
 } from "./firecrawl.js";
 

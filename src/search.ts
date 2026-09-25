@@ -1,9 +1,9 @@
 import { brand, env, envName } from "./brand.js";
 import { httpGet, pageDelayMs, sleep } from "./fetch.js";
-import { searchViaFirecrawl } from "./firecrawl.js";
-import { acceptLanguageHeader } from "./locale.js";
+import { firecrawlBase, ProbeMemo, searchViaFirecrawl, type FirecrawlHit } from "./firecrawl.js";
+import { acceptLanguageHeader, baseLang } from "./locale.js";
 import { canonicalizeUrl } from "./url.js";
-import { keylessEngines, searchViaKeyless, type KeylessEngine } from "./engines.js";
+import { isKeylessEngine, KEYLESS_ENGINES, keylessEngines, searchViaKeyless, unknownEngines, type EngineResult, type KeylessEngine } from "./engines.js";
 
 // Discovery: turning a question into candidate URLs.
 //
@@ -40,9 +40,22 @@ export interface SearchOptions {
   limit?: number;
   /** BCP-47 language tag, e.g. "fr-FR". */
   lang?: string;
+  /** Country code overriding the one `lang` implies, e.g. "ca"; "wt" asks for no region. */
   region?: string;
   /** Result pages to walk. SearXNG paginates with `&pageno=`. */
   pages?: number;
+  /**
+   * The whole search's budget in ms, every rung and page included. No rung or
+   * page starts after it, and each request's own timeout is capped to what is
+   * left, so the worst case is this plus the 2 s availability probes of
+   * SearXNG and Firecrawl.
+   */
+  timeoutMs?: number;
+  /**
+   * Abandons the search: checked before each rung and page. A request already
+   * in flight finishes first, within its own timeout.
+   */
+  signal?: AbortSignal;
   /**
    * Which keyless engines the cascade may fall back to, in order. Defaults to
    * all of them; `[]` disables the keyless rung entirely, leaving the local
@@ -51,10 +64,47 @@ export interface SearchOptions {
   engines?: KeylessEngine[];
 }
 
+/** A rung of the cascade: SearXNG, one keyless engine, or Firecrawl. */
+export type SearchRung = "searxng" | "firecrawl" | KeylessEngine;
+
+/**
+ * What one rung did. The first two are ANSWERS — the rung read a result page —
+ * and only they say anything about the web:
+ *
+ * - `hits` / `empty`: it answered, with results or with none;
+ * - `throttled`: it refused for load, and will work again later;
+ * - `blocked`: it turned this client away as automated traffic;
+ * - `unreachable`: nothing answered — not running, no connection, timed out;
+ * - `error`: something answered, but not with results — an error status, an
+ *   empty or unreadable page, a request the backend rejected;
+ * - `disabled`: switched off; `not-tried`: the cascade stopped before it.
+ */
+export type RungOutcome = "hits" | "empty" | "throttled" | "blocked" | "unreachable" | "error" | "disabled" | "not-tried";
+
+export interface RungReport {
+  rung: SearchRung;
+  outcome: RungOutcome;
+  /** How many hits it returned, when it returned any. */
+  hits?: number;
+  /** Its note, when it had one. */
+  note?: string;
+}
+
 export interface SearchResult {
   hits: SearchHit[];
   /** What degraded, in words a caller can show a user. Never an exception. */
   notes: string[];
+  /**
+   * What each rung did, in cascade order: the facts behind `notes`, for a
+   * caller that must tell "blocked" from "empty" without reading English.
+   */
+  rungs?: RungReport[];
+  /**
+   * True when at least one rung ANSWERED (outcome `hits` or `empty`). False
+   * means nothing was searched — every rung was off, refused or failed — and
+   * an empty `hits` is then no finding about the web.
+   */
+  searched?: boolean;
 }
 
 /**
@@ -72,7 +122,7 @@ export function searxngIsExplicit(opts: SearchOptions = {}): boolean {
   return !!(opts.searxng ?? env("SEARXNG"));
 }
 
-const probeCache = new Map<string, Promise<boolean>>();
+const probeCache = new ProbeMemo();
 
 /** Test seam: forget memoised probe verdicts. */
 export function resetSearxngProbeCache(): void {
@@ -81,32 +131,36 @@ export function resetSearxngProbeCache(): void {
 
 /**
  * Is a SearXNG instance answering at `base`? A single `GET {base}/healthz` with
- * a hard 2s ceiling; ANY HTTP response counts as up, because a 404 from a proxy
- * in front of it still proves something is listening. Memoised per base, so the
- * whole cost of an absent instance is one refused connection per process.
+ * a hard 2s ceiling.
+ *
+ * What counts as an answer depends on who chose the base, as for Firecrawl's
+ * probe. On the localhost DEFAULT it must be SearXNG's own `OK`: 8888 is also
+ * Jupyter's default port, and taking a notebook server for SearXNG made doctor
+ * report it "answering" and every search blame SearXNG's JSON setting. A base
+ * the caller NAMED is a statement about what lives there, so ANY HTTP response
+ * counts — a proxy in front of it may not route /healthz.
+ *
+ * Memoised per base: "up" for the process, "down" for 30 s, so an absent
+ * instance costs one refused connection per burst of calls while a long-lived
+ * MCP server still finds one started later.
  *
  * Deliberately bypasses httpGet, whose retry-with-backoff would turn a 2s
  * ceiling into roughly 4.6s on a blackholed host. A probe wants a single shot.
  */
-export function probeSearxng(base: string): Promise<boolean> {
-  let p = probeCache.get(base);
-  if (!p) {
-    p = (async () => {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
-      try {
-        const res = await fetch(`${base}/healthz`, { signal: ctrl.signal });
-        await res.text().catch(() => ""); // drain so the socket is released
-        return true;
-      } catch {
-        return false;
-      } finally {
-        clearTimeout(t);
-      }
-    })();
-    probeCache.set(base, p);
-  }
-  return p;
+export function probeSearxng(base: string, explicit = false): Promise<boolean> {
+  return probeCache.get(`${base}|${explicit}`, async () => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${base}/healthz`, { signal: ctrl.signal });
+      const body = await res.text().catch(() => ""); // drain so the socket is released
+      return explicit || (res.ok && /^\s*ok\s*$/i.test(body));
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(t);
+    }
+  });
 }
 
 /**
@@ -118,23 +172,28 @@ export function probeSearxng(base: string): Promise<boolean> {
  */
 export async function searchViaSearxng(query: string, opts: SearchOptions = {}): Promise<SearchResult> {
   const base = searxngBase(opts);
-  if (!base) return { hits: [], notes: [`SearXNG disabled (${envName("SEARXNG")}=off).`] };
+  if (!base) return rungResult("searxng", "disabled", [], [`SearXNG disabled (--searxng off / ${envName("SEARXNG")}=off).`]);
+  // Counted from here, so the probe is spent from the same budget.
+  const deadline = budgetDeadline(opts);
 
-  if (!(await probeSearxng(base))) {
-    return {
-      hits: [],
-      notes: [
+  if (!(await probeSearxng(base, searxngIsExplicit(opts)))) {
+    return rungResult(
+      "searxng",
+      "unreachable",
+      [],
+      [
         searxngIsExplicit(opts)
           ? `SearXNG not reachable at ${base}.`
           : `SearXNG not running at ${base} — start it with \`${brand().cli} searxng up\` for local, keyless discovery.`,
       ],
-    };
+    );
   }
 
   const pages = Math.max(1, opts.pages ?? 1);
   const limit = Math.max(1, opts.limit ?? 10);
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
-  const root = `${base}/search?q=${encodeURIComponent(query)}&format=json&safesearch=1` + (opts.lang ? `&language=${encodeURIComponent(opts.lang)}` : "");
+  const language = searxngLanguage(opts);
+  const root = `${base}/search?q=${encodeURIComponent(query)}&format=json&safesearch=1` + (language ? `&language=${encodeURIComponent(language)}` : "");
 
   const notes: string[] = [];
   const seen = new Set<string>();
@@ -146,18 +205,49 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
   // from a query that genuinely has no hits, and the caller reports "nothing
   // found" for something that will work again in a few minutes.
   const suspended = new Map<string, string>();
+  // Why page one produced no result list. A later page failing is not a
+  // failure: the pages before it stand.
+  let failed: RungOutcome | undefined;
 
   for (let p = 0; p < pages && hits.length < limit; p++) {
-    const r = await httpGet(root + (p > 0 ? `&pageno=${p + 1}` : ""), { accept: "application/json", acceptLanguage, timeoutMs: QUERY_TIMEOUT_MS });
+    const stop = halted(opts, deadline);
+    if (stop) {
+      if (p > 0) break; // the pages already read stand
+      return rungResult("searxng", "not-tried", [], [`SearXNG was not asked: ${stop === "cancelled" ? "the search was cancelled" : "no time was left"}.`]);
+    }
+    const r = await httpGet(root + (p > 0 ? `&pageno=${p + 1}` : ""), {
+      accept: "application/json",
+      acceptLanguage,
+      timeoutMs: Math.max(1, Math.min(QUERY_TIMEOUT_MS, deadline - Date.now())),
+      // No retry: the cascade's next rung is the retry.
+      retries: 0,
+    });
     if (!r.ok) {
-      if (p === 0) notes.push(r.status === 429 || r.status === 503 ? `SearXNG rate-limited (HTTP ${r.status}).` : `SearXNG unreachable (status ${r.status}).`);
+      if (p === 0) {
+        failed = r.status === 429 || r.status === 503 ? "throttled" : r.status === 0 ? "unreachable" : "error";
+        notes.push(
+          failed === "throttled"
+            ? `SearXNG rate-limited (HTTP ${r.status}).`
+            : failed === "unreachable"
+              ? `SearXNG unreachable (${r.error || "no response"}).`
+              : // SearXNG answers a format it does not serve with flask.abort(403),
+                // and the probe has just shown the instance is up: this is the
+                // most common misconfiguration, not an outage.
+                r.status === 403
+                ? "SearXNG refused format=json (HTTP 403) — add `json` to `search.formats` in its settings.yml."
+                : `SearXNG failed the query (HTTP ${r.status}).`,
+        );
+      }
       break;
     }
     let data: { results?: unknown[]; unresponsive_engines?: unknown[] };
     try {
       data = JSON.parse(r.body);
     } catch {
-      if (p === 0) notes.push("SearXNG returned a non-JSON body — is `format: json` enabled on that instance?");
+      if (p === 0) {
+        failed = "error";
+        notes.push("SearXNG returned a non-JSON body — is `format: json` enabled on that instance?");
+      }
       break;
     }
     for (const e of data.unresponsive_engines ?? []) {
@@ -187,7 +277,59 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
     notes.push(`SearXNG upstreams throttled: ${[...suspended].map(([e, why]) => `${e} (${why})`).join(", ")} — fewer results than usual, not an empty web.`);
   }
   if (!hits.length && !notes.length) notes.push("SearXNG returned no results.");
-  return { hits, notes };
+  // An empty list from throttled upstreams is a refusal, not an answer.
+  const outcome: RungOutcome = hits.length ? "hits" : (failed ?? (suspended.size ? "throttled" : "empty"));
+  return rungResult("searxng", outcome, hits, notes);
+}
+
+// SearXNG's `language`: the only locale knob it has, so an explicit region
+// rides on it ("fr" + "ca" → "fr-CA"; `wt` names no country). A region alone
+// does not pick a language for the caller.
+function searxngLanguage(opts: SearchOptions): string | undefined {
+  if (!opts.lang) return undefined;
+  const region = opts.region?.trim().toLowerCase();
+  if (!region) return opts.lang;
+  return region === "wt" ? baseLang(opts.lang) : `${baseLang(opts.lang)}-${region.toUpperCase()}`;
+}
+
+// When the caller's overall budget runs out, as a Date.now() instant.
+function budgetDeadline(opts: SearchOptions): number {
+  return opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? Date.now() + opts.timeoutMs : Number.POSITIVE_INFINITY;
+}
+
+// The slack engines.ts gives its page loop: a timer that fires a millisecond
+// before Date.now() reaches the deadline must not leave ~1 ms for a next rung
+// whose request can only fail.
+function spentSlackMs(budgetMs: number | undefined): number {
+  return budgetMs === undefined ? 0 : Math.min(25, budgetMs / 4);
+}
+
+// Why no further rung or page may start, if none may. Checked between them
+// because a request in flight cannot be recalled — httpGet takes no signal —
+// so the budget ALSO caps each request's own timeout.
+function halted(opts: SearchOptions, deadline: number): "cancelled" | "out of time" | undefined {
+  if (opts.signal?.aborted) return "cancelled";
+  return Date.now() >= deadline - spentSlackMs(opts.timeoutMs) ? "out of time" : undefined;
+}
+
+// A one-rung SearchResult: the hits and notes, plus the report that says the same in data.
+function rungResult(rung: SearchRung, outcome: RungOutcome, hits: SearchHit[], notes: string[]): SearchResult {
+  return { hits, notes, rungs: [report(rung, outcome, hits.length, notes.join(" "))], searched: answered(outcome) };
+}
+
+function report(rung: SearchRung, outcome: RungOutcome, hits = 0, note?: string): RungReport {
+  return { rung, outcome, ...(hits ? { hits } : {}), ...(note ? { note } : {}) };
+}
+
+const answered = (outcome: RungOutcome) => outcome === "hits" || outcome === "empty";
+
+// What a keyless engine's result says in the cascade's vocabulary.
+function keylessOutcome(r: EngineResult): RungOutcome {
+  if (r.hits.length) return "hits";
+  if (r.answered) return "empty";
+  if (r.blocked) return "blocked";
+  if (r.throttled) return "throttled";
+  return r.status ? "error" : "unreachable";
 }
 
 /**
@@ -207,52 +349,126 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
  * Never throws. When nothing answers, the result is empty hits plus notes saying
  * which piece was missing and how to start it — "no results" and "no search
  * engine running" are different facts, and a caller that cannot tell them apart
- * reports the wrong one.
+ * reports the wrong one. `rungs` and `searched` carry the same facts as data.
  */
 export async function search(query: string, opts: SearchOptions = {}): Promise<SearchResult> {
   const q = query.trim();
   if (!q) return { hits: [], notes: ["Empty query."] };
 
-  const viaSearxng = await searchViaSearxng(q, opts);
-  if (viaSearxng.hits.length) return viaSearxng;
-
-  const notes = [...viaSearxng.notes];
-
-  // The keyless rung. Each engine is tried in turn and the FIRST one with hits
-  // wins — this is a fallback chain, not a fan-out: pooling several engines and
-  // fusing them is a ranking decision, and ranking belongs to the caller.
+  const deadline = budgetDeadline(opts);
+  // What each rung may still spend: undefined when the caller set no budget.
+  const left = () => (deadline === Number.POSITIVE_INFINITY ? undefined : Math.max(1, deadline - Date.now()));
   const keyless = keylessEngines(opts);
-  let asked = 0;
-  let blocked = 0;
-  for (const engine of keyless) {
-    const r = await searchViaKeyless(engine, q, { limit: opts.limit, pages: opts.pages, lang: opts.lang, region: opts.region });
-    if (r.hits.length) {
-      return { hits: r.hits.map((h) => ({ ...h, via: engine })), notes };
-    }
-    asked++;
-    if (r.blocked) blocked++;
-    // Only a throttle is worth reporting. "Returned no results" from every
-    // engine in turn would bury the one note that matters under three that say
-    // the same thing.
-    if (r.throttled && r.note) notes.push(r.note);
-  }
+  const order: SearchRung[] = ["searxng", ...keyless, "firecrawl"];
+  // A rung the cascade never reached, reported as such: a caller reading
+  // `rungs` sees where it ended, not just what the winner said.
+  const untried = (rung: SearchRung): RungReport =>
+    report(rung, (rung === "searxng" && !searxngBase(opts)) || (rung === "firecrawl" && !firecrawlBase(opts)) ? "disabled" : "not-tried");
 
-  // searchViaFirecrawl runs its own probe and reports why it could not, so
-  // there is no second copy of that logic here.
-  const fc = await searchViaFirecrawl(q, opts.limit ?? 10, opts);
-  const hits: SearchHit[] = (fc.hits ?? []).map((h) => ({ url: h.url, title: h.title, snippet: h.description, via: "firecrawl" as const }));
-  if (fc.why) notes.push(fc.why);
-  if (!hits.length) {
-    // The closing note is the sentence a caller shows its user, so it must not
-    // say something the run did not establish. When every keyless engine turned
-    // us away, NOTHING was learned about the web for this query — reporting that
-    // as "no results" converts a refusal into a finding about the world, and the
-    // caller has no way to tell the two apart afterwards.
-    notes.push(
-      asked > 0 && blocked === asked
-        ? `Every keyless engine blocked this client (${keyless.join(", ")}) — nothing was searched, which is not the same as nothing being there. Try again later, or run \`${brand().cli} stack up\` for a local SearXNG.`
-        : `No results from any engine. \`${brand().cli} stack up\` starts SearXNG and Firecrawl locally.`,
-    );
+  const notes: string[] = [];
+  const unknown = unknownEngines(opts);
+  if (unknown.length) {
+    notes.push(`${envName("ENGINES")} names no engine this knows: ${unknown.join(", ")} (expected ${KEYLESS_ENGINES.join(", ")}) — ignored.`);
   }
-  return { hits, notes };
+  const rungs: RungReport[] = [];
+  let hits: SearchHit[] = [];
+  for (let i = 0; i < order.length; i++) {
+    const rung = order[i]!;
+    if (hits.length) {
+      rungs.push(untried(rung));
+      continue;
+    }
+    const stop = halted(opts, deadline);
+    if (stop) {
+      const rest = order.slice(i).map(untried);
+      const skipped = rest.filter((r) => r.outcome === "not-tried").map((r) => r.rung);
+      const why = stop === "cancelled" ? "the search was cancelled" : `the ${opts.timeoutMs} ms budget ran out`;
+      if (skipped.length) notes.push(`Stopped before ${skipped.join(", ")}: ${why}.`);
+      rungs.push(...rest);
+      break;
+    }
+
+    if (rung === "searxng") {
+      const r = await searchViaSearxng(q, { ...opts, timeoutMs: left() });
+      hits = r.hits;
+      notes.push(...r.notes);
+      rungs.push(...(r.rungs ?? []));
+    } else if (rung === "firecrawl") {
+      // searchViaFirecrawl runs its own probe and reports why it could not, so
+      // there is no second copy of that logic here.
+      const fc = await searchViaFirecrawl(q, limitOf(opts), { firecrawl: opts.firecrawl, lang: opts.lang, region: opts.region, budgetMs: left() });
+      hits = firecrawlHits(fc.hits ?? [], limitOf(opts));
+      if (fc.why) notes.push(fc.why);
+      rungs.push(report("firecrawl", firecrawlOutcome(fc), hits.length, fc.why));
+    } else {
+      // The keyless rung. Each engine is tried in turn and the FIRST one with
+      // hits wins — this is a fallback chain, not a fan-out: pooling several
+      // engines and fusing them is a ranking decision, and ranking belongs to
+      // the caller.
+      const r = await searchViaKeyless(rung, q, {
+        limit: opts.limit,
+        pages: opts.pages,
+        lang: opts.lang,
+        region: opts.region,
+        budgetMs: left(),
+        signal: opts.signal,
+      });
+      hits = r.hits.map((h) => ({ ...h, via: rung }));
+      rungs.push(report(rung, keylessOutcome(r), r.hits.length, r.note));
+      // Every failure is worth reporting; only "returned no results" is not.
+      // That one repeated by every engine in turn would bury the note that
+      // matters under three that say the same thing.
+      if (!r.answered && r.note) notes.push(r.note);
+    }
+  }
+  if (!hits.length) notes.push(closingNote(rungs));
+  return { hits, notes, rungs, searched: rungs.some((r) => answered(r.outcome)) };
+}
+
+const limitOf = (opts: SearchOptions) => Math.max(1, opts.limit ?? 10);
+
+// Firecrawl's hits, held to the rules every other rung keeps: canonical dedupe,
+// then the limit.
+function firecrawlHits(found: FirecrawlHit[], limit: number): SearchHit[] {
+  const seen = new Set<string>();
+  const hits: SearchHit[] = [];
+  for (const h of found) {
+    const key = canonicalizeUrl(h.url);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    hits.push({ url: h.url, title: h.title, snippet: h.description, via: "firecrawl" });
+    if (hits.length >= limit) break;
+  }
+  return hits;
+}
+
+function firecrawlOutcome(fc: { hits?: unknown[]; status?: number }): RungOutcome {
+  if (fc.hits) return fc.hits.length ? "hits" : "empty";
+  if (fc.status === undefined) return "disabled";
+  if (fc.status === 0) return "unreachable";
+  return fc.status === 429 || fc.status === 503 ? "throttled" : "error";
+}
+
+/**
+ * The sentence a caller shows its user when the cascade found nothing, so it
+ * must not say something the run did not establish. Three different facts:
+ * nothing was switched on; nothing ANSWERED (offline, blocked, throttled, a
+ * 5xx — nothing was learned about the web, and reporting that as "no results"
+ * converts a refusal into a finding about the world); or something answered
+ * and found nothing.
+ */
+function closingNote(rungs: RungReport[]): string {
+  const cli = brand().cli;
+  if (rungs.every((r) => r.outcome === "disabled")) {
+    return `No search backend was enabled — SearXNG and Firecrawl are off and no keyless engine is selected, so nothing was searched. Set ${envName("ENGINES")} to a list of ${KEYLESS_ENGINES.join(", ")}, or run \`${cli} stack up\`.`;
+  }
+  if (rungs.some((r) => answered(r.outcome))) return `No results from any engine. \`${cli} stack up\` starts SearXNG and Firecrawl locally.`;
+  const keyless = rungs.filter((r) => isKeylessEngine(r.rung));
+  if (keyless.length && keyless.every((r) => r.outcome === "blocked")) {
+    return `Every keyless engine blocked this client (${keyless.map((r) => r.rung).join(", ")}) — nothing was searched, which is not the same as nothing being there. Try again later, or run \`${cli} stack up\` for a local SearXNG.`;
+  }
+  return `No engine answered (${rungs
+    .filter((r) => r.outcome !== "disabled")
+    .map((r) => `${r.rung} ${r.outcome}`)
+    .join(", ")}) — nothing was searched, which is not the same as nothing being there. Try again later, or run \`${cli} stack up\` for a local SearXNG.`;
 }
