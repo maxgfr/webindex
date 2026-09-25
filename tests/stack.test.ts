@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -361,11 +361,36 @@ describe("stackControl", () => {
       });
     });
 
+    it("refuses one in a directory anyone may write", () => {
+      withCacheDir((dir) => {
+        // Owned by the caller, but anyone can swap the file inside it.
+        const { deps } = fake();
+        ensureComposeMaterialized();
+        chmodSync(join(dir, "compose", "docker"), 0o777);
+        const r = stackControl("searxng", "status", deps);
+        expect(r.code).toBe(1);
+        expect(r.message).toMatch(/refusing to run docker.*writable by anyone/);
+      });
+    });
+
     it("still runs against the one it wrote itself", () => {
       withCacheDir(() => {
         const { calls, deps } = fake();
         expect(stackControl("searxng", "status", deps).code).toBe(0);
         expect(argvOf(calls, "ps")).toBeDefined();
+      });
+    });
+
+    it("reads a cache dir given with a trailing slash as the same directory", () => {
+      // The walk up from each file stopped only at the root's exact spelling,
+      // so "/x/cache/" walked on past it to / — which belongs to root.
+      withCacheDir((dir) => {
+        // A parent the check has no business with, and would refuse.
+        chmodSync(dir, 0o777);
+        mkdirSync(join(dir, "cache"));
+        process.env[envName("CACHE_DIR")] = `${join(dir, "cache")}/`;
+        const { deps } = fake();
+        expect(stackControl("searxng", "status", deps).message).not.toMatch(/refusing/);
       });
     });
   });

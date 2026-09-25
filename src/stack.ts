@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { brand, env, envInt, envName } from "./brand.js";
 import { cacheDir } from "./cache.js";
 
@@ -341,7 +341,8 @@ export function ensureComposeMaterialized(): string {
  * one docker ran. So the content is read back, and on a platform with uids every
  * directory from the cache root down, and every file, must belong to the caller
  * and be no symbolic link: whoever owns any of them can swap the file after
- * this check and before docker reads it.
+ * this check and before docker reads it — and so, for the same reason, can anyone
+ * when a directory is world-writable.
  */
 function untrustedStack(): string | undefined {
   const assets = composeAssets();
@@ -356,10 +357,12 @@ function untrustedStack(): string | undefined {
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
   if (uid === undefined) return undefined;
-  const root = cacheDir();
+  // Resolved, so "/x/cache/" and "./cache" end the walk up where they should
+  // rather than at / — which belongs to root.
+  const root = resolve(cacheDir());
   const paths = new Set<string>();
   for (const a of assets) {
-    for (let p = a.path; p !== root && p !== dirname(p); p = dirname(p)) paths.add(p);
+    for (let p = resolve(a.path); p !== root && p !== dirname(p); p = dirname(p)) paths.add(p);
   }
   for (const p of [root, ...paths]) {
     try {
@@ -368,6 +371,9 @@ function untrustedStack(): string | undefined {
       const st = p === root ? statSync(p) : lstatSync(p);
       if (st.isSymbolicLink()) return `${p} is a symbolic link`;
       if (st.uid !== uid) return `${p} belongs to another user`;
+      // Owned is not enough when anyone may write it: in a world-writable
+      // directory without the sticky bit, anyone can replace what is inside.
+      if (st.mode & 0o002 && !(st.isDirectory() && st.mode & 0o1000)) return `${p} is writable by anyone`;
     } catch (e) {
       return `${p} cannot be inspected (${(e as Error).message})`;
     }
