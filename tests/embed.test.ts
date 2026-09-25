@@ -383,6 +383,56 @@ describe("the vector store", () => {
     now.mockReturnValue(5_000_000 + 31_000);
     expect(await probeQdrant(QDRANT)).toBe(true);
   });
+
+  it("refuses a collection built for another model's dimension, or another distance", async () => {
+    // After EMBED_MODEL changes (768 → 1024), every later upsert failed with an
+    // opaque 400 while this said ok.
+    installFetchMock((url, init) => {
+      if (url.endsWith("/collections")) return json({ result: {} });
+      if (url.endsWith("/collections/docs") && (init?.method ?? "GET") === "GET")
+        return json({ result: { status: "green", config: { params: { vectors: { size: 768, distance: "Cosine" } } } } });
+      return json({ result: true });
+    });
+    const wrongSize = await ensureCollection("docs", 1024, { base: QDRANT });
+    expect(wrongSize.ok).toBe(false);
+    expect(wrongSize.note).toMatch(/exists with size 768, not 1024/);
+    expect(wrongSize.note).toMatch(/deleteCollection/);
+    const wrongDistance = await ensureCollection("docs", 768, { base: QDRANT, distance: "Dot" });
+    expect(wrongDistance.ok).toBe(false);
+    expect(wrongDistance.note).toMatch(/Cosine/);
+    expect(await ensureCollection("docs", 768, { base: QDRANT })).toEqual({ ok: true });
+  });
+
+  it("upserts in chunks, so a large index stays under the store's request cap", async () => {
+    // One request of 3 000 × 768 floats is ~47 MB; Qdrant refuses above 32 MB.
+    process.env[envName("QDRANT_UPSERT_BATCH")] = "2";
+    const sizes: number[] = [];
+    qdrantUp((url, init) => {
+      if (url.includes("/points?wait=true")) sizes.push(JSON.parse(String(init?.body)).points.length);
+      return undefined;
+    });
+    const points = Array.from({ length: 5 }, (_, i) => ({ id: i, vector: [1, 0] }));
+    expect(await upsert("docs", points, { base: QDRANT })).toEqual({ ok: true });
+    expect(sizes).toEqual([2, 2, 1]);
+  });
+
+  it("names the chunk that failed, and sends nothing after it", async () => {
+    process.env[envName("QDRANT_UPSERT_BATCH")] = "2";
+    let n = 0;
+    installFetchMock((url) => {
+      if (url.endsWith("/collections")) return json({ result: {} });
+      n++;
+      return n === 2 ? { status: 400, body: "bad", contentType: "text/plain" } : json({ result: true });
+    });
+    const r = await upsert(
+      "docs",
+      Array.from({ length: 6 }, (_, i) => ({ id: i, vector: [1, 0] })),
+      { base: QDRANT },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.note).toMatch(/points 3–4 of 6/);
+    expect(n).toBe(2);
+  });
 });
 
 describe("hybridSearch", () => {

@@ -223,6 +223,7 @@ ENVIRONMENT
                          document ("none" for none); default from the model — nomic's
                          "search_query: " / "search_document: ", mxbai's, e5's
   WEBINDEX_EMBED_MAX_CHARS  characters of each document hybrid embeds (default 8000, 0 = all)
+  WEBINDEX_QDRANT_UPSERT_BATCH  points per upsert request (default 256)
   WEBINDEX_TIMEOUT_MS    how long a request may stay silent before it is abandoned,
                          not retried (default 20000; --timeout overrides it per call)
   WEBINDEX_CACHE_DIR     where the fetch cache lives (default <tmp>/webindex-<uid>/cache)

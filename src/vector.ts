@@ -68,6 +68,10 @@ export interface VectorHit {
  * Distance defaults to cosine because that is what `nomic-embed-text` is trained
  * for and what `cosine()` here computes; a caller using a dot-product model says
  * so explicitly.
+ *
+ * An existing collection is checked against both: one built by another
+ * embedding model (768 dimensions where 1024 are asked) is refused here, by
+ * name, instead of every later upsert failing with an opaque 400.
  */
 export async function ensureCollection(
   name: string,
@@ -78,24 +82,55 @@ export async function ensureCollection(
   if (base.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
   if (!(await probeQdrant(base))) return { ok: false, note: unreachable(base) };
 
+  const distance = opts.distance ?? "Cosine";
   const existing = await httpJson("GET", `${base}/collections/${encodeURIComponent(name)}`, undefined, { retries: 0 });
-  if (existing.ok) return { ok: true };
+  if (existing.ok) {
+    // A single unnamed vector reports {size, distance}; named vectors are a
+    // map of those, which this function never creates and cannot judge.
+    const have = existing.data?.result?.config?.params?.vectors as { size?: unknown; distance?: unknown } | undefined;
+    if (typeof have?.size === "number" && have.size !== size) {
+      return {
+        ok: false,
+        note: `collection "${name}" exists with size ${have.size}, not ${size} — was it built with another embedding model? deleteCollection and re-index.`,
+      };
+    }
+    if (typeof have?.distance === "string" && have.distance !== distance) {
+      return { ok: false, note: `collection "${name}" exists with distance ${have.distance}, not ${distance} — deleteCollection and re-index.` };
+    }
+    return { ok: true };
+  }
 
-  const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}`, { vectors: { size, distance: opts.distance ?? "Cosine" } });
+  const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}`, { vectors: { size, distance } });
   return r.ok ? { ok: true } : { ok: false, note: `could not create collection "${name}" at ${base}: ${r.error ?? `status ${r.status}`}` };
 }
 
-/** Insert or replace points. Waits for the write, so a search right after sees them. */
+/**
+ * Insert or replace points. Waits for the write, so a search right after sees them.
+ *
+ * Sent in chunks of `${PREFIX}_QDRANT_UPSERT_BATCH` points (default 256), one
+ * after another: 3 000 nomic vectors in one request is ~47 MB, and Qdrant
+ * refuses anything over 32 MB by default. A failed chunk stops the upsert and
+ * is named; the chunks before it are written, and re-running is safe, since an
+ * upsert of the same ids replaces them.
+ */
 export async function upsert(name: string, points: readonly VectorPoint[], opts: { base?: string } = {}): Promise<{ ok: boolean; note?: string }> {
   if (points.length === 0) return { ok: true };
   const base = clean(opts.base ?? qdrantBase());
   if (base.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
   if (!(await probeQdrant(base))) return { ok: false, note: unreachable(base) };
 
-  // `wait=true` matters: without it Qdrant acknowledges before the write is
-  // searchable, and an index-then-query in one run finds nothing at all.
-  const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}/points?wait=true`, { points });
-  return r.ok ? { ok: true } : { ok: false, note: `upsert into "${name}" failed: ${r.error ?? `status ${r.status}`}` };
+  const width = Math.max(1, envInt("QDRANT_UPSERT_BATCH", 256));
+  for (let i = 0; i < points.length; i += width) {
+    const chunk = points.slice(i, i + width);
+    // `wait=true` matters: without it Qdrant acknowledges before the write is
+    // searchable, and an index-then-query in one run finds nothing at all.
+    const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}/points?wait=true`, { points: chunk }, { timeoutMs: 60_000 });
+    if (!r.ok) {
+      const which = points.length > width ? ` at points ${i + 1}–${i + chunk.length} of ${points.length}` : "";
+      return { ok: false, note: `upsert into "${name}" failed${which}: ${r.error ?? `status ${r.status}`}` };
+    }
+  }
+  return { ok: true };
 }
 
 /** Nearest neighbours of a vector. Empty with a note when the store is absent. */

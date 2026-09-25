@@ -47,8 +47,12 @@ sort to the bottom of one ranking and the top of another.
 
 `ensureCollection` · `upsert` · `searchVectors` · `deleteCollection`, over plain
 HTTP. `size` must match the model's dimension — derive it from a real embedding
-rather than hardcoding a number that changes with the model. `upsert` waits for
-the write, or an index-then-query in one run finds nothing.
+rather than hardcoding a number that changes with the model. `ensureCollection`
+refuses, by name, an existing collection of another size or distance (built by
+another model) instead of letting every later upsert fail with a 400. `upsert`
+waits for the write, or an index-then-query in one run finds nothing, and sends
+the points in chunks of `WEBINDEX_QDRANT_UPSERT_BATCH` (256): one request of a
+few thousand vectors is over Qdrant's 32 MB request cap.
 
 ## Hybrid retrieval, and why RRF
 
