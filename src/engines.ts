@@ -474,6 +474,7 @@ export async function searchViaKeyless(
       acceptLanguage,
       timeoutMs: Math.max(1, Math.min(opts.timeoutMs ?? 12000, deadline - Date.now())),
       retries: 0,
+      signal: opts.signal,
     });
     if (!r.ok || !r.body.trim()) {
       // A later page failing is not a failure — page one's results stand.

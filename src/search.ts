@@ -52,8 +52,10 @@ export interface SearchOptions {
    */
   timeoutMs?: number;
   /**
-   * Abandons the search: checked before each rung and page. A request already
-   * in flight finishes first, within its own timeout.
+   * Abandons the search: checked before each rung and page, and a SearXNG or
+   * keyless-engine request in flight is aborted. A Firecrawl request already
+   * sent finishes within its own timeout — an aborted one would read to the
+   * shared availability probe as a Firecrawl that is down.
    */
   signal?: AbortSignal;
   /**
@@ -221,6 +223,7 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
       timeoutMs: Math.max(1, Math.min(QUERY_TIMEOUT_MS, deadline - Date.now())),
       // No retry: the cascade's next rung is the retry.
       retries: 0,
+      signal: opts.signal,
     });
     if (!r.ok) {
       if (p === 0) {
@@ -304,9 +307,9 @@ function spentSlackMs(budgetMs: number | undefined): number {
   return budgetMs === undefined ? 0 : Math.min(25, budgetMs / 4);
 }
 
-// Why no further rung or page may start, if none may. Checked between them
-// because a request in flight cannot be recalled — httpGet takes no signal —
-// so the budget ALSO caps each request's own timeout.
+// Why no further rung or page may start, if none may. The signal also aborts
+// the request in flight (httpGet takes it), but a budget cannot recall one, so
+// the budget ALSO caps each request's own timeout.
 function halted(opts: SearchOptions, deadline: number): "cancelled" | "out of time" | undefined {
   if (opts.signal?.aborted) return "cancelled";
   return Date.now() >= deadline - spentSlackMs(opts.timeoutMs) ? "out of time" : undefined;
