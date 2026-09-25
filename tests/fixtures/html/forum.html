@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html><head><title>Why does my token bucket drift? - Community Forum</title></head>
+<body>
+<div class="p-nav"><a href="/">Forums</a> <a href="/whats-new">What's new</a></div>
+<div class="p-body">
+<div class="block-container">
+<h1 class="p-title-value">Why does my token bucket drift?</h1>
+<article class="message message--post" data-author="alice"><div class="message-inner"><div class="message-userDetails"><h4 class="message-name">alice</h4><h5 class="userTitle">New member</h5></div>
+<div class="message-content"><div class="bbWrapper">I implemented a token bucket with a refill rate of 10 tokens per second, but after a few hours of running the bucket has drifted and allows about 11 requests per second. I'm using setInterval to add one token every 100 ms. What am I doing wrong? The QUESTION-MARKER is here.</div></div></div></article>
+<article class="message message--post" data-author="bob"><div class="message-inner"><div class="message-userDetails"><h4 class="message-name">bob</h4><h5 class="userTitle">Well-known member</h5></div>
+<div class="message-content"><div class="bbWrapper">setInterval is not a clock. Timers in Node can fire late, and if you compensate by adding tokens on catch-up you will over-count. Compute the tokens lazily instead: on each request, add (now - lastRefill) * rate tokens, cap at the bucket size, and store now as lastRefill. Then drift is impossible because you are always measuring elapsed wall-clock time rather than counting timer callbacks. I have been running this exact pattern in production for years across dozens of services and it has never drifted, even under heavy event-loop lag. ANSWER-MARKER one. You should also use a monotonic clock like performance.now() or process.hrtime.bigint() so that NTP adjustments cannot move time backwards and grant a burst of tokens. That subtle bug bit us once during a leap second.</div></div></div></article>
+<article class="message message--post" data-author="alice"><div class="message-inner"><div class="message-userDetails"><h4 class="message-name">alice</h4></div>
+<div class="message-content"><div class="bbWrapper">Thanks, that fixed it! FOLLOWUP-MARKER.</div></div></div></article>
+</div>
+</div>
+<footer class="p-footer">Community platform by XenForo®</footer>
+</body></html>

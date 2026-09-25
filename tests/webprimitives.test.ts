@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { charsetFromContentType, charsetFromHtml, decodeBody, decodeLocal } from "../src/charset.js";
 import { discoverFeeds, fetchFeed, parseFeed, parseSitemap } from "../src/feed.js";
@@ -323,6 +325,140 @@ describe("structured metadata", () => {
     expect(m.authors).toEqual([]);
     expect(m.jsonLd).toEqual([]);
     expect(m.title).toBeUndefined();
+  });
+
+  const ld = (o: unknown) => `<script type="application/ld+json">${JSON.stringify(o)}</script>`;
+
+  it("describes the article, not the Organization block the site header emits first", () => {
+    // The first node used to win every field: title "The Daily Planet", type
+    // Organization, canonical the homepage.
+    const m = pageMetadata(readFileSync(join(__dirname, "fixtures", "html", "news.html"), "utf8"));
+    expect(m).toMatchObject({
+      title: "City council approves new bike lanes",
+      type: "NewsArticle",
+      canonicalUrl: "https://daily.test/news/2025/bike-lanes",
+      siteName: "The Daily Planet",
+      authors: ["Lois Lane"],
+    });
+    expect(pageMetadata(readFileSync(join(__dirname, "fixtures", "html", "product.html"), "utf8"))).toMatchObject({
+      type: "Product",
+      title: "Trail Runner 3",
+      description: "A lightweight trail shoe with a grippy outsole.",
+    });
+    const site = ld({
+      "@graph": [
+        { "@type": "WebSite", name: "Site", url: "https://ex.test/" },
+        { "@type": "BlogPosting", headline: "Post" },
+      ],
+    });
+    expect(pageMetadata(site)).toMatchObject({ type: "BlogPosting", title: "Post", siteName: "Site" });
+    // Chrome alone never stands in for the page: its name is the site's.
+    const orgOnly = `${ld({ "@type": "Organization", name: "Org", url: "https://org.test/" })}<meta property="og:title" content="Story"><meta property="og:type" content="article">`;
+    expect(pageMetadata(orgOnly)).toMatchObject({ title: "Story", type: "article", siteName: "Org" });
+    expect(pageMetadata(orgOnly).canonicalUrl).toBeUndefined();
+  });
+
+  it("resolves a Yoast @graph's @id references, and never reports an @id as the canonical", () => {
+    const graph = {
+      "@context": "https://schema.org",
+      "@graph": [
+        { "@type": "Person", "@id": "https://blog.test/#/person/1", name: "Jane Doe" },
+        {
+          "@type": "Article",
+          "@id": "https://blog.test/post-slug/#article",
+          headline: "Post title",
+          author: { "@id": "https://blog.test/#/person/1" },
+          image: { "@id": "https://blog.test/post-slug/#primaryimage" },
+          publisher: { "@id": "https://blog.test/#organization" },
+          datePublished: "2025-01-02",
+        },
+        {
+          "@type": "WebPage",
+          "@id": "https://blog.test/post-slug/",
+          url: "https://blog.test/post-slug/",
+          name: "Post title - Blog",
+          description: "What the post says.",
+        },
+        { "@type": "ImageObject", "@id": "https://blog.test/post-slug/#primaryimage", url: "https://blog.test/img/post.jpg" },
+        { "@type": "Organization", "@id": "https://blog.test/#organization", name: "Blog Inc" },
+      ],
+    };
+    expect(pageMetadata(ld(graph))).toMatchObject({
+      type: "Article",
+      title: "Post title",
+      description: "What the post says.",
+      authors: ["Jane Doe"],
+      imageUrl: "https://blog.test/img/post.jpg",
+      siteName: "Blog Inc",
+      publishedAt: "2025-01-02",
+      canonicalUrl: "https://blog.test/post-slug/",
+    });
+    expect(pageMetadata(ld({ "@type": "Article", "@id": "https://x.test/p#article", headline: "T" })).canonicalUrl).toBeUndefined();
+  });
+
+  it("takes the canonical from <link rel=canonical> first, and resolves relative URLs against baseUrl", () => {
+    expect(pageMetadata('<link rel="canonical" href="https://x.test/real"><title>T</title>').canonicalUrl).toBe("https://x.test/real");
+    const html = `<link rel="canonical" href="/real"><meta property="og:url" content="https://x.test/og">${ld({ "@type": "Article", url: "https://x.test/ld" })}<meta property="og:image" content="/img/og.png">`;
+    expect(pageMetadata(html, { baseUrl: "https://x.test/some/page" })).toMatchObject({
+      canonicalUrl: "https://x.test/real",
+      imageUrl: "https://x.test/img/og.png",
+    });
+    // Without a base, a relative URL is reported as written rather than guessed.
+    expect(pageMetadata(html).canonicalUrl).toBe("/real");
+    // What resolves to no web address is not reported as one.
+    expect(pageMetadata('<link rel="canonical" href="javascript:void(0)">', { baseUrl: "https://x.test/" })).not.toHaveProperty("canonicalUrl");
+    // A news publisher's Organization subtype still names the site.
+    expect(pageMetadata(ld({ "@type": "NewsMediaOrganization", name: "The Planet" })).siteName).toBe("The Planet");
+  });
+
+  it("keeps every author a page lists in its own tag", () => {
+    const html = '<meta name="citation_author" content="Smith, J"><meta name="citation_author" content="Doe, A"><meta name="citation_author" content="Roe, B">';
+    expect(pageMetadata(html).authors).toEqual(["Smith, J", "Doe, A", "Roe, B"]);
+    // The first-wins map stays as it was for callers that read one value.
+    expect(extractMetaTags(html).get("citation_author")).toBe("Smith, J");
+  });
+
+  it("reads an image given as an ImageObject, the shape Google recommends", () => {
+    expect(pageMetadata(ld({ "@type": "Article", image: { "@type": "ImageObject", url: "https://x.test/a.jpg" } })).imageUrl).toBe("https://x.test/a.jpg");
+    expect(pageMetadata(ld({ "@type": "Article", image: [{ "@type": "ImageObject", contentUrl: "https://x.test/b.jpg" }] })).imageUrl).toBe(
+      "https://x.test/b.jpg",
+    );
+  });
+
+  it("reads meta attributes quote-aware, and not from data-* look-alikes", () => {
+    expect(extractMetaTags('<meta name="description" content="Use a -> b to map values">').get("description")).toBe("Use a -> b to map values");
+    expect(extractMetaTags('<meta data-content="tracking-id-123" name="description" content="Real description">').get("description")).toBe("Real description");
+    expect(extractMetaTags('<meta data-name="x" name="description" content="real">').get("description")).toBe("real");
+  });
+
+  it("recovers JSON-LD that browsers' lenient consumers accept", () => {
+    // A raw newline in a string, a trailing comma, a CDATA wrapper, an unquoted
+    // or parameterised type: each used to cost the whole block.
+    expect(extractJsonLd('<script type="application/ld+json">{"@type":"A","description":"line one\nline two"}</script>')).toEqual([
+      { "@type": "A", description: "line one line two" },
+    ]);
+    expect(extractJsonLd('<script type="application/ld+json">{"@type":"B","a":[1,2,],}</script>')).toEqual([{ "@type": "B", a: [1, 2] }]);
+    expect(extractJsonLd('<script type="application/ld+json">//<![CDATA[\n{"@type":"C"}\n//]]></script>')).toEqual([{ "@type": "C" }]);
+    expect(extractJsonLd('<script type=application/ld+json>{"@type":"D"}</script>')).toEqual([{ "@type": "D" }]);
+    expect(extractJsonLd('<script type="application/ld+json; charset=utf-8">{"@type":"E"}</script>')).toEqual([{ "@type": "E" }]);
+    expect(extractJsonLd('<script type="application/ld+json">[{"@graph":[{"@type":"F"},{"@type":"G"}]}]</script>')).toEqual([
+      { "@type": "F" },
+      { "@type": "G" },
+    ]);
+  });
+
+  it("scans JSON-LD in linear time on a page of unclosed script openers", () => {
+    const html = '<script type="application/ld+json">{'.repeat(50_000);
+    const started = performance.now();
+    expect(extractJsonLd(html)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  it("reads meta tags in linear time on a page of unterminated ones", () => {
+    // `<meta ` x 40k (240 KB) took 4 s: each opener read to the end of the page.
+    const started = performance.now();
+    expect(pageMetadata(`${"<meta ".repeat(40_000)}${'<meta content="x ">'.repeat(20_000)}`).authors).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });
 

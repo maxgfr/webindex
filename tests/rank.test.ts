@@ -86,7 +86,7 @@ describe("dedupeByUrl", () => {
   });
 
   it("keeps the earlier item on a score tie", () => {
-    const { items } = dedupeByUrl([src("https://a.test/p", 0.5), src("https://a.test/p?ref=y", 0.5)]);
+    const { items } = dedupeByUrl([src("https://a.test/p", 0.5), src("https://a.test/p?utm_source=y", 0.5)]);
     expect(items[0]!.url).toBe("https://a.test/p");
   });
 });

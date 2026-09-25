@@ -1,5 +1,23 @@
 import { brand, countFetch, env, envFlag, envInt } from "./brand.js";
 import { decodeBody } from "./charset.js";
+import { decodeEntities } from "./entities.js";
+import {
+  BLOCK_TAGS,
+  balancedRegions,
+  CHROME_ELEMENTS,
+  CHROME_ROLES,
+  closeTagRe,
+  dropElements,
+  dropLandmarks,
+  HIDDEN_ELEMENTS,
+  htmlAttributes,
+  INLINE_TAGS,
+  LOOSE_TAG_RE,
+  RAW_TEXT_ELEMENTS,
+  type Region,
+  TAG_RE,
+  tagName,
+} from "./html.js";
 // `nearestHeading` moved to text.ts — it is a fact about markdown, not about
 // HTTP — and is still exported from the package root, so no consumer sees it move.
 import { buildMatcher, nearestHeading } from "./text.js";
@@ -593,147 +611,40 @@ export async function httpJson(
   return last;
 }
 
-const ENTITIES: Record<string, string> = {
-  "&amp;": "&",
-  "&lt;": "<",
-  "&gt;": ">",
-  "&quot;": '"',
-  "&#39;": "'",
-  "&apos;": "'",
-  "&nbsp;": " ",
-  "&mdash;": "—",
-  "&ndash;": "–",
-  "&hellip;": "…",
-  "&copy;": "©",
-  // Typographic punctuation CMSes emit as named refs (WordPress "smart" text) —
-  // otherwise a curly quote/apostrophe leaks into the report prose verbatim.
-  "&lsquo;": "‘",
-  "&rsquo;": "’",
-  "&sbquo;": "‚",
-  "&ldquo;": "“",
-  "&rdquo;": "”",
-  "&bdquo;": "„",
-  "&bull;": "•",
-  "&middot;": "·",
-  "&laquo;": "«",
-  "&raquo;": "»",
-  "&deg;": "°",
-  "&plusmn;": "±",
-  "&times;": "×",
-  "&divide;": "÷",
-  "&frac12;": "½",
-  "&frac14;": "¼",
-  "&frac34;": "¾",
-  "&sup2;": "²",
-  "&sup3;": "³",
-  "&micro;": "µ",
-  "&trade;": "™",
-  "&reg;": "®",
-  "&sect;": "§",
-  "&para;": "¶",
-  "&dagger;": "†",
-  "&Dagger;": "‡",
-  "&prime;": "′",
-  "&Prime;": "″",
-  "&iexcl;": "¡",
-  "&iquest;": "¿",
-  "&cent;": "¢",
-  "&pound;": "£",
-  "&curren;": "¤",
-  "&yen;": "¥",
-  "&euro;": "€",
-  // Latin-1 accented letters — pervasive in non-English titles/snippets.
-  "&agrave;": "à",
-  "&aacute;": "á",
-  "&acirc;": "â",
-  "&atilde;": "ã",
-  "&auml;": "ä",
-  "&aring;": "å",
-  "&aelig;": "æ",
-  "&ccedil;": "ç",
-  "&egrave;": "è",
-  "&eacute;": "é",
-  "&ecirc;": "ê",
-  "&euml;": "ë",
-  "&igrave;": "ì",
-  "&iacute;": "í",
-  "&icirc;": "î",
-  "&iuml;": "ï",
-  "&ntilde;": "ñ",
-  "&ograve;": "ò",
-  "&oacute;": "ó",
-  "&ocirc;": "ô",
-  "&otilde;": "õ",
-  "&ouml;": "ö",
-  "&oslash;": "ø",
-  "&ugrave;": "ù",
-  "&uacute;": "ú",
-  "&ucirc;": "û",
-  "&uuml;": "ü",
-  "&yacute;": "ý",
-  "&yuml;": "ÿ",
-  "&szlig;": "ß",
-  "&Agrave;": "À",
-  "&Aacute;": "Á",
-  "&Acirc;": "Â",
-  "&Auml;": "Ä",
-  "&Aring;": "Å",
-  "&AElig;": "Æ",
-  "&Ccedil;": "Ç",
-  "&Egrave;": "È",
-  "&Eacute;": "É",
-  "&Ecirc;": "Ê",
-  "&Euml;": "Ë",
-  "&Iacute;": "Í",
-  "&Ntilde;": "Ñ",
-  "&Oacute;": "Ó",
-  "&Ouml;": "Ö",
-  "&Oslash;": "Ø",
-  "&Uacute;": "Ú",
-  "&Uuml;": "Ü",
-};
+// The decoder lives with the shared markup primitives; this is its public name.
+export { decodeEntities };
 
-// The table above, keyed by bare name, for the single-pass decoder below.
-const ENTITY_BY_NAME = new Map(Object.entries(ENTITIES).map(([k, v]) => [k.slice(1, -1), v]));
-const ENTITY_RE = /&(#[xX][0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g;
-
-/**
- * Decode the common named entities plus decimal/hex numeric references, in ONE
- * non-rescanning pass.
- *
- * The pass count is the whole design. Decoding numeric refs and then walking the
- * named table with split/join re-reads its own output, so `&amp;lt;` — which is
- * how a document writes the literal text "&lt;" — becomes "&lt;" and then "<".
- * The page said one thing and the extract says another, which for a page
- * documenting markup is most of its content. One pass cannot do that: each
- * reference is replaced exactly once, from the original text.
- *
- * Names are matched case-SENSITIVELY, because case is meaningful here: `&dagger;`
- * is † and `&Dagger;` is ‡. An unknown name is left exactly as written rather
- * than guessed at or blanked.
- */
-export function decodeEntities(s: string): string {
-  return s.replace(ENTITY_RE, (m, ref: string) => {
-    if (ref[0] === "#") {
-      const n = ref[1] === "x" || ref[1] === "X" ? Number.parseInt(ref.slice(2), 16) : Number(ref.slice(1));
-      try {
-        return Number.isFinite(n) ? String.fromCodePoint(n) : " ";
-      } catch {
-        return " "; // out of range — a space beats throwing on one bad codepoint
-      }
-    }
-    return ENTITY_BY_NAME.get(ref) ?? m;
-  });
-}
+// Formatting a title or snippet can carry — Crossref's <i>/<sub>/<scp>, a
+// search backend's highlight <span>s and <a>s — and the MathML/JATS namespaces
+// scholarly metadata nests inside it.
+const INLINE_FORMAT: ReadonlySet<string> = new Set([...INLINE_TAGS, "br", "scp"]);
+const INLINE_FORMAT_TAG = /<(\/?)([a-zA-Z][\w.-]*(?::[\w.-]+)?)(?=[\s/>])([^<>]*)>/g;
 
 // Clean a backend-provided inline field (a title or one-line snippet) that may
 // carry escaped or literal markup: decode entities FIRST (so escaped tags like
 // `&lt;i&gt;` become real tags), THEN strip the tags, then collapse whitespace.
 // Decode-then-strip handles both `R&amp;D` → `R&D` and `&lt;i&gt;P53&lt;/i&gt;`
 // → `P53` (and literal `<i>P53</i>` → `P53`).
+//
+// Only formatting markup goes, and only where it IS markup: a tag with
+// attributes, a <br>, a namespaced MathML/JATS tag, or one whose partner is
+// in the same string. Everything else in angle brackets is text — `Vec<u8>`,
+// `Promise<void>`, and MDN's own titles ("<a>: The Anchor element") all lost
+// their subject when every `<…>` was stripped.
 export function cleanInline(s: string): string {
-  return decodeEntities(String(s))
-    .replace(/<[^>]+>/g, " ")
+  const text = decodeEntities(String(s));
+  const opened = new Set<string>();
+  const closed = new Set<string>();
+  for (const m of text.matchAll(INLINE_FORMAT_TAG)) (m[1] ? closed : opened).add(m[2]!.toLowerCase());
+  return text
+    .replace(INLINE_FORMAT_TAG, (tag, slash: string, rawName: string, attrs: string) => {
+      const name = rawName.toLowerCase();
+      if (name.startsWith("mml:") || name.startsWith("jats:")) return "";
+      if (!INLINE_FORMAT.has(name)) return tag;
+      if (name === "br") return " ";
+      const markup = attrs.trim().replace(/\/$/, "") !== "" || name === "wbr" || (slash ? opened : closed).has(name);
+      return markup ? "" : tag;
+    })
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -742,26 +653,106 @@ export function cleanInline(s: string): string {
 // drop script/style/head/nav/footer, turn block tags into newlines, keep
 // heading structure as markdown markers, decode common entities, collapse
 // whitespace. Good enough to ground a report in a page's prose without a DOM.
-// Tags whose opening or closing marks a line break in the extracted text.
-const BLOCK_TAGS = new Set(["p", "div", "section", "article", "li", "tr", "td", "th", "ul", "ol", "pre", "blockquote", "table"]);
+
+// A placeholder line that carries a <pre> block past the whitespace cleanup:
+// NUL, the block's index, NUL. No page text can forge one, because htmlToText
+// first turns the page's own NULs into U+FFFD, as a browser does.
+const NUL = "\u0000";
+const PRE_SLOT = (i: number) => `\n${NUL}${i}${NUL}\n`;
+function preSlotIndex(line: string): number | undefined {
+  if (line.length < 3 || line[0] !== NUL || line[line.length - 1] !== NUL) return undefined;
+  const i = Number(line.slice(1, -1));
+  return Number.isInteger(i) ? i : undefined;
+}
+
+/**
+ * Every `<pre>…</pre>` replaced by a placeholder line, its text kept aside
+ * verbatim: indentation and blank lines are the meaning of a Python, YAML or
+ * TOML sample, and the line cleanup would destroy both. Inner tags are syntax
+ * highlighting (Prism, Pygments, GitHub's pl-* spans) and go without a trace.
+ */
+function setAsidePre(html: string, blocks: string[]): string {
+  const open = /<pre(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
+  const close = closeTagRe("pre");
+  let out = "";
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = open.exec(html))) {
+    close.lastIndex = open.lastIndex;
+    const c = close.exec(html);
+    if (!c) break; // no </pre> anywhere after: the tag pass handles the rest
+    const inner = html.slice(open.lastIndex, c.index);
+    const text = decodeEntities(inner.replace(/<br\s*\/?>/gi, "\n").replace(LOOSE_TAG_RE, ""))
+      .replace(/\r\n?/g, "\n")
+      .replace(/^\n/, "") // the newline right after <pre> is not content, per the spec
+      .trimEnd();
+    blocks.push(text);
+    out += html.slice(last, m.index) + PRE_SLOT(blocks.length - 1);
+    last = open.lastIndex = c.index + c[0].length;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
+
+// A heading ends at its own close or at the next heading tag of ANY level —
+// where a browser ends it too — so a stray </h3> after <h2> cannot drag the
+// article into the heading line.
+const HEADING_OPEN = /<h([1-6])(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
+const HEADING_BOUNDARY = /<\/h[1-6]\s*>|<h[1-6](?=[\s/>])/gi;
+// A permalink anchor whose whole text is a glyph (Sphinx's ¶ or #, or GitHub's
+// icon-only anchor once its SVG is gone). Not part of the title.
+const PERMALINK = /<a\b[^<>]*>\s*(?:(?:¶|#|§|🔗|&para;|&#182;|&#x[bB]6;|&sect;)\s*)?<\/a\s*>/gi;
+
+/**
+ * Each closed heading as ONE line, `## text`.
+ *
+ * Emitting the marker at the opening tag and letting the text follow put the
+ * marker on a line of its own whenever a template pretty-printed the heading,
+ * and `nearestHeading` — which needs `## text` — then lost the section title of
+ * every excerpt below it. An unclosed heading is left to the tag pass.
+ */
+function flattenHeadings(html: string): string {
+  let out = "";
+  let last = 0;
+  let m: RegExpExecArray | null;
+  HEADING_OPEN.lastIndex = 0;
+  while ((m = HEADING_OPEN.exec(html))) {
+    HEADING_BOUNDARY.lastIndex = HEADING_OPEN.lastIndex;
+    const b = HEADING_BOUNDARY.exec(html);
+    if (!b) break; // no heading tag of any kind after this one
+    if (b[0][1] !== "/") continue; // the next heading opens first: unclosed
+    const text = html
+      .slice(HEADING_OPEN.lastIndex, b.index)
+      .replace(PERMALINK, "")
+      .replace(TAG_RE, (tag) => (INLINE_TAGS.has(tagName(tag)) ? "" : " "))
+      .replace(/\s+/g, " ")
+      .trim();
+    out += html.slice(last, m.index) + (text ? `\n${"#".repeat(Number(m[1]))} ${text}\n` : "\n");
+    last = HEADING_OPEN.lastIndex = b.index + b[0].length;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
 
 export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): string {
-  let s = html;
-  // Comments and raw-text blocks go in ONE left-to-right pass, so whichever
-  // opens first owns the text up to its own close. Two separate passes get one
-  // of the two orders wrong: comments first lets a script containing "<!--"
-  // swallow the prose after it; blocks first lets "<!-- <script> -->" pair with
-  // a real </script> further down and delete the article in between.
   // Whole-page callers need navigation and footer text even without a main region.
-  const hidden = opts.fullPage
-    ? /<!--[\s\S]*?-->|<(script|style|noscript|head|svg|template)\b[\s\S]*?<\/\1\s*>/gi
-    : /<!--[\s\S]*?-->|<(script|style|noscript|head|nav|footer|svg|template)\b[\s\S]*?<\/\1\s*>/gi;
-  s = s.replace(hidden, " ");
-  // A quoted `>` belongs to an attribute, not the end of a tag.
-  s = s.replace(/<[a-zA-Z!/?][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g, (tag) => {
-    const name = /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
+  const hidden = opts.fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
+  let s = dropElements(html.includes(NUL) ? html.split(NUL).join("\uFFFD") : html, hidden, RAW_TEXT_ELEMENTS);
+  // The same chrome marked up as ARIA landmarks: a breadcrumb, a wiki's table
+  // of contents, a docs theme's prev/next bar.
+  if (!opts.fullPage) s = dropLandmarks(s, CHROME_ROLES);
+  const pre: string[] = [];
+  s = flattenHeadings(setAsidePre(s, pre));
+  let prevEnd = -1;
+  let prevClosed = false;
+  s = s.replace(TAG_RE, (tag: string, at: number) => {
+    const closing = tag[1] === "/";
+    // Two elements back to back (`</a><a>`): a stylesheet almost always spaces
+    // them apart — tag lists, nav links, breadcrumbs — so they keep a space.
+    const adjacent = at === prevEnd && prevClosed && !closing;
+    prevEnd = at + tag.length;
+    prevClosed = closing;
+    const name = tagName(tag);
     if (/^h[1-6]$/.test(name)) {
-      return tag.startsWith("</") ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
+      return closing ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
     }
     // Break on OPENING block tags too, not only closing ones. Unclosed `<li>` and
     // `<td>` are valid HTML and extremely common, and with closing tags alone a
@@ -769,49 +760,110 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
     // single sentence to anything scoring lines against a question. Headings
     // return above so their markdown markers are never doubled.
     if (BLOCK_TAGS.has(name) || name === "br" || name === "hr") return "\n";
+    if (INLINE_TAGS.has(name)) return adjacent ? " " : "";
     return " ";
   });
   // Malformed attributes must not leave tag markup in the extracted prose.
-  s = s.replace(/<[a-zA-Z!/?][^>]*>/g, " ");
+  s = s.replace(LOOSE_TAG_RE, " ");
   s = decodeEntities(s);
   s = s.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n");
   return s
     .split("\n")
-    .map((l) => l.trim())
+    .map((l) => {
+      const t = l.trim();
+      const slot = preSlotIndex(t);
+      return slot === undefined ? t : (pre[slot] ?? t);
+    })
     .filter((l) => l.length > 0)
     .join("\n");
 }
 
-// Best-effort page title from an HTML document.
-export function htmlTitle(html: string): string | undefined {
-  const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
-  if (!m) return undefined;
-  const t = decodeEntities(m[1]!.replace(/\s+/g, " ").trim());
-  return t || undefined;
+// Never where a page names itself: an icon's <svg><title> ("Search icon")
+// was the title of every SPA shell whose <head> had none.
+const NOT_TITLE: readonly string[] = ["script", "style", "template", "svg"];
+
+/**
+ * The text of the first `<name>` element in `html`, markup out, entities
+ * decoded, whitespace collapsed. The close is searched once, forward from the
+ * opener, so an unclosed one costs one pass rather than a lazy regex's pass
+ * per opener.
+ */
+function firstElementText(html: string, name: string): string | undefined {
+  const open = new RegExp(`<${name}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>`, "i").exec(html);
+  if (!open) return undefined;
+  const close = closeTagRe(name);
+  close.lastIndex = open.index + open[0].length;
+  const c = close.exec(html);
+  if (!c) return undefined;
+  const inner = html.slice(open.index + open[0].length, c.index).replace(TAG_RE, (tag) => (INLINE_TAGS.has(tagName(tag)) ? "" : " "));
+  return decodeEntities(inner).replace(/\s+/g, " ").trim() || undefined;
 }
 
-function htmlAttributes(tag: string): Map<string, string> {
-  const attrs = new Map<string, string>();
-  for (const m of tag.matchAll(/([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) {
-    const name = m[1]!.toLowerCase();
-    if (!attrs.has(name)) attrs.set(name, m[2] ?? m[3] ?? m[4] ?? "");
+// Best-effort page title from an HTML document: its `<title>`.
+export function htmlTitle(html: string): string | undefined {
+  return firstElementText(dropElements(html, NOT_TITLE), "title");
+}
+
+// The first `<meta>` content among `keys` (name or property, lower-case), by
+// the order of `keys` rather than of the document.
+function metaContent(html: string, keys: readonly string[]): string | undefined {
+  const found = new Map<string, string>();
+  for (const m of html.matchAll(/<meta(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi)) {
+    const attrs = htmlAttributes(m[0]);
+    const key = (attrs.get("property") ?? attrs.get("name"))?.toLowerCase();
+    const value = attrs.get("content")?.trim();
+    if (key && value && keys.includes(key) && !found.has(key)) found.set(key, decodeEntities(value).replace(/\s+/g, " ").trim());
   }
-  return attrs;
+  return keys.map((k) => found.get(k)).find(Boolean);
+}
+
+/**
+ * What to call a fetched page: its `<title>`, else what it tells social cards
+ * (`og:title`), else its first `<h1>`. A title-less page — an SPA shell, a
+ * generated doc — used to report none, although it names itself plainly.
+ */
+function pageTitle(html: string): string | undefined {
+  const clean = dropElements(html, NOT_TITLE);
+  return firstElementText(clean, "title") ?? metaContent(clean, ["og:title", "twitter:title"]) ?? firstElementText(clean, "h1");
 }
 
 // The URL a page declares for ITSELF — `<link rel="canonical">`, else the
 // OpenGraph `og:url`. Only meaningful when the URL we fetched is not itself
 // citable (an API endpoint, a redirector): the page names its own address, so
 // we don't have to guess one. Extraction strips <head>, hence reading it here.
+//
+// Read up to the end of <head>, wherever that is, with scripts, styles and
+// comments out of the way. A fixed window missed the canonical of every page
+// that inlines a large critical stylesheet first, as Next and Gatsby do.
 export function htmlCanonicalUrl(html: string): string | undefined {
-  const head = html.slice(0, 60_000); // <head> is at the top; don't scan a megabyte of body
-  const canonical = /<link\b[^>]*\brel=["']?canonical["']?[^>]*>/i.exec(head)?.[0];
-  const og = /<meta\b[^>]*\bproperty=["']?og:url["']?[^>]*>/i.exec(head)?.[0];
-  for (const tag of [canonical, og]) {
-    const href = tag && /\b(?:href|content)=["']([^"']+)["']/i.exec(tag)?.[1];
-    if (href?.trim()) return decodeEntities(href.trim());
+  const clean = dropElements(html, ["script", "style", "template"]);
+  const end = clean.search(/<\/head\s*>|<body(?=[\s/>])/i);
+  const head = end < 0 ? clean : clean.slice(0, end);
+  let og: string | undefined;
+  for (const m of head.matchAll(/<(link|meta)(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi)) {
+    const attrs = htmlAttributes(m[0]);
+    if (m[1]!.toLowerCase() === "link") {
+      const href = attrs.get("href")?.trim();
+      if (href && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("canonical")) return decodeEntities(href);
+    } else if (og === undefined && attrs.get("property")?.toLowerCase() === "og:url") {
+      og = attrs.get("content")?.trim() || undefined;
+    }
   }
-  return undefined;
+  return og && decodeEntities(og);
+}
+
+// A declared canonical made absolute against the address the page came from.
+// A relative one ("/blog/post-slug") is legal and common, and was reported as
+// written — which no citation check accepts. Anything that does not resolve
+// to http(s) is not an address to cite.
+function absoluteCanonical(href: string | undefined, base: string): string | undefined {
+  if (!href) return undefined;
+  try {
+    const u = new URL(href, base);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.href : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // Readability-lite: isolate the main content region of an HTML page so the
@@ -819,72 +871,121 @@ export function htmlCanonicalUrl(html: string): string | undefined {
 // Dependency-free and CONSERVATIVE — when it can't confidently find a main
 // region (or that region looks too small versus the whole page) it returns the
 // input unchanged, so we never extract LESS than the previous behaviour. The
-// strongest matching tier wins: <main>/<article> first, then common content
-// containers. (Regex can't track nested tags; the size gate below catches a
-// container truncated at its first nested close tag and falls back.)
-// Given the index just past a `<tag …>` opening, return the inner HTML up to
-// that tag's MATCHING close, counting nested same-name opens so a nested block
-// doesn't close the container early. Returns null when the tag never closes.
-// Regex alone can't balance nested tags — this is why the previous lazy
-// `([\s\S]*?)</tag>` truncated a content div at its first nested `</div>`.
-function sliceToMatchingClose(html: string, start: number, tag: string): string | null {
-  const re = new RegExp(`<${tag}\\b|</${tag}\\s*>`, "gi");
-  re.lastIndex = start;
-  let depth = 1;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html))) {
-    if (m[0]![1] === "/") {
-      if (--depth === 0) return html.slice(start, m.index);
-    } else {
-      depth++;
-    }
+// strongest matching tier wins: <main> or role="main", then <article>, then
+// common content containers.
+
+// Length of the text a reader would see: tags out, whitespace collapsed.
+const visibleLength = (h: string) =>
+  h
+    .replace(/<[^<>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim().length;
+
+// The ARIA landmark for the main region. Sphinx/Read the Docs, MediaWiki,
+// Discourse and many CMS themes mark it this way instead of with <main>.
+const ROLE_MAIN = /\srole\s*=\s*["']?main(?=["'\s/>])/i;
+// The element names that carry it on this page, so each can be balanced by name.
+const ROLE_MAIN_TAG = /<([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>])[^<>]*\srole\s*=\s*["']?main(?=["'\s/>])/g;
+
+// Words in an id or class that mark a content container, and words that mark
+// the chrome around one. `entry-content` and `main-outlet` are content;
+// `main-nav` and `sidebar-content` are not, though a bare `\bmain\b` or
+// `\bcontent\b` test matched both.
+const CONTENT_WORDS = new Set(["content", "article", "post", "entry", "story", "main", "prose"]);
+const CHROME_WORDS = new Set([
+  "nav",
+  "navbar",
+  "navigation",
+  "menu",
+  "header",
+  "footer",
+  "sidebar",
+  "breadcrumb",
+  "breadcrumbs",
+  "banner",
+  "cookie",
+  "consent",
+  "comment",
+  "comments",
+  "related",
+  "share",
+  "social",
+  "toolbar",
+  "widget",
+  "meta",
+  "ad",
+  "ads",
+  "promo",
+]);
+
+function isContentContainer(open: string): boolean {
+  const attrs = htmlAttributes(open);
+  for (const token of `${attrs.get("id") ?? ""} ${attrs.get("class") ?? ""}`.toLowerCase().split(/\s+/)) {
+    if (token === "markdown-body") return true;
+    const words = token.split(/\W+/);
+    if (words.some((w) => CONTENT_WORDS.has(w)) && !words.some((w) => CHROME_WORDS.has(w))) return true;
   }
-  return null;
+  return false;
 }
 
+// What makes two candidates the same KIND of block: tag name and first class,
+// digits ignored so WordPress's `post-123` and `post-456` agree.
+function blockKind(open: string): string {
+  const tag = /^<([a-zA-Z][a-zA-Z0-9-]*)/.exec(open)?.[1]?.toLowerCase() ?? "";
+  const firstClass = (htmlAttributes(open).get("class") ?? "").trim().split(/\s+/)[0]!;
+  return `${tag} ${firstClass.replace(/\d+/g, "0")}`;
+}
+
+/**
+ * The main content region of `html`, or `html` itself when none is found with
+ * confidence.
+ *
+ * Candidates are found and measured on the page WITHOUT its comments, scripts,
+ * styles, templates and SVGs, and a region is returned from that cleaned page.
+ * Inline scripts count as characters but are not text: a sidebar holding a chat
+ * widget's JSON outscored the article, and a `__NEXT_DATA__` blob outside
+ * `<main>` inflated the page until the size gate refused the real region.
+ */
 export function extractMainHtml(html: string): string {
-  const visible = (h: string) =>
-    h
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim().length;
-  // Opening-tag matchers, strongest tier first. Each captured group 1 is the
-  // container tag name; the body is recovered by balanced scan (not a lazy
-  // regex) so a nested block never truncates the extraction.
-  const tiers: RegExp[] = [
-    /<(main)\b[^>]*>/gi,
-    /<(article)\b[^>]*>/gi,
-    /<(div|section)\b[^>]*\b(?:id|class)="[^"]*\b(?:content|article|post|entry|story|markdown-body|main|prose)\b[^"]*"[^>]*>/gi,
+  const clean = dropElements(html, ["script", "style", "template", "svg"]);
+  const roleMainTags = new Set(["main"]);
+  for (const m of clean.matchAll(ROLE_MAIN_TAG)) roleMainTags.add(m[1]!.toLowerCase());
+  // Strongest tier first; the first tier with a candidate decides.
+  const tiers: { tags: string[]; isCandidate: (open: string) => boolean }[] = [
+    { tags: [...roleMainTags], isCandidate: (open) => /^<main[\s/>]/i.test(open) || ROLE_MAIN.test(open) },
+    { tags: ["article"], isCandidate: () => true },
+    { tags: ["div", "section"], isCandidate: isContentContainer },
   ];
-  let candidates: string[] = [];
-  for (const re of tiers) {
-    const found: string[] = [];
-    re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(html))) {
-      const inner = sliceToMatchingClose(html, re.lastIndex, m[1]!.toLowerCase());
-      if (inner !== null) found.push(inner);
+  for (const tier of tiers) {
+    const regions = tier.tags.flatMap((tag) => balancedRegions(clean, tag, tier.isCandidate)).sort((a, b) => a.start - b.start);
+    if (!regions.length) continue;
+    // Only an outermost candidate can win — a nested one never has more text
+    // than the candidate around it — so only those are measured. They are
+    // disjoint, which keeps the measuring linear however deep the nesting goes.
+    const outer: (Region & { len: number })[] = [];
+    let reach = -1;
+    for (const r of regions) {
+      if (r.start < reach) continue;
+      reach = r.end;
+      outer.push({ ...r, len: visibleLength(clean.slice(r.start, r.end)) });
     }
-    if (found.length) {
-      candidates = found; // use the strongest tier that matched
-      break;
-    }
+    let best = outer[0]!;
+    for (const r of outer) if (r.len > best.len) best = r;
+    // Repeated siblings — the posts of a thread, the entries of a blog index —
+    // are the content between them. Keeping only the longest dropped the rest
+    // of the thread, very often the question itself. A story beside its
+    // comments is two kinds of block and still keeps just the story.
+    const kind = blockKind(best.open);
+    const kept = outer.filter((r) => r === best || blockKind(r.open) === kind);
+    const keptLen = kept.reduce((n, r) => n + r.len, 0);
+    // Size gate: a tiny region (short absolutely AND a small share of the page)
+    // is probably a wrong match — fall back to the full document. The whole
+    // page is only measured when the region is short enough for it to matter.
+    if (keptLen < 500 && keptLen < visibleLength(clean) * 0.3) return html;
+    if (kept.length === 1) return clean.slice(best.start, best.end);
+    return kept.map((r) => `<div>${clean.slice(r.start, r.end)}</div>`).join("\n");
   }
-  if (!candidates.length) return html;
-  let best = candidates[0]!;
-  let bestLen = visible(best);
-  for (const c of candidates.slice(1)) {
-    const len = visible(c);
-    if (len > bestLen) {
-      best = c;
-      bestLen = len;
-    }
-  }
-  // Size gate: a tiny region (short absolutely AND a small share of the page) is
-  // probably a truncated/wrong match — fall back to the full document.
-  const fullLen = visible(html);
-  if (bestLen < 500 && bestLen < fullLen * 0.3) return html;
-  return best;
+  return html;
 }
 
 export const PDF_URL_RE = /\.pdf($|[?#])/i;
@@ -1187,8 +1288,8 @@ export async function fetchAndExtract(
   const isHtml = HTML_TYPE_RE.test(mime) || (ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(body));
   const stripped = isHtml ? htmlToText(opts.fullPage ? body : extractMainHtml(body), opts) : body;
   const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped) : { text: stripped, dropped: 0 };
-  const title = isHtml ? htmlTitle(body) : undefined;
-  const canonical = isHtml ? htmlCanonicalUrl(body) : undefined;
+  const title = isHtml ? pageTitle(body) : undefined;
+  const canonical = isHtml ? absoluteCanonical(htmlCanonicalUrl(body), res.url) : undefined;
   const metaDescription = isHtml ? metaDescriptionOf(body) : undefined;
   const notDocument = answeredHtml
     ? `${url} looked like ${claimsPdf ? "a PDF" : "an office document"} but the server returned HTML (a login wall or landing page?), so it was read as a web page.`
@@ -1245,27 +1346,48 @@ export async function rescueViaWayback(
 // Consent walls, "enable JavaScript" shells and anti-bot interstitials extract
 // to a short block of boilerplate that would otherwise pass as a source's full
 // text. Flag such an extraction (returning a short reason) so the gatherer keeps
-// only the search snippet instead. BOTH conditions are required — a genuine
-// article ABOUT cookies or CAPTCHAs is long, so the length gate never trips it.
-const JUNK_PATTERNS: [RegExp, string][] = [
-  [/\b(accept|manage)\s+(all\s+)?cookies\b/i, "cookie/consent wall"],
-  [/\bwe use cookies\b/i, "cookie/consent wall"],
-  [/\bcookie (policy|settings|consent|preferences)\b/i, "cookie/consent wall"],
-  [/\b(please )?enable javascript\b/i, "JavaScript-required shell"],
-  [/\bjavascript is (disabled|required|not enabled)\b/i, "JavaScript-required shell"],
-  [/\bverify (you are|you're|you are a)\b|\bare you a human\b|\bhuman verification\b/i, "anti-bot interstitial"],
-  [/\baccess denied\b|\battention required\b.*cloudflare|\bunusual traffic\b|\bare you a robot\b/i, "anti-bot interstitial"],
-  [/\benable cookies\b|\bchecking your browser\b/i, "anti-bot interstitial"],
+// only the search snippet instead. A genuine article ABOUT cookies or CAPTCHAs
+// is long, so the length gate never trips it.
+//
+// Short is not enough, though, and neither is one loose phrase. "Access denied"
+// is the title of every database-error help page, and "verify you are on Node
+// 18" is an install step: a phrase alone flagged them, and rescueViaWayback
+// threw the good archived page away. So a pattern is STRONG — worded as only
+// the wall itself words it — or weak, and a page is flagged on a strong one
+// plus either a second signal or almost nothing else on the page.
+const JUNK_PATTERNS: [RegExp, string, "strong" | "weak"][] = [
+  [/\b(accept|manage)\s+(all\s+)?cookies\b/i, "cookie/consent wall", "strong"],
+  [/\bwe use cookies\b/i, "cookie/consent wall", "strong"],
+  [/\bcookie (policy|settings|consent|preferences)\b/i, "cookie/consent wall", "weak"],
+  [/\b(accept|reject|allow|decline) all\b/i, "cookie/consent wall", "weak"],
+  [/\b(please )?enable javascript\b/i, "JavaScript-required shell", "strong"],
+  [/\bjavascript is (disabled|required|not enabled)\b/i, "JavaScript-required shell", "strong"],
+  [
+    /\bverify(ing)? (that )?(you are|you're) (a )?(human|not a (ro)?bot)\b|\bare you a (human|robot)\b|\bhuman verification\b/i,
+    "anti-bot interstitial",
+    "strong",
+  ],
+  [/\battention required\b.*cloudflare|\bunusual traffic from your (computer )?network\b|\bchecking your browser\b/i, "anti-bot interstitial", "strong"],
+  // Akamai's and Cloudflare's denials carry an incident reference; without one
+  // the phrase is as likely a permission-error article.
+  [/\baccess denied\b[\s\S]{0,300}?(\breference #|\bray id\b|\bpermission to access\b)/i, "anti-bot interstitial", "strong"],
+  [/\baccess denied\b|\benable cookies\b/i, "anti-bot interstitial", "weak"],
   // FR / DE (the locale layer targets non-EN markets)
-  [/\bnous utilisons des cookies\b|\baccepter (tous )?les cookies\b|\bactiver javascript\b/i, "cookie/consent wall (fr)"],
-  [/\bwir verwenden cookies\b|\bcookies akzeptieren\b|\bjavascript aktivieren\b/i, "cookie/consent wall (de)"],
+  [/\bnous utilisons des cookies\b|\baccepter (tous )?les cookies\b|\bactiver javascript\b/i, "cookie/consent wall (fr)", "strong"],
+  [/\bwir verwenden cookies\b|\bcookies akzeptieren\b|\bjavascript aktivieren\b/i, "cookie/consent wall (de)", "strong"],
 ];
 export function looksLikeJunkExtraction(text: string): string | undefined {
   const t = text.trim();
   if (t.length >= 2000) return undefined; // a real article is long — never flag it
   const head = t.slice(0, 800);
-  for (const [re, reason] of JUNK_PATTERNS) if (re.test(head)) return reason;
-  return undefined;
+  const hits = JUNK_PATTERNS.filter(([re]) => re.test(head));
+  const strong = hits.find(([, , kind]) => kind === "strong");
+  if (!strong) return undefined;
+  if (hits.length >= 2) return strong[1];
+  // A strong phrase alone decides only on a page with nothing else to it:
+  // fewer than three lines of prose that no pattern accounts for.
+  const prose = t.split("\n").filter((l) => l.trim().length >= 60 && !JUNK_PATTERNS.some(([re]) => re.test(l))).length;
+  return prose < 3 ? strong[1] : undefined;
 }
 
 // Consent boilerplate that SURVIVES htmlToText — it lives in body <div>/<dialog>
@@ -1289,6 +1411,12 @@ const CONSENT_PATTERNS = [
   /tracking technolog/i,
   /advertising partners/i,
   /legitimate interest/i,
+  // FR / DE: the locale layer targets those markets, and their consent
+  // managers (Didomi, Usercentrics, OneTrust) speak the local language.
+  /\bconsentement\b/i,
+  /\brgpd\b/i,
+  /\beinwilligung\b/i,
+  /\bdsgvo\b/i,
 ];
 
 // A short line needs a consent action or notice too — merely mentioning
@@ -1301,19 +1429,50 @@ const CONSENT_ACTIONS = [
   /\b(?:learn more|privacy policy|cookie policy)\b/i,
 ];
 
+// The banner speaking about ITSELF: first person using or storing cookies, or
+// the "by clicking / by continuing" clause. An article about cookies is written
+// in the third person ("a site must obtain consent"), which is what lets a long
+// line be judged at all. The gap is bounded so the scan stays linear on a line
+// full of "we".
+const BANNER_VOICE =
+  /\b(?:we|us|our)\b[^.]{0,60}?\b(?:cookies?|partners|consent|tracking)\b|\bby (?:clicking|continuing|using|browsing)\b|\bthis (?:site|website) uses cookies\b|\bnous (?:utilisons|et nos partenaires)\b|\ben cliquant sur\b|\bwir (?:verwenden|nutzen|setzen|und unsere partner)\b|\bmit (?:dem )?klick auf\b/i;
+
+// FR / DE button labels, matched as the WHOLE line. Only multi-word labels: a
+// bare "Einstellungen" or "Accepter" is just as likely a heading in the article.
+const BUTTON_LABEL =
+  /^(?:tout (?:accepter|refuser)|(?:accepter|refuser) tout|accepter et (?:fermer|continuer)|continuer sans accepter|(?:param[ée]trer|g[ée]rer|personnaliser|accepter|refuser) (?:les|mes) cookies|alle (?:cookies )?(?:akzeptieren|ablehnen)|nur (?:notwendige|essenzielle)(?: cookies)?|cookie-einstellungen|einstellungen verwalten|akzeptieren und schlie(?:ß|ss)en)$/i;
+
+// A line this short is a button or a label, not a sentence anyone would cite.
+const BUTTON_LENGTH = 40;
+// Banner voice is only trusted this far: a paragraph longer than a banner's own
+// notice is more likely prose that happens to use "we".
+const NOTICE_LENGTH = 400;
+
 /**
  * Drop consent-banner lines from extracted text, and say how many went.
  *
- * Deliberately conservative: a line goes only on two distinct pattern hits, or
- * on one hit when the line is short and reads as a consent action or notice
- * ("Accept all cookies"). Prose that merely mentions cookies once stays —
- * this must never quietly delete the paragraph someone wanted to cite.
+ * Deliberately conservative, because this must never quietly delete the
+ * paragraph someone wanted to cite. A line goes when it is:
+ *
+ * - a known FR/DE button label, the whole line;
+ * - button-length and either names two consent topics ("Accept all cookies")
+ *   or names one next to a consent action ("Cookie settings");
+ * - a notice in the banner's own voice ("We use cookies…", "By clicking…")
+ *   that names a consent topic.
+ *
+ * Counting topic words alone is not enough on a longer line: an article about
+ * the GDPR names two of them per sentence, and a recipe says "allow the cookies
+ * to cool".
  */
 export function stripConsentBoilerplate(text: string): { text: string; dropped: number } {
   let dropped = 0;
   const kept = text.split("\n").filter((line) => {
-    const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(line) ? 1 : 0), 0);
-    const isBanner = hits >= 2 || (hits === 1 && line.trim().length < 120 && CONSENT_ACTIONS.some((re) => re.test(line)));
+    const t = line.trim();
+    const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(t) ? 1 : 0), 0);
+    const isBanner =
+      BUTTON_LABEL.test(t) ||
+      (hits >= 1 && t.length <= BUTTON_LENGTH && (hits >= 2 || CONSENT_ACTIONS.some((re) => re.test(t)))) ||
+      (hits >= 1 && t.length < NOTICE_LENGTH && BANNER_VOICE.test(t));
     if (isBanner) dropped++;
     return !isBanner;
   });

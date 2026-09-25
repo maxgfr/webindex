@@ -15,6 +15,8 @@ import {
   parseRetryAfter,
   stripConsentBoilerplate,
   metaDescriptionOf,
+  htmlCanonicalUrl,
+  cleanInline,
 } from "../src/fetch.js";
 import { installFetchMock, routes } from "./fetchmock.js";
 
@@ -128,11 +130,135 @@ describe("htmlToText", () => {
     expect(text).not.toContain("var x");
     expect(text).not.toContain("copyright");
   });
+
+  it("keeps a pretty-printed heading's text on its marker line", () => {
+    // Templated HTML puts the text on its own line inside <hN>. The marker used
+    // to land alone ("##"), and nearestHeading — which needs "## text" — lost
+    // the section title for every excerpt under it.
+    expect(htmlToText("<h2>\n      What happens next\n  </h2><p>May.</p>")).toBe("## What happens next\nMay.");
+    expect(htmlToText("<h2>\n  Multi\n  line\n</h2>")).toBe("## Multi line");
+    expect(htmlToText('<h1><span class="mw-page-title-main">Water</span></h1>')).toBe("# Water");
+    expect(htmlToText("<h3>Setup <div>guide</div></h3>")).toBe("### Setup guide");
+  });
+
+  it("drops a permalink glyph from a heading, but not a heading's own '#'", () => {
+    expect(htmlToText('<h2>Options<a class="headerlink" href="#options" title="Permalink">¶</a></h2>')).toBe("## Options");
+    expect(htmlToText('<h2>Options<a class="headerlink" href="#options">#</a></h2>')).toBe("## Options");
+    expect(htmlToText("<h2>Learn C#</h2>")).toBe("## Learn C#");
+  });
+
+  it("ends a heading at the next heading tag, as a browser does", () => {
+    // A mismatched close must not pull the article into the heading line.
+    expect(htmlToText("<h2>Title</h3><p>Body text.</p><h2>Next</h2>")).toBe("## Title\nBody text.\n## Next");
+    expect(htmlToText("<h2>Unclosed<p>Body text.</p>")).toBe("## Unclosed\nBody text.");
+  });
+
+  it("adds no whitespace around inline elements", () => {
+    expect(htmlToText("<p>un<em>believ</em>able</p>")).toBe("unbelievable");
+    expect(htmlToText("<p>H<sub>2</sub>O and g/cm<sup>3</sup></p>")).toBe("H2O and g/cm3");
+    expect(htmlToText('<p>By <a href="/lois">Lois Lane</a>, <time>March 4</time>.</p>')).toBe("By Lois Lane, March 4.");
+    expect(htmlToText("<p><a href='/e'>Earth</a>'s hydrosphere</p>")).toBe("Earth's hydrosphere");
+  });
+
+  it("still separates adjacent inline elements and non-inline tags", () => {
+    expect(htmlToText('<a class="topic-tag">widgets</a><a class="topic-tag">ui</a>')).toBe("widgets ui");
+    expect(htmlToText("<span>Home</span><span>About</span>")).toBe("Home About");
+    expect(htmlToText('left<img src="x.png">right')).toBe("left right");
+  });
+
+  it("keeps <pre> blocks verbatim: indentation, blank lines, highlighted tokens", () => {
+    expect(htmlToText("<pre><code>def f():\n    return 1\n\n\n\nx = 2</code></pre>")).toBe("def f():\n    return 1\n\n\n\nx = 2");
+    const toml =
+      '<p>Example:</p><pre><span class="k">[widget]</span>\n<span class="n">timeout</span> = 60\n\n<span class="k">[widget.proxy]</span>\n<span class="w">    </span><span class="n">url</span> = <span class="s">&quot;http://proxy:3128&quot;</span>\n</pre><p>After.</p>';
+    expect(htmlToText(toml)).toBe('Example:\n[widget]\ntimeout = 60\n\n[widget.proxy]\n    url = "http://proxy:3128"\nAfter.');
+    expect(htmlToText("<pre>\nfirst line<br>second &lt;b&gt;</pre>")).toBe("first line\nsecond <b>");
+    // The page's own NULs cannot pose as the placeholder a <pre> block rides in.
+    expect(htmlToText("<pre>code</pre><p>\u00000\u0000</p>")).toBe("code\n�0�");
+  });
+
+  it("drops an unclosed script or style to the end of the page, as a browser does", () => {
+    // A page cut by the response cap inside a __NEXT_DATA__ blob used to hand
+    // back megabytes of raw JSON as prose.
+    expect(htmlToText("<p>before</p><script>var x = '<p>not</p>';")).toBe("before");
+    expect(htmlToText("<p>before</p><style>.a{content:'<p>not</p>'}")).toBe("before");
+  });
+
+  it("puts definition-list terms and descriptions on their own lines", () => {
+    expect(htmlToText("<dl><dt>Term</dt><dd>Definition</dd><dt>T2</dt><dd>D2</dd></dl>")).toBe("Term\nDefinition\nT2\nD2");
+    expect(htmlToText("<figure><img src=x><figcaption>A cyclist</figcaption></figure>Photo: J. Olsen")).toBe("A cyclist\nPhoto: J. Olsen");
+  });
+
+  it("drops <select> option lists, which are form widgets rather than prose", () => {
+    const html = "<label>Ship to</label><select><option>Afghanistan</option><option>Albania</option></select><p>Free returns.</p>";
+    expect(htmlToText(html)).toBe("Ship to\nFree returns.");
+    expect(htmlToText(html, { fullPage: true })).toBe("Ship to\nFree returns.");
+  });
+
+  it("drops navigation, banner and contentinfo landmarks as it drops <nav> and <footer>", () => {
+    // A breadcrumb, a wiki's table of contents, a docs theme's prev/next bar:
+    // marked up as ARIA landmarks rather than <nav>, and read as prose.
+    const html =
+      '<div role="banner"><a>Site</a></div><div class="crumbs" role="navigation"><ul><li><a>Docs</a> »</li><li><div>Configuration</div></li></ul></div><p>Body text.</p><div role="contentinfo">© Site</div>';
+    expect(htmlToText(html)).toBe("Body text.");
+    expect(htmlToText(html, { fullPage: true })).toContain("Configuration");
+    // An article's own <header> and a role on something else stay.
+    expect(htmlToText('<article><header><h1>Title</h1></header><p role="note">Kept.</p></article>')).toBe("# Title\nKept.");
+  });
 });
 
 describe("decodeEntities", () => {
   it("decodes named, decimal and hex references", () => {
     expect(decodeEntities("a &amp; b &#39;x&#39; &#x27;y&#x27;")).toBe("a & b 'x' 'y'");
+  });
+
+  it("reads numeric references 128–159 as Windows-1252, as the HTML spec does", () => {
+    // Word exports and legacy CMSes write their curly quotes and dashes this way;
+    // taken literally they are invisible C1 controls and the punctuation vanishes.
+    expect(decodeEntities("don&#146;t")).toBe("don’t");
+    expect(decodeEntities("&#147;quoted&#148; 1&#150;2 &#128;5 &#x85;")).toBe("“quoted” 1–2 €5 …");
+    // The five cp1252 leaves undefined stay what they are.
+    expect(decodeEntities("&#129;")).toBe("\u0081");
+  });
+
+  it("turns NUL, surrogates and out-of-range references into U+FFFD", () => {
+    expect(decodeEntities("a&#0;b")).toBe("a�b");
+    expect(decodeEntities("&#xD800;&#xDFFF;")).toBe("��");
+    expect(decodeEntities("&#99999999;&#x110000;&#99999999999999999999999;")).toBe("���");
+  });
+
+  it("knows HTML's named references beyond the common ones", () => {
+    expect(decodeEntities("Le c&oelig;ur, &OElig;uvre, na&iuml;f")).toBe("Le cœur, Œuvre, naïf");
+    expect(decodeEntities("&alpha; &beta; &Omega; &epsilon;")).toBe("α β Ω ε");
+    expect(decodeEntities("x &le; y &ge; z &ne; &minus;1 &infin; &sum; &radic;")).toBe("x ≤ y ≥ z ≠ −1 ∞ ∑ √");
+    expect(decodeEntities("&larr; &rarr; &rArr; &harr;")).toBe("← → ⇒ ↔");
+    expect(decodeEntities("a&ensp;b&emsp;c&thinsp;d")).toBe("a b c d");
+    expect(decodeEntities("&AMP; &LT; &GT; &QUOT; &COPY; &REG;")).toBe('& < > " © ®');
+  });
+
+  it("drops soft hyphens and invisible joiners, which split words for anything searching the text", () => {
+    expect(decodeEntities("Einwilligungs&shy;banner Daten&#173;schutz&#xAD;konferenz")).toBe("Einwilligungsbanner Datenschutzkonferenz");
+    expect(decodeEntities("a&zwnj;b&zwj;c&lrm;d&rlm;e")).toBe("abcde");
+  });
+
+  it("is still single-pass and still case-sensitive", () => {
+    expect(decodeEntities("&amp;shy; &#38;oelig; &Dagger; &dagger; &Amp; &unknown;")).toBe("&shy; &oelig; ‡ † &Amp; &unknown;");
+  });
+});
+
+describe("cleanInline", () => {
+  it("strips the formatting markup scholarly titles carry, escaped or literal", () => {
+    expect(cleanInline("R&amp;D in &lt;i&gt;P53&lt;/i&gt; mutants")).toBe("R&D in P53 mutants");
+    expect(cleanInline("CO<sub>2</sub> uptake in <i>E. coli</i>")).toBe("CO2 uptake in E. coli");
+    expect(cleanInline("<jats:title>A <jats:italic>novel</jats:italic> <mml:math><mml:mi>β</mml:mi></mml:math> site</jats:title>")).toBe("A novel β site");
+    expect(cleanInline('see <a href="/x">the <span class="hl">docs</span></a><br/>now')).toBe("see the docs now");
+  });
+
+  it("leaves angle-bracket text that is not markup: generics and element names", () => {
+    expect(cleanInline("Vec<u8> to String - Rust")).toBe("Vec<u8> to String - Rust");
+    expect(cleanInline("How to return Promise&lt;void&gt; in TypeScript")).toBe("How to return Promise<void> in TypeScript");
+    expect(cleanInline("The <dialog> element")).toBe("The <dialog> element");
+    expect(cleanInline("<a>: The Anchor element - HTML | MDN")).toBe("<a>: The Anchor element - HTML | MDN");
+    expect(cleanInline("Map<String, List<Integer>> in Java")).toBe("Map<String, List<Integer>> in Java");
   });
 });
 
@@ -140,6 +266,35 @@ describe("htmlTitle", () => {
   it("extracts and decodes the title", () => {
     expect(htmlTitle("<title>Foo &amp; Bar</title>")).toBe("Foo & Bar");
     expect(htmlTitle("<body>no title</body>")).toBeUndefined();
+  });
+
+  it("never takes an icon's <svg><title> for the page's", () => {
+    expect(htmlTitle("<svg><title>icon</title></svg><title>Real</title>")).toBe("Real");
+    expect(htmlTitle('<body><svg viewBox="0 0 1 1"><title>Search icon</title></svg><main>x</main></body>')).toBeUndefined();
+    expect(htmlTitle("<title>A&nbsp;\n  B</title>")).toBe("A B");
+  });
+
+  it("stays linear on a page of unclosed <title> openers", () => {
+    const started = performance.now();
+    expect(htmlTitle("<title>x ".repeat(100_000))).toBeUndefined();
+    expect(htmlCanonicalUrl("<link rel=canonical ".repeat(100_000))).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe("htmlCanonicalUrl", () => {
+  it("finds the canonical past a large inlined stylesheet", () => {
+    // Next/Gatsby inline their critical CSS in <head>; a fixed 60 KB window
+    // stopped before the <link> that followed it.
+    const css = `.a{color:red}`.repeat(6_000);
+    expect(htmlCanonicalUrl(`<head><style>${css}</style><link rel="canonical" href="https://x.test/real"></head>`)).toBe("https://x.test/real");
+  });
+
+  it("reads rel as a token list and ignores a commented-out canonical", () => {
+    expect(htmlCanonicalUrl('<!-- <link rel="canonical" href="https://x.test/old"> --><link href="https://x.test/new" rel="alternate canonical">')).toBe(
+      "https://x.test/new",
+    );
+    expect(htmlCanonicalUrl('<meta content="https://x.test/og" property="og:url">')).toBe("https://x.test/og");
   });
 });
 
@@ -208,6 +363,51 @@ describe("fetchAndExtract", () => {
     const r = await fetchAndExtract("https://example.com/x");
     expect(r.text).toBe("");
     expect(r.note).toMatch(/Could not fetch/);
+  });
+
+  it("says so when an HTML page was cut at the size cap, and keeps the cut script out of the text", async () => {
+    // A Next.js page whose __NEXT_DATA__ runs past the 4 MB cap: the script
+    // never closes, and its JSON used to come back as megabytes of "prose"
+    // with nothing saying the page was incomplete.
+    const article = `<div class="wrap"><h1>Launch notes</h1><p>${"The release ships a new scheduler. ".repeat(30)}</p></div>`;
+    const body = `<html><body>${article}<script id="__NEXT_DATA__" type="application/json">{"payload":"${"PAYLOADTOKEN ".repeat(420_000)}"}</script></body></html>`;
+    installFetchMock(routes([["x.test/huge", { body, contentType: "text/html" }]]));
+    const r = await fetchAndExtract("https://x.test/huge");
+    expect(r.text).toContain("The release ships a new scheduler.");
+    expect(r.text).not.toContain("PAYLOADTOKEN");
+    expect(r.note).toMatch(/Read only the first \d+ bytes of https:\/\/x\.test\/huge \(the response size cap\), so this text is a prefix/);
+  });
+
+  it("resolves a relative canonical against the final URL, so it can be cited", async () => {
+    installFetchMock(routes([["x.test/blog/post", { body: '<link rel="canonical" href="/blog/post-slug"><p>Body</p>', contentType: "text/html" }]]));
+    expect((await fetchAndExtract("https://x.test/blog/post?utm_source=a")).canonical).toBe("https://x.test/blog/post-slug");
+  });
+
+  it("drops a canonical that resolves to no http(s) URL", async () => {
+    installFetchMock(routes([["x.test/p", { body: '<link rel="canonical" href="javascript:void(0)"><p>Body</p>', contentType: "text/html" }]]));
+    expect((await fetchAndExtract("https://x.test/p")).canonical).toBeUndefined();
+  });
+
+  it("titles a page without <title> from og:title, then its first <h1>, never from an icon", async () => {
+    installFetchMock(
+      routes([
+        [
+          "x.test/og",
+          { body: '<meta property="og:title" content="From OG"><svg><title>Search icon</title></svg><main><h1>Heading</h1></main>', contentType: "text/html" },
+        ],
+        [
+          "x.test/h1",
+          { body: '<svg><title>Search icon</title></svg><main><h1 class="t">\n  The <em>real</em> heading\n</h1><p>x</p></main>', contentType: "text/html" },
+        ],
+      ]),
+    );
+    expect((await fetchAndExtract("https://x.test/og")).title).toBe("From OG");
+    expect((await fetchAndExtract("https://x.test/h1")).title).toBe("The real heading");
+  });
+
+  it("adds no truncation note to a page that arrived whole", async () => {
+    installFetchMock(routes([["x.test/small", { body: "<p>whole</p>", contentType: "text/html" }]]));
+    expect((await fetchAndExtract("https://x.test/small")).note).toBeUndefined();
   });
 
   it("extracts a content-type-only PDF (no .pdf in the URL) from the bytes it already has — one download, not two", async () => {
@@ -396,6 +596,54 @@ describe("extractMainHtml", () => {
   });
 });
 
+describe("HTML scans stay linear on hostile markup", () => {
+  // Every shape below used to cost O(n²): a scan that, from each opener, read
+  // to the end of the input looking for a terminator that never came. About
+  // 1 MB of any of them froze the process — CLI and MCP server alike — for
+  // over a minute. The bounds are an order of magnitude above the linear cost
+  // and two below the quadratic one, so a slow CI box cannot flake them.
+  const within = (ms: number, fn: () => unknown) => {
+    const started = performance.now();
+    fn();
+    expect(performance.now() - started).toBeLessThan(ms);
+  };
+
+  it.each([
+    ["a '<' in prose with no '>' after it", "<p>" + "if a<b then ".repeat(80_000)],
+    ["unclosed <nav> openers", "<nav>x ".repeat(150_000)],
+    ["unclosed comment openers", "<!-- x ".repeat(150_000)],
+    ["unclosed <svg> openers", "<svg>x ".repeat(150_000)],
+    ["an unterminated attribute quote per tag", '<a title="x '.repeat(80_000)],
+    ["unclosed <h2> openers", "<h2>x ".repeat(150_000)],
+    ["headings closed only at the very end", `${"<h2>x ".repeat(150_000)}</h2>`],
+    ["unclosed <pre> openers", "<pre>x ".repeat(150_000)],
+    ["unclosed <script> openers", "<p>a</p><script>x ".repeat(100_000)],
+    ["adjacent inline elements", "<a>x</a>".repeat(150_000)],
+    ["unclosed navigation landmarks", '<div role="navigation"><p>x</p>'.repeat(50_000)],
+    ["nested navigation landmarks", `${'<div role="navigation"><div>x'.repeat(20_000)}${"</div>".repeat(40_000)}`],
+    ["a heading anchor holding a long run of whitespace", `<h2><a href="#x">${" ".repeat(300_000)}x</a></h2>`],
+  ])("htmlToText: %s", (_label, html) => {
+    within(2000, () => htmlToText(html));
+  });
+
+  it("extractMainHtml: thousands of unclosed content containers", () => {
+    within(2000, () => extractMainHtml(`<div class="comment-content"><p>${"word ".repeat(40)}</p>`.repeat(20_000)));
+  });
+
+  it("extractMainHtml: deeply nested content containers", () => {
+    const n = 20_000;
+    within(2000, () => extractMainHtml(`${'<div class="post"><p>word word</p>'.repeat(n)}${"</div>".repeat(n)}`));
+  });
+
+  it("extractMainHtml: one opening tag holding a long unbroken attribute run", () => {
+    within(2000, () => extractMainHtml(`<div ${"a".repeat(300_000)}><p>text</p></div>`));
+  });
+
+  it("extractMainHtml: many unclosed <main>/<article> openers", () => {
+    within(2000, () => extractMainHtml(`<main><article><p>${"word ".repeat(20)}</p>`.repeat(20_000)));
+  });
+});
+
 describe("looksLikeJunkExtraction", () => {
   it("flags a short consent/JS/anti-bot wall in EN, FR and DE", () => {
     expect(looksLikeJunkExtraction("We use cookies to improve your experience. Accept all cookies")).toMatch(/cookie/i);
@@ -407,6 +655,26 @@ describe("looksLikeJunkExtraction", () => {
   it("never flags a long genuine article, even one that mentions cookies", () => {
     const article = "This article explains HTTP cookies in depth. We use cookies as an example. " + "x ".repeat(1200);
     expect(looksLikeJunkExtraction(article)).toBeUndefined();
+  });
+
+  it("does not take a short page that merely uses a wall's words for a wall", () => {
+    // Each was flagged on one bare phrase, and rescueViaWayback then threw the
+    // good archived page away.
+    const mysql =
+      "# Fix ERROR 1045 (28000): Access denied for user root@localhost\nThis error means the server rejected the credentials the client sent.\nCheck the user's host part with SELECT user, host FROM mysql.user.\nThen reset the password with ALTER USER and flush the privileges again.";
+    expect(looksLikeJunkExtraction(mysql)).toBeUndefined();
+    expect(looksLikeJunkExtraction("# widget\nInstall with npm install widget. To verify you are on Node 18 or later, run node -v.")).toBeUndefined();
+    expect(looksLikeJunkExtraction("## Cookie policy\nThis library parses the Set-Cookie header into a jar you can query.")).toBeUndefined();
+    expect(looksLikeJunkExtraction("## Handling unusual traffic\nAutoscaling absorbs a spike before the queue backs up.")).toBeUndefined();
+  });
+
+  it("still flags the interstitials those phrases come from", () => {
+    expect(
+      looksLikeJunkExtraction("Access Denied\nYou don't have permission to access this resource on this server.\nReference #18.4d2f3b17.1726000000.1a2b3c"),
+    ).toMatch(/anti-bot/);
+    expect(looksLikeJunkExtraction("Verifying you are human. This may take a few seconds.")).toMatch(/anti-bot/);
+    expect(looksLikeJunkExtraction("Our systems have detected unusual traffic from your computer network.")).toMatch(/anti-bot/);
+    expect(looksLikeJunkExtraction("Cookie settings\nWe use cookies to personalise content.\nAccept all\nReject all")).toMatch(/cookie/);
   });
 });
 
@@ -660,6 +928,62 @@ describe("stripConsentBoilerplate", () => {
   it("leaves text with no banners byte-identical", () => {
     const text = "# Title\n\nordinary prose\nmore prose";
     expect(stripConsentBoilerplate(text)).toEqual({ text, dropped: 0 });
+  });
+
+  it.each([
+    // An article ABOUT cookie law names two topics per sentence. Two hits used
+    // to be enough on any line, so these were exactly the paragraphs removed.
+    "Under the GDPR, a site must obtain informed consent before it sets any cookie that is not strictly necessary, and it must let users withdraw that consent as easily as they gave it.",
+    "Legislation or regulations that cover the use of cookies include the General Data Privacy Regulation (GDPR) in the European Union and the California Consumer Privacy Act (CCPA).",
+    'That is why so many sites show a cookie banner with an "Accept all" and a "Reject all" button: the banner is the site\'s mechanism for recording consent.',
+    "Advertising partners frequently rely on third-party cookies and other tracking technologies to follow users across sites.",
+    // One topic word plus a generic verb, on a line far longer than a button.
+    "Allow the cookies to cool on the tray for 5 minutes.",
+    "Store cookies in an airtight tin; accept that they soften after a day.",
+    "Accept all incoming connections on port 443 and reject all others.",
+    "Informed consent: participants may opt out at any time.",
+  ])("keeps prose that merely talks about consent: %s", (line) => {
+    expect(stripConsentBoilerplate(line)).toEqual({ text: line, dropped: 0 });
+  });
+
+  it("still drops a long notice written in the banner's own voice", () => {
+    const text = [
+      'We use cookies and similar technologies to improve your experience and for advertising. By clicking "Accept all", you consent to our use of cookies.',
+      "We and our partners store and/or access information on a device, such as cookies, and process personal data.",
+      "By continuing to browse this site, you agree to the use of cookies.",
+      "Article prose.",
+    ].join("\n");
+    expect(stripConsentBoilerplate(text)).toEqual({ text: "Article prose.", dropped: 3 });
+  });
+
+  it("drops FR and DE banner notices and buttons, but not bare words", () => {
+    const banner = [
+      "Nous utilisons des cookies et des technologies similaires pour mesurer l'audience, personnaliser les contenus et la publicité. Vous pouvez accepter ou refuser ces cookies.",
+      "Accepter et fermer",
+      "Continuer sans accepter",
+      "Paramétrer les cookies",
+      "Tout accepter",
+      "Tout refuser",
+      "Wir verwenden Cookies und ähnliche Technologien, um Inhalte zu personalisieren und Werbung anzuzeigen. Mit „Alle akzeptieren“ stimmen Sie der Verarbeitung zu.",
+      "Alle akzeptieren",
+      "Alle ablehnen",
+      "Nur notwendige Cookies",
+      "Cookie-Einstellungen",
+    ];
+    const prose = [
+      "# Einstellungen",
+      "Die Datenschutzkonferenz hat neue Leitlinien für Cookie-Banner veröffentlicht.",
+      "Le cœur de la réforme reste la durée de cotisation.",
+    ];
+    const r = stripConsentBoilerplate([...banner, ...prose].join("\n"));
+    expect(r).toEqual({ text: prose.join("\n"), dropped: banner.length });
+  });
+
+  it("runs in linear time on a long line full of first-person words", () => {
+    const line = "we ".repeat(300_000) + "cookies";
+    const started = performance.now();
+    stripConsentBoilerplate(`${line}\n${"our us ".repeat(100_000)}`);
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });
 

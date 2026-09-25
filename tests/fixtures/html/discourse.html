@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en" class="desktop-view not-mobile-device text-size-normal anon">
+<head><meta charset="utf-8"><title>Why does my token bucket drift? - Help - Example Forum</title>
+<meta name="description" content="I implemented a token bucket with a refill rate of 10 tokens per second...">
+<link rel="canonical" href="https://forum.test/t/why-does-my-token-bucket-drift/1234">
+<script defer src="/assets/vendor.js"></script><script defer src="/assets/discourse.js"></script>
+</head>
+<body class="crawler">
+<noscript data-path="/t/why-does-my-token-bucket-drift/1234">
+<header class="d-header"><div class="wrap"><div class="contents"><div class="header-buttons"><a href="/login" class="btn">Log In</a></div></div></div></header>
+<div id="main-outlet" class="wrap" role="main">
+<!-- preload-content: -->
+<div id="topic-title"><h1><a href="/t/why-does-my-token-bucket-drift/1234">Why does my token bucket drift?</a></h1></div>
+<div itemscope itemtype="http://schema.org/DiscussionForumPosting">
+<div class="topic-body crawler-post"><div class="crawler-post-meta"><span class="creator" itemprop="author"><a href="/u/alice"><span itemprop="name">alice</span></a></span></div>
+<div class="post" itemprop="text"><p>I implemented a token bucket with a refill rate of 10 tokens per second, but after a few hours it allows about 11 requests per second. I am using setInterval to add one token every 100 ms. What am I doing wrong?</p></div></div>
+<div class="topic-body crawler-post"><div class="crawler-post-meta"><span class="creator"><a href="/u/bob"><span itemprop="name">bob</span></a></span></div>
+<div class="post" itemprop="text"><p>setInterval is not a clock. Compute the tokens lazily on each request from the elapsed monotonic time, cap at the bucket size, and store the refill timestamp. Then drift is impossible.</p></div></div>
+</div>
+<!-- :preload-content -->
+</div>
+<footer class="container wrap"><nav class="crawler-nav"><ul><li><a href="/">Home</a></li><li><a href="/categories">Categories</a></li></ul></nav></footer>
+</noscript>
+<section id='main'></section>
+<div id="d-splash"><div class="dots"></div><noscript><p>JavaScript is required.</p></noscript></div>
+<script defer src="/assets/start-discourse.js"></script>
+</body>
+</html>

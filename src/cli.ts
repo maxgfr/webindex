@@ -773,7 +773,7 @@ export function webindexAdapter(): McpAdapter {
         }
         const page = await httpGet(url, { accept: "text/html,application/xml,*/*" });
         if (!page.ok) throw new ToolError(`Could not fetch ${url} (status ${page.status}).`);
-        if (name === "webindex_meta") return { text: JSON.stringify(pageMetadata(page.body), null, 2) };
+        if (name === "webindex_meta") return { text: JSON.stringify(pageMetadata(page.body, { baseUrl: page.url }), null, 2) };
 
         const direct = parseFeed(page.body);
         if (direct) return { text: JSON.stringify(direct, null, 2) };
@@ -1162,7 +1162,7 @@ async function dispatch(argv: string[]): Promise<void> {
       );
       return;
     }
-    const m = pageMetadata(page.body);
+    const m = pageMetadata(page.body, { baseUrl: page.url });
     emit(m, [
       `  title      ${m.title ?? "—"}`,
       `  type       ${m.type ?? "—"}`,
