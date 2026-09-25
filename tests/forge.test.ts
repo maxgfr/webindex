@@ -74,6 +74,97 @@ describe("resolveRepo", () => {
   it("does not produce the un-cloneable '/.git' from a trailing slash", () => {
     expect(resolveRepo("https://github.com/a/b/").cloneUrl).toBe("https://github.com/a/b.git");
   });
+
+  it("reads the repository out of a URL copied from a browser", () => {
+    // Everything after owner/repo is a page INSIDE the repository. Taking the
+    // last segment as the repo named a file, an issue number or a branch, and
+    // the clone URL became `…/tree/main/src.git`.
+    for (const s of [
+      "https://github.com/maxgfr/webindex/tree/main/src",
+      "https://github.com/maxgfr/webindex/blob/main/README.md",
+      "https://github.com/maxgfr/webindex/issues/12",
+      "https://github.com/maxgfr/webindex/pull/3",
+      "https://github.com/maxgfr/webindex?tab=readme-ov-file",
+      "https://github.com/maxgfr/webindex#readme",
+      "https://www.github.com/maxgfr/webindex",
+      "github.com/maxgfr/webindex/tree/main",
+    ]) {
+      const r = resolveRepo(s);
+      expect({ host: r.host, owner: r.owner, repo: r.repo }, s).toEqual({ host: "github.com", owner: "maxgfr", repo: "webindex" });
+      expect(r.cloneUrl, s).toBe("https://github.com/maxgfr/webindex.git");
+      expect(r.webUrl, s).toBe("https://github.com/maxgfr/webindex");
+      expect(r.slug, s).toBe(resolveRepo("maxgfr/webindex").slug);
+    }
+    // www. is the browser's, not a GitHub Enterprise install at www.github.com.
+    expect(apiBase(resolveRepo("https://www.github.com/maxgfr/webindex"))).toBe("https://api.github.com");
+  });
+
+  it("ends a GitLab path at '/-/', and a Gitea one after owner/repo", () => {
+    expect(resolveRepo("https://gitlab.com/gitlab-org/gitlab/-/tree/master/app")).toMatchObject({ owner: "gitlab-org", repo: "gitlab" });
+    expect(resolveRepo("https://gitlab.com/group/subgroup/thing/-/issues/3")).toMatchObject({
+      owner: "group/subgroup",
+      repo: "thing",
+      cloneUrl: "https://gitlab.com/group/subgroup/thing.git",
+    });
+    expect(resolveRepo("https://codeberg.org/forgejo/forgejo/src/branch/forgejo")).toMatchObject({ owner: "forgejo", repo: "forgejo" });
+  });
+
+  it("refuses '.' and '..' as a path segment, which a URL parser would resolve away", () => {
+    // `/repos/../../user` is `/user` by the time it is requested — an
+    // authenticated GET of an endpoint nobody asked for.
+    for (const s of ["github.com/../../user", "https://github.com/%2e%2e/%2E%2e/user", "github.com/a/..", "https://gitlab.com/g/./p"]) {
+      const r = resolveRepo(s);
+      expect(r.host, s).toBe("generic");
+      expect(r.cloneUrl, s).toBeUndefined();
+    }
+  });
+
+  it("keeps the ssh transport a private repository needs", () => {
+    // Rebuilt as https, a repository reachable only over SSH on a custom port
+    // failed for lack of credentials.
+    expect(resolveRepo("ssh://git@gitlab.company.com:2222/g/r.git")).toMatchObject({
+      host: "gitlab.company.com",
+      owner: "g",
+      repo: "r",
+      cloneUrl: "ssh://git@gitlab.company.com:2222/g/r.git",
+      webUrl: "https://gitlab.company.com/g/r",
+    });
+    // A user other than `git` is still the scp form.
+    expect(resolveRepo("org-123@github.com:org/repo.git")).toMatchObject({
+      host: "github.com",
+      owner: "org",
+      repo: "repo",
+      cloneUrl: "org-123@github.com:org/repo.git",
+    });
+    // git:// has no auth to keep; https is the transport that works everywhere.
+    expect(resolveRepo("git://github.com/a/b.git").cloneUrl).toBe("https://github.com/a/b.git");
+  });
+
+  it("parses adversarial identifiers in linear time", () => {
+    // A repository string can arrive from a prompt; every pattern here must stay
+    // linear on it. The bound is loose enough that only a superlinear scan fails.
+    const n = 200_000;
+    const started = Date.now();
+    for (const s of [
+      `https://${"a".repeat(n)}`,
+      `https://${"a@".repeat(n)}`,
+      `${"a".repeat(n)}@`,
+      `${"a@".repeat(n)}x`,
+      `git@${"a".repeat(n)}`,
+      `github.com/${"a/".repeat(n)}`,
+      `github.com/a/b${"?".repeat(n)}`,
+    ]) {
+      resolveRepo(s);
+    }
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("never lets a user or host that git would read as an option through", () => {
+    for (const s of ["-oProxyCommand=touch%20x@github.com:a/b", "git@-oProxyCommand=x:a/b", "ssh://-oProxyCommand=x/a/b", "ssh://-u@host.example/a/b"]) {
+      const r = resolveRepo(s);
+      expect(r.cloneUrl, s).toBeUndefined();
+    }
+  });
 });
 
 describe("slugify", () => {
@@ -303,6 +394,20 @@ describe("releases and repo facts", () => {
     }));
     const r = await listReleases(resolveRepo("github.com/a/b"));
     expect(r.items[0]).toMatchObject({ kind: "release", title: "v2.0.0", body: "notes", state: "released" });
+  });
+
+  it("builds no request from a hand-made ref whose names would walk out of the repository", async () => {
+    const spy = installFetchMock(() => ({ body: JSON.stringify({ full_name: "x" }), contentType: "application/json" }));
+    const base = resolveRepo("github.com/a/b");
+    expect(await repoFacts({ ...base, owner: "../..", repo: "user" })).toBeUndefined();
+    expect(await repoFacts({ ...base, owner: "%2e%2E", repo: "user" })).toBeUndefined();
+    expect((await listReleases({ ...base, owner: "a", repo: ".." })).items).toEqual([]);
+    expect((await searchIssues({ ...base, owner: "..", repo: "b" }, ["x"], "issue")).items).toEqual([]);
+    expect(spy).not.toHaveBeenCalled();
+    // A name is one path segment on GitHub: a slash or a query character is
+    // sent as data, never as structure.
+    await repoFacts({ ...base, owner: "a?b", repo: "c/d" });
+    expect(spy.mock.calls[0]![0]).toBe("https://api.github.com/repos/a%3Fb/c%2Fd");
   });
 
   it("answers 'is this maintained' from the record, not from the README", async () => {

@@ -223,6 +223,28 @@ async function forgeGet(url: string, kind: ForgeKind, ref: RepoRef, opts: ForgeO
   return forgeGetOnce(url, headers, timeoutMs);
 }
 
+// A dot segment as a URL parser reads one — `%2e` included, which WHATWG URL
+// treats as a dot.
+const DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
+
+/**
+ * The repository's place in an API path: `owner/repo` for GitHub and Gitea, the
+ * url-encoded project path for GitLab. Undefined when the ref names no
+ * repository, or names one that would walk out of the path — resolveRepo
+ * refuses `..`, but a RepoRef is a plain object any caller can build, and
+ * `/repos/../../user` reaches `/user` with the user's token attached.
+ *
+ * Each name is encoded as ONE segment: a GitHub or Gitea owner never contains a
+ * slash, so one arriving here is data, not structure.
+ */
+function repoPath(ref: RepoRef, forge: ForgeKind): string | undefined {
+  if (!ref.owner || !ref.repo) return undefined;
+  if ([...ref.owner.split("/"), ref.repo].some((s) => !s || DOT_SEGMENT.test(s))) return undefined;
+  return forge === "gitlab"
+    ? `projects/${encodeURIComponent(`${ref.owner}/${ref.repo}`)}`
+    : `repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}`;
+}
+
 function clip(s: unknown, n = 1200): string {
   return String(s ?? "")
     .replace(/\r/g, "")
@@ -309,16 +331,17 @@ function splitSlug(full: string, fallback: { owner: string; repo: string }): { o
  */
 export function canonicalRepoRef(ref: RepoRef, opts: ForgeOptions = {}): Promise<{ owner: string; repo: string }> {
   const fallback = { owner: ref.owner ?? "", repo: ref.repo ?? "" };
-  if (!ref.owner || !ref.repo || forgeKind(ref.host) !== "github") return Promise.resolve(fallback);
+  const path = forgeKind(ref.host) === "github" ? repoPath(ref, "github") : undefined;
+  if (!path) return Promise.resolve(fallback);
   const key = `${ref.host}/${ref.owner}/${ref.repo}`;
   let hit = canonCache.get(key);
   if (!hit) {
     hit = (async () => {
       if (ghUsable(ref.host)) {
-        const r = await shAsync("gh", ["api", `repos/${ref.owner}/${ref.repo}`, "--jq", ".full_name"], { timeoutMs: opts.timeoutMs ?? 15_000 });
+        const r = await shAsync("gh", ["api", path, "--jq", ".full_name"], { timeoutMs: opts.timeoutMs ?? 15_000 });
         if (r.ok && r.stdout.includes("/")) return splitSlug(r.stdout.trim(), fallback);
       }
-      const r = await forgeGet(`${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}`, "github", ref, opts);
+      const r = await forgeGet(`${apiBase(ref, opts)}/${path}`, "github", ref, opts);
       const full = r.ok ? r.data?.full_name : undefined;
       return typeof full === "string" && full.includes("/") ? splitSlug(full, fallback) : fallback;
     })();
@@ -345,7 +368,8 @@ export async function canonicalRepo(ref: RepoRef, opts: ForgeOptions = {}): Prom
 export async function searchIssues(ref: RepoRef, terms: string[], kind: "issue" | "pr", opts: ForgeOptions = {}): Promise<ForgeResult> {
   const forge = forgeKind(ref.host);
   if (!forge) return { items: [], note: `${ref.host} is not a forge this engine knows how to query.` };
-  if (!ref.owner || !ref.repo) return { items: [], note: `"${ref.raw}" does not name owner/repo.` };
+  const repoAt = repoPath(ref, forge);
+  if (!repoAt) return { items: [], note: `"${ref.raw}" does not name owner/repo.` };
   const limit = Math.max(1, opts.limit ?? 10);
   const q = terms.filter(Boolean).join(" ");
 
@@ -361,9 +385,8 @@ export async function searchIssues(ref: RepoRef, terms: string[], kind: "issue" 
   }
 
   if (forge === "gitlab") {
-    const project = encodeURIComponent(`${ref.owner}/${ref.repo}`);
     const path = kind === "pr" ? "merge_requests" : "issues";
-    const url = `${apiBase(ref, opts)}/projects/${project}/${path}?search=${encodeURIComponent(q)}&per_page=${limit}&order_by=updated_at`;
+    const url = `${apiBase(ref, opts)}/${repoAt}/${path}?search=${encodeURIComponent(q)}&per_page=${limit}&order_by=updated_at`;
     const r = await forgeGet(url, forge, ref, opts);
     if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: "GitLab rate-limited this search." };
     if (!r.ok) return { items: [], note: `GitLab request failed (status ${r.status}).` };
@@ -381,7 +404,7 @@ export async function searchIssues(ref: RepoRef, terms: string[], kind: "issue" 
   }
 
   const path = kind === "pr" ? "pulls" : "issues";
-  const url = `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}/${path}?state=all&limit=${limit}&q=${encodeURIComponent(q)}`;
+  const url = `${apiBase(ref, opts)}/${repoAt}/${path}?state=all&limit=${limit}&q=${encodeURIComponent(q)}`;
   const r = await forgeGet(url, forge, ref, opts);
   if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: "Gitea rate-limited this request." };
   if (!r.ok) return { items: [], note: `Gitea request failed (status ${r.status}).` };
@@ -401,12 +424,10 @@ export async function searchIssues(ref: RepoRef, terms: string[], kind: "issue" 
 /** A repository's releases, newest first. */
 export async function listReleases(ref: RepoRef, opts: ForgeOptions = {}): Promise<ForgeResult> {
   const forge = forgeKind(ref.host);
-  if (!forge || !ref.owner || !ref.repo) return { items: [], note: `Cannot list releases for "${ref.raw}".` };
+  const repoAt = forge && repoPath(ref, forge);
+  if (!forge || !repoAt) return { items: [], note: `Cannot list releases for "${ref.raw}".` };
   const limit = Math.max(1, opts.limit ?? 20);
-  const url =
-    forge === "gitlab"
-      ? `${apiBase(ref, opts)}/projects/${encodeURIComponent(`${ref.owner}/${ref.repo}`)}/releases?per_page=${limit}`
-      : `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}/releases?per_page=${limit}&limit=${limit}`;
+  const url = `${apiBase(ref, opts)}/${repoAt}/releases?per_page=${limit}${forge === "gitlab" ? "" : `&limit=${limit}`}`;
   const r = await forgeGet(url, forge, ref, opts);
   if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: `${forge} rate-limited the release list.` };
   if (!r.ok) return { items: [], note: `Could not list releases (status ${r.status}).` };
@@ -425,12 +446,13 @@ export async function listReleases(ref: RepoRef, opts: ForgeOptions = {}): Promi
 /** A repository's tags, which exist even where releases do not. */
 export async function listTags(ref: RepoRef, opts: ForgeOptions = {}): Promise<ForgeResult> {
   const forge = forgeKind(ref.host);
-  if (!forge || !ref.owner || !ref.repo) return { items: [], note: `Cannot list tags for "${ref.raw}".` };
+  const repoAt = forge && repoPath(ref, forge);
+  if (!forge || !repoAt) return { items: [], note: `Cannot list tags for "${ref.raw}".` };
   const limit = Math.max(1, opts.limit ?? 50);
   const url =
     forge === "gitlab"
-      ? `${apiBase(ref, opts)}/projects/${encodeURIComponent(`${ref.owner}/${ref.repo}`)}/repository/tags?per_page=${limit}`
-      : `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}/tags?per_page=${limit}&limit=${limit}`;
+      ? `${apiBase(ref, opts)}/${repoAt}/repository/tags?per_page=${limit}`
+      : `${apiBase(ref, opts)}/${repoAt}/tags?per_page=${limit}&limit=${limit}`;
   const r = await forgeGet(url, forge, ref, opts);
   if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: `${forge} rate-limited the tag list.` };
   if (!r.ok) return { items: [], note: `Could not list tags (status ${r.status}).` };
@@ -468,12 +490,9 @@ export interface RepoFacts {
  */
 export async function repoFacts(ref: RepoRef, opts: ForgeOptions = {}): Promise<RepoFacts | undefined> {
   const forge = forgeKind(ref.host);
-  if (!forge || !ref.owner || !ref.repo) return undefined;
-  const url =
-    forge === "gitlab"
-      ? `${apiBase(ref, opts)}/projects/${encodeURIComponent(`${ref.owner}/${ref.repo}`)}`
-      : `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}`;
-  const r = await forgeGet(url, forge, ref, opts);
+  const repoAt = forge && repoPath(ref, forge);
+  if (!forge || !repoAt) return undefined;
+  const r = await forgeGet(`${apiBase(ref, opts)}/${repoAt}`, forge, ref, opts);
   if (!r.ok || !r.data || typeof r.data !== "object") return undefined;
   const d = r.data as Record<string, any>;
   return {

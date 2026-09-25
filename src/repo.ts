@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { brand, env, envInt } from "./brand.js";
 import { have, sh, shAsync } from "./exec.js";
+import { hostForgeKind, normalizeForgeHost } from "./forge-host.js";
 import { slugify } from "./text.js";
 
 // Naming a repository, and getting a working tree for it.
@@ -88,50 +89,105 @@ export function resolveRepo(raw: string): RepoRef {
     };
   }
 
-  let host: string;
-  let path: string; // owner(/subgroups)/repo, no host, no .git
+  const generic = (): RepoRef => ({ raw: trimmed, host: "generic", isLocal: false, slug: slugify(trimmed) || "seed" });
 
-  const scp = /^git@([^:]+):(.+)$/.exec(trimmed); // git@github.com:owner/repo.git
-  // Any URL scheme, case-insensitive, dropping userinfo and port.
-  const url = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/i.exec(trimmed);
+  // How the clone URL is rebuilt: an http(s) or ssh remote keeps its transport
+  // (userinfo and port included — a private repository may be reachable no
+  // other way), the scp form keeps its user, and anything else becomes https.
+  let transport: { kind: "scp"; user: string } | { kind: "url"; scheme: "http" | "https" | "ssh"; userinfo?: string; port?: string } | { kind: "https" };
+  let host: string;
+  let rest: string; // everything after the host, not yet normalised
+
+  // `user@host:path` — git's scp-like syntax, for any user (not only `git`).
+  const scp = /^([\w.-]+)@([^:/]+):(.+)$/.exec(trimmed);
+  // Any URL scheme, case-insensitive: scheme, userinfo, host, port, path.
+  const url = /^([a-z][a-z0-9+.-]*):\/\/(?:([^@/]+)@)?([^/:?#]+)(?::(\d+))?\/(.+)$/i.exec(trimmed);
   const hostPath = /^([a-z0-9.-]+\.[a-z]{2,})\/(.+)$/i.exec(trimmed);
 
   if (scp) {
-    host = scp[1]!;
-    path = scp[2]!;
+    transport = { kind: "scp", user: scp[1]! };
+    host = scp[2]!;
+    rest = scp[3]!;
   } else if (url) {
-    host = url[1]!;
-    path = url[2]!;
+    const scheme = url[1]!.toLowerCase();
+    transport = /^(?:https?|ssh|git\+ssh|ssh\+git)$/.test(scheme)
+      ? { kind: "url", scheme: scheme.startsWith("http") ? (scheme as "http" | "https") : "ssh", userinfo: url[2], port: url[4] }
+      : { kind: "https" };
+    host = url[3]!;
+    rest = url[5]!;
   } else if (hostPath) {
+    transport = { kind: "https" };
     host = hostPath[1]!;
-    path = hostPath[2]!;
+    rest = hostPath[2]!;
   } else if (/^[\w.-]+\/[\w.-]+$/.test(trimmed)) {
+    transport = { kind: "https" };
     host = "github.com";
-    path = trimmed;
+    rest = trimmed;
   } else {
-    return { raw: trimmed, host: "generic", isLocal: false, slug: slugify(trimmed) || "seed" };
+    return generic();
   }
 
-  host = host.toLowerCase();
-  path = path.replace(/\.git$/, "").replace(/\/+$/, "");
-  const segments = path.split("/").filter(Boolean);
-  const repo = segments.length ? segments[segments.length - 1] : undefined;
+  // git reads a user or host that begins with "-" as an OPTION to ssh
+  // (`-oProxyCommand=…`), which is command execution. git itself refuses a
+  // host like that; a user is refused here, before a clone URL can carry it.
+  const user = transport.kind === "scp" ? transport.user : transport.kind === "url" ? transport.userinfo : undefined;
+  if (host.startsWith("-") || user?.startsWith("-")) return generic();
+
+  host = normalizeForgeHost(host);
+  const segments = repoSegments(host, rest);
+  if (!segments) return generic();
+  const path = segments.join("/");
+  const repo = segments[segments.length - 1];
   const owner = segments.length > 1 ? segments.slice(0, -1).join("/") : undefined;
 
-  // Trailing slash stripped BEFORE the .git suffix, so a URL pasted as
-  // ".../repo/" yields ".../repo.git" rather than the un-cloneable ".../repo/.git".
-  const base = /^https?:\/\//i.test(trimmed) || scp ? trimmed.replace(/\/+$/, "") : `https://${host}/${path}.git`;
+  const cloneUrl =
+    transport.kind === "scp"
+      ? `${transport.user}@${host}:${path}.git`
+      : transport.kind === "url"
+        ? `${transport.scheme}://${transport.userinfo ? `${transport.userinfo}@` : ""}${host}${transport.port ? `:${transport.port}` : ""}/${path}.git`
+        : `https://${host}/${path}.git`;
 
   return {
     raw: trimmed,
     host,
     ...(owner ? { owner } : {}),
     ...(repo ? { repo } : {}),
-    cloneUrl: base.endsWith(".git") ? base : `${base}.git`,
+    cloneUrl,
     webUrl: `https://${host}/${path}`,
     isLocal: false,
     slug: slugify(`${host}/${path}`),
   };
+}
+
+// A dot segment, spelled as a URL parser will read it: `%2e` is a dot to WHATWG
+// URL, so `/repos/%2e%2e/%2e%2e/user` resolves to `/user` just as `..` does.
+const DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
+
+// Hosts whose repositories are exactly `owner/repo`, where anything after that
+// is a page INSIDE the repository — `/tree/main/src`, `/issues/12`, `/src/branch/x`.
+const TWO_SEGMENT_HOSTS: ReadonlySet<string> = new Set(["bitbucket.org"]);
+
+/**
+ * The repository's own path segments out of whatever followed the host: no
+ * query or fragment, no page within the repository, no `.git`. Undefined when a
+ * segment is `.` or `..`, which no forge allows and which a URL parser would
+ * resolve into a different endpoint altogether.
+ */
+function repoSegments(host: string, rest: string): string[] | undefined {
+  let segments = rest
+    .replace(/[?#].*$/s, "")
+    .split("/")
+    .filter(Boolean);
+  if (segments.some((s) => DOT_SEGMENT.test(s))) return undefined;
+  // GitLab ends a project path at `/-/` — subgroups nest, so a segment count
+  // cannot tell where it stops, but the separator is reserved everywhere.
+  const dash = segments.indexOf("-");
+  if (dash >= 0) segments = segments.slice(0, dash);
+  const kind = hostForgeKind(host);
+  if (kind === "github" || kind === "gitea" || TWO_SEGMENT_HOSTS.has(host)) segments = segments.slice(0, 2);
+  const last = segments.length - 1;
+  if (last >= 0) segments[last] = segments[last]!.replace(/\.git$/i, "");
+  return segments.filter(Boolean).length ? segments.filter(Boolean) : undefined;
 }
 
 /**
