@@ -87,6 +87,22 @@ describe("slugify", () => {
     expect(slugify("???", { fallback: "run" })).toBe("run");
     expect(slugify("???")).toBe("");
   });
+
+  it("tells apart inputs it has to drop characters from or cut, with a hash of what it dropped", () => {
+    // Both became "file-srv-git", and the second repository was handed the
+    // first one's checkout.
+    const a = resolveRepo("file:///srv/git/项目").slug;
+    const b = resolveRepo("file:///srv/git/文档").slug;
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^file-srv-git-[0-9a-f]{8}$/);
+    const long = `/srv/${"x".repeat(130)}`;
+    expect(resolveRepo(`file://${long}/alpha`).slug).not.toBe(resolveRepo(`file://${long}/beta`).slug);
+    expect(slugify("x".repeat(200)).length).toBe(120);
+    expect(slugify("日本語")).toMatch(/^[0-9a-f]{8}$/);
+    // An ASCII slug that fits keeps its readable name, unsuffixed.
+    expect(slugify("github.com/expressjs/express")).toBe("github.com-expressjs-express");
+    expect(slugify("What is the C++ memory model?")).toBe("what-is-the-c-memory-model");
+  });
 });
 
 describe("forge routing", () => {
