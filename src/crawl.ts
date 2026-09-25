@@ -23,6 +23,7 @@ import { envInt } from "./brand.js";
 import { decodeEntities, fetchAndExtract, sleep } from "./fetch.js";
 import { fetchSitemap } from "./feed.js";
 import { mapLimit } from "./pool.js";
+import { dropElements, htmlAttributes, RAW_TEXT_ELEMENTS } from "./html.js";
 import { fetchRobots, isAllowed } from "./robots.js";
 import { canonicalizeUrl } from "./url.js";
 
@@ -138,18 +139,56 @@ export interface CrawlResult {
   notes: string[];
 }
 
-/** Absolute, canonical links out of a page's HTML. */
+// The opening tags that carry a page's links, and the one that says what they
+// are relative to. Quote-aware, and linear for the reason TAG_RE in html.ts is:
+// an unquoted run stops at `<` as well as `>`, so each opener is one short look.
+// `<a\b[^>]*?\bhref…` rescanned to the end of the page from every `<a` start
+// on a page of unclosed ones — 400 KB of `<a x` took ten seconds of CPU.
+const LINK_TAG_RE = /<(a|area|base)(?=[\s/>])[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/gi;
+
+// Anchors that are not on the page: inside a script's strings, a style, an
+// inert <template>. Comments go in the same pass (see dropElements).
+const INERT_ELEMENTS = ["script", "style", "template"];
+
+/**
+ * Absolute, canonical links out of a page's HTML: `<a href>` and `<area href>`,
+ * resolved against the page's `<base href>` when it has one.
+ *
+ * Attributes are read by exact name, quoted or not — `href=/about` is valid
+ * HTML that minifiers emit everywhere, and a `data-href` is not an `href`.
+ */
 export function linksFrom(html: string, baseUrl: string): string[] {
+  let base = baseUrl;
+  let sawBase = false;
+  const hrefs: string[] = [];
+  for (const m of dropElements(html, INERT_ELEMENTS, RAW_TEXT_ELEMENTS).matchAll(LINK_TAG_RE)) {
+    const href = htmlAttributes(m[0]).get("href");
+    if (href === undefined) continue;
+    const raw = decodeEntities(href).trim();
+    if (m[1]!.toLowerCase() !== "base") {
+      hrefs.push(raw);
+      continue;
+    }
+    // The first <base href> sets the document's base, wherever it sits
+    // relative to the links, and is itself resolved against the page's URL.
+    if (sawBase) continue;
+    sawBase = true;
+    try {
+      base = new URL(raw, baseUrl).href;
+    } catch {
+      /* a base we cannot resolve leaves the page's own URL in charge */
+    }
+  }
+
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const m of html.matchAll(/<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
-    const raw = decodeEntities(m[1] ?? m[2] ?? "").trim();
+  for (const raw of hrefs) {
     if (!raw || raw.startsWith("#")) continue;
     // A mailto:, tel: or javascript: href is not a page. `new URL` would happily
     // accept the first two and hand back something no fetch can use.
     if (/^(mailto|tel|javascript|data):/i.test(raw)) continue;
     try {
-      const abs = new URL(raw, baseUrl);
+      const abs = new URL(raw, base);
       if (abs.protocol !== "http:" && abs.protocol !== "https:") continue;
       abs.hash = "";
       const canon = canonicalizeUrl(abs.href);

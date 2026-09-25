@@ -99,6 +99,46 @@ describe("linksFrom", () => {
   it("survives a malformed href", () => {
     expect(linksFrom('<a href="http://[bad">x</a><a href="/ok">y</a>', "https://a.test/")).toEqual(["https://a.test/ok"]);
   });
+
+  it("reads an unquoted href, which minified HTML is full of", () => {
+    expect(linksFrom("<a href=/about>About</a><a class=x href=docs/intro>Intro</a>", "https://a.test/dir/")).toEqual([
+      "https://a.test/about",
+      "https://a.test/dir/docs/intro",
+    ]);
+  });
+
+  it("reads href itself, not a data-href that comes first", () => {
+    expect(linksFrom('<a data-href="/tracking" href="/real">x</a>', "https://a.test/")).toEqual(["https://a.test/real"]);
+  });
+
+  it("resolves against the page's <base href>", () => {
+    const html = '<head><base href="https://a.test/docs/"></head><a href="child">c</a><a href="/root">r</a>';
+    expect(linksFrom(html, "https://a.test/dir/page")).toEqual(["https://a.test/docs/child", "https://a.test/root"]);
+    // A relative base resolves against the page; a broken one is ignored.
+    expect(linksFrom('<base href="../up/"><a href="x">x</a>', "https://a.test/a/b/page")).toEqual(["https://a.test/a/up/x"]);
+    expect(linksFrom('<base href="http://[bad"><a href="x">x</a>', "https://a.test/a/page")).toEqual(["https://a.test/a/x"]);
+  });
+
+  it("does not follow links that are commented out or live in a script", () => {
+    const html = '<!-- <a href="/old-admin">old</a> --><script>var s = \'<a href="/in-script">\';</script><a href="/live">live</a>';
+    expect(linksFrom(html, "https://a.test/")).toEqual(["https://a.test/live"]);
+  });
+
+  it("reads image-map areas, and not <abbr> or <link>", () => {
+    expect(linksFrom('<map><area href="/region"></map><abbr href="/no">x</abbr><link href="/style.css">', "https://a.test/")).toEqual([
+      "https://a.test/region",
+    ]);
+  });
+
+  it("scans a page of unclosed anchors in linear time", () => {
+    // `<a\b[^>]*?\bhref…` rescanned to the end of the page from every `<a`
+    // start: 400 KB of `<a x` took ten seconds.
+    const started = performance.now();
+    expect(linksFrom("<a x".repeat(100_000), "https://a.test/")).toEqual([]);
+    expect(linksFrom(`<a href="${"<a ".repeat(50_000)}`, "https://a.test/")).toEqual([]);
+    expect(linksFrom('<a title="'.repeat(50_000), "https://a.test/")).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
 });
 
 describe("crawlSite", () => {
