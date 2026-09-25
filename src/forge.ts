@@ -1,6 +1,7 @@
-import { env, envFlag } from "./brand.js";
+import { countFetch, env, envFlag, envInt } from "./brand.js";
 import { have, shAsync } from "./exec.js";
-import { contactUa, httpJson } from "./fetch.js";
+import { contactUa, readCappedBytes, sleep } from "./fetch.js";
+import { configuredForgeHosts, hostForgeKind, normalizeForgeHost } from "./forge-host.js";
 import type { RepoRef } from "./repo.js";
 
 // Forge APIs: asking a code host about a repository.
@@ -40,19 +41,22 @@ export interface ForgeResult {
 }
 
 export interface ForgeOptions {
-  /** Override the API base — a self-hosted GitLab, or GitHub Enterprise. */
+  /**
+   * Override the API base — a self-hosted GitLab, or GitHub Enterprise. Naming
+   * it is also what sends the forge's token there: the calling code chose this
+   * host, which a repository string alone never proves.
+   */
   apiBase?: string;
   limit?: number;
   timeoutMs?: number;
 }
 
-/** Which forge a host is, by its shape. Unknown hosts get no client. */
+/**
+ * Which forge a host is: a host declared in `<PREFIX>_FORGE_HOSTS` first, then
+ * its shape. Unknown hosts get no client.
+ */
 export function forgeKind(host: string): ForgeKind | undefined {
-  const h = host.toLowerCase();
-  if (h === "github.com" || h.endsWith(".github.com") || h.startsWith("github.")) return "github";
-  if (h === "gitlab.com" || h.includes("gitlab")) return "gitlab";
-  if (h.includes("gitea") || h.includes("codeberg")) return "gitea";
-  return undefined;
+  return hostForgeKind(host);
 }
 
 /**
@@ -69,33 +73,154 @@ export function forgeKind(host: string): ForgeKind | undefined {
  */
 export function apiBase(ref: Pick<RepoRef, "host"> | string, opts: ForgeOptions = {}): string {
   if (opts.apiBase) return opts.apiBase.replace(/\/+$/, "");
-  const host = typeof ref === "string" ? ref : ref.host;
+  const host = normalizeForgeHost(typeof ref === "string" ? ref : ref.host);
   const kind = forgeKind(host);
   if (kind === "github") return host === "github.com" ? "https://api.github.com" : `https://${host}/api/v3`;
   if (kind === "gitlab") return `https://${host}/api/v4`;
   return `https://${host}/api/v1`;
 }
 
-/** Auth headers when a token is in the environment; none when it is not. */
-export function forgeAuthHeaders(kind: ForgeKind): Record<string, string> {
-  if (kind === "github") {
-    const t = env("GITHUB_TOKEN") ?? process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
-    return t ? { authorization: `Bearer ${t}` } : {};
-  }
-  if (kind === "gitlab") {
-    const t = env("GITLAB_TOKEN") ?? process.env.GITLAB_TOKEN;
-    return t ? { "private-token": t } : {};
-  }
-  const t = env("GITEA_TOKEN") ?? process.env.GITEA_TOKEN;
-  return t ? { authorization: `token ${t}` } : {};
+// The hosts each token is FOR, with no configuration. Deliberately not "every
+// host that looks like one": the kind is read off the host's name, and anyone can
+// register github.<anything>. A token goes to one of these, to a host the user
+// declared in `<PREFIX>_FORGE_HOSTS`, or to an `apiBase` the calling code named —
+// never to a host a repository string merely mentions. Gitea has no default at
+// all: Codeberg is one instance among many, and a token belongs to one of them.
+const TOKEN_HOSTS: Record<ForgeKind, readonly string[]> = {
+  github: ["github.com", "api.github.com"],
+  gitlab: ["gitlab.com"],
+  gitea: [],
+};
+
+function tokenHostAllowed(kind: ForgeKind, host: string): boolean {
+  const h = normalizeForgeHost(host);
+  return TOKEN_HOSTS[kind].includes(h) || configuredForgeHosts().get(h) === kind;
 }
 
-function reqOpts(kind: ForgeKind, opts: ForgeOptions) {
+// `||`, not `??`: an exported-but-empty variable is how CI spells "no secret",
+// and it must not shadow the next variable the user did set.
+function forgeToken(kind: ForgeKind): string | undefined {
+  const raw = (name: string) => process.env[name]?.trim() || undefined;
+  if (kind === "github") return env("GITHUB_TOKEN") || raw("GITHUB_TOKEN") || raw("GH_TOKEN");
+  if (kind === "gitlab") return env("GITLAB_TOKEN") || raw("GITLAB_TOKEN");
+  return env("GITEA_TOKEN") || raw("GITEA_TOKEN");
+}
+
+/**
+ * Auth headers when a token is in the environment; none when it is not.
+ *
+ * Given the `host` a request goes to, a token comes back only for a host it
+ * belongs to (see `TOKEN_HOSTS`). Without one this answers by kind alone, as it
+ * always has — for a caller that decides where the header goes itself.
+ *
+ * Every token travels in `Authorization`, GitLab's included (it accepts a
+ * personal token as a Bearer): that is the header a runtime drops on a
+ * cross-origin redirect, where a custom `private-token` sailed through.
+ */
+export function forgeAuthHeaders(kind: ForgeKind, host?: string): Record<string, string> {
+  const t = forgeToken(kind);
+  if (!t || (host !== undefined && !tokenHostAllowed(kind, host))) return {};
+  return { authorization: kind === "gitea" ? `token ${t}` : `Bearer ${t}` };
+}
+
+function reqHeaders(kind: ForgeKind, ref: RepoRef, opts: ForgeOptions): Record<string, string> {
   return {
-    timeoutMs: opts.timeoutMs ?? 15_000,
-    userAgent: contactUa(),
-    headers: { ...forgeAuthHeaders(kind), ...(kind === "github" ? { accept: "application/vnd.github+json" } : {}) },
+    "user-agent": contactUa(),
+    accept: kind === "github" ? "application/vnd.github+json" : "application/json",
+    ...(opts.apiBase ? forgeAuthHeaders(kind) : forgeAuthHeaders(kind, ref.host)),
   };
+}
+
+interface ForgeResponse {
+  ok: boolean;
+  status: number;
+  data: any;
+  /** Why a request got no answer (status 0), or why its answer was unusable. */
+  error?: string;
+  timedOut?: boolean;
+}
+
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
+// The only answers a second try can change: a gateway that hiccuped. A quota —
+// a 429, or GitHub's 403 — is never retried; waiting it out is the caller's call.
+const RETRY_STATUS = new Set([502, 503, 504]);
+const MAX_REDIRECTS = 5;
+const MAX_BODY_BYTES = 4 * 1024 * 1024;
+
+// Why a request failed, as specifically as the runtime says: undici reports
+// every network failure as "fetch failed" and keeps the reason on `cause`.
+function failureText(e: unknown): string {
+  const err = e as { message?: unknown; cause?: { message?: unknown; code?: unknown } } | undefined;
+  const code = typeof err?.cause?.code === "string" ? err.cause.code : undefined;
+  const detail = typeof err?.cause?.message === "string" && err.cause.message ? err.cause.message : code;
+  if (!detail) return typeof err?.message === "string" ? err.message : String(e);
+  return code && !detail.includes(code) ? `${code}: ${detail}` : detail;
+}
+
+// One GET, following redirects BY HAND so a credential never outlives its
+// origin. `fetch` decides for itself which headers survive a cross-origin hop,
+// and older runtimes kept them all; here every header that can carry a secret is
+// dropped the moment the target changes origin, whatever the runtime. One
+// timeout covers the whole chain.
+async function forgeGetOnce(url: string, headers: Record<string, string>, timeoutMs: number): Promise<ForgeResponse> {
+  const ctrl = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctrl.abort();
+  }, timeoutMs);
+  const sent = { ...headers };
+  let target = url;
+  try {
+    for (let hop = 0; ; hop++) {
+      const res = await fetch(target, { headers: sent, redirect: "manual", signal: ctrl.signal });
+      const location = res.headers.get("location");
+      if (REDIRECT_STATUS.has(res.status) && location) {
+        await res.body?.cancel().catch(() => {});
+        if (hop >= MAX_REDIRECTS) return { ok: false, status: 0, data: undefined, error: `more than ${MAX_REDIRECTS} redirects from ${url}` };
+        const next = new URL(location, target);
+        if (next.protocol !== "https:" && next.protocol !== "http:") return { ok: false, status: 0, data: undefined, error: `redirected to ${next.protocol}` };
+        if (next.origin !== new URL(target).origin) {
+          delete sent.authorization;
+          delete sent["private-token"];
+          delete sent.cookie;
+        }
+        target = next.href;
+        continue;
+      }
+      const bytes = await readCappedBytes(res, MAX_BODY_BYTES + 1);
+      countFetch(Math.min(bytes.length, MAX_BODY_BYTES), false);
+      if (bytes.length > MAX_BODY_BYTES) return { ok: false, status: res.status, data: undefined, error: `response over the ${MAX_BODY_BYTES}-byte cap` };
+      const text = bytes.toString("utf8");
+      let data: unknown;
+      try {
+        data = text ? JSON.parse(text) : undefined;
+      } catch {
+        data = text;
+      }
+      return { ok: res.ok, status: res.status, data };
+    }
+  } catch (e) {
+    return { ok: false, status: 0, data: undefined, error: timedOut ? `timed out after ${timeoutMs} ms` : failureText(e), timedOut };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * A forge API GET: JSON, byte-capped, never throwing, and retried at most once —
+ * for a gateway error or a dropped connection. A timeout has already spent the
+ * whole budget the caller granted, so it is not retried either: a black-holed
+ * network costs one timeout per call, not two.
+ */
+async function forgeGet(url: string, kind: ForgeKind, ref: RepoRef, opts: ForgeOptions): Promise<ForgeResponse> {
+  const headers = reqHeaders(kind, ref, opts);
+  const timeoutMs = opts.timeoutMs ?? 15_000;
+  const first = await forgeGetOnce(url, headers, timeoutMs);
+  const transient = RETRY_STATUS.has(first.status) || (first.status === 0 && !first.timedOut);
+  if (!transient) return first;
+  await sleep(envInt("RETRY_MS", 600, 0, 5000));
+  return forgeGetOnce(url, headers, timeoutMs);
 }
 
 function clip(s: unknown, n = 1200): string {
@@ -193,7 +318,7 @@ export function canonicalRepoRef(ref: RepoRef, opts: ForgeOptions = {}): Promise
         const r = await shAsync("gh", ["api", `repos/${ref.owner}/${ref.repo}`, "--jq", ".full_name"], { timeoutMs: opts.timeoutMs ?? 15_000 });
         if (r.ok && r.stdout.includes("/")) return splitSlug(r.stdout.trim(), fallback);
       }
-      const r = await httpJson("GET", `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}`, undefined, reqOpts("github", opts));
+      const r = await forgeGet(`${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}`, "github", ref, opts);
       const full = r.ok ? r.data?.full_name : undefined;
       return typeof full === "string" && full.includes("/") ? splitSlug(full, fallback) : fallback;
     })();
@@ -228,7 +353,7 @@ export async function searchIssues(ref: RepoRef, terms: string[], kind: "issue" 
     const slug = (await canonicalRepo(ref, opts)) ?? `${ref.owner}/${ref.repo}`;
     const filter = kind === "pr" ? "is:pr" : "is:issue";
     const url = `${apiBase(ref, opts)}/search/issues?q=${encodeURIComponent(`repo:${slug} ${filter} ${q}`)}&per_page=${limit}&sort=updated&order=desc`;
-    const r = await httpJson("GET", url, undefined, reqOpts(forge, opts));
+    const r = await forgeGet(url, forge, ref, opts);
     if (limited(r.status, r.data))
       return { items: [], rateLimited: true, note: "GitHub rate-limited this search — set GITHUB_TOKEN to raise the anonymous quota." };
     if (!r.ok) return { items: [], note: `GitHub search failed (status ${r.status}).` };
@@ -239,7 +364,7 @@ export async function searchIssues(ref: RepoRef, terms: string[], kind: "issue" 
     const project = encodeURIComponent(`${ref.owner}/${ref.repo}`);
     const path = kind === "pr" ? "merge_requests" : "issues";
     const url = `${apiBase(ref, opts)}/projects/${project}/${path}?search=${encodeURIComponent(q)}&per_page=${limit}&order_by=updated_at`;
-    const r = await httpJson("GET", url, undefined, reqOpts(forge, opts));
+    const r = await forgeGet(url, forge, ref, opts);
     if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: "GitLab rate-limited this search." };
     if (!r.ok) return { items: [], note: `GitLab request failed (status ${r.status}).` };
     const items: ForgeItem[] = (Array.isArray(r.data) ? r.data : []).map((it: Record<string, unknown>) => ({
@@ -257,7 +382,7 @@ export async function searchIssues(ref: RepoRef, terms: string[], kind: "issue" 
 
   const path = kind === "pr" ? "pulls" : "issues";
   const url = `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}/${path}?state=all&limit=${limit}&q=${encodeURIComponent(q)}`;
-  const r = await httpJson("GET", url, undefined, reqOpts(forge, opts));
+  const r = await forgeGet(url, forge, ref, opts);
   if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: "Gitea rate-limited this request." };
   if (!r.ok) return { items: [], note: `Gitea request failed (status ${r.status}).` };
   const items: ForgeItem[] = (Array.isArray(r.data) ? r.data : []).map((it: Record<string, unknown>) => ({
@@ -282,7 +407,7 @@ export async function listReleases(ref: RepoRef, opts: ForgeOptions = {}): Promi
     forge === "gitlab"
       ? `${apiBase(ref, opts)}/projects/${encodeURIComponent(`${ref.owner}/${ref.repo}`)}/releases?per_page=${limit}`
       : `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}/releases?per_page=${limit}&limit=${limit}`;
-  const r = await httpJson("GET", url, undefined, reqOpts(forge, opts));
+  const r = await forgeGet(url, forge, ref, opts);
   if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: `${forge} rate-limited the release list.` };
   if (!r.ok) return { items: [], note: `Could not list releases (status ${r.status}).` };
   const items: ForgeItem[] = (Array.isArray(r.data) ? r.data : []).map((it: Record<string, unknown>) => ({
@@ -306,7 +431,7 @@ export async function listTags(ref: RepoRef, opts: ForgeOptions = {}): Promise<F
     forge === "gitlab"
       ? `${apiBase(ref, opts)}/projects/${encodeURIComponent(`${ref.owner}/${ref.repo}`)}/repository/tags?per_page=${limit}`
       : `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}/tags?per_page=${limit}&limit=${limit}`;
-  const r = await httpJson("GET", url, undefined, reqOpts(forge, opts));
+  const r = await forgeGet(url, forge, ref, opts);
   if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: `${forge} rate-limited the tag list.` };
   if (!r.ok) return { items: [], note: `Could not list tags (status ${r.status}).` };
   const items: ForgeItem[] = (Array.isArray(r.data) ? r.data : []).map((it: Record<string, unknown>) => ({
@@ -348,7 +473,7 @@ export async function repoFacts(ref: RepoRef, opts: ForgeOptions = {}): Promise<
     forge === "gitlab"
       ? `${apiBase(ref, opts)}/projects/${encodeURIComponent(`${ref.owner}/${ref.repo}`)}`
       : `${apiBase(ref, opts)}/repos/${ref.owner}/${ref.repo}`;
-  const r = await httpJson("GET", url, undefined, reqOpts(forge, opts));
+  const r = await forgeGet(url, forge, ref, opts);
   if (!r.ok || !r.data || typeof r.data !== "object") return undefined;
   const d = r.data as Record<string, any>;
   return {

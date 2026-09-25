@@ -270,12 +270,16 @@ describe("the branches a forge and a repo ref actually take", () => {
 
   it("uses a token when one is in the environment, and none when there is not", async () => {
     const { forgeAuthHeaders } = await import("../src/forge.js");
+    // Both, blank: an empty GITHUB_TOKEN no longer hides a GH_TOKEN the machine set.
     vi.stubEnv("GITHUB_TOKEN", "");
+    vi.stubEnv("GH_TOKEN", "");
     expect(forgeAuthHeaders("github")).toEqual({});
     vi.stubEnv("GITHUB_TOKEN", "tok");
     expect(forgeAuthHeaders("github")).toEqual({ authorization: "Bearer tok" });
     vi.stubEnv("GITLAB_TOKEN", "gl");
-    expect(forgeAuthHeaders("gitlab")).toEqual({ "private-token": "gl" });
+    // Authorization, not GitLab's own `private-token`: a runtime strips the
+    // former on a cross-origin redirect and forwarded the latter.
+    expect(forgeAuthHeaders("gitlab")).toEqual({ authorization: "Bearer gl" });
     vi.stubEnv("GITEA_TOKEN", "gt");
     expect(forgeAuthHeaders("gitea")).toEqual({ authorization: "token gt" });
     vi.unstubAllEnvs();

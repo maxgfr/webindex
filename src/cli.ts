@@ -195,6 +195,11 @@ ENVIRONMENT
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
   WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
   WEBINDEX_UA            override the browser User-Agent
+  GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, GITEA_TOKEN
+                         optional forge tokens; each goes only to github.com, gitlab.com,
+                         or a host listed in WEBINDEX_FORGE_HOSTS
+  WEBINDEX_FORGE_HOSTS   self-hosted forges, e.g. "salsa.debian.org=gitlab,git.corp=github":
+                         each is queried as that forge and receives that forge's token
 
 Every optional helper degrades to a note. Nothing here needs an API key.`;
 

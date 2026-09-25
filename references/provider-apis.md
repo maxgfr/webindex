@@ -44,9 +44,30 @@ A quota answer is reported as `rateLimited`, never retried. Retrying a quota you
 have already exhausted only exhausts it further, and the two failures need
 opposite handling: "wait" versus "this request is wrong".
 
-GitHub's anonymous search quota is small. Set `GITHUB_TOKEN` (or
+GitHub's anonymous search quota is small. Set `GITHUB_TOKEN` (or `GH_TOKEN`, or
 `WEBINDEX_GITHUB_TOKEN`) to raise it; `GITLAB_TOKEN` and `GITEA_TOKEN` work the
 same way.
+
+## Where a token goes
+
+A token is sent to **its own host only**: `GITHUB_TOKEN` to github.com
+(`api.github.com`), `GITLAB_TOKEN` to gitlab.com. Never to a host that merely
+looks like a forge — anyone can register `github.<anything>`, and a repository
+string in a prompt is enough to point an agent at one.
+
+A self-hosted forge receives its token once you declare it:
+
+```bash
+export WEBINDEX_FORGE_HOSTS="ghe.corp.example=github,salsa.debian.org=gitlab,codeberg.org=gitea"
+```
+
+Each listed host is queried as that forge (so a GitLab whose name does not say
+"gitlab" works) and gets that forge's token. `GITEA_TOKEN` has no default host at
+all: Codeberg is one Gitea among many. A library caller that passes `apiBase`
+has named the host itself, so the token goes there too.
+
+Every token travels in the `Authorization` header — GitLab's as a Bearer — and is
+dropped the moment a redirect leaves the API's origin.
 
 ## Getting the source itself
 

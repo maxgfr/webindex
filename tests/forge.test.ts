@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { apiBase, forgeKind, listReleases, mapGithubIssues, repoFacts, resetCanonicalRepoCache, searchIssues } from "../src/forge.js";
+import { envName } from "../src/brand.js";
+import { apiBase, forgeAuthHeaders, forgeKind, listReleases, mapGithubIssues, repoFacts, resetCanonicalRepoCache, searchIssues } from "../src/forge.js";
 import { lookupPackage, normalizeRepoUrl, resolvePackage } from "../src/registry.js";
 import { resolveRepo } from "../src/repo.js";
 import { slugify } from "../src/text.js";
@@ -119,6 +120,112 @@ describe("forge routing", () => {
     expect(apiBase(resolveRepo("github.acme.corp/a/b"))).toBe("https://github.acme.corp/api/v3");
     expect(apiBase(resolveRepo("gitlab.acme.corp/a/b"))).toBe("https://gitlab.acme.corp/api/v4");
     expect(apiBase(resolveRepo("github.com/a/b"), { apiBase: "https://pinned.test/api" })).toBe("https://pinned.test/api");
+  });
+});
+
+describe("where a token is sent", () => {
+  // Every case sets all three tokens, so a header that reaches the wrong host is
+  // a real leak and not an artefact of which variables the machine had.
+  beforeEach(() => {
+    vi.stubEnv("GITHUB_TOKEN", "ghp_SECRET");
+    vi.stubEnv("GH_TOKEN", "");
+    vi.stubEnv("GITLAB_TOKEN", "glpat-SECRET");
+    vi.stubEnv("GITEA_TOKEN", "gitea-SECRET");
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  /** The credential headers each request carried, keyed by URL. */
+  function recordAuth() {
+    const seen: { url: string; auth?: string; privateToken?: string }[] = [];
+    installFetchMock((url, init) => {
+      const h = (init?.headers ?? {}) as Record<string, string>;
+      seen.push({ url, auth: h.authorization, privateToken: h["private-token"] });
+      return { body: JSON.stringify({ full_name: "o/r" }), contentType: "application/json" };
+    });
+    return seen;
+  }
+
+  it("never sends a token to a host that only looks like its forge", async () => {
+    // A prompt-injected link is enough to route an agent here, and the forge
+    // KIND was all it took to hand over the user's token.
+    const seen = recordAuth();
+    for (const host of ["github.attacker.example", "notgitlab.attacker.example", "gitea-lookalike.attacker.example", "codeberg.evil.example"]) {
+      await repoFacts(resolveRepo(`https://${host}/o/r`));
+      await listReleases(resolveRepo(`https://${host}/o/r`));
+    }
+    expect(seen.length).toBeGreaterThanOrEqual(8);
+    for (const s of seen) {
+      expect(s.auth, s.url).toBeUndefined();
+      expect(s.privateToken, s.url).toBeUndefined();
+    }
+  });
+
+  it("sends each token to its own public forge", async () => {
+    const seen = recordAuth();
+    await repoFacts(resolveRepo("github.com/o/r"));
+    await repoFacts(resolveRepo("gitlab.com/o/r"));
+    expect(seen[0]).toMatchObject({ url: "https://api.github.com/repos/o/r", auth: "Bearer ghp_SECRET" });
+    // As an Authorization header: that is the one a runtime strips on a
+    // cross-origin redirect. GitLab accepts a personal token either way.
+    expect(seen[1]!.url).toMatch(/^https:\/\/gitlab\.com\/api\/v4\/projects\/o%2Fr/);
+    expect(seen[1]!.auth).toBe("Bearer glpat-SECRET");
+    expect(seen[1]!.privateToken).toBeUndefined();
+  });
+
+  it("sends a token to a self-hosted forge only once the user has declared it", async () => {
+    let seen = recordAuth();
+    await repoFacts(resolveRepo("github.corp.example/o/r"));
+    expect(seen[0]!.auth).toBeUndefined();
+
+    vi.stubEnv(envName("FORGE_HOSTS"), "github.corp.example=github, git.corp.example=gitea");
+    seen = recordAuth();
+    await repoFacts(resolveRepo("github.corp.example/o/r"));
+    await repoFacts(resolveRepo("git.corp.example/o/r"));
+    expect(seen[0]).toMatchObject({ url: "https://github.corp.example/api/v3/repos/o/r", auth: "Bearer ghp_SECRET" });
+    expect(seen[1]).toMatchObject({ url: "https://git.corp.example/api/v1/repos/o/r", auth: "token gitea-SECRET" });
+  });
+
+  it("trusts an API base the calling code named itself", async () => {
+    const seen = recordAuth();
+    await repoFacts(resolveRepo("github.acme.example/o/r"), { apiBase: "https://github.acme.example/api/v3" });
+    expect(seen[0]!.auth).toBe("Bearer ghp_SECRET");
+  });
+
+  it("answers by host when asked by host, and by kind for a caller that names none", () => {
+    expect(forgeAuthHeaders("github", "github.attacker.example")).toEqual({});
+    expect(forgeAuthHeaders("github", "github.com")).toEqual({ authorization: "Bearer ghp_SECRET" });
+    expect(forgeAuthHeaders("gitea", "codeberg.org")).toEqual({});
+    // The pre-existing, host-less call: its caller decides where the header goes.
+    expect(forgeAuthHeaders("github")).toEqual({ authorization: "Bearer ghp_SECRET" });
+  });
+
+  it("reads GH_TOKEN when GITHUB_TOKEN is exported but empty", () => {
+    // `GITHUB_TOKEN: ${{ secrets.MISSING }}` exports an empty variable in CI,
+    // and `??` took that empty string over the GH_TOKEN the user did set.
+    vi.stubEnv("GITHUB_TOKEN", "");
+    vi.stubEnv("GH_TOKEN", "gho_FROMGH");
+    expect(forgeAuthHeaders("github", "github.com")).toEqual({ authorization: "Bearer gho_FROMGH" });
+    vi.stubEnv("GITHUB_TOKEN", "  ");
+    expect(forgeAuthHeaders("github", "github.com")).toEqual({ authorization: "Bearer gho_FROMGH" });
+  });
+
+  it("drops the credential when the API redirects to another origin", async () => {
+    // A GitLab behind a moved domain, or a proxy: the token is for the host it
+    // was issued to, not for wherever that host points next.
+    const seen: { url: string; auth?: string; privateToken?: string }[] = [];
+    installFetchMock((url, init) => {
+      const h = (init?.headers ?? {}) as Record<string, string>;
+      seen.push({ url, auth: h.authorization, privateToken: h["private-token"] });
+      if (url.startsWith("https://gitlab.com/")) return { status: 302, headers: { location: "https://elsewhere.example/api/v4/projects/o%2Fr" } };
+      if (url.startsWith("https://api.github.com/repos/old/")) return { status: 301, headers: { location: "https://api.github.com/repositories/42" } };
+      return { body: JSON.stringify({ full_name: "o/r", path_with_namespace: "o/r" }), contentType: "application/json" };
+    });
+    expect(await repoFacts(resolveRepo("gitlab.com/o/r"))).toMatchObject({ fullName: "o/r" });
+    expect(seen[1]).toMatchObject({ url: "https://elsewhere.example/api/v4/projects/o%2Fr", auth: undefined, privateToken: undefined });
+
+    // A rename answers with a same-origin redirect, which keeps its token.
+    await repoFacts(resolveRepo("github.com/old/name"));
+    expect(seen[3]).toMatchObject({ url: "https://api.github.com/repositories/42", auth: "Bearer ghp_SECRET" });
   });
 });
 
