@@ -160,6 +160,13 @@ export interface CrawlOptions {
   prefix?: string;
   /** Ignore robots.txt. For a site you own, and named so it cannot happen by accident. */
   ignoreRobots?: boolean;
+  /**
+   * The caller's own policy, asked before every request the crawl makes —
+   * each page and each of its redirects, robots.txt, the sitemaps. A URL it
+   * refuses is not requested, and a note says so. How a server that refuses
+   * private addresses keeps a crawl from walking into them.
+   */
+  authorizeUrl?: (url: string) => Promise<boolean>;
   /** Per-host delay override. Otherwise robots' own Crawl-delay, else hostDelayMs(). */
   delayMs?: number;
   /**
@@ -387,6 +394,14 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
   // how most sites answer) but not leave it — and the authorizer never asks
   // robots.txt whether it may fetch itself. One per origin, so the memo, which
   // is kept per authorizer, is shared by every page of that origin.
+  // The caller's own policy comes before the crawl's: a URL it refuses is not
+  // asked for at all — robots.txt, sitemaps and redirect hops included.
+  const permitted = async (url: string): Promise<boolean> => {
+    if (!opts.authorizeUrl || (await opts.authorizeUrl(url))) return true;
+    notes.push(`${url}: refused by the caller's policy.`);
+    return false;
+  };
+
   const NONE: Robots = { rules: [], sitemaps: [], absent: true };
   const robotsPolicy = new Map<string, (url: string) => Promise<boolean>>();
   const robotsFor = (url: string): Promise<Robots> => {
@@ -395,6 +410,7 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
     let authorize = robotsPolicy.get(home);
     if (!authorize) {
       authorize = async (target: string) => {
+        if (!(await permitted(target))) return false;
         if (sameSite(target, home) || inScope(target)) return true;
         notes.push(`${target}: destination is outside the crawl origin.`);
         return false;
@@ -434,6 +450,7 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
   // robots-refused page. Delays apply to the destination host as well. The
   // seed's own redirects may leave the origin: they are what settles it.
   const authorizeHop = async (url: string, seedHop: boolean): Promise<boolean> => {
+    if (!(await permitted(url))) return false;
     if (!seedHop && !inScope(url)) {
       notes.push(`${url}: destination is outside the crawl origin.`);
       return false;

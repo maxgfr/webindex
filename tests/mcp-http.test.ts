@@ -241,6 +241,39 @@ describe("origin checking", () => {
   });
 });
 
+describe("bearer token", () => {
+  // Opt-in, for a server others can reach: without it anyone who finds the
+  // port has a fetch-anything proxy.
+  it("answers only a request carrying the operator's token", async () => {
+    const s = await startHttpServer(testAdapter(), { port: 0, bearerToken: "s3cret-token" });
+    try {
+      const call = (headers: Record<string, string>) =>
+        fetch(s.url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(rpc(1, "ping")) });
+      const none = await call({});
+      expect(none.status).toBe(401);
+      expect(none.headers.get("www-authenticate")).toMatch(/^Bearer/);
+      expect((await call({ authorization: "Bearer wrong" })).status).toBe(401);
+      expect((await call({ authorization: "Bearer s3cret-token-and-more" })).status).toBe(401);
+      expect((await call({ authorization: "s3cret-token" })).status).toBe(401);
+      const ok = await call({ authorization: "Bearer s3cret-token" });
+      expect(ok.status).toBe(200);
+      expect(await json(ok)).toMatchObject({ id: 1, result: {} });
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("still answers a CORS preflight, which a browser sends without credentials", async () => {
+    const s = await startHttpServer(testAdapter(), { port: 0, bearerToken: "s3cret-token" });
+    try {
+      const pre = await fetch(s.url, { method: "OPTIONS", headers: { origin: "http://localhost:5173", "access-control-request-method": "POST" } });
+      expect(pre.status).toBe(204);
+    } finally {
+      await s.close();
+    }
+  });
+});
+
 describe("routing", () => {
   it("404s a path that is not the MCP endpoint", async () => {
     expect((await fetch(running.url.replace("/mcp", "/nope"))).status).toBe(404);

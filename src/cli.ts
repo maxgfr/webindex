@@ -13,7 +13,7 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // What it offers is what the engine actually does today: discover candidate
 // URLs through the local keyless stack, turn a URL or a local file into clean
 // text, drive the containers, and serve all of that to an agent over MCP.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { configure, env, envFlag, envInt, envName } from "./brand.js";
@@ -24,7 +24,7 @@ import { enabledExtractors, extractPdf, ocrBudgetLeft, ocrTools, PDF_EXTRACTORS 
 import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./pdf/exec.js";
 import { npxCacheState } from "./pdf/npx.js";
 import { have } from "./exec.js";
-import { extractMainHtml, htmlToText, httpGet, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
+import { type ExtractResult, extractMainHtml, fetchAndExtract, htmlToText, httpGet, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
 import { firecrawlBase, probeFirecrawl } from "./firecrawl.js";
 import { embedModel, ensureComposeMaterialized, STACK_SERVICES, stackControl } from "./stack.js";
 import { ollamaBase, probeOllama } from "./embed.js";
@@ -41,7 +41,8 @@ import { fetchRobots, isAllowed } from "./robots.js";
 import { discoverFeeds, fetchFeed, fetchSitemap, parseFeed } from "./feed.js";
 import { pageMetadata } from "./structured.js";
 import { type RepoRef, resolveRepo } from "./repo.js";
-import { type ForgeKind, forgeRef, listReleases, listTags, repoFactsResult, searchIssues } from "./forge.js";
+import { apiBase, type ForgeKind, forgeRef, listReleases, listTags, repoFactsResult, searchIssues } from "./forge.js";
+import { configuredForgeHosts, normalizeForgeHost } from "./forge-host.js";
 import { type RegistryKind, resolvePackageResult } from "./registry.js";
 import { bm25MatchedTerms, bm25Score, bm25Tokenize, buildBm25Index, dedupeNearDuplicates, diversify } from "./rank.js";
 import {
@@ -63,6 +64,7 @@ import type { JsonSchemaProp } from "./mcp/protocol.js";
 import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
+import { confinePath, publicUrlRefusal, publicUrlsOnly } from "./mcp/policy.js";
 
 configure({ name: "webindex", envPrefix: "WEBINDEX", cli: "webindex", contactUrl: "https://github.com/maxgfr/webindex" });
 
@@ -91,6 +93,7 @@ USAGE
   webindex sitemap <url> [--max <n>] [--json]
   webindex feed <url> [--json]
   webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>] [--allow-remote]
+               [--public-only] [--allow-private] [--extract-root <dir>]
   webindex searxng   up|down|status
   webindex firecrawl up|down|status
   webindex semantic  up|down|status
@@ -175,7 +178,15 @@ COMMANDS
              50 MB. The children --max did not reach are named on stderr.
   feed       A site's RSS, Atom or JSON Feed, or the feeds the page
              advertises. Relative entry links are resolved.
-  mcp        Serve fetch/extract to an agent over MCP (stdio by default).
+  mcp        Serve the webindex_* tools to an agent over MCP (stdio by
+             default). --public-only refuses URLs that are, or resolve to,
+             loopback, private, link-local or metadata addresses, checked
+             again at every redirect; --extract-root <dir> confines
+             webindex_extract to one directory (symlinks resolved).
+             --allow-remote turns both walls on: no local file at all
+             without --extract-root, and --allow-private lifts the address
+             one. With WEBINDEX_MCP_TOKEN set, HTTP answers only requests
+             carrying it as a bearer token.
   searxng    Bring the keyless SearXNG container up or down, or show it.
   firecrawl  Same for Firecrawl, which cleans a page with a real browser. It
              delegates its own search to SearXNG, so this starts both.
@@ -258,6 +269,9 @@ ENVIRONMENT
   WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
   WEBINDEX_MAX_CRAWL_DELAY_MS the longest robots.txt Crawl-delay a crawl waits out, in ms
                               (default 60000); a site asking for more is not crawled
+  WEBINDEX_PUBLIC_ONLY   set to make every \`mcp\` run --public-only
+  WEBINDEX_EXTRACT_ROOT  the directory \`mcp\` confines webindex_extract to (--extract-root)
+  WEBINDEX_MCP_TOKEN     the bearer token \`mcp --transport http\` then requires
   WEBINDEX_UA            override the browser User-Agent
   GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, GITEA_TOKEN
                          optional forge tokens; each goes only to github.com, gitlab.com,
@@ -304,6 +318,7 @@ export const VALUE_FLAGS = [
   "timeout",
   "forge",
   "prefix",
+  "extract-root",
 ];
 export const BOOL_FLAGS = [
   "json",
@@ -319,6 +334,8 @@ export const BOOL_FLAGS = [
   "offline",
   "dense",
   "lines",
+  "public-only",
+  "allow-private",
 ];
 export const COMMANDS = [
   "search",
@@ -376,6 +393,46 @@ function argTimeout(args: CommandArgs): number | undefined {
   const ms = argInt(args, "timeout");
   if (ms !== undefined && ms < 1) throw new UsageError(`--timeout expects a positive number of milliseconds, got "${ms}"`);
   return ms;
+}
+
+/**
+ * The walls `webindex mcp` puts round its tools, from the flags and the
+ * environment.
+ *
+ * --allow-remote turns the two that matter on by default: a server others can
+ * reach refuses private addresses (lifted by --allow-private) and reads no
+ * local file (unless --extract-root names the one directory it may). Keyed on
+ * the flag rather than on the bind address, because "others can reach this" is
+ * what the flag says — a loopback server behind a reverse proxy is reachable
+ * too, and its operator can say so.
+ */
+function mcpPolicy(args: CommandArgs, allowRemote: boolean): WebindexToolPolicy {
+  const allowPrivate = argBool(args, "allow-private");
+  if (allowPrivate && argBool(args, "public-only")) usage("--public-only and --allow-private contradict each other");
+  const publicOnly = !allowPrivate && (argBool(args, "public-only") || envFlag("PUBLIC_ONLY") || allowRemote);
+  const rootArg = argValue(args, "extract-root") ?? env("EXTRACT_ROOT");
+  let extractRoot: string | undefined;
+  if (rootArg !== undefined) {
+    extractRoot = resolve(rootArg);
+    let isDir = false;
+    try {
+      isDir = statSync(extractRoot).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) usage(`--extract-root ${rootArg} is not a directory`);
+  }
+  return { publicOnly, ...(extractRoot !== undefined ? { extractRoot } : allowRemote ? { noLocalFiles: true } : {}) };
+}
+
+/** What the policy is, said once at startup — nothing when there is none. */
+function mcpPolicyNotice(policy: WebindexToolPolicy, allowRemote: boolean, allowPrivate: boolean): string[] {
+  const lines: string[] = [];
+  if (policy.publicOnly) lines.push(`fetches: public addresses only${allowRemote ? " (the --allow-remote default; --allow-private lifts it)" : ""}.`);
+  else if (allowRemote && allowPrivate) lines.push("fetches: any address, this machine's own network included (--allow-private).");
+  if (policy.extractRoot !== undefined) lines.push(`local files: only under ${policy.extractRoot}.`);
+  else if (policy.noLocalFiles) lines.push("local files: none, and webindex_extract is off (--extract-root <dir> offers one directory).");
+  return lines;
 }
 
 /**
@@ -648,17 +705,91 @@ function withHints(tools: ToolDecl[]): ToolDecl[] {
 }
 
 /**
+ * The declarations as this server's policy shapes them. A tool that could only
+ * fail is not offered — the model would spend a call learning that — and an
+ * argument the policy constrains says so where the model reads it.
+ */
+function withPolicy(policy: WebindexToolPolicy, tools: ToolDecl[]): ToolDecl[] {
+  const root = policy.extractRoot;
+  const offered = root === undefined && policy.noLocalFiles ? tools.filter((t) => t.name !== "webindex_extract") : tools;
+  const withArg = (t: ToolDecl, name: string, prop: JsonSchemaProp): ToolDecl => ({
+    ...t,
+    inputSchema: { ...t.inputSchema, properties: { ...t.inputSchema.properties, [name]: prop } },
+  });
+  return withHints(
+    offered.map((t) => {
+      if (t.name === "webindex_extract" && root !== undefined) {
+        return withArg(t, "path", {
+          type: "string",
+          description: `Path to the file, under ${root} — the only directory this server reads; a relative path is read from there.`,
+        });
+      }
+      if (t.name === "webindex_fetch" && policy.publicOnly) {
+        return withArg(t, "cache", {
+          type: "boolean",
+          description: "Ignored here: this server fetches public addresses only, and never reads the on-disk cache, which unguarded runs share.",
+        });
+      }
+      return t;
+    }),
+  );
+}
+
+/**
+ * The walls an operator can put round the tools (`webindex mcp` flags).
+ *
+ * Off by default: on a developer's own machine, fetching any URL and reading
+ * any file is the point. Exposed with --allow-remote, the first two are on
+ * unless lifted, because a fetch that reaches 169.254.169.254 hands out cloud
+ * credentials and a file tool reads ~/.ssh.
+ */
+export interface WebindexToolPolicy {
+  /** Refuse URLs that are, or resolve to, non-public addresses — checked again at every redirect. */
+  publicOnly?: boolean;
+  /** Read local files (webindex_extract, a repository named by its path) only under this directory. */
+  extractRoot?: string;
+  /** Read no local file at all: webindex_extract is not offered. `extractRoot` wins over it. */
+  noLocalFiles?: boolean;
+}
+
+/**
  * webindex's own MCP tools: fetch a URL, extract a file.
  *
  * Exported because it is a useful seam in both directions — the suite drives it
  * without a subprocess, and a host embedding several engines can mount these
  * tools inside its own server rather than spawning `webindex mcp`.
  */
-export function webindexAdapter(): McpAdapter {
+export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
+  // One authorizer for the adapter's life: fetchRobots keys its cache by it.
+  const guard = policy.publicOnly ? publicUrlsOnly() : undefined;
+  const refuseUrl = async (url: string): Promise<void> => {
+    if (!guard) return;
+    const why = await publicUrlRefusal(url);
+    if (why) throw new ToolError(`Refused ${url}: ${why} — this server fetches public addresses only.`);
+  };
+  const root = policy.extractRoot;
+  const localFiles = root !== undefined || !policy.noLocalFiles;
+  // A local path, as the policy allows it: under the root, or not at all.
+  const localPath = (requested: string): string => {
+    if (!localFiles) throw new ToolError(`${requested} is a path on this machine, and this server reads no local files.`);
+    if (root === undefined) return requested;
+    try {
+      return confinePath(root, requested);
+    } catch (e) {
+      throw new ToolError((e as Error).message);
+    }
+  };
+  // A forge host a caller named, where the operator did not: under the
+  // public-only policy it must resolve publicly like any URL. The forge client
+  // follows its own redirects, so this is checked once, on the API base.
+  const refuseForgeHost = async (ref: RepoRef, kind: ForgeKind | undefined): Promise<void> => {
+    if (!guard || configuredForgeHosts().has(normalizeForgeHost(ref.host))) return;
+    await refuseUrl(apiBase(ref, kind ? { kind } : {}));
+  };
   return {
     version: ENGINE_VERSION,
     listTools: (): ToolDecl[] =>
-      withHints([
+      withPolicy(policy, [
         {
           name: "webindex_search",
           title: "Search for candidate URLs",
@@ -943,12 +1074,21 @@ export function webindexAdapter(): McpAdapter {
       if (name === "webindex_fetch") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
+        await refuseUrl(url);
         const fullPage = args.fullPage === true;
-        const r = await cachedFetchAndExtract(
-          url,
-          { acceptLanguage: args.lang ? String(args.lang) : undefined, fullPage, stripConsent: !fullPage, timeoutMs: toolTimeoutMs(args.timeoutMs), signal },
-          args.cache === true,
-        );
+        const fetchOpts = {
+          acceptLanguage: args.lang ? String(args.lang) : undefined,
+          fullPage,
+          stripConsent: !fullPage,
+          timeoutMs: toolTimeoutMs(args.timeoutMs),
+          signal,
+        };
+        // Guarded, every hop is checked (which also keeps Firecrawl — a fetcher
+        // no hook reaches — out of it), and the cache is not read: it holds what
+        // unguarded runs fetched, a private page among them.
+        const r: ExtractResult & { cached?: boolean } = guard
+          ? await fetchAndExtract(url, { ...fetchOpts, authorizeUrl: guard })
+          : await cachedFetchAndExtract(url, fetchOpts, args.cache === true);
         if (!r.text) throw new ToolError(`Nothing readable at ${url}${r.note ? ` — ${r.note}` : ""}.`);
         // Provenance a citation needs — where the text came from after
         // redirects, what the page calls itself — plus anything the fetch had
@@ -995,7 +1135,7 @@ export function webindexAdapter(): McpAdapter {
         return { text: trailer.length ? `${body}\n\n---\n${trailer.join("\n")}` : body };
       }
       if (name === "webindex_extract") {
-        const r = await extractLocal(String(args.path ?? ""), args.fullPage === true);
+        const r = await extractLocal(localPath(String(args.path ?? "")), args.fullPage === true);
         if (!r.text) throw new ToolError(`Nothing readable in that file${r.reason ? ` — ${r.reason}` : ""}.`);
         return { text: `${r.text}\n\n---\nextractor: ${r.extractor}` };
       }
@@ -1029,8 +1169,15 @@ export function webindexAdapter(): McpAdapter {
       if (name === "webindex_repo" || name === "webindex_issues" || name === "webindex_releases" || name === "webindex_tags") {
         const forge = args.forge === undefined ? undefined : String(args.forge);
         if (forge !== undefined && !isForgeKind(forge)) throw new InvalidParamsError(`\`forge\` must be one of: ${FORGE_KINDS.join(", ")}`);
-        const ref = forgeTarget(String(args.repo ?? ""), forge);
-        if (ref.host === "generic") throw new ToolError(`"${String(args.repo ?? "")}" does not name a repository.`);
+        const raw = String(args.repo ?? "");
+        const kind = forge ? { kind: forge } : {};
+        // A local checkout is read (its origin remote) before anything else, so
+        // the file policy is applied before forgeRef runs git in it.
+        const parsed = resolveRepo(raw, kind);
+        if (parsed.isLocal) localPath(resolve(raw.trim()));
+        const ref = forgeRef(parsed, kind);
+        if (ref.host === "generic") throw new ToolError(`"${raw}" does not name a repository.`);
+        await refuseForgeHost(ref, forge);
         const limit = typeof args.limit === "number" ? args.limit : undefined;
         const opts = { ...(limit ? { limit } : {}), ...(forge ? { kind: forge } : {}) };
         if (name === "webindex_repo") {
@@ -1062,24 +1209,27 @@ export function webindexAdapter(): McpAdapter {
       if (name === "webindex_meta" || name === "webindex_robots" || name === "webindex_sitemap" || name === "webindex_feed") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
+        await refuseUrl(url);
+        const robotsOpts = guard ? { authorizeUrl: guard } : {};
 
         if (name === "webindex_robots") {
-          const r = await fetchRobots(url);
+          const r = await fetchRobots(url, robotsOpts);
           return { text: JSON.stringify({ url, allowed: isAllowed(r, url), ...r }, null, 2) };
         }
         if (name === "webindex_sitemap") {
-          const robots = await fetchRobots(url);
+          const robots = await fetchRobots(url, robotsOpts);
           const max = typeof args.max === "number" ? args.max : undefined;
           const s = await fetchSitemap(url, {
             sitemaps: robots.sitemaps,
             max,
             signal,
+            authorizeUrl: guard,
             onDocument: (doc, fetched) => ctx?.progress(fetched, max ?? 3, doc),
           });
           if (!s.urls.length && !s.sitemaps.length) throw new ToolError(`No sitemap found for ${url}.${s.notes?.length ? ` ${s.notes.join(" ")}` : ""}`);
           return { text: JSON.stringify(s, null, 2) };
         }
-        const page = await httpGet(url, { accept: "text/html,application/xml,application/feed+json,*/*", signal });
+        const page = await httpGet(url, { accept: "text/html,application/xml,application/feed+json,*/*", signal, authorizeUrl: guard });
         if (!page.ok) throw new ToolError(`Could not fetch ${url} (${fetchFailure(page)}).`);
         if (name === "webindex_meta") return { text: JSON.stringify(pageMetadata(page.body, { baseUrl: page.url }), null, 2) };
 
@@ -1090,7 +1240,7 @@ export function webindexAdapter(): McpAdapter {
         if (!found.length) throw new ToolError(`${url} is not a feed and advertises none.`);
         const feeds = [];
         for (const f of found) {
-          const parsed = await fetchFeed(f, { signal });
+          const parsed = await fetchFeed(f, { signal, authorizeUrl: guard });
           if (parsed) feeds.push({ url: f, ...parsed });
         }
         if (!feeds.length) throw new ToolError(`${url} advertises ${found.length} feed(s), none of which parsed.`);
@@ -1099,7 +1249,8 @@ export function webindexAdapter(): McpAdapter {
       if (name === "webindex_tables") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
-        const page = await httpGet(url, { accept: "text/html,*/*", signal });
+        await refuseUrl(url);
+        const page = await httpGet(url, { accept: "text/html,*/*", signal, authorizeUrl: guard });
         if (!page.ok) throw new ToolError(`could not fetch ${url} (${fetchFailure(page)})`);
         const tables = extractTables(page.body);
         if (!tables.length) throw new ToolError(`${url} has no tables — use webindex_fetch for its text.`);
@@ -1118,10 +1269,12 @@ export function webindexAdapter(): McpAdapter {
         const max = Number(args.max);
         if (!Number.isInteger(max) || max < 1)
           throw new ToolError("`max` is required and must be a positive whole number — a crawl without a budget is not one.");
+        await refuseUrl(url);
         let read = 0;
         const r = await crawlSite(url, {
           maxPages: max,
           signal,
+          ...(guard ? { authorizeUrl: guard } : {}),
           onPage: (page) => ctx?.progress(++read, max, page.url),
           ...(args.depth !== undefined ? { maxDepth: Number(args.depth) } : {}),
           ...(typeof args.prefix === "string" && args.prefix ? { prefix: args.prefix } : {}),
@@ -1280,24 +1433,43 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "mcp") {
     const transport = argValue(args, "transport") ?? "stdio";
+    const allowRemote = argBool(args, "allow-remote");
+    const policy = mcpPolicy(args, allowRemote);
+    // stderr, not stdout: stdio's stdout is the protocol stream, and keeping
+    // the two transports identical here means no one has to remember which is
+    // which.
+    const notice = mcpPolicyNotice(policy, allowRemote, argBool(args, "allow-private"));
     if (transport === "stdio") {
-      await runStdioServer(webindexAdapter());
+      for (const line of notice) process.stderr.write(`webindex: ${line}\n`);
+      await runStdioServer(webindexAdapter(policy));
       return;
     }
     if (transport !== "http") fail(`unknown transport "${transport}" — expected stdio or http`);
     const port = argInt(args, "port") ?? 7340;
     if (!Number.isInteger(port) || port < 0 || port > 65535) fail("invalid --port");
+    const token = env("MCP_TOKEN");
     let running: Awaited<ReturnType<typeof startHttpServer>>;
     try {
-      running = await startHttpServer(webindexAdapter(), { port, bind: argValue(args, "bind"), allowRemote: argBool(args, "allow-remote") });
+      running = await startHttpServer(webindexAdapter(policy), {
+        port,
+        bind: argValue(args, "bind"),
+        allowRemote,
+        ...(token ? { bearerToken: token } : {}),
+      });
     } catch (e) {
       fail((e as Error).message);
     }
-    // stderr, not stdout: an HTTP server's stdout is not a protocol stream, but
-    // keeping the two transports identical here means no one has to remember
-    // which is which.
     process.stderr.write(`webindex: MCP server listening on ${running.url}\n`);
-    process.stderr.write(`  client: claude mcp add --transport http webindex ${running.url}\n`);
+    const header = token ? ` --header "Authorization: Bearer $${envName("MCP_TOKEN")}"` : "";
+    process.stderr.write(`  client: claude mcp add --transport http webindex ${running.url}${header}\n`);
+    if (allowRemote) {
+      process.stderr.write(
+        token
+          ? "  exposed beyond this machine (--allow-remote); every request needs the bearer token.\n"
+          : `  exposed beyond this machine (--allow-remote) with no authentication: anyone who can reach the port can use it. Set ${envName("MCP_TOKEN")} to require a bearer token.\n`,
+      );
+    }
+    for (const line of notice) process.stderr.write(`  ${line}\n`);
     return;
   }
 

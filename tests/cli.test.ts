@@ -572,6 +572,13 @@ describe("unknown input", () => {
     expect(await run(["mcp", "--transport", "http", "--port", "99999"])).toBe(1);
     expect(stderr()).toMatch(/invalid --port/);
   });
+
+  it("refuses contradictory address policies, and a root that is not a directory", async () => {
+    expect(await run(["mcp", "--public-only", "--allow-private"])).toBe(2);
+    expect(stderr()).toMatch(/contradict/);
+    expect(await run(["mcp", "--extract-root", join(dir, "nope")])).toBe(2);
+    expect(stderr()).toMatch(/--extract-root .* is not a directory/);
+  });
 });
 
 describe("the MCP tools", () => {
@@ -798,6 +805,76 @@ describe("the MCP tools", () => {
 
   it("reports an unknown tool as a tool error", async () => {
     await expect(adapter.callTool("webindex_nope", {})).rejects.toBeInstanceOf(ToolError);
+  });
+
+  describe("the operator's walls", () => {
+    // Opt-in hardening for a server others can reach: fetch only public
+    // addresses, read files from one directory or none.
+    it("refuses a private or metadata address before asking anything, when public-only", async () => {
+      const spy = installFetchMock(() => ({ body: "<p>secret</p>", contentType: "text/html" }));
+      const guarded = webindexAdapter({ publicOnly: true });
+      for (const [tool, args] of [
+        ["webindex_fetch", { url: "http://169.254.169.254/latest/meta-data/" }],
+        ["webindex_meta", { url: "http://127.0.0.1:8080/admin" }],
+        ["webindex_tables", { url: "http://[::1]/" }],
+        ["webindex_feed", { url: "http://10.0.0.1/feed" }],
+        ["webindex_robots", { url: "http://192.168.1.1/" }],
+        ["webindex_sitemap", { url: "http://localhost/" }],
+        ["webindex_crawl", { url: "http://172.16.0.1/", max: 2 }],
+      ] as const) {
+        await expect(guarded.callTool(tool, { ...args }), tool).rejects.toThrow(/not a public address|public addresses only/);
+      }
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("refuses a redirect into a private address, at the hop", async () => {
+      // A public page that answers 302 → the metadata endpoint is the classic
+      // way round a check made only on the URL a caller sent.
+      installFetchMock((url) =>
+        url.startsWith("http://93.184.216.34/")
+          ? { status: 302, body: "", headers: { location: "http://169.254.169.254/latest/meta-data/iam/" } }
+          : { body: "<p>credentials</p>", contentType: "text/html" },
+      );
+      const guarded = webindexAdapter({ publicOnly: true });
+      await expect(guarded.callTool("webindex_fetch", { url: "http://93.184.216.34/go" })).rejects.toThrow(/not authorized: http:\/\/169\.254\.169\.254/);
+      await expect(guarded.callTool("webindex_meta", { url: "http://93.184.216.34/go" })).rejects.toThrow(/not authorized/);
+      await expect(guarded.callTool("webindex_tables", { url: "http://93.184.216.34/go" })).rejects.toThrow(/not authorized/);
+    });
+
+    it("refuses a self-hosted forge on a private address, unless the operator declared it", async () => {
+      const guarded = webindexAdapter({ publicOnly: true });
+      await expect(guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/group/project", forge: "gitlab" })).rejects.toThrow(/not a public address/);
+      process.env[envName("FORGE_HOSTS")] = "10.1.2.3=gitlab";
+      installFetchMock(() => ({ status: 404, body: "{}", contentType: "application/json" }));
+      await expect(guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/group/project" })).rejects.not.toThrow(/not a public address/);
+    });
+
+    it("reads files only under --extract-root, relative paths against it, symlinks checked", async () => {
+      const root = join(dir, "served");
+      mkdirSync(root);
+      writeFileSync(join(root, "note.md"), "inside the root");
+      writeFileSync(join(dir, "secret.md"), "outside the root");
+      const confined = webindexAdapter({ extractRoot: root });
+      expect((await confined.callTool("webindex_extract", { path: "note.md" })).text).toContain("inside the root");
+      expect((await confined.callTool("webindex_extract", { path: join(root, "note.md") })).text).toContain("inside the root");
+      await expect(confined.callTool("webindex_extract", { path: join(dir, "secret.md") })).rejects.toThrow(/outside/);
+      await expect(confined.callTool("webindex_extract", { path: "../secret.md" })).rejects.toThrow(/outside/);
+      const decl = confined.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_extract")!;
+      expect(decl.inputSchema.properties.path!.description).toContain(root);
+    });
+
+    it("offers no file tool at all when local files are off, and reads no local checkout", async () => {
+      const closed = webindexAdapter({ noLocalFiles: true });
+      expect(closed.listTools(LATEST_PROTOCOL).map((t) => t.name)).not.toContain("webindex_extract");
+      await expect(closed.callTool("webindex_extract", { path: join(dir, "x.md") })).rejects.toThrow(/local files/);
+      await expect(closed.callTool("webindex_repo", { repo: dir })).rejects.toThrow(/local/);
+    });
+
+    it("confines a local checkout named to the forge tools as it confines files", async () => {
+      const root = join(dir, "served");
+      mkdirSync(root);
+      await expect(webindexAdapter({ extractRoot: root }).callTool("webindex_repo", { repo: dir })).rejects.toThrow(/outside/);
+    });
   });
 
   describe("cancellation and progress", () => {

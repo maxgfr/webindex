@@ -1,4 +1,5 @@
 import { brand } from "../brand.js";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createMcpServer, ERR_INVALID_REQUEST, type JsonRpcMessage, type McpAdapter, type ServerOptions } from "./server.js";
 import { ASSUMED_HTTP_PROTOCOL, batchRefusal, isOriginAllowed, isProtocolVersion, type ProtocolVersion } from "./protocol.js";
@@ -32,6 +33,12 @@ export interface HttpOptions extends ServerOptions {
   // this server fetches arbitrary URLs and reads files off disk, so an exposed
   // port is a fetch-anything primitive for whoever finds it.
   allowRemote?: boolean;
+  /**
+   * Answer only requests carrying `Authorization: Bearer <token>`; anything
+   * else gets a 401. The one wall that keeps a reachable port from being
+   * everyone's: the others limit what a caller can do, this limits who calls.
+   */
+  bearerToken?: string;
 }
 
 export interface RunningHttpServer {
@@ -114,6 +121,14 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
       "access-control-max-age": "86400",
     });
     res.end();
+    return;
+  }
+
+  // After the preflight, which a browser sends without credentials, and before
+  // anything else — a caller without the token learns nothing, not even
+  // which paths exist.
+  if (opts.bearerToken !== undefined && !bearerMatches(header(req, "authorization"), opts.bearerToken)) {
+    sendJson(res, 401, { error: "this server needs `Authorization: Bearer <token>`" }, origin, { "www-authenticate": 'Bearer realm="mcp"' });
     return;
   }
 
@@ -235,6 +250,16 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
   }
 
   sendJson(res, 200, Array.isArray(parsed) ? out : out[0]!, origin);
+}
+
+// Compared as digests, so the comparison takes the same time whatever the
+// caller sent and however long it was: timingSafeEqual needs equal lengths,
+// and returning early on a length mismatch would announce the token's length.
+function bearerMatches(sent: string | undefined, token: string): boolean {
+  const m = /^Bearer[ \t]+(\S+)[ \t]*$/i.exec(sent ?? "");
+  if (!m) return false;
+  const digest = (s: string) => createHash("sha256").update(s).digest();
+  return timingSafeEqual(digest(m[1]!), digest(token));
 }
 
 function header(req: IncomingMessage, name: string): string | undefined {
