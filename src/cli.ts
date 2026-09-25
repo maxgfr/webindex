@@ -191,7 +191,10 @@ COMMANDS
              50 MB. The children --max did not reach are named on stderr.
   feed       A site's RSS, Atom or JSON Feed, or the feeds the page
              advertises. Relative entry links are resolved.
-  mcp        Serve fetch/extract to an agent over MCP (stdio by default).
+  mcp        Serve these commands to an agent as MCP tools — search, fetch,
+             extract, rank, the forge, registry and site lookups, tables,
+             embed and crawl (hybrid and skill stay here). stdio by default;
+             --transport http binds loopback unless --allow-remote.
   searxng    Bring the keyless SearXNG container up or down, or show it.
   firecrawl  Same for Firecrawl, which cleans a page with a real browser. It
              delegates its own search to SearXNG, so this starts both.
