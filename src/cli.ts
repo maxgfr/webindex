@@ -73,7 +73,8 @@ documents — and serve that to an agent over MCP. Zero dependencies, no API key
 
 USAGE
   webindex search <query> [--json] [--limit <n>] [--pages <n>] [--lang <tag>]
-                          [--engine ddg|ddglite|mojeek|off] [--searxng <base>|off]
+                          [--region <cc>|wt] [--engine ddg|ddglite|mojeek|off]
+                          [--searxng <base>|off] [--firecrawl <base>|off]
                           [--timeout <ms>]
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>] [--full-page]
                        [--cache] [--refresh] [--offline] [--timeout <ms>]
@@ -112,6 +113,8 @@ COMMANDS
              engines (DuckDuckGo, DDG Lite, Mojeek — no key, no container),
              then Firecrawl. Prints what it found, or says which backend was
              missing and how to start it — those are different answers.
+             --lang is the result language; --region a country overriding
+             the one it implies (fr + ca is Canadian French), or wt for none.
              --timeout bounds the WHOLE cascade, every rung and page; the
              rungs it never reached are named. --json adds each rung's
              outcome (rungs) and whether anything answered (searched).
@@ -255,6 +258,7 @@ export const VALUE_FLAGS = [
   "limit",
   "pages",
   "lang",
+  "region",
   "searxng",
   "firecrawl",
   "engine",
@@ -341,6 +345,8 @@ function toolTimeoutMs(value: unknown): number | undefined {
 
 // The whole webindex_search cascade's budget: every rung and page within it.
 const SEARCH_TOOL_BUDGET_MS = 45_000;
+// The most result pages webindex_search walks per engine.
+const SEARCH_TOOL_MAX_PAGES = 5;
 
 const FORGE_KINDS: readonly ForgeKind[] = ["github", "gitlab", "gitea"];
 const isForgeKind = (v: string): v is ForgeKind => (FORGE_KINDS as readonly string[]).includes(v);
@@ -494,6 +500,8 @@ export function webindexAdapter(): McpAdapter {
             query: { type: "string", description: "What to search for." },
             limit: { type: "number", description: "How many hits to aim for (default 10)." },
             lang: { type: "string", description: "BCP-47 language tag, e.g. fr-FR." },
+            region: { type: "string", description: "Country code overriding the one `lang` implies, e.g. ca for fr + Canada; wt asks for no region." },
+            pages: { type: "number", description: `Result pages to walk per engine (default 1, at most ${SEARCH_TOOL_MAX_PAGES}).` },
             engine: {
               type: "string",
               description: "Pin one keyless engine: ddg | ddglite | mojeek. Omit to let the cascade choose.",
@@ -774,6 +782,12 @@ export function webindexAdapter(): McpAdapter {
         const r = await search(q, {
           limit: typeof args.limit === "number" ? args.limit : undefined,
           lang: args.lang ? String(args.lang) : undefined,
+          region: args.region ? String(args.region) : undefined,
+          // Clamped, not refused: every page is another request to an engine
+          // that rations them, and an agent's 50 should cost it a few pages,
+          // not the call.
+          pages:
+            typeof args.pages === "number" && Number.isFinite(args.pages) ? Math.min(SEARCH_TOOL_MAX_PAGES, Math.max(1, Math.trunc(args.pages))) : undefined,
           // An MCP host gives up on a tool call long before a cascade of
           // timeouts would: better a partial answer that says where it
           // stopped than none at all.
@@ -964,6 +978,7 @@ async function dispatch(argv: string[]): Promise<void> {
       limit: argInt(args, "limit"),
       pages: argInt(args, "pages"),
       lang: argValue(args, "lang"),
+      region: argValue(args, "region"),
       searxng: argValue(args, "searxng"),
       firecrawl: argValue(args, "firecrawl"),
       // The budget for the whole cascade, not one request.

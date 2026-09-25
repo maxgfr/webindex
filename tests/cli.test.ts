@@ -202,6 +202,15 @@ describe("search", () => {
     expect(stderr()).toContain("stack up");
   });
 
+  it("takes --region, and hands SearXNG the language-region pair", async () => {
+    // locale.ts documents `--region wt` as the opt-out, and the CLI rejected
+    // --region as an unknown flag.
+    const spy = up({ results: [] });
+    expect(await run(["search", "q", "--lang", "fr", "--region", "ca", "--searxng", "http://sxcli5.test"])).toBe(1);
+    const asked = spy.mock.calls.map((c) => String(c[0])).find((u) => u.includes("/search?"))!;
+    expect(new URL(asked).searchParams.get("language")).toBe("fr-CA");
+  });
+
   it("holds the whole search to --timeout", async () => {
     vi.stubGlobal("fetch", hangingFetch());
     const t0 = performance.now();
@@ -648,6 +657,30 @@ describe("the MCP tools", () => {
       }),
     );
     await expect(adapter.callTool("webindex_search", { query: "rate limiting" })).rejects.toThrow(/stack up/);
+  });
+
+  it("lets an agent walk more pages and set a region, within reason", async () => {
+    const tool = adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_search")!;
+    expect(tool.inputSchema.properties.pages?.type).toBe("number");
+    expect(tool.inputSchema.properties.region?.type).toBe("string");
+    expect(tool.inputSchema.required).toEqual(["query"]);
+    process.env[envName("SEARXNG")] = "http://sx-mcp-pages.test";
+    // Every page brings ten new results, so only the clamp stops the walk.
+    const spy = installFetchMock((url) => {
+      if (!url.includes("/search?")) return { body: "OK", contentType: "text/plain" };
+      const page = Number(new URL(url).searchParams.get("pageno") ?? "1");
+      const results = Array.from({ length: 10 }, (_, i) => ({ url: `https://a.test/${page}/${i}`, title: `r${i}` }));
+      return { body: JSON.stringify({ results }), contentType: "application/json" };
+    });
+    try {
+      await adapter.callTool("webindex_search", { query: "q", pages: 50, limit: 500, lang: "fr", region: "be" });
+    } finally {
+      vi.unstubAllGlobals();
+      process.env[envName("SEARXNG")] = "off";
+    }
+    const queries = spy.mock.calls.map((c) => String(c[0])).filter((u) => u.includes("/search?"));
+    expect(queries).toHaveLength(5);
+    expect(new URL(queries[0]!).searchParams.get("language")).toBe("fr-BE");
   });
 
   it("ends a search with one line saying what each rung did", async () => {

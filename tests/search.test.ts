@@ -129,6 +129,20 @@ describe("searchViaSearxng", () => {
     expect(url).toContain("language=fr-FR");
   });
 
+  it("carries an explicit region into SearXNG's language, and no country under wt", async () => {
+    // Only `language=` reaches SearXNG, so a region was dropped on the floor.
+    const base = nextBase();
+    const spy = installFetchMock(routes([["/search", page([])]]));
+    const language = () => new URL(String(spy.mock.calls.at(-1)![0])).searchParams.get("language");
+    await searchViaSearxng("q", { searxng: base, lang: "fr", region: "CA" });
+    expect(language()).toBe("fr-CA");
+    await searchViaSearxng("q", { searxng: base, lang: "fr-FR", region: "wt" });
+    expect(language()).toBe("fr");
+    // A region alone does not choose a language for the caller.
+    await searchViaSearxng("q", { searxng: base, region: "ca" });
+    expect(language()).toBeNull();
+  });
+
   it("falls back to the URL when a result has no title", async () => {
     const base = nextBase();
     installFetchMock(routes([["/search", page([{ url: "https://a.test/1", title: "   " }])]]));

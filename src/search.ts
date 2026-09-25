@@ -1,7 +1,7 @@
 import { brand, env, envName } from "./brand.js";
 import { httpGet, pageDelayMs, sleep } from "./fetch.js";
 import { firecrawlBase, ProbeMemo, searchViaFirecrawl, type FirecrawlHit } from "./firecrawl.js";
-import { acceptLanguageHeader } from "./locale.js";
+import { acceptLanguageHeader, baseLang } from "./locale.js";
 import { canonicalizeUrl } from "./url.js";
 import { isKeylessEngine, KEYLESS_ENGINES, keylessEngines, searchViaKeyless, unknownEngines, type EngineResult, type KeylessEngine } from "./engines.js";
 
@@ -189,7 +189,8 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
   const pages = Math.max(1, opts.pages ?? 1);
   const limit = Math.max(1, opts.limit ?? 10);
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
-  const root = `${base}/search?q=${encodeURIComponent(query)}&format=json&safesearch=1` + (opts.lang ? `&language=${encodeURIComponent(opts.lang)}` : "");
+  const language = searxngLanguage(opts);
+  const root = `${base}/search?q=${encodeURIComponent(query)}&format=json&safesearch=1` + (language ? `&language=${encodeURIComponent(language)}` : "");
 
   const notes: string[] = [];
   const seen = new Set<string>();
@@ -273,6 +274,16 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
   // An empty list from throttled upstreams is a refusal, not an answer.
   const outcome: RungOutcome = hits.length ? "hits" : (failed ?? (suspended.size ? "throttled" : "empty"));
   return rungResult("searxng", outcome, hits, notes);
+}
+
+// SearXNG's `language`: the only locale knob it has, so an explicit region
+// rides on it ("fr" + "ca" → "fr-CA"; `wt` names no country). A region alone
+// does not pick a language for the caller.
+function searxngLanguage(opts: SearchOptions): string | undefined {
+  if (!opts.lang) return undefined;
+  const region = opts.region?.trim().toLowerCase();
+  if (!region) return opts.lang;
+  return region === "wt" ? baseLang(opts.lang) : `${baseLang(opts.lang)}-${region.toUpperCase()}`;
 }
 
 // When the caller's overall budget runs out, as a Date.now() instant.
