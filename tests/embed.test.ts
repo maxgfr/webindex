@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
-import { cosine, embed, embedOne, normalize, ollamaBase, probeOllama, resetOllamaProbe } from "../src/embed.js";
+import { cosine, embed, embedOne, embedPrefixes, normalize, ollamaBase, probeOllama, resetOllamaProbe } from "../src/embed.js";
 import { deleteCollection, ensureCollection, hybridSearch, probeQdrant, qdrantBase, resetQdrantProbe, searchVectors, upsert } from "../src/vector.js";
 import { installFetchMock } from "./fetchmock.js";
 
@@ -126,6 +126,93 @@ describe("embed", () => {
     installFetchMock((url) => (url.startsWith("http://dead.test") ? { status: 503, body: "down" } : json({ models: [] })));
     expect(await probeOllama("http://dead.test")).toBe(false);
     expect(await probeOllama(OLLAMA)).toBe(true);
+  });
+
+  it("stops sending batches once one has failed", async () => {
+    // The result is already void after the first bad batch; issuing the rest
+    // turned a wedged server into ten minutes of timeouts before the note.
+    process.env[envName("EMBED_BATCH")] = "1";
+    let calls = 0;
+    installFetchMock((url) => {
+      if (url.includes("/api/tags")) return json({ models: [] });
+      if (url.includes("/api/embed")) {
+        calls++;
+        return { status: 500, body: JSON.stringify({ error: "boom" }), contentType: "application/json" };
+      }
+      return undefined;
+    });
+    const r = await embed(
+      Array.from({ length: 20 }, (_, i) => `t${i}`),
+      { base: OLLAMA, concurrency: 2 },
+    );
+    expect(r.vectors).toEqual([]);
+    expect(calls).toBeLessThanOrEqual(2);
+  });
+
+  it("says what the server said, and suggests a pull only when the model is missing", async () => {
+    installFetchMock((url) =>
+      url.includes("/api/tags")
+        ? json({ models: [] })
+        : { status: 404, body: JSON.stringify({ error: 'model "nomic-embed-text" not found, try pulling it first' }), contentType: "application/json" },
+    );
+    const missing = await embed(["a"], { base: OLLAMA });
+    expect(missing.note).toContain('model "nomic-embed-text" not found');
+    expect(missing.note).toContain("ollama pull nomic-embed-text");
+    expect(missing.note).toContain("semantic up");
+
+    resetOllamaProbe();
+    installFetchMock((url) =>
+      url.includes("/api/tags") ? json({ models: [] }) : { status: 500, body: JSON.stringify({ error: "boom" }), contentType: "application/json" },
+    );
+    const broken = await embed(["a"], { base: OLLAMA });
+    expect(broken.note).toContain("boom");
+    expect(broken.note).not.toMatch(/pull/);
+  });
+
+  it("re-probes a server that was down once that verdict is stale, and keeps a live one", async () => {
+    // A long-lived MCP server used to keep answering "no embedding server"
+    // after the server came up, without sending a single request.
+    let up = false;
+    const spy = installFetchMock((url) => {
+      if (!up) return { status: 502, body: "down", contentType: "text/plain" };
+      return url.includes("/api/tags") ? json({ models: [] }) : json({ embeddings: [[1, 0]] });
+    });
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    expect((await embed(["a"], { base: OLLAMA })).note).toMatch(/no embedding server/);
+    up = true;
+    // Inside the window the verdict stands: no probe per call.
+    expect((await embed(["a"], { base: OLLAMA })).note).toMatch(/no embedding server/);
+    now.mockReturnValue(1_000_000 + 31_000);
+    expect((await embed(["a"], { base: OLLAMA })).vectors).toEqual([[1, 0]]);
+    // A positive verdict is kept for the process.
+    now.mockReturnValue(1_000_000 + 10_000_000);
+    await embed(["b"], { base: OLLAMA });
+    expect(spy.mock.calls.filter((c) => String(c[0]).includes("/api/tags"))).toHaveLength(2);
+  });
+
+  it("sends one probe for callers that ask at the same time", async () => {
+    const spy = ollamaUp();
+    await Promise.all([embed(["a"], { base: OLLAMA }), embed(["b"], { base: OLLAMA }), probeOllama(OLLAMA)]);
+    expect(spy.mock.calls.filter((c) => String(c[0]).includes("/api/tags"))).toHaveLength(1);
+  });
+});
+
+describe("embedPrefixes", () => {
+  it("knows the task prefixes the common local models were trained with", () => {
+    expect(embedPrefixes("nomic-embed-text")).toEqual({ query: "search_query: ", doc: "search_document: " });
+    expect(embedPrefixes("nomic-embed-text:v1.5")).toEqual({ query: "search_query: ", doc: "search_document: " });
+    expect(embedPrefixes("mxbai-embed-large")).toEqual({ query: "Represent this sentence for searching relevant passages: ", doc: "" });
+    expect(embedPrefixes("snowflake-arctic-embed:335m").query).toBe("Represent this sentence for searching relevant passages: ");
+    expect(embedPrefixes("snowflake-arctic-embed2")).toEqual({ query: "query: ", doc: "" });
+    expect(embedPrefixes("jeffh/intfloat-multilingual-e5-large")).toEqual({ query: "query: ", doc: "passage: " });
+    expect(embedPrefixes("all-minilm")).toEqual({ query: "", doc: "" });
+  });
+
+  it("defaults to the configured model, and lets the environment override either side", () => {
+    expect(embedPrefixes().query).toBe("search_query: ");
+    process.env[envName("EMBED_QUERY_PREFIX")] = "query:";
+    process.env[envName("EMBED_DOC_PREFIX")] = "none";
+    expect(embedPrefixes("nomic-embed-text")).toEqual({ query: "query: ", doc: "" });
   });
 });
 
@@ -285,6 +372,17 @@ describe("the vector store", () => {
   it("never probes a store the caller turned off", async () => {
     expect(await probeQdrant("off")).toBe(false);
   });
+
+  it("re-probes a store that was down once that verdict is stale", async () => {
+    let up = false;
+    installFetchMock(() => (up ? json({ result: { collections: [] } }) : { status: 502, body: "down", contentType: "text/plain" }));
+    const now = vi.spyOn(Date, "now").mockReturnValue(5_000_000);
+    expect(await probeQdrant(QDRANT)).toBe(false);
+    up = true;
+    expect(await probeQdrant(QDRANT)).toBe(false);
+    now.mockReturnValue(5_000_000 + 31_000);
+    expect(await probeQdrant(QDRANT)).toBe(true);
+  });
 });
 
 describe("hybridSearch", () => {
@@ -328,6 +426,75 @@ describe("hybridSearch", () => {
     ollamaUp();
     expect((await hybridSearch("q", docs, { base: OLLAMA })).hits).toHaveLength(3);
     expect((await hybridSearch("q", docs, { base: OLLAMA, limit: 2 })).hits).toHaveLength(2);
+  });
+
+  it("never drops a hit for a limit that is not positive", async () => {
+    ollamaUp();
+    expect((await hybridSearch("q", docs, { base: OLLAMA, limit: -1 })).hits).toHaveLength(3);
+    expect((await hybridSearch("q", docs, { base: OLLAMA, limit: 0 })).hits).toHaveLength(3);
+  });
+
+  it("fuses by position, so two documents sharing an id do not share a score", async () => {
+    // Merged results from several engines repeat URLs. Keyed by id, both copies
+    // got the summed score and the later copy's rank, and "Cooking" outranked
+    // a genuinely strong document.
+    installFetchMock(() => ({ status: 502, body: "down", contentType: "text/plain" }));
+    const dup = [
+      { id: "a.test/same", title: "Token bucket rate limiting", headings: "", body: "token bucket rate limiting" },
+      { id: "b.test/strong", title: "Token bucket", headings: "", body: "token bucket" },
+      { id: "a.test/same", title: "Cooking", headings: "", body: "braising" },
+      { id: "c.test", title: "Weather", headings: "", body: "rain" },
+    ];
+    const r = await hybridSearch("token bucket rate limiting", dup, { base: OLLAMA });
+    expect(r.hits.map((h) => h.doc.title)).toEqual(["Token bucket rate limiting", "Token bucket", "Cooking", "Weather"]);
+    expect(r.hits.map((h) => h.lexicalRank)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("asks the model for its task prefixes, query and documents apart", async () => {
+    // nomic-embed-text "must include a task instruction prefix"; without one
+    // the question and the passages are embedded as the same task.
+    const sent: string[] = [];
+    installFetchMock((url, init) => {
+      if (url.includes("/api/tags")) return json({ models: [] });
+      const input = JSON.parse(String(init?.body)).input as string[];
+      sent.push(...input);
+      return json({ embeddings: input.map(() => [1, 0]) });
+    });
+    await hybridSearch("token bucket", docs, { base: OLLAMA });
+    expect(sent[0]).toBe("search_query: token bucket");
+    expect(sent.slice(1).every((t) => t.startsWith("search_document: "))).toBe(true);
+
+    sent.length = 0;
+    await hybridSearch("token bucket", docs, { base: OLLAMA, model: "all-minilm" });
+    expect(sent[0]).toBe("token bucket");
+
+    sent.length = 0;
+    await hybridSearch("token bucket", docs, { base: OLLAMA, queryPrefix: "", docPrefix: "D: " });
+    expect(sent[0]).toBe("token bucket");
+    expect(sent[1]).toMatch(/^D: Token bucket rate limiting/);
+  });
+
+  it("sends at most EMBED_MAX_CHARS of each document — the model truncates the rest anyway", async () => {
+    const sent: string[] = [];
+    installFetchMock((url, init) => {
+      if (url.includes("/api/tags")) return json({ models: [] });
+      const input = JSON.parse(String(init?.body)).input as string[];
+      sent.push(...input);
+      return json({ embeddings: input.map(() => [1, 0]) });
+    });
+    const long = [{ id: "l", title: "", headings: "", body: "word ".repeat(10_000) }];
+    await hybridSearch("q", long, { base: OLLAMA, model: "all-minilm" });
+    expect(sent[1]!.length).toBe(8_000);
+
+    sent.length = 0;
+    process.env[envName("EMBED_MAX_CHARS")] = "100";
+    await hybridSearch("q", long, { base: OLLAMA, model: "all-minilm" });
+    expect(sent[1]!.length).toBe(100);
+
+    sent.length = 0;
+    process.env[envName("EMBED_MAX_CHARS")] = "0";
+    await hybridSearch("q", long, { base: OLLAMA, model: "all-minilm" });
+    expect(sent[1]!.length).toBe(50_000);
   });
 
   it("answers an empty pool without asking anything", async () => {

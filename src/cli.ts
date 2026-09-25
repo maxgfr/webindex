@@ -218,6 +218,11 @@ ENVIRONMENT
   WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
   WEBINDEX_QDRANT        vector store base URL, or "off"      (default http://localhost:6333)
   WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
+  WEBINDEX_EMBED_QUERY_PREFIX, WEBINDEX_EMBED_DOC_PREFIX
+                         the task prefixes hybrid puts before the question and each
+                         document ("none" for none); default from the model — nomic's
+                         "search_query: " / "search_document: ", mxbai's, e5's
+  WEBINDEX_EMBED_MAX_CHARS  characters of each document hybrid embeds (default 8000, 0 = all)
   WEBINDEX_TIMEOUT_MS    how long a request may stay silent before it is abandoned,
                          not retried (default 20000; --timeout overrides it per call)
   WEBINDEX_CACHE_DIR     where the fetch cache lives (default <tmp>/webindex-<uid>/cache)
