@@ -42,10 +42,15 @@ export function preserves(before: unknown, after: unknown, policy: RecallPolicy,
   return Object.is(before, after);
 }
 
+/** The `repin.recall` policy skill.json declares, if it declares one. */
+export function recallPolicy(root: string): RecallPolicy | undefined {
+  const config = JSON.parse(readFileSync(join(root, "skill.json"), "utf8"));
+  return config.repin?.recall;
+}
+
 /** Changed prose/snapshots are reviewed explicitly; byte/line counts cannot prove meaning. */
 export function checkArtifactRecall(root: string, ref = "HEAD"): string[] {
-  const config = JSON.parse(readFileSync(join(root, "skill.json"), "utf8"));
-  const policy: RecallPolicy | undefined = config.repin?.recall;
+  const policy = recallPolicy(root);
   if (!policy) return [];
   const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   // Enumerate the BASE tree, so deleting a whole directory cannot erase its baseline.

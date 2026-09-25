@@ -1619,6 +1619,29 @@ describe("webindex skill", () => {
     expect(stdout()).toBe("");
   });
 
+  it("does not call artifacts preserved when no recall policy asked it to compare any", async () => {
+    // With no `repin.recall` in skill.json nothing was compared, and the gate
+    // still printed "Artifact identities and evidence preserved".
+    skillJson();
+    expect(await run(["skill", "recall", "--root", repo])).toBe(0);
+    expect(stdout()).toMatch(/No repin\.recall policy/);
+    expect(stdout()).not.toMatch(/preserved/);
+  });
+
+  it.each(["repin", "finish"])("says `skill %s` needs the GitHub CLI when it is not installed", async (action) => {
+    // It died on "spawnSync gh ENOENT".
+    skillJson();
+    vi.stubEnv("PATH", join(dir, "no-gh-here"));
+    resetHaveCache();
+    try {
+      expect(await run(["skill", action, "--root", repo])).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+      resetHaveCache();
+    }
+    expect(stderr()).toMatch(/drives the GitHub CLI \(gh\), which is not installed/);
+  });
+
   it("names the actions it knows before looking for a skill.json", async () => {
     // With no skill.json, `webindex skill` and `webindex skill frobnicate`
     // answered "no readable skill.json" — the wrong problem, and exit 1.

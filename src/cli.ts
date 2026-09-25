@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { checkArtifactRecall } from "./skillkit/recall.js";
+import { checkArtifactRecall, recallPolicy } from "./skillkit/recall.js";
 import { finishRepin } from "./skillkit/finish.js";
 import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // The webindex command line.
@@ -1891,10 +1891,20 @@ async function dispatch(argv: string[]): Promise<void> {
     }
 
     if (action === "recall") {
+      // With no policy nothing is compared, and "preserved" would claim a
+      // check that never ran.
+      if (!recallPolicy(root)) {
+        process.stdout.write("No repin.recall policy in skill.json — no artifact was compared.\n");
+        return;
+      }
       const lost = checkArtifactRecall(root, argValue(args, "ref") ?? "HEAD");
       if (lost.length) fail(lost.join("\n"));
       process.stdout.write("Artifact identities and evidence preserved\n");
       return;
+    }
+    // Both drive `gh` throughout; without it they died on "spawnSync gh ENOENT".
+    if ((action === "finish" || action === "repin") && !have("gh")) {
+      fail(`skill ${action} drives the GitHub CLI (gh), which is not installed — install it and authenticate (gh auth login, or GH_TOKEN in CI).`);
     }
     if (action === "finish") {
       await finishRepin(root);
