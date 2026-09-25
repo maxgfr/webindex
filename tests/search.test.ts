@@ -243,6 +243,54 @@ describe("search", () => {
     expect(r.notes.at(-1)).toContain("webindex-tests stack up");
   });
 
+  it("reports each rung's outcome, and where the cascade stopped", async () => {
+    const base = nextBase();
+    installFetchMock(routes([["/search", page([hit("https://a.test/1"), hit("https://a.test/2")])]]));
+    const r = await search("q", { searxng: base, engines: ["ddg", "mojeek"] });
+    expect(r.searched).toBe(true);
+    expect(r.rungs).toEqual([
+      { rung: "searxng", outcome: "hits", hits: 2 },
+      { rung: "ddg", outcome: "not-tried" },
+      { rung: "mojeek", outcome: "not-tried" },
+      { rung: "firecrawl", outcome: "disabled" },
+    ]);
+  });
+
+  it("tells 'nothing answered' from 'nothing found' in data, not only in words", async () => {
+    const sx = nextBase();
+    installFetchMock((url) => (url.startsWith(sx) && url.includes("/search") ? { status: 429, body: "" } : { body: "ok" }));
+    const refused = await search("q", { searxng: sx, engines: [] });
+    expect(refused.searched).toBe(false);
+    expect(refused.rungs?.map((r) => [r.rung, r.outcome])).toEqual([
+      ["searxng", "throttled"],
+      ["firecrawl", "disabled"],
+    ]);
+
+    const sx2 = nextBase();
+    installFetchMock(routes([["/search", page([])]]));
+    const empty = await search("q", { searxng: sx2, engines: [] });
+    expect(empty.searched).toBe(true);
+    expect(empty.rungs?.[0]).toMatchObject({ rung: "searxng", outcome: "empty" });
+  });
+
+  it("calls a dead instance unreachable and a failing one an error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      }),
+    );
+    const dead = await searchViaSearxng("q", { searxng: nextBase() });
+    expect(dead.rungs?.[0]?.outcome).toBe("unreachable");
+    expect(dead.searched).toBe(false);
+
+    const base = nextBase();
+    installFetchMock((url) => (url.includes("/search") ? { status: 500, body: "boom" } : { body: "OK" }));
+    const failing = await searchViaSearxng("q", { searxng: base });
+    expect(failing.rungs?.[0]?.outcome).toBe("error");
+    expect(failing.notes[0]).toMatch(/HTTP 500/);
+  });
+
   it("refuses an empty query without hitting the network", async () => {
     const spy = installFetchMock(() => ({ body: "ok" }));
     expect(await search("   ")).toEqual({ hits: [], notes: ["Empty query."] });

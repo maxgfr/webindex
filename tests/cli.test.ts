@@ -190,6 +190,9 @@ describe("search", () => {
     await run(["search", "q", "--json", "--searxng", "http://sxcli3.test"]);
     const parsed = JSON.parse(stdout());
     expect(parsed.hits[0]).toMatchObject({ url: "https://a.test/1", via: "searxng" });
+    // What each rung did, for a script that must tell "blocked" from "empty".
+    expect(parsed.searched).toBe(true);
+    expect(parsed.rungs[0]).toEqual({ rung: "searxng", outcome: "hits", hits: 1 });
   });
 
   it("exits non-zero when it found nothing, so a script can tell", async () => {
@@ -617,6 +620,26 @@ describe("the MCP tools", () => {
       }),
     );
     await expect(adapter.callTool("webindex_search", { query: "rate limiting" })).rejects.toThrow(/stack up/);
+  });
+
+  it("ends a search with one line saying what each rung did", async () => {
+    // The notes are English; the rung line is the same facts in a form an
+    // agent can read without parsing prose.
+    process.env[envName("SEARXNG")] = "http://sx-mcp.test";
+    installFetchMock(
+      routes([
+        ["/search", { body: JSON.stringify({ results: [{ url: "https://a.test/1", title: "A" }] }), contentType: "application/json" }],
+        ["/healthz", { body: "OK", contentType: "text/plain" }],
+      ]),
+    );
+    try {
+      const r = await adapter.callTool("webindex_search", { query: "q" });
+      expect(r.text.split("\n").at(-1)).toBe("rungs: searxng=hits(1) firecrawl=disabled");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    process.env[envName("SEARXNG")] = "off";
+    await expect(adapter.callTool("webindex_search", { query: "q" })).rejects.toThrow(/\nrungs: searxng=disabled firecrawl=disabled$/);
   });
 
   it("fetches a URL and says which rung produced the text", async () => {

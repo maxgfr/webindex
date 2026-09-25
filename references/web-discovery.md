@@ -20,16 +20,25 @@ disables the keyless rungs entirely.
 
 ## What "no results" means
 
-Three different facts, kept separate on purpose:
+Different facts, kept separate on purpose:
 
-- **Nothing found** — the query genuinely has no hits.
-- **Rate-limited** — the engine refused for load. It will work again shortly, and
-  the note says so.
+- **Nothing found** — a rung answered and the query genuinely has no hits.
+- **Nothing searched** — every rung that was tried refused or failed: blocked as
+  a bot, rate-limited, offline, timed out, a 5xx. Each engine's note is kept, and
+  the closing note says nothing was searched rather than "no results".
 - **Nothing running** — no local stack, and the keyless rungs are off. The note
-  names the container and how to start it.
+  names the container and how to start it, and names the switch that turned a
+  rung off (`--searxng off`, a misspelt `WEBINDEX_ENGINES`).
 
 A caller that collapses these reports the wrong one, and a model told "no results"
 learns the answer does not exist.
+
+The same facts come back as data. `--json` (and `search()` in the library) adds
+`rungs` — each rung's `outcome`: `hits`, `empty`, `throttled`, `blocked`,
+`unreachable` (nothing answered), `error` (something answered, but not with
+results), `disabled` or `not-tried` — and `searched`, true only when some rung
+answered (`hits` or `empty`). `webindex_search` ends its text with the same as
+one line: `rungs: searxng=unreachable ddg=blocked ddglite=hits(10) firecrawl=not-tried`.
 
 ## The parsers rot
 

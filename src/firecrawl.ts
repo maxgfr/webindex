@@ -289,16 +289,25 @@ export async function scrapeViaFirecrawl(url: string, opts: FirecrawlOptions = {
  * Query Firecrawl's keyless `/search` (Fire-Engine → SearXNG → DuckDuckGo
  * internally). Returns the `web` hits, or a reason.
  */
-export async function searchViaFirecrawl(query: string, limit: number, opts: FirecrawlOptions = {}): Promise<{ hits?: FirecrawlHit[]; why?: string }> {
+export async function searchViaFirecrawl(
+  query: string,
+  limit: number,
+  opts: FirecrawlOptions = {},
+): Promise<{
+  hits?: FirecrawlHit[];
+  why?: string;
+  /** When it produced no hit list: the HTTP status that ended it, 0 when nothing answered. Absent when disabled. */
+  status?: number;
+}> {
   const base = firecrawlBase(opts);
   if (!base) return { why: `Firecrawl disabled (--firecrawl off / ${envName("FIRECRAWL")}=off). Skipping.` };
   if (!(await probeFirecrawl(base, firecrawlIsExplicit(opts)))) {
-    return { why: `Firecrawl not reachable at ${base} (bring it up with \`${brand().cli} firecrawl up\`). Skipping.` };
+    return { why: `Firecrawl not reachable at ${base} (bring it up with \`${brand().cli} firecrawl up\`). Skipping.`, status: 0 };
   }
   const r = await postJson(base, "/search", { query, limit, sources: ["web"] }, SEARCH_TIMEOUT_MS);
   if (!r.ok) {
     const why = r.status === 429 || r.status === 503 ? `rate-limited (HTTP ${r.status})` : `unreachable (status ${r.status || 0})`;
-    return { why: `Firecrawl search ${why} at ${base}.` };
+    return { why: `Firecrawl search ${why} at ${base}.`, status: r.status };
   }
   return { hits: mapSearchResponse(r.data) };
 }

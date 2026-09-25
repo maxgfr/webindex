@@ -466,6 +466,130 @@ describe("an engine that refuses to answer says so, rather than reporting an emp
   });
 });
 
+describe("a cascade in which no engine answered says nothing was searched", () => {
+  // Blocked is one way of not being asked. Offline, a 5xx, a timeout and a
+  // rate limit are others, and each ended in "No results from any engine" with
+  // the engines' own notes dropped — the refusal-as-finding this file exists
+  // to prevent.
+  const ALL = { engines: ["ddg", "ddglite", "mojeek"] as ("ddg" | "ddglite" | "mojeek")[] };
+  const offline = () =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (u: string) => {
+        throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND", message: `getaddrinfo ENOTFOUND ${new URL(u).hostname}` } });
+      }),
+    );
+
+  it("keeps every engine's failure and closes on 'nothing was searched' when offline", async () => {
+    offline();
+    const r = await search("x", ALL);
+    expect(r.hits).toHaveLength(0);
+    expect(r.notes.filter((n) => /^(DuckDuckGo|DuckDuckGo Lite|Mojeek) unreachable/.test(n))).toHaveLength(3);
+    expect(r.notes.join(" ")).toContain("ENOTFOUND");
+    expect(r.notes.join(" ")).not.toContain("status 0");
+    expect(r.notes.at(-1)).toMatch(/nothing was searched/i);
+    expect(r.notes.at(-1)).not.toMatch(/^No results from any engine/);
+  });
+
+  it.each([
+    ["every engine answering 502", () => ({ status: 502, body: "bad gateway" })],
+    ["every engine rate-limiting", () => ({ status: 429, body: "" })],
+    [
+      "a mix of 403, 429 and a captcha",
+      (url: string) =>
+        url.includes("html.duckduckgo")
+          ? { status: 403, body: DDG_403 }
+          : url.includes("lite.")
+            ? { status: 429, body: "" }
+            : { status: 200, body: MOJEEK_CAPTCHA },
+    ],
+  ])("does the same for %s", async (_label, router) => {
+    installFetchMock(router);
+    const r = await search("x", ALL);
+    expect(r.notes.filter((n) => /DuckDuckGo|Mojeek/.test(n)).length).toBeGreaterThanOrEqual(3);
+    expect(r.notes.at(-1)).toMatch(/nothing was searched/i);
+  });
+
+  it("names a timeout as a timeout", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_u: string, init?: RequestInit) =>
+          new Promise((_resolve, reject) =>
+            init?.signal?.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError"))),
+          ),
+      ),
+    );
+    const r = await searchViaKeyless("ddg", "x", { timeoutMs: 20 });
+    expect(r.note).toMatch(/DuckDuckGo unreachable \(timed out after 20 ms\)/);
+    expect(r.answered).toBeFalsy();
+  });
+
+  it("calls an empty 200 an empty page, not an unreachable host", async () => {
+    installFetchMock(() => ({ status: 200, body: "" }));
+    const r = await searchViaKeyless("ddg", "x");
+    expect(r.note).toBe("DuckDuckGo returned an empty page (HTTP 200).");
+    expect(r.answered).toBeFalsy();
+  });
+
+  it("says the same in data: each engine's outcome, and searched=false", async () => {
+    installFetchMock((url) =>
+      url.includes("html.duckduckgo") ? { status: 403, body: DDG_403 } : url.includes("lite.") ? { status: 502, body: "" } : { status: 429, body: "" },
+    );
+    const r = await search("x", ALL);
+    expect(r.searched).toBe(false);
+    expect(r.rungs?.map((x) => [x.rung, x.outcome])).toEqual([
+      ["searxng", "disabled"],
+      ["ddg", "blocked"],
+      ["ddglite", "error"],
+      ["mojeek", "throttled"],
+      ["firecrawl", "disabled"],
+    ]);
+    offline();
+    expect((await search("x", ALL)).rungs?.filter((x) => x.outcome === "unreachable")).toHaveLength(3);
+  });
+
+  it("marks a page it could read as answered, results or not", async () => {
+    installFetchMock(() => ({ body: "<html>nothing</html>" }));
+    expect((await searchViaKeyless("ddg", "x")).answered).toBe(true);
+    installFetchMock(() => ({ body: DDG_LITE }));
+    expect((await searchViaKeyless("ddglite", "x")).answered).toBe(true);
+    installFetchMock(() => ({ status: 202, body: DDG_CHALLENGE }));
+    expect((await searchViaKeyless("ddg", "x")).answered).toBeFalsy();
+  });
+});
+
+describe("the notes name the switch the user actually threw", () => {
+  it("reports engine names it does not know, instead of dropping the rung in silence", async () => {
+    vi.stubEnv(envName("ENGINES"), "duckduckgo,mojek");
+    const spy = installFetchMock(() => ({ body: DDG_LITE }));
+    const r = await search("x");
+    expect(spy).not.toHaveBeenCalled();
+    expect(r.notes.join(" ")).toMatch(new RegExp(`${envName("ENGINES")} names no engine .*duckduckgo, mojek`));
+    expect(r.notes.at(-1)).toMatch(/No search backend was enabled/);
+    expect(r.notes.at(-1)).not.toMatch(/No results/);
+  });
+
+  it("still reports the one it ignored when the others work", async () => {
+    vi.stubEnv(envName("ENGINES"), "ddglite,googol");
+    installFetchMock(() => ({ body: DDG_LITE }));
+    const r = await search("x");
+    expect(r.hits).toHaveLength(3);
+    expect(r.notes.join(" ")).toContain("googol");
+  });
+
+  it("names the flag as well as the variable when SearXNG is off", async () => {
+    const r = await search("x", { searxng: "off", engines: [] });
+    expect(r.notes[0]).toMatch(/--searxng off/);
+    expect(r.notes[0]).toContain(`${envName("SEARXNG")}=off`);
+  });
+
+  it("does not call a run with every backend switched off a search that found nothing", async () => {
+    const r = await search("x", { engines: [] });
+    expect(r.notes.at(-1)).toMatch(/No search backend was enabled/);
+  });
+});
+
 describe("Mojeek is asked in the territory's language", () => {
   it("carries the locale into the query, like the DuckDuckGo endpoints do", async () => {
     // `search()` promises its callers that a run over a French territory asks in
@@ -541,6 +665,14 @@ describe("the search cascade", () => {
     const r = await search("x", { engines: ["ddg", "ddglite", "mojeek"] });
     expect(seen).toEqual(["html.duckduckgo.com", "lite.duckduckgo.com", "www.mojeek.com"]);
     expect(r.hits[0]!.via).toBe("mojeek");
+    expect(r.searched).toBe(true);
+    expect(r.rungs?.map((x) => [x.rung, x.outcome, x.hits])).toEqual([
+      ["searxng", "disabled", undefined],
+      ["ddg", "empty", undefined],
+      ["ddglite", "empty", undefined],
+      ["mojeek", "hits", 2],
+      ["firecrawl", "disabled", undefined],
+    ]);
   });
 
   it("surfaces a throttle but does not repeat 'no results' three times", async () => {

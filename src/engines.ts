@@ -43,10 +43,26 @@ export function keylessEngines(opts: { engines?: KeylessEngine[] } = {}): Keyles
   const raw = env("ENGINES");
   if (raw === undefined) return KEYLESS_ENGINES;
   if (raw.toLowerCase() === "off") return [];
+  return engineNames(raw).filter(isKeylessEngine);
+}
+
+/**
+ * The names in `<PREFIX>_ENGINES` that are not engines — what `keylessEngines`
+ * skipped. Ignoring a typo is right; ignoring it SILENTLY is not: a list with
+ * no valid name removed the whole keyless rung, and the run then reported "no
+ * results" for a search nobody made.
+ */
+export function unknownEngines(opts: { engines?: KeylessEngine[] } = {}): string[] {
+  const raw = opts.engines ? undefined : env("ENGINES");
+  if (raw === undefined || raw.toLowerCase() === "off") return [];
+  return engineNames(raw).filter((s) => !isKeylessEngine(s));
+}
+
+function engineNames(raw: string): string[] {
   return raw
     .split(",")
     .map((s) => s.trim().toLowerCase())
-    .filter(isKeylessEngine);
+    .filter(Boolean);
 }
 
 export interface EngineHit {
@@ -71,6 +87,15 @@ export interface EngineResult {
    * was asked. Blocked implies throttled: it is worth retrying later too.
    */
   blocked?: boolean;
+  /**
+   * The engine served a result page and it was read — hits, or a genuinely
+   * empty page. Anything else (a refusal, an error status, a timeout, no
+   * connection) says nothing about the web, and a caller counting "no results"
+   * must not count it.
+   */
+  answered?: boolean;
+  /** When it did not answer: the HTTP status that ended it, 0 when no response came back at all. */
+  status?: number;
 }
 
 // Tags that style a run of text without breaking it. The engines wrap every
@@ -110,8 +135,12 @@ export function ddgRedirectTarget(href: string): string {
  * again in a few minutes and the second will not, and a caller that reports the
  * wrong one sends its user down the wrong path. Repeated identically across six
  * backends before it lived here.
+ *
+ * `error` is the transport's own account of a request that got no status at
+ * all — "timed out after 12000 ms", "ENOTFOUND: …" — which says far more than
+ * "status 0".
  */
-export function throttleReason(status: number): { throttled: boolean; why: string } {
+export function throttleReason(status: number, error?: string): { throttled: boolean; why: string } {
   if (status === 429 || status === 503) return { throttled: true, why: `rate-limited (HTTP ${status})` };
   // A 403 from a SEARCH engine is a bot policy, not a broken host. Both of these
   // endpoints answer it after a few dozen queries — DuckDuckGo with a stub
@@ -120,6 +149,7 @@ export function throttleReason(status: number): { throttled: boolean; why: strin
   // fact, and the cascade then drops the note because it only keeps notes from
   // engines it considers throttled.
   if (status === 403) return { throttled: true, why: "blocked this client as automated traffic (HTTP 403)" };
+  if (status === 0) return { throttled: false, why: `unreachable (${error || "no response"})` };
   return { throttled: false, why: `unreachable (status ${status})` };
 }
 
@@ -413,11 +443,14 @@ export async function searchViaKeyless(
   let url = spec.url(q, 0, kl, locale);
   for (let p = 0; p < pages && hits.length < limit; p++) {
     const r = await httpGet(url, { accept: "text/html", acceptLanguage, timeoutMs: opts.timeoutMs ?? 12000 });
-    if (!r.ok || !r.body) {
+    if (!r.ok || !r.body.trim()) {
       // A later page failing is not a failure — page one's results stand.
       if (p > 0) break;
-      const { throttled, why } = throttleReason(r.status);
-      return { hits: [], note: `${spec.label} ${why}.`, throttled, ...(r.status === 403 ? { blocked: true } : {}) };
+      // A success with nothing in it is not an unreachable host: something
+      // answered, and said nothing.
+      if (r.ok) return { hits: [], note: `${spec.label} returned an empty page (HTTP ${r.status}).`, status: r.status };
+      const { throttled, why } = throttleReason(r.status, r.error);
+      return { hits: [], note: `${spec.label} ${why}.`, throttled, ...(r.status === 403 ? { blocked: true } : {}), status: r.status };
     }
     const before = hits.length;
     const parsed = spec.parse(r.body, limit * 2);
@@ -440,6 +473,7 @@ export async function searchViaKeyless(
         note: `${spec.label} served an anti-bot challenge (HTTP ${r.status}) instead of results — blocked, not empty.`,
         throttled: true,
         blocked: true,
+        status: r.status,
       };
     }
 
@@ -459,5 +493,5 @@ export async function searchViaKeyless(
     if (pageDelayMs()) await sleep(pageDelayMs());
   }
 
-  return hits.length ? { hits } : { hits: [], note: `${spec.label} returned no results.` };
+  return hits.length ? { hits, answered: true } : { hits: [], note: `${spec.label} returned no results.`, answered: true };
 }

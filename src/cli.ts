@@ -769,9 +769,13 @@ export function webindexAdapter(): McpAdapter {
           lang: args.lang ? String(args.lang) : undefined,
           ...(engines ? { engines } : {}),
         });
-        if (!r.hits.length) throw new ToolError(r.notes.join(" ") || "No results.");
+        // The notes are prose; this line is the same facts in a form an agent
+        // can act on without parsing English — "blocked" is not "empty".
+        const rungs = r.rungs?.length ? `rungs: ${r.rungs.map((x) => `${x.rung}=${x.outcome}${x.hits ? `(${x.hits})` : ""}`).join(" ")}` : "";
+        if (!r.hits.length) throw new ToolError([r.notes.join(" ") || "No results.", rungs].filter(Boolean).join("\n"));
         const body = r.hits.map((h, i) => `${i + 1}. ${h.title}\n   ${h.url}${h.snippet ? `\n   ${h.snippet}` : ""}`).join("\n\n");
-        return { text: r.notes.length ? `${body}\n\n---\n${r.notes.join("\n")}` : body };
+        const trailer = [...r.notes, rungs].filter(Boolean);
+        return { text: trailer.length ? `${body}\n\n---\n${trailer.join("\n")}` : body };
       }
       if (name === "webindex_extract") {
         const r = await extractLocal(String(args.path ?? ""), args.fullPage === true);

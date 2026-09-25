@@ -1,9 +1,9 @@
 import { brand, env, envName } from "./brand.js";
 import { httpGet, pageDelayMs, sleep } from "./fetch.js";
-import { searchViaFirecrawl } from "./firecrawl.js";
+import { firecrawlBase, searchViaFirecrawl } from "./firecrawl.js";
 import { acceptLanguageHeader } from "./locale.js";
 import { canonicalizeUrl } from "./url.js";
-import { keylessEngines, searchViaKeyless, type KeylessEngine } from "./engines.js";
+import { isKeylessEngine, KEYLESS_ENGINES, keylessEngines, searchViaKeyless, unknownEngines, type EngineResult, type KeylessEngine } from "./engines.js";
 
 // Discovery: turning a question into candidate URLs.
 //
@@ -51,10 +51,47 @@ export interface SearchOptions {
   engines?: KeylessEngine[];
 }
 
+/** A rung of the cascade: SearXNG, one keyless engine, or Firecrawl. */
+export type SearchRung = "searxng" | "firecrawl" | KeylessEngine;
+
+/**
+ * What one rung did. The first two are ANSWERS — the rung read a result page —
+ * and only they say anything about the web:
+ *
+ * - `hits` / `empty`: it answered, with results or with none;
+ * - `throttled`: it refused for load, and will work again later;
+ * - `blocked`: it turned this client away as automated traffic;
+ * - `unreachable`: nothing answered — not running, no connection, timed out;
+ * - `error`: something answered, but not with results — an error status, an
+ *   empty or unreadable page, a request the backend rejected;
+ * - `disabled`: switched off; `not-tried`: the cascade stopped before it.
+ */
+export type RungOutcome = "hits" | "empty" | "throttled" | "blocked" | "unreachable" | "error" | "disabled" | "not-tried";
+
+export interface RungReport {
+  rung: SearchRung;
+  outcome: RungOutcome;
+  /** How many hits it returned, when it returned any. */
+  hits?: number;
+  /** Its note, when it had one. */
+  note?: string;
+}
+
 export interface SearchResult {
   hits: SearchHit[];
   /** What degraded, in words a caller can show a user. Never an exception. */
   notes: string[];
+  /**
+   * What each rung did, in cascade order: the facts behind `notes`, for a
+   * caller that must tell "blocked" from "empty" without reading English.
+   */
+  rungs?: RungReport[];
+  /**
+   * True when at least one rung ANSWERED (outcome `hits` or `empty`). False
+   * means nothing was searched — every rung was off, refused or failed — and
+   * an empty `hits` is then no finding about the web.
+   */
+  searched?: boolean;
 }
 
 /**
@@ -118,17 +155,19 @@ export function probeSearxng(base: string): Promise<boolean> {
  */
 export async function searchViaSearxng(query: string, opts: SearchOptions = {}): Promise<SearchResult> {
   const base = searxngBase(opts);
-  if (!base) return { hits: [], notes: [`SearXNG disabled (${envName("SEARXNG")}=off).`] };
+  if (!base) return rungResult("searxng", "disabled", [], [`SearXNG disabled (--searxng off / ${envName("SEARXNG")}=off).`]);
 
   if (!(await probeSearxng(base))) {
-    return {
-      hits: [],
-      notes: [
+    return rungResult(
+      "searxng",
+      "unreachable",
+      [],
+      [
         searxngIsExplicit(opts)
           ? `SearXNG not reachable at ${base}.`
           : `SearXNG not running at ${base} — start it with \`${brand().cli} searxng up\` for local, keyless discovery.`,
       ],
-    };
+    );
   }
 
   const pages = Math.max(1, opts.pages ?? 1);
@@ -146,18 +185,33 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
   // from a query that genuinely has no hits, and the caller reports "nothing
   // found" for something that will work again in a few minutes.
   const suspended = new Map<string, string>();
+  // Why page one produced no result list. A later page failing is not a
+  // failure: the pages before it stand.
+  let failed: RungOutcome | undefined;
 
   for (let p = 0; p < pages && hits.length < limit; p++) {
     const r = await httpGet(root + (p > 0 ? `&pageno=${p + 1}` : ""), { accept: "application/json", acceptLanguage, timeoutMs: QUERY_TIMEOUT_MS });
     if (!r.ok) {
-      if (p === 0) notes.push(r.status === 429 || r.status === 503 ? `SearXNG rate-limited (HTTP ${r.status}).` : `SearXNG unreachable (status ${r.status}).`);
+      if (p === 0) {
+        failed = r.status === 429 || r.status === 503 ? "throttled" : r.status === 0 ? "unreachable" : "error";
+        notes.push(
+          failed === "throttled"
+            ? `SearXNG rate-limited (HTTP ${r.status}).`
+            : failed === "unreachable"
+              ? `SearXNG unreachable (${r.error || "no response"}).`
+              : `SearXNG failed the query (HTTP ${r.status}).`,
+        );
+      }
       break;
     }
     let data: { results?: unknown[]; unresponsive_engines?: unknown[] };
     try {
       data = JSON.parse(r.body);
     } catch {
-      if (p === 0) notes.push("SearXNG returned a non-JSON body — is `format: json` enabled on that instance?");
+      if (p === 0) {
+        failed = "error";
+        notes.push("SearXNG returned a non-JSON body — is `format: json` enabled on that instance?");
+      }
       break;
     }
     for (const e of data.unresponsive_engines ?? []) {
@@ -187,7 +241,29 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
     notes.push(`SearXNG upstreams throttled: ${[...suspended].map(([e, why]) => `${e} (${why})`).join(", ")} — fewer results than usual, not an empty web.`);
   }
   if (!hits.length && !notes.length) notes.push("SearXNG returned no results.");
-  return { hits, notes };
+  // An empty list from throttled upstreams is a refusal, not an answer.
+  const outcome: RungOutcome = hits.length ? "hits" : (failed ?? (suspended.size ? "throttled" : "empty"));
+  return rungResult("searxng", outcome, hits, notes);
+}
+
+// A one-rung SearchResult: the hits and notes, plus the report that says the same in data.
+function rungResult(rung: SearchRung, outcome: RungOutcome, hits: SearchHit[], notes: string[]): SearchResult {
+  return { hits, notes, rungs: [report(rung, outcome, hits.length, notes.join(" "))], searched: answered(outcome) };
+}
+
+function report(rung: SearchRung, outcome: RungOutcome, hits = 0, note?: string): RungReport {
+  return { rung, outcome, ...(hits ? { hits } : {}), ...(note ? { note } : {}) };
+}
+
+const answered = (outcome: RungOutcome) => outcome === "hits" || outcome === "empty";
+
+// What a keyless engine's result says in the cascade's vocabulary.
+function keylessOutcome(r: EngineResult): RungOutcome {
+  if (r.hits.length) return "hits";
+  if (r.answered) return "empty";
+  if (r.blocked) return "blocked";
+  if (r.throttled) return "throttled";
+  return r.status ? "error" : "unreachable";
 }
 
 /**
@@ -213,28 +289,47 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
   const q = query.trim();
   if (!q) return { hits: [], notes: ["Empty query."] };
 
-  const viaSearxng = await searchViaSearxng(q, opts);
-  if (viaSearxng.hits.length) return viaSearxng;
+  const keyless = keylessEngines(opts);
+  const fcOff = !firecrawlBase(opts);
+  // The rungs the cascade stopped before, reported as such: a caller reading
+  // `rungs` sees where it ended, not just what the winner said.
+  const untried = (from: number): RungReport[] => [
+    ...keyless.slice(from).map((e) => report(e, "not-tried")),
+    report("firecrawl", fcOff ? "disabled" : "not-tried"),
+  ];
+  const done = (hits: SearchHit[], notes: string[], rungs: RungReport[]): SearchResult => ({
+    hits,
+    notes,
+    rungs,
+    searched: rungs.some((r) => answered(r.outcome)),
+  });
 
+  const viaSearxng = await searchViaSearxng(q, opts);
+  const rungs = [...(viaSearxng.rungs ?? [])];
+  if (viaSearxng.hits.length) return done(viaSearxng.hits, viaSearxng.notes, [...rungs, ...untried(0)]);
   const notes = [...viaSearxng.notes];
 
   // The keyless rung. Each engine is tried in turn and the FIRST one with hits
   // wins — this is a fallback chain, not a fan-out: pooling several engines and
   // fusing them is a ranking decision, and ranking belongs to the caller.
-  const keyless = keylessEngines(opts);
-  let asked = 0;
-  let blocked = 0;
-  for (const engine of keyless) {
+  const unknown = unknownEngines(opts);
+  if (unknown.length) {
+    notes.push(`${envName("ENGINES")} names no engine this knows: ${unknown.join(", ")} (expected ${KEYLESS_ENGINES.join(", ")}) — ignored.`);
+  }
+  for (const [i, engine] of keyless.entries()) {
     const r = await searchViaKeyless(engine, q, { limit: opts.limit, pages: opts.pages, lang: opts.lang, region: opts.region });
+    rungs.push(report(engine, keylessOutcome(r), r.hits.length, r.note));
     if (r.hits.length) {
-      return { hits: r.hits.map((h) => ({ ...h, via: engine })), notes };
+      return done(
+        r.hits.map((h) => ({ ...h, via: engine })),
+        notes,
+        [...rungs, ...untried(i + 1)],
+      );
     }
-    asked++;
-    if (r.blocked) blocked++;
-    // Only a throttle is worth reporting. "Returned no results" from every
-    // engine in turn would bury the one note that matters under three that say
-    // the same thing.
-    if (r.throttled && r.note) notes.push(r.note);
+    // Every failure is worth reporting; only "returned no results" is not.
+    // That one repeated by every engine in turn would bury the note that
+    // matters under three that say the same thing.
+    if (!r.answered && r.note) notes.push(r.note);
   }
 
   // searchViaFirecrawl runs its own probe and reports why it could not, so
@@ -242,17 +337,38 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
   const fc = await searchViaFirecrawl(q, opts.limit ?? 10, opts);
   const hits: SearchHit[] = (fc.hits ?? []).map((h) => ({ url: h.url, title: h.title, snippet: h.description, via: "firecrawl" as const }));
   if (fc.why) notes.push(fc.why);
-  if (!hits.length) {
-    // The closing note is the sentence a caller shows its user, so it must not
-    // say something the run did not establish. When every keyless engine turned
-    // us away, NOTHING was learned about the web for this query — reporting that
-    // as "no results" converts a refusal into a finding about the world, and the
-    // caller has no way to tell the two apart afterwards.
-    notes.push(
-      asked > 0 && blocked === asked
-        ? `Every keyless engine blocked this client (${keyless.join(", ")}) — nothing was searched, which is not the same as nothing being there. Try again later, or run \`${brand().cli} stack up\` for a local SearXNG.`
-        : `No results from any engine. \`${brand().cli} stack up\` starts SearXNG and Firecrawl locally.`,
-    );
+  rungs.push(report("firecrawl", firecrawlOutcome(fc), hits.length, fc.why));
+  if (!hits.length) notes.push(closingNote(rungs));
+  return done(hits, notes, rungs);
+}
+
+function firecrawlOutcome(fc: { hits?: unknown[]; status?: number }): RungOutcome {
+  if (fc.hits) return fc.hits.length ? "hits" : "empty";
+  if (fc.status === undefined) return "disabled";
+  if (fc.status === 0) return "unreachable";
+  return fc.status === 429 || fc.status === 503 ? "throttled" : "error";
+}
+
+/**
+ * The sentence a caller shows its user when the cascade found nothing, so it
+ * must not say something the run did not establish. Three different facts:
+ * nothing was switched on; nothing ANSWERED (offline, blocked, throttled, a
+ * 5xx — nothing was learned about the web, and reporting that as "no results"
+ * converts a refusal into a finding about the world); or something answered
+ * and found nothing.
+ */
+function closingNote(rungs: RungReport[]): string {
+  const cli = brand().cli;
+  if (rungs.every((r) => r.outcome === "disabled")) {
+    return `No search backend was enabled — SearXNG and Firecrawl are off and no keyless engine is selected, so nothing was searched. Set ${envName("ENGINES")} to a list of ${KEYLESS_ENGINES.join(", ")}, or run \`${cli} stack up\`.`;
   }
-  return { hits, notes };
+  if (rungs.some((r) => answered(r.outcome))) return `No results from any engine. \`${cli} stack up\` starts SearXNG and Firecrawl locally.`;
+  const keyless = rungs.filter((r) => isKeylessEngine(r.rung));
+  if (keyless.length && keyless.every((r) => r.outcome === "blocked")) {
+    return `Every keyless engine blocked this client (${keyless.map((r) => r.rung).join(", ")}) — nothing was searched, which is not the same as nothing being there. Try again later, or run \`${cli} stack up\` for a local SearXNG.`;
+  }
+  return `No engine answered (${rungs
+    .filter((r) => r.outcome !== "disabled")
+    .map((r) => `${r.rung} ${r.outcome}`)
+    .join(", ")}) — nothing was searched, which is not the same as nothing being there. Try again later, or run \`${cli} stack up\` for a local SearXNG.`;
 }
