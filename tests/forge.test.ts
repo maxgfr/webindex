@@ -420,8 +420,10 @@ describe("why a forge call failed", () => {
     expect(missing.note).toMatch(/no such repository on github\.com, or it is private/);
     expect(await repoFacts(REF)).toBeUndefined();
 
-    answer(502);
+    // A gateway error is the one answer a second try can change: exactly one more.
+    const gateway = answer(502);
     expect((await repoFactsResult(REF)).note).toMatch(/status 502.*unavailable/);
+    expect(gateway).toHaveBeenCalledTimes(2);
     answer(500);
     expect((await repoFactsResult(REF)).note).toMatch(/status 500.*unavailable/);
   });
