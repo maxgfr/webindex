@@ -99,7 +99,7 @@ async function viaAnydoc(bytes: Buffer, format?: string): Promise<{ text?: strin
   // npx missing is the ordinary state of a machine without npm, not news.
   if (r.unavailable === "not installed") return { unavailable: true };
   if (r.unavailable) return { unavailable: true, failure: `anydoc ${r.unavailable}; ${skipNpxHint()}` };
-  return { failure: `anydoc: ${failureDetail(r)}` };
+  return { failure: failureDetail("anydoc", r) };
 }
 
 /** What the built-in reader made of the document. Never unavailable: it needs nothing. */

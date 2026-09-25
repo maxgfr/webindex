@@ -205,6 +205,13 @@ describe("a document the converter rejects", () => {
     expect(r.reason).toBe("anydoc: malformed document: not a PDF: file appears to be a ZIP archive");
   });
 
+  // anydoc names itself in its own messages; the note said "anydoc: anydoc: …".
+  it("names the tool once when its own message already does", async () => {
+    runMock.mockResolvedValue({ ok: false, stdout: "", error: "exit 1", stderr: "anydoc: unsupported input: unrecognized file content\n" });
+    const r = await extractDocument(TRUNCATED, BINARY, { engines: ["anydoc"] });
+    expect(r.reason).toBe("anydoc: unsupported input: unrecognized file content");
+  });
+
   it("says anydoc could not be installed, and how to skip it, when npm is offline", async () => {
     runMock.mockResolvedValue({ ok: false, stdout: "", error: "exit 1", stderr: "npm error code ENOTFOUND\nnpm error network request failed\n" });
     const r = await extractDocument(BYTES, BINARY, { engines: ["anydoc", "firecrawl"] });

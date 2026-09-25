@@ -189,13 +189,15 @@ export function skipNpxHint(): string {
 }
 
 /**
- * The tool's own account of a failure: the first line of stderr that is not
- * npm's chatter, capped — else the exit status.
+ * The tool's own account of a failure, under its name: the first line of
+ * stderr that is not npm's chatter, capped — else the exit status. A tool that
+ * already names itself (`anydoc: unsupported input…`) is not named twice.
  */
-export function failureDetail(r: RunResult): string {
+export function failureDetail(tool: string, r: RunResult): string {
   const line = (r.stderr ?? "")
     .split(/\r?\n/)
     .map((l) => l.trim())
     .find((l) => l && !/^npm (?:warn|WARN|notice)\b/.test(l));
-  return (line ?? r.error ?? "failed").slice(0, 200);
+  const detail = (line ?? r.error ?? "failed").slice(0, 200);
+  return detail.startsWith(`${tool}:`) ? detail : `${tool}: ${detail}`;
 }

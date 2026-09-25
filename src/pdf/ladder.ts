@@ -155,7 +155,7 @@ async function viaNpx(id: PdfExtractorId, spec: string, args: string[], bytes: B
   // npx itself missing is the ordinary state of a machine without npm, not news.
   if (r.unavailable === "not installed") return { unavailable: true };
   if (r.unavailable) return { unavailable: true, failure: `${id} ${r.unavailable}`, hint: skipNpxHint() };
-  return { failure: `${id}: ${failureDetail(r)}` };
+  return { failure: failureDetail(id, r) };
 }
 
 async function viaPdftotext(bytes: Buffer): Promise<RungResult> {
@@ -164,7 +164,7 @@ async function viaPdftotext(bytes: Buffer): Promise<RungResult> {
   const r = await runWithInput("pdftotext", ["-layout", "-", "-"], bytes, PDFTOTEXT_TIMEOUT_MS);
   // pdftotext ends each page with a form feed; a reader wants a paragraph break.
   if (r.ok) return { text: r.stdout.replace(/\f/g, "\n\n") };
-  return r.error === "not installed" ? { unavailable: true } : { failure: `pdftotext: ${failureDetail(r)}` };
+  return r.error === "not installed" ? { unavailable: true } : { failure: failureDetail("pdftotext", r) };
 }
 
 async function viaOcr(bytes: Buffer): Promise<RungResult> {
