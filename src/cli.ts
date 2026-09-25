@@ -96,7 +96,7 @@ USAGE
   webindex cache     status|clean [--all] [--json]
   webindex crawl <url> --max <n> [--depth <n>] [--cross-origin] [--json]
   webindex tables <url> [--markdown] [--json]
-  webindex embed <text> [--json]
+  webindex embed <text> | --docs <file.json|-> [--lines] [--json]
   webindex hybrid --query <q> [--docs <file.json|->] [--limit <n>] [--json]
   webindex changed <url> [--etag <v>] [--last-modified <date>] [--hash <sha256>]
                          [--timeout <ms>] [--json]
@@ -183,7 +183,9 @@ COMMANDS
              resolved. Plain extraction flattens a table into prose in which
              every figure has lost its row and column.
   embed      Vectors for a text, from the local Ollama. No key, and nothing
-             leaves the machine. Needs \`webindex semantic up\`.
+             leaves the machine. Needs \`webindex semantic up\`. --docs embeds a
+             JSON array of strings (--lines: one text per non-empty line) in
+             one run, in input order.
   hybrid     Rank documents against a question with BOTH retrievers, fused by
              RRF: BM25F cannot find a page that never uses your words, and a
              dense index cannot match an exact identifier. Degrades to the
@@ -280,7 +282,7 @@ export const VALUE_FLAGS = [
   "timeout",
   "forge",
 ];
-export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page", "cache", "refresh", "offline", "dense"];
+export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page", "cache", "refresh", "offline", "dense", "lines"];
 export const COMMANDS = [
   "search",
   "fetch",
@@ -816,7 +818,7 @@ export function webindexAdapter(): McpAdapter {
         title: "Embed text with the local model",
         description:
           "Turn text into vectors with the local Ollama, which needs no key and sends nothing off the machine. Returns one vector per input, in input order. " +
-          "Answers with a note rather than an error when the service is not running.",
+          "Fails with a note naming the command that starts the service when it is not running.",
         inputSchema: {
           type: "object",
           properties: { texts: { type: "array", items: { type: "string" }, description: "The texts to embed." } },
@@ -1462,8 +1464,36 @@ async function dispatch(argv: string[]): Promise<void> {
   }
 
   if (cmd === "embed") {
+    const EMBED_USAGE = "usage: webindex embed <text> | --docs <file.json|-> [--lines] [--json]";
     const text = positionalText(args);
-    if (!text) usage("usage: webindex embed <text>");
+    if (argValue(args, "docs") !== undefined || argBool(args, "lines")) {
+      // A file of passages in one run: one probe, the batching embed() already
+      // does, and the vectors in input order.
+      if (text) usage(EMBED_USAGE);
+      const input = readDocsInput(args, EMBED_USAGE);
+      const shape = "a non-empty JSON array of strings (or one text per line with --lines)";
+      let texts: string[];
+      if (argBool(args, "lines")) texts = input.text.split(/\r?\n/).filter((l) => l.trim());
+      else {
+        let arr: unknown;
+        try {
+          arr = parseJsonInput(input.text, input.label, `pass ${shape}`);
+        } catch (e) {
+          fail((e as Error).message);
+        }
+        texts = Array.isArray(arr) && arr.every((t) => typeof t === "string") ? (arr as string[]) : [];
+      }
+      if (!texts.length) fail(`${input.label} must be ${shape}`);
+      const r = await embed(texts);
+      if (!r.vectors.length) fail(r.note ?? "the embedding server returned nothing");
+      process.stdout.write(
+        argBool(args, "json")
+          ? jsonLine({ model: r.model, dimensions: r.vectors[0]?.length ?? 0, vectors: r.vectors })
+          : `${r.vectors.map((v) => v.join(" ")).join("\n")}\n`,
+      );
+      return;
+    }
+    if (!text) usage(EMBED_USAGE);
     const r = await embed([text]);
     if (!r.vectors.length) fail(r.note ?? "the embedding server returned nothing");
     process.stdout.write(

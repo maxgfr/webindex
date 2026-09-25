@@ -1495,6 +1495,43 @@ describe("the new commands", () => {
     expect(stderr()).toMatch(/semantic up/);
   });
 
+  it("embeds a whole file of texts in one run, in input order", async () => {
+    // The MCP tool took texts[]; the CLI took one argv string, so a file of
+    // passages cost a process and a probe per line.
+    resetOllamaProbe();
+    process.env[envName("OLLAMA")] = "http://ol.test";
+    const batches: string[][] = [];
+    installFetchMock((url, init) => {
+      if (url.includes("/api/tags")) return { status: 200, body: "{}", contentType: "application/json" };
+      const input = JSON.parse(String(init?.body)).input as string[];
+      batches.push(input);
+      return { status: 200, body: JSON.stringify({ embeddings: input.map((t) => [t.length, 0]) }), contentType: "application/json" };
+    });
+    const file = join(dir, "texts.json");
+    writeFileSync(file, JSON.stringify(["a", "bbb", "cc"]));
+    expect(await run(["embed", "--docs", file, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({
+      dimensions: 2,
+      vectors: [
+        [1, 0],
+        [3, 0],
+        [2, 0],
+      ],
+    });
+
+    out = [];
+    const lines = join(dir, "texts.txt");
+    writeFileSync(lines, "first line\n\nsecond\n");
+    expect(await run(["embed", "--docs", lines, "--lines"])).toBe(0);
+    expect(stdout()).toBe("10 0\n6 0\n");
+
+    out = [];
+    err = [];
+    writeFileSync(file, JSON.stringify(["a", 3]));
+    expect(await run(["embed", "--docs", file])).toBe(1);
+    expect(stderr()).toMatch(/--docs .* must be a non-empty JSON array of strings/);
+  });
+
   it("ranks hybridly, and keeps the degradation note off stdout", async () => {
     // The reason a run ranked lexically must be visible without landing in the
     // middle of the ranking — the same rule `search` follows.
@@ -1633,6 +1670,14 @@ describe("audit regressions", () => {
     const j = JSON.parse(r.text);
     expect(j.ranked.map((x: { url: string }) => x.url)).toEqual(["a", "b"]);
     expect(j.note).toMatch(/semantic up/);
+  });
+
+  it("says plainly that webindex_embed fails, with the note, when nothing answers", async () => {
+    const decl = webindexAdapter()
+      .listTools(LATEST_PROTOCOL)
+      .find((t) => t.name === "webindex_embed");
+    expect(decl?.description).not.toMatch(/rather than an error/);
+    expect(decl?.description).toMatch(/fails with a note/i);
   });
 
   it.each(["text", "title", "headings"])("rejects an incorrectly typed rank %s as invalid params", async (field) => {

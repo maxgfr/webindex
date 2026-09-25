@@ -70,7 +70,7 @@ webindex package <name> [--registry npm|pypi|crates]
 webindex meta|robots|sitemap|feed <url>
 webindex crawl <url> --max <n>       # bounded site walk, robots at every hop
 webindex tables <url>                # tables as data, not flattened prose
-webindex embed <text>                # local vectors, no key
+webindex embed <text> | --docs <f>   # local vectors, no key; a JSON array of texts in one run
 webindex hybrid --query <q>          # BM25F + dense, fused by RRF
 webindex changed <url> [--etag <v>] [--last-modified <d>]  # a 304 costs one round trip
 webindex cache status|clean [--all]

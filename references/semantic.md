@@ -14,6 +14,7 @@ unpublished draft, where a hosted embedding API is simply not an option.
 webindex semantic up     # Qdrant :6333, Ollama :11434, and the model pulled once
 webindex doctor          # both should say "answering at …"
 webindex embed "hello"
+webindex embed --docs passages.json --json   # a JSON array of texts, one run, input order
 ```
 
 `WEBINDEX_OLLAMA=off` and `WEBINDEX_QDRANT=off` disable each half for a sandbox
