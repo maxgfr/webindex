@@ -125,8 +125,15 @@ default, and one out of range is clamped to it.
 
 `searxng`, `firecrawl` and `stack` do not need a checkout. The compose file, the
 SearXNG settings and the Firecrawl env are compiled into the binary and written
-out on first use — so they work from a Homebrew cellar, a global npm install or a
-vendored bundle alike.
+out on first use, into `compose/` beside the fetch cache — so they work from a
+Homebrew cellar, a global npm install or a vendored bundle alike.
+
+A compose file is something docker runs with root's rights, so before each
+action the written files are read back, and every directory from the cache root
+down must be yours, no symbolic link, and not writable by anyone else; otherwise
+the command refuses and says which path failed. With the docker client installed
+but no daemon answering, every action says so and exits 1 rather than reporting
+a status or blaming the image pull.
 
 The stack uses one fixed project name and one set of container names, so several
 tools on the same machine share a single set of containers instead of fighting
