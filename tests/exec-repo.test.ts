@@ -825,6 +825,8 @@ describe("cloning, against a real local repository", () => {
     expect(side).not.toBe(main);
     expect(existsSync(join(side, "SIDE.md"))).toBe(true);
     expect(existsSync(join(main, "SIDE.md"))).toBe(false);
+    // An empty branch is no branch — the default clone, as it always was.
+    expect(await ensureClone(ref, { branch: "" })).toBe(main);
     await expect(ensureClone(ref, { branch: "--upload-pack=touch /tmp/x" })).rejects.toThrow(/not a branch name/);
   });
 

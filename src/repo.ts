@@ -252,17 +252,18 @@ export async function ensureClone(ref: RepoRef, opts: { refresh?: boolean; branc
   if (ref.isLocal) return resolve(ref.raw);
   if (!ref.cloneUrl) throw new Error(`"${ref.raw}" does not name a repository that can be cloned`);
   if (!have("git")) throw new Error(`git is not installed or not on PATH — cannot clone ${ref.cloneUrl}`);
+  const branch = opts.branch?.trim() || undefined;
   // git reads an argument that begins with "-" as an option, and no ref name
   // may begin with one — so such a "branch" is refused before it reaches git.
-  if (opts.branch !== undefined && (!opts.branch.trim() || opts.branch.startsWith("-"))) throw new Error(`"${opts.branch}" is not a branch name`);
+  if (branch?.startsWith("-")) throw new Error(`"${branch}" is not a branch name`);
 
-  const dir = join(repoCacheRoot(), opts.branch ? `${ref.slug}@${branchSlug(opts.branch)}` : ref.slug);
+  const dir = join(repoCacheRoot(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
   // One clone per directory at a time, in this process: concurrent callers all
   // saw "not cloned yet", each ran `git clone` into the same directory, and the
   // losers deleted the winner's half-written tree before retrying.
   const pending = inflight.get(dir);
   if (pending) return pending;
-  const work = obtainClone(ref, dir, opts).finally(() => {
+  const work = obtainClone(ref, dir, { refresh: opts.refresh, branch }).finally(() => {
     if (inflight.get(dir) === work) inflight.delete(dir);
   });
   inflight.set(dir, work);
@@ -317,6 +318,16 @@ async function refreshClone(ref: RepoRef, dir: string, branch: string | undefine
 // clone in progress.
 const STALE_STAGING_MS = 24 * 60 * 60 * 1000;
 
+// Removing a staging tree is cleanup: failing at it must not replace the error
+// the caller needs (the clone's own) with one about housekeeping.
+function discard(path: string): void {
+  try {
+    rmSync(path, { recursive: true, force: true });
+  } catch {
+    /* left for sweepStaging */
+  }
+}
+
 function sweepStaging(staging: string): void {
   try {
     for (const name of readdirSync(staging)) {
@@ -339,7 +350,7 @@ async function freshClone(ref: RepoRef, dir: string, branch: string | undefined)
     const tmp = join(staging, `${basename(dir)}-${process.pid}-${randomBytes(4).toString("hex")}`);
     const args = ["clone", "--depth", "1", ...(filter ? ["--filter=blob:none"] : []), ...(branch ? ["--branch", branch] : []), "--", ref.cloneUrl!, tmp];
     const r = await shAsync("git", args, { timeoutMs: cloneTimeoutMs() });
-    if (!r.ok) rmSync(tmp, { recursive: true, force: true });
+    if (!r.ok) discard(tmp);
     return { r, tmp };
   };
 
@@ -368,7 +379,7 @@ async function freshClone(ref: RepoRef, dir: string, branch: string | undefined)
   try {
     renameSync(done.tmp, dir);
   } catch (e) {
-    rmSync(done.tmp, { recursive: true, force: true });
+    discard(done.tmp);
     // Another process finished the same clone first: theirs is as good as ours.
     if (!existsSync(join(dir, ".git"))) throw new Error(`could not move the clone of ${ref.cloneUrl} into ${dir}: ${(e as Error).message}`);
   }
