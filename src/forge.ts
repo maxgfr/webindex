@@ -1,8 +1,9 @@
+import { resolve } from "node:path";
 import { countFetch, env, envFlag, envInt, envName } from "./brand.js";
 import { have, shAsync } from "./exec.js";
 import { contactUa, parseRetryAfter, readCappedBytes, sleep } from "./fetch.js";
 import { configuredForgeHosts, hostForgeKind, normalizeForgeHost } from "./forge-host.js";
-import type { RepoRef } from "./repo.js";
+import { originUrl, type RepoRef, resolveRepo } from "./repo.js";
 import { rankedKeywords } from "./text.js";
 
 // Forge APIs: asking a code host about a repository.
@@ -52,6 +53,12 @@ export interface ForgeOptions {
    * host, which a repository string alone never proves.
    */
   apiBase?: string;
+  /**
+   * Which forge the host runs, for a self-hosted one whose name does not say
+   * (salsa.debian.org is a GitLab). It picks the API to ask and nothing else: a
+   * token still goes only where `forgeAuthHeaders` allows.
+   */
+  kind?: ForgeKind;
   limit?: number;
   timeoutMs?: number;
   /**
@@ -63,11 +70,25 @@ export interface ForgeOptions {
 }
 
 /**
- * Which forge a host is: a host declared in `<PREFIX>_FORGE_HOSTS` first, then
- * its shape. Unknown hosts get no client.
+ * Which forge a host is: `opts.kind` when the caller says, then a host declared
+ * in `<PREFIX>_FORGE_HOSTS`, then the host's shape. Unknown hosts get no client.
  */
-export function forgeKind(host: string): ForgeKind | undefined {
-  return hostForgeKind(host);
+export function forgeKind(host: string, opts: Pick<ForgeOptions, "kind"> = {}): ForgeKind | undefined {
+  return opts.kind ?? hostForgeKind(host);
+}
+
+/**
+ * The ref a forge can answer for. A local checkout stands for its `origin`
+ * remote — `webindex repo .` means the project this directory is a clone of —
+ * with any credential in that URL dropped, since the ref travels into output. A
+ * checkout with no origin, and every other ref, comes back as it was.
+ */
+export function forgeRef(ref: RepoRef, opts: Pick<ForgeOptions, "kind"> = {}): RepoRef {
+  if (!ref.isLocal) return ref;
+  const origin = originUrl(resolve(ref.raw));
+  if (!origin) return ref;
+  const remote = resolveRepo(origin.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]*@/i, "$1"), opts);
+  return remote.host === "generic" || remote.isLocal ? ref : remote;
 }
 
 /**
@@ -85,7 +106,7 @@ export function forgeKind(host: string): ForgeKind | undefined {
 export function apiBase(ref: Pick<RepoRef, "host"> | string, opts: ForgeOptions = {}): string {
   if (opts.apiBase) return opts.apiBase.replace(/\/+$/, "");
   const host = normalizeForgeHost(typeof ref === "string" ? ref : ref.host);
-  const kind = forgeKind(host);
+  const kind = forgeKind(host, opts);
   if (kind === "github") return host === "github.com" ? "https://api.github.com" : `https://${host}/api/v3`;
   if (kind === "gitlab") return `https://${host}/api/v4`;
   return `https://${host}/api/v1`;
@@ -441,7 +462,7 @@ function splitSlug(full: string, fallback: { owner: string; repo: string }): { o
  * them; `canonicalRepo` below joins them for the callers that want the string.
  */
 export async function canonicalRepoRef(ref: RepoRef, opts: ForgeOptions = {}): Promise<{ owner: string; repo: string }> {
-  const { owner, repo } = await canonicalLookup(ref, opts);
+  const { owner, repo } = await canonicalLookup(forgeRef(ref, opts), opts);
   return { owner, repo };
 }
 
@@ -450,7 +471,7 @@ export async function canonicalRepoRef(ref: RepoRef, opts: ForgeOptions = {}): P
 // verdict, and a 404 here is the answer the search would have hidden in a 422.
 function canonicalLookup(ref: RepoRef, opts: ForgeOptions): Promise<Canonical> {
   const fallback = { owner: ref.owner ?? "", repo: ref.repo ?? "" };
-  const path = forgeKind(ref.host) === "github" ? repoPath(ref, "github") : undefined;
+  const path = forgeKind(ref.host, opts) === "github" ? repoPath(ref, "github") : undefined;
   if (!path) return Promise.resolve(fallback);
   const key = `${ref.host}/${ref.owner}/${ref.repo}`;
   let hit = canonCache.get(key);
@@ -476,10 +497,13 @@ function canonicalLookup(ref: RepoRef, opts: ForgeOptions): Promise<Canonical> {
 
 /** The same answer as `canonicalRepoRef`, as an `owner/repo` slug. */
 export async function canonicalRepo(ref: RepoRef, opts: ForgeOptions = {}): Promise<string | undefined> {
+  ref = forgeRef(ref, opts);
   if (!ref.owner || !ref.repo) return undefined;
   const { owner, repo } = await canonicalRepoRef(ref, opts);
   return `${owner}/${repo}`;
 }
+
+const noOrigin = (ref: RepoRef) => `"${ref.raw}" is a local directory with no origin remote — name the repository it is a clone of.`;
 
 /**
  * Search a repository's issues or pull requests.
@@ -497,7 +521,9 @@ export async function canonicalRepo(ref: RepoRef, opts: ForgeOptions = {}): Prom
  * note says so: a looser answer must never pass for the one asked for.
  */
 export async function searchIssues(ref: RepoRef, terms: string[], kind: "issue" | "pr", opts: ForgeOptions = {}): Promise<ForgeResult> {
-  const forge = forgeKind(ref.host);
+  ref = forgeRef(ref, opts);
+  if (ref.isLocal) return { items: [], note: noOrigin(ref) };
+  const forge = forgeKind(ref.host, opts);
   if (!forge) return { items: [], note: `${ref.host} is not a forge this engine knows how to query.` };
   const repoAt = repoPath(ref, forge);
   if (!repoAt) return { items: [], note: `"${ref.raw}" does not name owner/repo.` };
@@ -580,7 +606,9 @@ async function searchOnce(ref: RepoRef, forge: ForgeKind, repoAt: string, terms:
 
 /** A repository's releases, newest first. */
 export async function listReleases(ref: RepoRef, opts: ForgeOptions = {}): Promise<ForgeResult> {
-  const forge = forgeKind(ref.host);
+  ref = forgeRef(ref, opts);
+  if (ref.isLocal) return { items: [], note: noOrigin(ref) };
+  const forge = forgeKind(ref.host, opts);
   const repoAt = forge && repoPath(ref, forge);
   if (!forge || !repoAt) return { items: [], note: `Cannot list releases for "${ref.raw}".` };
   const limit = Math.max(1, opts.limit ?? 20);
@@ -602,7 +630,9 @@ export async function listReleases(ref: RepoRef, opts: ForgeOptions = {}): Promi
 
 /** A repository's tags, which exist even where releases do not. */
 export async function listTags(ref: RepoRef, opts: ForgeOptions = {}): Promise<ForgeResult> {
-  const forge = forgeKind(ref.host);
+  ref = forgeRef(ref, opts);
+  if (ref.isLocal) return { items: [], note: noOrigin(ref) };
+  const forge = forgeKind(ref.host, opts);
   const repoAt = forge && repoPath(ref, forge);
   if (!forge || !repoAt) return { items: [], note: `Cannot list tags for "${ref.raw}".` };
   const limit = Math.max(1, opts.limit ?? 50);
@@ -677,7 +707,9 @@ export async function repoFacts(ref: RepoRef, opts: ForgeOptions = {}): Promise<
  * different response, and all of them used to arrive as the same `undefined`.
  */
 export async function repoFactsResult(ref: RepoRef, opts: ForgeOptions = {}): Promise<RepoFactsResult> {
-  const forge = forgeKind(ref.host);
+  ref = forgeRef(ref, opts);
+  if (ref.isLocal) return { note: noOrigin(ref) };
+  const forge = forgeKind(ref.host, opts);
   if (!forge) return { note: `${ref.host} is not a forge this engine knows how to query.` };
   const repoAt = repoPath(ref, forge);
   if (!repoAt) return { note: `"${ref.raw}" does not name owner/repo.` };

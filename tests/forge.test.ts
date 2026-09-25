@@ -1,10 +1,15 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
+import { sh } from "../src/exec.js";
 import {
   apiBase,
   canonicalRepo,
   forgeAuthHeaders,
   forgeKind,
+  forgeRef,
   listReleases,
   listTags,
   mapGithubIssues,
@@ -223,6 +228,66 @@ describe("forge routing", () => {
     expect(apiBase(resolveRepo("github.acme.corp/a/b"))).toBe("https://github.acme.corp/api/v3");
     expect(apiBase(resolveRepo("gitlab.acme.corp/a/b"))).toBe("https://gitlab.acme.corp/api/v4");
     expect(apiBase(resolveRepo("github.com/a/b"), { apiBase: "https://pinned.test/api" })).toBe("https://pinned.test/api");
+  });
+
+  it("queries a self-hosted forge whose name does not say what it runs", async () => {
+    // salsa.debian.org, invent.kde.org, git.company.example: every call used to
+    // stop at "not a forge this engine knows" before it looked at any option.
+    vi.stubEnv("GITLAB_TOKEN", "glpat-SECRET");
+    const seen: { url: string; auth?: string }[] = [];
+    installFetchMock((url, init) => {
+      seen.push({ url, auth: ((init?.headers ?? {}) as Record<string, string>).authorization });
+      return { body: JSON.stringify({ path_with_namespace: "debian/dpkg", star_count: 1 }), contentType: "application/json" };
+    });
+    expect(forgeKind("salsa.debian.org")).toBeUndefined();
+    expect(forgeKind("salsa.debian.org", { kind: "gitlab" })).toBe("gitlab");
+    const f = await repoFacts(resolveRepo("salsa.debian.org/debian/dpkg"), { kind: "gitlab" });
+    expect(f?.fullName).toBe("debian/dpkg");
+    // Naming the kind is not naming the host as trusted: no token rides along.
+    expect(seen[0]).toEqual({ url: "https://salsa.debian.org/api/v4/projects/debian%2Fdpkg?license=true", auth: undefined });
+
+    vi.stubEnv(envName("FORGE_HOSTS"), "invent.kde.org=gitlab");
+    expect(forgeKind("invent.kde.org")).toBe("gitlab");
+    await repoFacts(resolveRepo("invent.kde.org/plasma/kwin"));
+    expect(seen[1]).toEqual({ url: "https://invent.kde.org/api/v4/projects/plasma%2Fkwin?license=true", auth: "Bearer glpat-SECRET" });
+    vi.unstubAllEnvs();
+  });
+
+  it("cuts a browser URL at owner/repo once it knows the host is a GitHub", () => {
+    expect(resolveRepo("https://git.corp.example/team/app/tree/main")).toMatchObject({ owner: "team/app/tree", repo: "main" });
+    expect(resolveRepo("https://git.corp.example/team/app/tree/main", { kind: "github" })).toMatchObject({ owner: "team", repo: "app" });
+  });
+});
+
+describe("a local checkout, as far as a forge is concerned", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "wi-local-"));
+    sh("git", ["-C", dir, "init", "-q"]);
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("stands for its origin — with any credential in that URL left behind", async () => {
+    // CI checkouts routinely carry a token in the remote URL, and this ref ends
+    // up in MCP output.
+    sh("git", ["-C", dir, "remote", "add", "origin", "https://x-access-token:ghs_SECRET@github.com/maxgfr/webindex.git"]);
+    const ref = forgeRef(resolveRepo(dir));
+    expect(ref).toMatchObject({ host: "github.com", owner: "maxgfr", repo: "webindex", isLocal: false });
+    expect(JSON.stringify(ref)).not.toContain("SECRET");
+
+    const seen: string[] = [];
+    installFetchMock((url) => {
+      seen.push(url);
+      return { body: JSON.stringify({ full_name: "maxgfr/webindex" }), contentType: "application/json" };
+    });
+    expect((await repoFacts(resolveRepo(dir)))?.fullName).toBe("maxgfr/webindex");
+    expect(seen[0]).toBe("https://api.github.com/repos/maxgfr/webindex");
+  });
+
+  it("says so when the checkout has no origin to stand for", async () => {
+    const r = await repoFactsResult(resolveRepo(dir));
+    expect(r.note).toMatch(/local directory with no origin remote/);
+    expect(forgeRef(resolveRepo(dir)).isLocal).toBe(true);
   });
 });
 

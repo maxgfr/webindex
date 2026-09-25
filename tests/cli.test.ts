@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -123,6 +124,7 @@ describe("help and version", () => {
       "issues",
       "prs",
       "releases",
+      "tags",
       "package",
       "meta",
       "robots",
@@ -533,6 +535,7 @@ describe("the MCP tools", () => {
       "webindex_repo",
       "webindex_issues",
       "webindex_releases",
+      "webindex_tags",
       "webindex_package",
       "webindex_meta",
       "webindex_robots",
@@ -822,6 +825,58 @@ describe("the forge, registry and page-metadata commands", () => {
     );
     expect(await run(["repo", "github.com/a/b"])).toBe(1);
     expect(stderr()).toMatch(/network error reaching api\.github\.com — getaddrinfo ENOTFOUND/);
+  });
+
+  it("lists tags, and points at them when a project publishes no releases", async () => {
+    installFetchMock((url) =>
+      url.includes("/tags") ? json([{ name: "3.8.13" }, { name: "3.8.12" }]) : url.includes("/releases") ? json([]) : json({ full_name: "a/b" }),
+    );
+    expect(await run(["tags", "gitlab.com/gnutls/gnutls", "--limit", "2"])).toBe(0);
+    expect(stdout()).toContain("3.8.13\n  https://gitlab.com/gnutls/gnutls/-/tags/3.8.13");
+
+    expect(await run(["releases", "gitlab.com/gnutls/gnutls"])).toBe(1);
+    expect(stderr()).toMatch(/no releases published for gitlab\.com\/gnutls\/gnutls — try `webindex tags/);
+
+    const r = await webindexAdapter().callTool("webindex_tags", { repo: "gitlab.com/gnutls/gnutls", limit: 2 });
+    expect(JSON.parse(r.text).items.map((i: { title: string }) => i.title)).toEqual(["3.8.13", "3.8.12"]);
+    await expect(webindexAdapter().callTool("webindex_releases", { repo: "gitlab.com/gnutls/gnutls" })).rejects.toThrow(/webindex_tags/);
+  });
+
+  it("queries a self-hosted forge as the forge --forge names", async () => {
+    const seen: string[] = [];
+    installFetchMock((url) => {
+      seen.push(url);
+      return json({ path_with_namespace: "debian/dpkg", star_count: 3 });
+    });
+    expect(await run(["repo", "https://salsa.debian.org/debian/dpkg/-/tree/main", "--forge", "gitlab"])).toBe(0);
+    expect(seen[0]).toBe("https://salsa.debian.org/api/v4/projects/debian%2Fdpkg?license=true");
+    await webindexAdapter().callTool("webindex_repo", { repo: "salsa.debian.org/debian/dpkg", forge: "gitlab" });
+    expect(seen[1]).toBe(seen[0]);
+
+    err = [];
+    expect(await run(["repo", "salsa.debian.org/debian/dpkg", "--forge", "bitbucket"])).toBe(2);
+    expect(stderr()).toMatch(/--forge expects github, gitlab or gitea/);
+    await expect(webindexAdapter().callTool("webindex_repo", { repo: "salsa.debian.org/debian/dpkg", forge: "bitbucket" })).rejects.toThrow(
+      /`forge` must be one of/,
+    );
+  });
+
+  it("reads a local checkout as the repository it is a clone of", async () => {
+    const checkout = mkdtempSync(join(tmpdir(), "webindex-checkout-"));
+    try {
+      execFileSync("git", ["-C", checkout, "init", "-q"]);
+      execFileSync("git", ["-C", checkout, "remote", "add", "origin", "git@github.com:maxgfr/webindex.git"]);
+      const seen: string[] = [];
+      installFetchMock((url) => {
+        seen.push(url);
+        return json({ full_name: "maxgfr/webindex", stargazers_count: 1 });
+      });
+      expect(await run(["repo", checkout, "--json"])).toBe(0);
+      expect(seen[0]).toBe("https://api.github.com/repos/maxgfr/webindex");
+      expect(JSON.parse(stdout()).ref).toMatchObject({ host: "github.com", owner: "maxgfr", repo: "webindex" });
+    } finally {
+      rmSync(checkout, { recursive: true, force: true });
+    }
   });
 
   it("refuses free text rather than inventing a repository", async () => {

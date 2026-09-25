@@ -37,8 +37,8 @@ import { cacheClean, cacheDir, cachedFetchAndExtract, cacheStats, setCacheMode }
 import { fetchRobots, isAllowed } from "./robots.js";
 import { discoverFeeds, fetchFeed, fetchSitemap, parseFeed } from "./feed.js";
 import { pageMetadata } from "./structured.js";
-import { resolveRepo } from "./repo.js";
-import { listReleases, repoFactsResult, searchIssues } from "./forge.js";
+import { type RepoRef, resolveRepo } from "./repo.js";
+import { type ForgeKind, forgeRef, listReleases, listTags, repoFactsResult, searchIssues } from "./forge.js";
 import { resolvePackage, type RegistryKind } from "./registry.js";
 import { bm25MatchedTerms, bm25Score, bm25Tokenize, buildBm25Index, dedupeNearDuplicates, diversify } from "./rank.js";
 import {
@@ -56,6 +56,7 @@ import {
   UsageError,
 } from "./cli-kit.js";
 import { ensureDir, isNoWrite, writeArtifact } from "./no-write.js";
+import type { JsonSchemaProp } from "./mcp/protocol.js";
 import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
@@ -74,10 +75,11 @@ USAGE
                        [--cache] [--refresh] [--offline] [--timeout <ms>]
   webindex extract <file> [--json] [--full-page]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--json]
-  webindex repo <ref> [--json]
-  webindex issues <ref> [--terms "<words>"] [--limit <n>] [--json]
-  webindex prs <ref> [--terms "<words>"] [--limit <n>] [--json]
-  webindex releases <ref> [--limit <n>] [--json]
+  webindex repo <ref> [--forge github|gitlab|gitea] [--json]
+  webindex issues <ref> [--terms "<words>"] [--limit <n>] [--forge <kind>] [--json]
+  webindex prs <ref> [--terms "<words>"] [--limit <n>] [--forge <kind>] [--json]
+  webindex releases <ref> [--limit <n>] [--forge <kind>] [--json]
+  webindex tags <ref> [--limit <n>] [--forge <kind>] [--json]
   webindex package <name> [--registry npm|pypi|crates] [--version <semver>] [--json]
   webindex meta <url> [--json]
   webindex robots <url> [--json]
@@ -124,9 +126,17 @@ COMMANDS
              --docs or stdin. Deterministic; no model, no network.
   repo       A repository's own facts: stars, licence, default branch, last
              push, and whether it is archived — the record, not the README.
-  issues     Search a repository's issues on GitHub, GitLab or Gitea.
+             A <ref> is owner/repo, any repository URL (one copied from a
+             browser works), git@host:owner/repo, or a local checkout, read as
+             its origin. --forge names what a self-hosted host runs when its
+             name does not say (salsa.debian.org is a GitLab).
+  issues     Search a repository's issues on GitHub, GitLab or Gitea. Every
+             term must match; when together they match nothing, it searches
+             once more with the most distinctive ones and says so on stderr.
   prs        The same, over pull or merge requests.
   releases   Its releases, newest first, with their notes.
+  tags       Its tags — the versions of a project that tags without
+             publishing releases.
   package    A library NAME resolved through npm, PyPI or crates.io to its
              repository, docs, current version, licence and deprecation.
   meta       What a page says about itself: JSON-LD, OpenGraph and meta tags —
@@ -237,6 +247,7 @@ export const VALUE_FLAGS = [
   "terms",
   "max",
   "timeout",
+  "forge",
 ];
 export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page", "cache", "refresh", "offline"];
 export const COMMANDS = [
@@ -248,6 +259,7 @@ export const COMMANDS = [
   "issues",
   "prs",
   "releases",
+  "tags",
   "package",
   "meta",
   "robots",
@@ -304,6 +316,22 @@ function argTimeout(args: CommandArgs): number | undefined {
 function toolTimeoutMs(value: unknown): number | undefined {
   const n = typeof value === "string" ? Number(value) : value;
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(300_000, Math.max(1, Math.round(n))) : undefined;
+}
+
+const FORGE_KINDS: readonly ForgeKind[] = ["github", "gitlab", "gitea"];
+const isForgeKind = (v: string): v is ForgeKind => (FORGE_KINDS as readonly string[]).includes(v);
+
+// The optional `forge` argument the repository tools share.
+const FORGE_ARG: JsonSchemaProp = {
+  type: "string",
+  description: "Which forge a self-hosted host runs when its name does not say (salsa.debian.org is gitlab). Omit for github.com, gitlab.com, Codeberg.",
+  enum: [...FORGE_KINDS],
+};
+
+/** A repository argument as the forge commands read it: parsed, and a local checkout read as its origin. */
+function forgeTarget(raw: string, kind: ForgeKind | undefined): RepoRef {
+  const opts = kind ? { kind } : {};
+  return forgeRef(resolveRepo(raw, opts), opts);
 }
 
 /** Extraction over bytes already in hand — the shared half of `extract`. */
@@ -503,7 +531,10 @@ export function webindexAdapter(): McpAdapter {
           "Answers 'is this maintained' from the forge rather than from a README that says it is. Keyless; a token only raises the quota.",
         inputSchema: {
           type: "object",
-          properties: { repo: { type: "string", description: "owner/repo, a URL, or git@host:owner/repo." } },
+          properties: {
+            repo: { type: "string", description: "owner/repo, a URL (a browser URL works), git@host:owner/repo, or a local checkout (read as its origin)." },
+            forge: FORGE_ARG,
+          },
           required: ["repo"],
         },
       },
@@ -521,6 +552,7 @@ export function webindexAdapter(): McpAdapter {
             terms: { type: "string", description: "What to look for." },
             kind: { type: "string", description: "issue (default) or pr.", enum: ["issue", "pr"] },
             limit: { type: "number", description: "How many to return (default 10)." },
+            forge: FORGE_ARG,
           },
           required: ["repo"],
         },
@@ -528,12 +560,30 @@ export function webindexAdapter(): McpAdapter {
       {
         name: "webindex_releases",
         title: "A repository's releases",
-        description: "List releases newest-first with their notes and dates — the authoritative answer to 'what changed', and to 'when was X added'.",
+        description:
+          "List releases newest-first with their notes and dates — the authoritative answer to 'what changed', and to 'when was X added'. " +
+          "A project that tags versions without publishing releases has none: use webindex_tags for it.",
         inputSchema: {
           type: "object",
           properties: {
             repo: { type: "string", description: "owner/repo, or a repository URL." },
             limit: { type: "number", description: "How many (default 20)." },
+            forge: FORGE_ARG,
+          },
+          required: ["repo"],
+        },
+      },
+      {
+        name: "webindex_tags",
+        title: "A repository's tags",
+        description:
+          "List a repository's tags with a link to each — the versions of a project that tags without publishing forge releases, where webindex_releases finds nothing.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            repo: { type: "string", description: "owner/repo, or a repository URL." },
+            limit: { type: "number", description: "How many (default 50)." },
+            forge: FORGE_ARG,
           },
           required: ["repo"],
         },
@@ -642,6 +692,7 @@ export function webindexAdapter(): McpAdapter {
       webindex_repo: "this repository's record is unusually large; ask for what you need instead",
       webindex_issues: "lower `limit`, or narrow `terms`",
       webindex_releases: "lower `limit` — release notes are long",
+      webindex_tags: "lower `limit`",
       webindex_package: "this package's registry record is unusually large; pin a `version`",
       webindex_meta: "the page is very large; this reads only its head, so a cap here means the document itself is enormous",
       webindex_robots: "this site's robots.txt is unusually large; read it directly",
@@ -722,28 +773,37 @@ export function webindexAdapter(): McpAdapter {
         if (!p) throw new ToolError(`No registry knows a package called "${pkg}".`);
         return { text: JSON.stringify(p, null, 2) };
       }
-      if (name === "webindex_repo" || name === "webindex_issues" || name === "webindex_releases") {
-        const ref = resolveRepo(String(args.repo ?? ""));
+      if (name === "webindex_repo" || name === "webindex_issues" || name === "webindex_releases" || name === "webindex_tags") {
+        const forge = args.forge === undefined ? undefined : String(args.forge);
+        if (forge !== undefined && !isForgeKind(forge)) throw new InvalidParamsError(`\`forge\` must be one of: ${FORGE_KINDS.join(", ")}`);
+        const ref = forgeTarget(String(args.repo ?? ""), forge);
         if (ref.host === "generic") throw new ToolError(`"${String(args.repo ?? "")}" does not name a repository.`);
         const limit = typeof args.limit === "number" ? args.limit : undefined;
+        const opts = { ...(limit ? { limit } : {}), ...(forge ? { kind: forge } : {}) };
         if (name === "webindex_repo") {
-          const { facts: f, note } = await repoFactsResult(ref);
+          const { facts: f, note } = await repoFactsResult(ref, opts);
           if (!f) throw new ToolError(note ?? `Could not read ${ref.webUrl ?? ref.raw}.`);
           return { text: JSON.stringify({ ref, ...f }, null, 2) };
         }
         const r =
           name === "webindex_releases"
-            ? await listReleases(ref, { ...(limit ? { limit } : {}) })
-            : await searchIssues(
-                ref,
-                String(args.terms ?? "")
-                  .split(/\s+/)
-                  .filter(Boolean),
-                args.kind === "pr" ? "pr" : "issue",
-                { ...(limit ? { limit } : {}) },
-              );
+            ? await listReleases(ref, opts)
+            : name === "webindex_tags"
+              ? await listTags(ref, opts)
+              : await searchIssues(
+                  ref,
+                  String(args.terms ?? "")
+                    .split(/\s+/)
+                    .filter(Boolean),
+                  args.kind === "pr" ? "pr" : "issue",
+                  opts,
+                );
         // A quota answer is not "nothing exists" — say which it was.
-        if (!r.items.length) throw new ToolError(r.note ?? `Nothing found for ${ref.raw}.`);
+        if (!r.items.length) {
+          if (!r.note && name === "webindex_releases")
+            throw new ToolError(`No releases published for ${ref.raw} — its versions may only be tags: try webindex_tags.`);
+          throw new ToolError(r.note ?? `Nothing found for ${ref.raw}.`);
+        }
         return { text: JSON.stringify(r, null, 2) };
       }
       if (name === "webindex_meta" || name === "webindex_robots" || name === "webindex_sitemap" || name === "webindex_feed") {
@@ -1035,7 +1095,7 @@ async function dispatch(argv: string[]): Promise<void> {
 
   // What a code host and a package registry say about a project. Read-only,
   // keyless, and answering from the record rather than from a README.
-  if (cmd === "repo" || cmd === "issues" || cmd === "prs" || cmd === "releases" || cmd === "package") {
+  if (cmd === "repo" || cmd === "issues" || cmd === "prs" || cmd === "releases" || cmd === "tags" || cmd === "package") {
     const target = positionalText(args);
     if (!target) usage(`usage: webindex ${cmd} <${cmd === "package" ? "name" : "repo"}> [--json]`);
     const asJson = argBool(args, "json");
@@ -1061,11 +1121,14 @@ async function dispatch(argv: string[]): Promise<void> {
       return;
     }
 
-    const ref = resolveRepo(target);
+    const forge = argValue(args, "forge");
+    if (forge !== undefined && !isForgeKind(forge)) usage(`--forge expects github, gitlab or gitea, got "${forge}"`);
+    const ref = forgeTarget(target, forge);
     if (ref.host === "generic") fail(`"${target}" does not name a repository`);
+    const opts = { ...(limit ? { limit } : {}), ...(forge ? { kind: forge } : {}) };
 
     if (cmd === "repo") {
-      const { facts: f, note } = await repoFactsResult(ref);
+      const { facts: f, note } = await repoFactsResult(ref, opts);
       if (!f) fail(note ?? `could not read ${ref.webUrl ?? target}`);
       emit({ ref, ...f }, [
         `  name        ${f.fullName ?? `${ref.owner}/${ref.repo}`}`,
@@ -1081,11 +1144,15 @@ async function dispatch(argv: string[]): Promise<void> {
 
     const r =
       cmd === "releases"
-        ? await listReleases(ref, { ...(limit ? { limit } : {}) })
-        : await searchIssues(ref, (argValue(args, "terms") ?? "").split(/\s+/).filter(Boolean), cmd === "prs" ? "pr" : "issue", {
-            ...(limit ? { limit } : {}),
-          });
-    if (!r.items.length) fail(r.note ?? `nothing found for ${target}`);
+        ? await listReleases(ref, opts)
+        : cmd === "tags"
+          ? await listTags(ref, opts)
+          : await searchIssues(ref, (argValue(args, "terms") ?? "").split(/\s+/).filter(Boolean), cmd === "prs" ? "pr" : "issue", opts);
+    if (!r.items.length) {
+      // Plenty of projects tag every version and never publish a release.
+      if (!r.note && cmd === "releases") fail(`no releases published for ${target} — try \`webindex tags ${target}\``);
+      fail(r.note ?? `nothing found for ${target}`);
+    }
     emit(
       r,
       r.items.map((i) => `${i.number ? `#${i.number} ` : ""}${i.title}${i.state ? ` [${i.state}]` : ""}\n  ${i.url}`),

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { brand, env, envInt } from "./brand.js";
 import { have, sh, shAsync } from "./exec.js";
+import type { ForgeKind } from "./forge.js";
 import { hostForgeKind, normalizeForgeHost } from "./forge-host.js";
 import { slugify } from "./text.js";
 
@@ -53,13 +54,15 @@ const historyTimeoutMs = () => envInt("GIT_HISTORY_TIMEOUT_MS", 300_000, 1000);
  * Parse any repository identifier into a `RepoRef`. Accepts a local directory,
  * `https://host/owner/repo(.git)`, `ssh://`/`git://` URLs, `git@host:owner/repo`,
  * `host/owner/repo`, and the bare `owner/repo` shorthand (which means GitHub).
+ * A URL copied from a browser names its repository, not the page within it.
+ * `opts.kind` says which forge a self-hosted host runs, where its name does not.
  *
  * An unrecognisable seed becomes a `generic` ref with NO synthesised clone URL.
  * That matters: minting `https://github.com/<free text>.git` would turn "some
  * words the user typed" into a plausible-looking URL that 404s later, far from
  * where the mistake was made.
  */
-export function resolveRepo(raw: string): RepoRef {
+export function resolveRepo(raw: string, opts: { kind?: ForgeKind } = {}): RepoRef {
   const trimmed = raw.trim();
 
   // A local directory wins, so a caller can point at a checkout they already
@@ -134,7 +137,7 @@ export function resolveRepo(raw: string): RepoRef {
   if (host.startsWith("-") || user?.startsWith("-")) return generic();
 
   host = normalizeForgeHost(host);
-  const segments = repoSegments(host, rest);
+  const segments = repoSegments(host, rest, opts.kind ?? hostForgeKind(host));
   if (!segments) return generic();
   const path = segments.join("/");
   const repo = segments[segments.length - 1];
@@ -173,7 +176,7 @@ const TWO_SEGMENT_HOSTS: ReadonlySet<string> = new Set(["bitbucket.org"]);
  * segment is `.` or `..`, which no forge allows and which a URL parser would
  * resolve into a different endpoint altogether.
  */
-function repoSegments(host: string, rest: string): string[] | undefined {
+function repoSegments(host: string, rest: string, kind: ForgeKind | undefined): string[] | undefined {
   let segments = rest
     .replace(/[?#].*$/s, "")
     .split("/")
@@ -183,7 +186,6 @@ function repoSegments(host: string, rest: string): string[] | undefined {
   // cannot tell where it stops, but the separator is reserved everywhere.
   const dash = segments.indexOf("-");
   if (dash >= 0) segments = segments.slice(0, dash);
-  const kind = hostForgeKind(host);
   if (kind === "github" || kind === "gitea" || TWO_SEGMENT_HOSTS.has(host)) segments = segments.slice(0, 2);
   const last = segments.length - 1;
   if (last >= 0) segments[last] = segments[last]!.replace(/\.git$/i, "");

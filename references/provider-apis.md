@@ -25,7 +25,20 @@ names. Pass `--registry` when you know the ecosystem.
 
 ## Forges
 
-`repo`, `issues`, `prs`, `releases` work against GitHub, GitLab and Gitea.
+`repo`, `issues`, `prs`, `releases` and `tags` work against GitHub, GitLab and
+Gitea (`webindex_repo`, `webindex_issues`, `webindex_releases`, `webindex_tags`
+over MCP).
+
+- **Any repository string.** `owner/repo`, a URL copied from a browser
+  (`…/tree/main/src`, `…/issues/12`, `?tab=readme` — the repository, not the page
+  inside it), `git@host:owner/repo`, or a local checkout, which stands for its
+  `origin` remote.
+- **Self-hosted forges.** A host whose name does not say what it runs
+  (salsa.debian.org, invent.kde.org, git.company.example) is queried with
+  `--forge github|gitlab|gitea` (MCP: `forge`), or declared once in
+  `WEBINDEX_FORGE_HOSTS`. Only the declaration also sends it a token.
+- **Tags where there are no releases.** Plenty of projects tag every version and
+  never publish a forge release; `releases` then points at `tags`.
 
 - **Renames are followed.** A moved repository still answers on its old name, but
   every search keyed on that name returns nothing. The canonical `owner/repo` is
