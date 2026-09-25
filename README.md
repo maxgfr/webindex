@@ -57,7 +57,7 @@ rather than an error.
 | `webindex hybrid --query <q>` | Rank documents with BM25F **and** a dense lane, fused by RRF. Each hit reports its rank in each lane. Degrades to the lexical half, with a note on stderr, when no embedding server answers. |
 | `webindex changed <url>` | Fingerprint a URL, or — given `--etag` / `--last-modified` / `--hash` — say whether it changed and how it was decided. A baseline prints `etag`, `last-modified`, `hash` (SHA-256 of the raw bytes, what `sha256sum` of the download gives) and `status`, and exits non-zero instead of printing one it could not read. `--timeout <ms>` bounds the request. Exits non-zero on "could not tell", so a watcher never reads an error as "nothing to do". |
 | `webindex skill <action>` | Packaging gates for a repo built on this engine, driven by its `skill.json`: `vendor` (pin by tag + sha256, `--check` for the offline drift/staleness gate), `check` (no module may re-declare an engine export), `bundle` (`skills add` would install a working skill), `copy`, `doctor`, `init`. |
-| `webindex doctor` | Which optional helpers answer — SearXNG, Firecrawl, Ollama, Qdrant, the extraction rungs, OCR — on this machine. |
+| `webindex doctor` | Which optional helpers answer — SearXNG, Firecrawl, Ollama, Qdrant — and what each extraction rung will do on this machine: installed, downloads on first use, not installed, built-in, or switched off and by which variable. The npx rungs are checked against npm's cache, never installed. |
 | `webindex version` | The engine version. |
 
 Nothing above needs an API key, and nothing is required: every optional helper

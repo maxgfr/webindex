@@ -12,6 +12,7 @@ import { installFetchMock, routes } from "./fetchmock.js";
 import { envName } from "../src/brand.js";
 import { resetOllamaProbe } from "../src/embed.js";
 import { resetCacheMode } from "../src/cache.js";
+import { resetHaveCache } from "../src/exec.js";
 
 // Every stack service the engine knows, except `all` — the CLI spells that one
 // `stack`. Derived rather than typed out, because a hand-written list is exactly
@@ -436,6 +437,42 @@ describe("doctor", () => {
     expect(s).toMatch(/pdf rungs/);
     expect(s).toMatch(/doc rungs/);
     expect(s).toMatch(/ocr/);
+  });
+
+  // It printed the enabled list as "available": pdftotext when it was not
+  // installed, firecrawl when it was unreachable, and nothing about the npx
+  // rungs downloading on first use or failing offline.
+  it("says what each rung will actually do on this machine", async () => {
+    process.env[envName("FIRECRAWL")] = "off";
+    delete process.env[envName("PDF_ENGINE")];
+    delete process.env[envName("DOC_ENGINE")];
+    vi.stubEnv("PATH", join(dir, "no-tools-here"));
+    resetHaveCache();
+    try {
+      expect(await run(["doctor"])).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      resetHaveCache();
+    }
+    const s = stdout();
+    expect(s).toMatch(/pdf rungs {3}pdf-inspector {2}npx not found\n/);
+    expect(s).toMatch(/^ {14}firecrawl {6}disabled$/m);
+    expect(s).toMatch(/^ {14}pdftotext {6}not installed$/m);
+    expect(s).toMatch(/^ {14}native {9}built-in$/m);
+    expect(s).toContain(`ocr            off (${envName("OCR_MAX")}=0)`);
+    expect(s).toMatch(/doc rungs {3}anydoc {9}npx not found\n/);
+    expect(s).toMatch(/^ {14}builtin {8}built-in \(OOXML and OpenDocument\)$/m);
+  });
+
+  it("lists a rung the environment switched off, and which variable did it", async () => {
+    process.env[envName("FIRECRAWL")] = "off";
+    process.env[envName("NO_NPX")] = "1";
+    delete process.env[envName("PDF_ENGINE")];
+    expect(await run(["doctor"])).toBe(0);
+    const s = stdout();
+    expect(s).toContain(`pdf-inspector  off (${envName("NO_NPX")})`);
+    expect(s).toContain(`anydoc         off (${envName("DOC_ENGINE")}=none)`);
+    expect(s).toMatch(/pdf rungs {3}firecrawl/);
   });
 });
 

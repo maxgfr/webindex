@@ -134,6 +134,21 @@ function findInstalled(spec: string): Promise<Installed> {
 }
 
 /**
+ * Whether npm already holds `spec` — for `doctor`, which must answer without
+ * installing anything: under `--offline` npm refuses (ENOTCACHED) instead of
+ * downloading. `unknown` on Windows, where the probe's `command -v` is not
+ * available, and whenever npm answers something else.
+ */
+export async function npxCacheState(spec: string): Promise<"cached" | "not cached" | "no npx" | "unknown"> {
+  if (process.platform === "win32") return "unknown";
+  const probe = ["-y", "--offline", "--package", spec, "-c", `command -v ${npxBinName(spec)}`];
+  const r = await runWithInput("npx", probe, Buffer.alloc(0), 30_000, { env: npxEnv() });
+  if (r.ok) return "cached";
+  if (r.error === "not installed") return "no npx";
+  return NPM_ERROR_RE.exec(r.stderr ?? "")?.[1] === "ENOTCACHED" ? "not cached" : "unknown";
+}
+
+/**
  * Run `<spec>`'s executable with `args…` and `input` on stdin: directly once
  * npx has said where it is installed, else as `npx -y --prefer-offline <spec>`.
  *
