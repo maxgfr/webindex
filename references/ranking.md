@@ -18,6 +18,13 @@ Below three documents IDF is too noisy to mean anything and degrades to uniform.
 A three-result pool where one term happens to be missing from two of them would
 otherwise assign that term an enormous weight on no evidence.
 
+Terms are the excerpt matcher's terms: the same folding and stopwords, and an
+identifier counts as itself AND its words (`RateLimiter`, `rate_limiter` also
+match "rate limiter"). Combining marks stay inside their word, so Devanagari,
+Thai or Tamil words survive whole. Chinese and Japanese, written without spaces,
+are read as overlapping character bigrams (a lone ideograph as itself) — no
+dictionary, still deterministic.
+
 **SimHash collapse** — the same CONTENT syndicated across different URLs:
 mirrors, scraper copies, a press release reprinted verbatim. Identity dedup
 (`dedupeByUrl`, DOI/arXiv) catches the same *resource*; this catches the same
@@ -30,8 +37,10 @@ bury the one source saying something else. Relevance ranking has no defence
 against that, because every one of them really is relevant.
 
 λ = 0.75 keeps relevance dominant. Diversity breaks ties and demotes redundancy;
-it does not promote an off-topic page. And it **reorders only** — every input
-comes back exactly once. This changes what you read first, never what you have.
+it does not promote an off-topic page: every candidate with a positive score is
+placed before any candidate scoring zero, and diversity reorders within each
+group. And it **reorders only** — every input comes back exactly once. This
+changes what you read first, never what you have.
 
 ## The relevance floor
 
@@ -49,7 +58,15 @@ little signal to filter on.
 `rrf` merges ranked lists that have no comparable scores — a keyless engine's
 "score" and a scholarly API's "relevance" are not the same quantity and cannot be
 added. RRF reads POSITION only, so it needs no calibration, and `k` damps the
-tail so a rank-40 cannot outvote a couple of top-tens.
+tail so a rank-40 cannot outvote a couple of top-tens. An item counts once per
+list, at its best rank: one engine repeating a URL (a tracking-param variant, a
+pagination overlap) is not two engines agreeing on it.
+
+## Deterministic means on every machine
+
+Ties are broken by comparing URLs code unit by code unit, never with the
+locale's collation — `localeCompare` reads `LANG`, and two machines would
+disagree on the order and on which near-duplicate survives.
 
 ## Scores are pool-relative
 

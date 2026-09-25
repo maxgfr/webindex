@@ -817,6 +817,35 @@ describe("rank", () => {
     expect(await run(["rank", "--query", "what is the of", "--docs", withDocs(DOCS)])).toBe(1);
     expect(stderr()).toMatch(/no rankable terms/);
   });
+
+  it("never ranks a document that matched nothing above one that matched", async () => {
+    // MMR used to pick the off-topic pages (relevance 0, similarity 0) before a
+    // relevant one whose overlap with the top result carried the full penalty.
+    const pool = JSON.stringify([
+      { url: "https://a.test/1", title: "Rate limiting with a token bucket", text: "A token bucket refills at a fixed rate; rate limiting caps bursts." },
+      { url: "https://a.test/2", title: "Token bucket explained", text: "The token bucket algorithm refills tokens at a fixed rate." },
+      { url: "https://c.test/3", title: "Slow braised beef", text: "Braise the beef slowly with onions and wine." },
+      { url: "https://d.test/4", title: "Match report", text: "The home side won after extra time." },
+      { url: "https://e.test/5", title: "Why do my requests get 429?", text: "Your client exceeded the rate the server allows." },
+    ]);
+    await run(["rank", "--query", "token bucket rate limiting", "--docs", withDocs(pool), "--json"]);
+    const ranked = JSON.parse(stdout()).ranked as { url: string; matched: string[] }[];
+    const lastMatched = ranked.map((r) => r.matched.length > 0).lastIndexOf(true);
+    const firstUnmatched = ranked.findIndex((r) => r.matched.length === 0);
+    expect(lastMatched).toBeLessThan(firstUnmatched);
+    expect(ranked.slice(0, 3).map((r) => r.url)).toContain("https://e.test/5");
+  });
+
+  it("orders tied documents the same on every machine", async () => {
+    // Code units, not localeCompare: "B" (0x42) sorts before "a" (0x61) whatever
+    // LANG says. Two documents, so the order is the pipeline's own sort.
+    const tie = JSON.stringify([
+      { url: "https://s.test/a", title: "Token bucket", text: "token bucket" },
+      { url: "https://s.test/B", title: "Token bucket", text: "token bucket" },
+    ]);
+    await run(["rank", "--query", "token bucket", "--docs", withDocs(tie), "--json"]);
+    expect(JSON.parse(stdout()).ranked.map((r: { url: string }) => r.url)).toEqual(["https://s.test/B", "https://s.test/a"]);
+  });
 });
 
 describe("the forge, registry and page-metadata commands", () => {

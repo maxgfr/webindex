@@ -1,4 +1,4 @@
-import { foldTerm, isStopword, type KeywordMatcher } from "./text.js";
+import { foldTerm, isStopword, type KeywordMatcher, subtokens } from "./text.js";
 import { canonicalizeUrl, domainOf, fnv1a64Words, normalizeDoi } from "./url.js";
 
 // Ranking: turning a pool of candidates into a reading order.
@@ -38,16 +38,39 @@ export interface Ranked {
  * reads POSITION, so it needs no calibration: an item's contribution from each
  * list is `1/(k + rank)`, and `k` damps the tail so rank 40 cannot outvote a
  * couple of top-tens.
+ *
+ * An item counts ONCE per list, at its best rank, as in Cormack et al. Callers
+ * key by canonical URL or DOI, so tracking-param variants, pagination overlap
+ * and abs/pdf twins inside one engine's list share a key — summed, one engine
+ * repeating a URL counted as much as two engines agreeing on it.
  */
 export function rrf<T>(lists: T[][], keyOf: (item: T) => string, k = 60): Map<string, number> {
   const score = new Map<string, number>();
   for (const list of lists) {
+    const seen = new Set<string>();
     list.forEach((item, idx) => {
       const key = keyOf(item);
+      if (seen.has(key)) return;
+      seen.add(key);
       score.set(key, (score.get(key) ?? 0) + 1 / (k + idx + 1));
     });
   }
   return score;
+}
+
+/**
+ * Code-unit order for tie-breaks. `localeCompare` reads the ICU default locale
+ * from LANG, so "aa" sorted after "ab" under da_DK and two machines produced two
+ * orders from one input — "deterministic" has to hold across machines.
+ */
+const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+// Trailing-character trims written as loops: `/\/+$/` backtracks once per
+// start position on a long run that does not reach the end.
+function trimTrailing(s: string, ch: string): string {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === ch) end--;
+  return s.slice(0, end);
 }
 
 // ── Identity ────────────────────────────────────────────────────────────────
@@ -64,7 +87,8 @@ export function arxivIdFromUrl(url: string): string | undefined {
   try {
     const u = new URL(url.trim());
     host = u.hostname.toLowerCase();
-    path = u.pathname;
+    // A trailing slash ("abs/2405.12345v2/") is the same page.
+    path = trimTrailing(u.pathname, "/");
   } catch {
     return undefined;
   }
@@ -78,26 +102,44 @@ export function arxivIdFromUrl(url: string): string | undefined {
 
 /**
  * The DOI inside a URL — a doi.org resolver link, or a publisher landing page
- * that carries the DOI in its path (`dl.acm.org/doi/…`, `/doi/full/…`). Returned
- * normalised, so a DOI-in-path collapses with a bare one.
+ * that carries the DOI in its path (`dl.acm.org/doi/…`, `/doi/full/…`,
+ * `link.springer.com/article/10.1007/…`, bioRxiv's `/content/10.1101/…v1`) or
+ * its query (PLOS's `?id=10.1371/…`). Returned normalised, so a DOI-in-path
+ * collapses with a bare one.
  */
 export function doiFromUrl(url: string): string | undefined {
   let host: string;
   let path: string;
+  let search: string;
   try {
     const u = new URL(url.trim());
     host = u.hostname.toLowerCase();
     path = u.pathname;
+    search = u.search;
   } catch {
     return undefined;
   }
+  const decode = (s: string): string => {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  };
   if (/(^|\.)(dx\.)?doi\.org$/.test(host)) {
-    const doi = normalizeDoi(decodeURIComponent(path.replace(/^\/+/, "").replace(/\/+$/, "")));
+    const doi = normalizeDoi(decode(trimTrailing(path.replace(/^\/+/, ""), "/")));
     return /^10\.\d{4,9}\//.test(doi) ? doi : undefined;
   }
   const m = /\/doi(?:\/(?:abs|full|pdf|epdf|e?pub))?\/(10\.\d{4,9}\/[^\s?#]+)/i.exec(path);
-  if (m) return normalizeDoi(decodeURIComponent(m[1]!).replace(/\/+$/, ""));
-  return undefined;
+  if (m) return normalizeDoi(trimTrailing(decode(m[1]!), "/"));
+  // No /doi/ segment: a DOI anywhere in the path or the query, after a slash
+  // or an `=`. The page's own suffixes are not part of it: `.pdf`, and on
+  // bioRxiv/medRxiv (10.1101) the version and the `.full`/`.abstract` views.
+  const loose = /(?:^|[/=])(10\.\d{4,9}\/[^\s?#&]+)/.exec(`${path}${search}`);
+  if (!loose) return undefined;
+  let doi = normalizeDoi(trimTrailing(decode(loose[1]!), "/")).replace(/\.pdf$/, "");
+  if (doi.startsWith("10.1101/")) doi = doi.replace(/\.(?:full|abstract|supplementary-material|article-info|article-metrics)$/, "").replace(/v\d+$/, "");
+  return doi;
 }
 
 /**
@@ -163,20 +205,77 @@ const indexTokenCache = new WeakMap<Bm25Index, WeakMap<Bm25Doc, CachedDocTokens>
 /**
  * Tokenise into canonical terms WITH repetition, so term frequency survives.
  *
- * Shares `foldTerm` and `isStopword` with `buildMatcher`, which is the point:
- * two scorers that disagree about whether "requests" and "request" are the same
- * term will disagree about relevance for reasons nobody can debug.
+ * Shares `foldTerm`, `isStopword` and `subtokens` with `buildMatcher`, which is
+ * the point: two scorers that disagree about whether "requests" and "request"
+ * — or "RateLimiter" and "rate limiter" — are the same term will disagree about
+ * relevance for reasons nobody can debug. An identifier therefore yields its
+ * whole folded form AND its inner words (`subtokens: false` keeps the whole
+ * form only).
+ *
+ * Chinese and Japanese, written without spaces, come back as overlapping
+ * character bigrams; a lone ideograph is kept as a unigram.
  */
-export function bm25Tokenize(text: string): string[] {
+export function bm25Tokenize(text: string, opts: { subtokens?: boolean } = {}): string[] {
+  return tokenize(text, opts.subtokens !== false);
+}
+
+// Anything that is not part of a word splits. Combining marks ARE part of it:
+// leaving \p{M} out split every Devanagari, Thai or Tamil word at each vowel
+// sign or virama, and the fragments mostly fell under two characters — a Hindi
+// question kept one meaningless piece.
+const WORD_SPLIT = /[^\p{L}\p{M}\p{N}_]+/u;
+const NON_ASCII = /[^\p{ASCII}]/u;
+// Chinese and Japanese put no space between words, so a whole clause used to be
+// ONE token and a natural question matched nothing. Overlapping bigrams are
+// Lucene's CJKBigramFilter answer: deterministic, no dictionary, no ICU data.
+// Script_Extensions, so the prolonged-sound mark ー (Common) stays in its run.
+const CJK_CHAR = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
+const CJK_RUNS = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
+// Where an identifier has inner words: RateLimiter, rate_limiter, http2Client.
+const IDENT_BOUNDARY = /_|[\p{Ll}\p{N}]\p{Lu}|\p{Lu}\p{Lu}\p{Ll}|\p{L}\p{N}|\p{N}\p{L}/u;
+// Real identifiers are short. The cap keeps `subtokens`, which backtracks on a
+// long run of capitals, off a hostile 100 KB "word".
+const MAX_IDENT = 64;
+
+function tokenize(text: string, expand: boolean): string[] {
   if (!text) return [];
   const out: string[] = [];
-  for (const raw of text.split(/[^\p{L}\p{N}_]+/u)) {
-    if (raw.length < 2) continue;
-    if (isStopword(raw)) continue;
-    const t = foldCached(raw);
-    if (t.length >= 2) out.push(t);
+  const nonAscii = NON_ASCII.test(text);
+  // NFC so a decomposed "é" is one letter plus its mark, as a precomposed
+  // "é" is, and folds the same way. ASCII is already NFC.
+  for (const raw of (nonAscii ? text.normalize("NFC") : text).split(WORD_SPLIT)) {
+    if (!raw) continue;
+    if (nonAscii && CJK_CHAR.test(raw)) {
+      // Captured, so the pieces alternate: Latin or digits, then a CJK run.
+      for (const piece of raw.split(CJK_RUNS)) {
+        if (!piece) continue;
+        if (CJK_CHAR.test(piece)) pushBigrams(piece, out);
+        else pushTerm(piece, out, expand);
+      }
+    } else pushTerm(raw, out, expand);
   }
   return out;
+}
+
+function pushTerm(raw: string, out: string[], expand: boolean): void {
+  if (raw.length < 2 || isStopword(raw)) return;
+  const t = foldCached(raw);
+  if (t.length < 2) return;
+  out.push(t);
+  if (!expand || raw.length > MAX_IDENT || !IDENT_BOUNDARY.test(raw)) return;
+  for (const sub of subtokens(raw)) {
+    const s = foldCached(sub);
+    if (s !== t && s.length >= 2) out.push(s);
+  }
+}
+
+function pushBigrams(run: string, out: string[]): void {
+  const chars = Array.from(run);
+  if (chars.length === 1) {
+    out.push(run);
+    return;
+  }
+  for (let i = 0; i + 1 < chars.length; i++) out.push((chars[i] as string) + (chars[i + 1] as string));
 }
 
 // foldTerm is pure and vocabularies repeat: a 300-document pool folds the same
@@ -368,7 +467,9 @@ export function recencyScore(meta: { year?: number } | undefined, minYear: numbe
  * apart; unrelated ones sit around 32.
  */
 export function simhash(text: string): bigint {
-  const toks = bm25Tokenize(text);
+  // The unexpanded words: an identifier's inner words would add shingles, and a
+  // hash that moves between engine versions changes what `maxBits` means.
+  const toks = tokenize(text, false);
   if (!toks.length) return 0n;
   // Each shingle is hashed as `${a} ${b} ${c}` — fed to FNV piecewise, which is
   // the same bytes without building the string. The 64 counters are read off
@@ -445,7 +546,7 @@ export function dedupeNearDuplicates<T extends Ranked>(
 ): { items: T[]; dropped: number } {
   const maxBits = opts.maxBits ?? 3;
   const minChars = opts.minChars ?? 500;
-  const better = (a: T, b: T): boolean => (a.score !== b.score ? a.score > b.score : a.url.localeCompare(b.url) < 0);
+  const better = (a: T, b: T): boolean => (a.score !== b.score ? a.score > b.score : byCodeUnit(a.url, b.url) < 0);
   const kept: { it: T; hash: bigint | null }[] = [];
   let dropped = 0;
   for (const it of items) {
@@ -516,24 +617,33 @@ export function diversify<T extends Ranked>(items: readonly T[], tokensOf: (it: 
   const out: T[] = [];
   // The best-scored item always leads: the most relevant result is never demoted
   // for being similar to nothing.
-  remaining.sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
+  remaining.sort((a, b) => b.score - a.score || byCodeUnit(a.url, b.url));
   out.push(remaining.shift()!);
   // Running max-similarity to the selected set, updated incrementally — what
   // keeps this O(n²) rather than O(n³).
   const maxSim = new Map<T, number>(remaining.map((it) => [it, sim(it, out[0]!)]));
+  // Relevant items are placed before any irrelevant one. With similarity
+  // normalised to the pool's maximum, any overlap with the picked set can carry
+  // the full penalty, so a relevant page with rel < sim/3 went negative while an
+  // off-topic page (rel 0, sim 0) sat at 0 and was picked first — promoting
+  // noise, and with a `limit` cutting the relevant page altogether. Diversity
+  // still reorders freely within each tier.
+  let relevantLeft = remaining.filter((it) => it.score > 0).length;
 
   while (remaining.length) {
-    let bestIdx = 0;
+    let bestIdx = -1;
     let bestVal = Number.NEGATIVE_INFINITY;
     for (let i = 0; i < remaining.length; i++) {
       const it = remaining[i]!;
+      if (relevantLeft > 0 && !(it.score > 0)) continue;
       const val = lambda * rel(it) - (1 - lambda) * (maxSim.get(it) ?? 0);
-      if (val > bestVal || (val === bestVal && it.url.localeCompare(remaining[bestIdx]!.url) < 0)) {
+      if (bestIdx < 0 || val > bestVal || (val === bestVal && byCodeUnit(it.url, remaining[bestIdx]!.url) < 0)) {
         bestVal = val;
         bestIdx = i;
       }
     }
     const picked = remaining.splice(bestIdx, 1)[0]!;
+    if (picked.score > 0) relevantLeft--;
     out.push(picked);
     for (const it of remaining) maxSim.set(it, Math.max(maxSim.get(it) ?? 0, sim(it, picked)));
   }
@@ -542,7 +652,10 @@ export function diversify<T extends Ranked>(items: readonly T[], tokensOf: (it: 
 
 // ── Attribution ─────────────────────────────────────────────────────────────
 
-const URL_IN_TEXT = /https?:\/\/[a-z0-9.-]+/gi;
+// The scheme, an optional userinfo ("user@", which is not the host), and a host
+// in any script — `domainOf` does the IDN conversion. ASCII-only cut
+// "müller.de" to "m", and "https://user@evil.test" read as host "user".
+const URL_IN_TEXT = /https?:\/\/(?:[^\s/@?#]+@)?[\p{L}\p{N}.-]+/giu;
 
 /**
  * The hosts a text links out to, excluding its own domain and `www.` noise.
@@ -555,7 +668,8 @@ export function externalHosts(url: string, text: string): Set<string> {
   const self = domainOf(url).replace(/^www\./, "");
   const out = new Set<string>();
   for (const m of text.match(URL_IN_TEXT) ?? []) {
-    const h = domainOf(m).replace(/^www\./, "");
+    // A sentence's final period is not part of the host: "see https://mdn.io."
+    const h = trimTrailing(domainOf(trimTrailing(m, ".")), ".").replace(/^www\./, "");
     if (h && h !== self) out.add(h);
   }
   return out;

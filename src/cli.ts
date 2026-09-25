@@ -430,7 +430,8 @@ function rankDocuments(question: string, docs: RankInput[], limit?: number): { r
     score: (raw[i] ?? 0) / max,
     matched: bm25MatchedTerms(index, bm[i]!),
   }));
-  scored.sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
+  // Code-unit tie-break: localeCompare reads LANG, and two machines disagreed.
+  scored.sort((a, b) => b.score - a.score || (a.url < b.url ? -1 : a.url > b.url ? 1 : 0));
 
   const { items: unique, dropped } = dedupeNearDuplicates(scored);
   const ordered = diversify(unique, (it) => new Set(bm25Tokenize(it.text)));
