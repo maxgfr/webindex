@@ -297,12 +297,19 @@ function budgetDeadline(opts: SearchOptions): number {
   return opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? Date.now() + opts.timeoutMs : Number.POSITIVE_INFINITY;
 }
 
+// The slack engines.ts gives its page loop: a timer that fires a millisecond
+// before Date.now() reaches the deadline must not leave ~1 ms for a next rung
+// whose request can only fail.
+function spentSlackMs(budgetMs: number | undefined): number {
+  return budgetMs === undefined ? 0 : Math.min(25, budgetMs / 4);
+}
+
 // Why no further rung or page may start, if none may. Checked between them
 // because a request in flight cannot be recalled — httpGet takes no signal —
 // so the budget ALSO caps each request's own timeout.
 function halted(opts: SearchOptions, deadline: number): "cancelled" | "out of time" | undefined {
   if (opts.signal?.aborted) return "cancelled";
-  return Date.now() >= deadline ? "out of time" : undefined;
+  return Date.now() >= deadline - spentSlackMs(opts.timeoutMs) ? "out of time" : undefined;
 }
 
 // A one-rung SearchResult: the hits and notes, plus the report that says the same in data.
