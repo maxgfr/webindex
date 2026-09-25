@@ -219,7 +219,20 @@ export function isStopword(term: string): boolean {
   // buildMatcher and to its own tokeniser alike — the two must agree on what a
   // term is, or a document ranks on a word the excerpt never highlights.
   const extra = brand().extraStopwords;
-  return extra ? extra.some((w) => w.toLowerCase() === t) : false;
+  return extra ? extraStopwordSet(extra).has(t) : false;
+}
+
+// Lowercased once per list, not once per token: the tokeniser asks for every
+// word it reads, and scanning forty extras per word doubled its cost. Keyed on
+// the array and its length, so a list a consumer extends in place is re-read.
+const extraSets = new WeakMap<readonly string[], { length: number; set: Set<string> }>();
+
+function extraStopwordSet(extra: readonly string[]): Set<string> {
+  const hit = extraSets.get(extra);
+  if (hit && hit.length === extra.length) return hit.set;
+  const set = new Set(extra.map((w) => w.toLowerCase()));
+  extraSets.set(extra, { length: extra.length, set });
+  return set;
 }
 
 // One question token: a run of letters, digits and underscores. Splitting on
