@@ -260,10 +260,17 @@ function record(r: JsonAnswer): Record<string, any> | undefined {
   return r.ok && r.data && typeof r.data === "object" && !Array.isArray(r.data) ? (r.data as Record<string, any>) : undefined;
 }
 
-/** No facts: a 404 says "no such package or version"; anything else says why. */
+// The answers that mean "there is no such package, or no such version of it":
+// a 404, a 410 for a removed project, and the 400 crates.io gives a version
+// string that cannot exist (`^18`). Each lets the next registry answer.
+const ABSENT: ReadonlySet<number> = new Set([400, 404, 410]);
+
+/** No facts: an ABSENT status says "no such package or version"; anything else says why. */
 function miss(r: JsonAnswer): PackageLookup {
-  if (r.status === 404) return { status: 404 };
-  return { status: r.status, error: r.error ?? (r.ok ? "the registry answered with something other than a package record" : `status ${r.status}`) };
+  if (ABSENT.has(r.status)) return { status: r.status };
+  // A registry's own words when it gave some, which name the cause better than a number.
+  const said = r.data && typeof r.data === "object" ? (str(r.data.errors?.[0]?.detail) ?? str(r.data.message) ?? str(r.data.error)) : undefined;
+  return { status: r.status, error: r.error ?? said ?? (r.ok ? "the registry answered with something other than a package record" : `status ${r.status}`) };
 }
 
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
@@ -423,7 +430,11 @@ async function cratesLookup(n: string, version: string | undefined): Promise<Pac
     v = pinned.version ?? {};
   }
   const c: Record<string, any> = d.crate ?? {};
-  const num = version ? (str(v?.num) ?? version) : (str(c.default_version) ?? str(c.max_stable_version) ?? str(c.newest_version));
+  // With `include=default_version`, max_stable_version is null and
+  // newest_version a "0.0.0" placeholder — the default version is the answer.
+  const listed = Array.isArray(d.versions) ? str(d.versions[0]?.num) : undefined;
+  const newest = str(c.newest_version) === "0.0.0" ? undefined : str(c.newest_version);
+  const num = version ? (str(v?.num) ?? version) : (str(c.default_version) ?? listed ?? str(c.max_stable_version) ?? newest);
   v ??= Array.isArray(d.versions) ? d.versions.find((x: Record<string, unknown> | null) => x?.num === num) : undefined;
   // The licence and the publication date belong to a VERSION, which is why the
   // crate record alone never carried a licence.
@@ -478,11 +489,14 @@ export async function resolvePackageResult(name: string, opts: { registry?: Regi
     tried.push({ registry, status: r.status, ...(r.error ? { error: r.error } : {}) });
     if (r.facts) return { facts: r.facts, tried };
     if (!REGISTRIES.includes(registry)) return { tried, note: r.error };
-    if (r.status !== 404) {
+    if (!ABSENT.has(r.status)) {
       const why = r.status ? ` (status ${r.status})` : "";
       return { tried, note: `${registry} could not be asked${why}: ${r.error ?? "no answer"} — retry, or name the registry the package is on.` };
     }
   }
   const at = opts.version ? ` at version ${opts.version}` : "";
-  return { tried, note: `no registry knows a package called "${name.trim()}"${at}` };
+  // Registries resolve exact versions (npm also dist-tags), never a range.
+  const range =
+    opts.version && /[\^~<>=*|\s]|^[xX]$|\.[xX]\b/.test(opts.version) ? " (a version range is not resolved — pass an exact version, or an npm dist-tag)" : "";
+  return { tried, note: `no registry knows a package called "${name.trim()}"${at}${range}` };
 }

@@ -867,10 +867,31 @@ describe("the version asked for is the version answered", () => {
 
   it("does not answer a version from an ecosystem that never confirmed it", async () => {
     // `react --version ^18`: npm said no, and PyPI's latest python-react came back.
-    installFetchMock((url) => (url.includes("pypi.org/pypi/react/json") ? json({ info: { name: "react", version: "4.3.0" } }) : json({}, 404)));
+    // crates.io answers a version that cannot exist with a 400, which is a "no" too.
+    installFetchMock((url) =>
+      url.includes("pypi.org/pypi/react/json")
+        ? json({ info: { name: "react", version: "4.3.0" } })
+        : url.includes("crates.io") && url.includes("%5E18")
+          ? json({ errors: [{ detail: "Invalid URL: unexpected character '^'" }] }, 400)
+          : json({}, 404),
+    );
     const r = await resolvePackageResult("react", { version: "^18" });
     expect(r.facts).toBeUndefined();
-    expect(r.note).toMatch(/no registry knows a package called "react" at version \^18/);
+    expect(r.note).toMatch(/no registry knows a package called "react" at version \^18 \(a version range is not resolved/);
+  });
+
+  it("names the registry's own reason for a failure", async () => {
+    installFetchMock(() => json({ errors: [{ detail: "crates.io is in read-only mode" }] }, 503));
+    expect((await resolvePackageResult("serde", { registry: "crates" })).note).toMatch(
+      /crates could not be asked \(status 503\): crates\.io is in read-only mode/,
+    );
+  });
+
+  it("takes the default version, not the placeholders crates.io leaves beside it", async () => {
+    installFetchMock(() =>
+      json({ crate: { name: "serde", default_version: undefined, max_stable_version: null, newest_version: "0.0.0" }, versions: [{ num: "1.0.229" }] }),
+    );
+    expect((await lookupPackage("crates", "serde"))?.version).toBe("1.0.229");
   });
 
   it("reports the version a dist-tag stands for, with its date", async () => {
