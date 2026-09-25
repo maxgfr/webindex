@@ -38,7 +38,7 @@ import { fetchRobots, isAllowed } from "./robots.js";
 import { discoverFeeds, fetchFeed, fetchSitemap, parseFeed } from "./feed.js";
 import { pageMetadata } from "./structured.js";
 import { resolveRepo } from "./repo.js";
-import { listReleases, repoFacts, searchIssues } from "./forge.js";
+import { listReleases, repoFactsResult, searchIssues } from "./forge.js";
 import { resolvePackage, type RegistryKind } from "./registry.js";
 import { bm25MatchedTerms, bm25Score, bm25Tokenize, buildBm25Index, dedupeNearDuplicates, diversify } from "./rank.js";
 import {
@@ -726,8 +726,8 @@ export function webindexAdapter(): McpAdapter {
         if (ref.host === "generic") throw new ToolError(`"${String(args.repo ?? "")}" does not name a repository.`);
         const limit = typeof args.limit === "number" ? args.limit : undefined;
         if (name === "webindex_repo") {
-          const f = await repoFacts(ref);
-          if (!f) throw new ToolError(`Could not read ${ref.webUrl ?? ref.raw} — is it public, and is ${ref.host} a forge?`);
+          const { facts: f, note } = await repoFactsResult(ref);
+          if (!f) throw new ToolError(note ?? `Could not read ${ref.webUrl ?? ref.raw}.`);
           return { text: JSON.stringify({ ref, ...f }, null, 2) };
         }
         const r =
@@ -1064,8 +1064,8 @@ async function dispatch(argv: string[]): Promise<void> {
     if (ref.host === "generic") fail(`"${target}" does not name a repository`);
 
     if (cmd === "repo") {
-      const f = await repoFacts(ref);
-      if (!f) fail(`could not read ${ref.webUrl ?? target} — is it public, and is ${ref.host} a forge?`);
+      const { facts: f, note } = await repoFactsResult(ref);
+      if (!f) fail(note ?? `could not read ${ref.webUrl ?? target}`);
       emit({ ref, ...f }, [
         `  name        ${f.fullName ?? `${ref.owner}/${ref.repo}`}`,
         `  description ${f.description ?? "—"}`,

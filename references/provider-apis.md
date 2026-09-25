@@ -40,9 +40,21 @@ names. Pass `--registry` when you know the ecosystem.
 
 ## Quotas
 
-A quota answer is reported as `rateLimited`, never retried. Retrying a quota you
-have already exhausted only exhausts it further, and the two failures need
-opposite handling: "wait" versus "this request is wrong".
+A quota answer is reported as `rateLimited`, never retried, with `resetAt` when
+the forge says when it ends. Retrying a quota you have already exhausted only
+exhausts it further, and the two failures need opposite handling: "wait" versus
+"this request is wrong". Only a gateway error (502/503/504) or a dropped
+connection gets one more try; a timeout gets none, so a dead network costs one
+timeout per command.
+
+## When a call fails, it says which failure
+
+`repo`, `issues`, `prs`, `releases` and `tags` name the cause, because each
+wants a different response: **no such repository** (or a private one), a
+**rejected token** (named — GitHub answers 401 even for a public repository when
+the token is bad), a **quota** and when it resets, the forge **unavailable**, or
+a **network error** with its cause. `repoFactsResult` and every `ForgeResult`
+carry the same `note` and `status` for a library caller.
 
 GitHub's anonymous search quota is small. Set `GITHUB_TOKEN` (or `GH_TOKEN`, or
 `WEBINDEX_GITHUB_TOKEN`) to raise it; `GITLAB_TOKEN` and `GITEA_TOKEN` work the

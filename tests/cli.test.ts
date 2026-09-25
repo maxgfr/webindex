@@ -797,6 +797,33 @@ describe("the forge, registry and page-metadata commands", () => {
     expect(stdout()).toContain("MIT");
   });
 
+  it("says why a repository could not be read, not 'is it public?' for everything", async () => {
+    installFetchMock(() => ({ status: 404, body: JSON.stringify({ message: "Not Found" }), contentType: "application/json" }));
+    expect(await run(["repo", "github.com/missing/x"])).toBe(1);
+    expect(stderr()).toMatch(/no such repository on github\.com/);
+    await expect(webindexAdapter().callTool("webindex_repo", { repo: "github.com/missing/x" })).rejects.toThrow(/no such repository/);
+
+    err = [];
+    installFetchMock(() => ({
+      status: 403,
+      body: JSON.stringify({ message: "API rate limit exceeded" }),
+      contentType: "application/json",
+      headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1893456000" },
+    }));
+    expect(await run(["repo", "github.com/a/b"])).toBe(1);
+    expect(stderr()).toMatch(/rate-limited this request until 2030-01-01T00:00:00\.000Z/);
+
+    err = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.github.com"), { code: "ENOTFOUND" }) });
+      }),
+    );
+    expect(await run(["repo", "github.com/a/b"])).toBe(1);
+    expect(stderr()).toMatch(/network error reaching api\.github\.com — getaddrinfo ENOTFOUND/);
+  });
+
   it("refuses free text rather than inventing a repository", async () => {
     expect(await run(["repo", "some", "words"])).toBe(1);
     expect(stderr()).toMatch(/does not name a repository/);

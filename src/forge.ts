@@ -1,6 +1,6 @@
-import { countFetch, env, envFlag, envInt } from "./brand.js";
+import { countFetch, env, envFlag, envInt, envName } from "./brand.js";
 import { have, shAsync } from "./exec.js";
-import { contactUa, readCappedBytes, sleep } from "./fetch.js";
+import { contactUa, parseRetryAfter, readCappedBytes, sleep } from "./fetch.js";
 import { configuredForgeHosts, hostForgeKind, normalizeForgeHost } from "./forge-host.js";
 import type { RepoRef } from "./repo.js";
 
@@ -38,6 +38,10 @@ export interface ForgeResult {
   /** Why it came back thin, in words a caller can show. Never an exception. */
   note?: string;
   rateLimited?: boolean;
+  /** The HTTP status of a request that failed — 0 when it got no answer at all. */
+  status?: number;
+  /** When a spent quota resets, as the forge stated it (ISO 8601). */
+  resetAt?: string;
 }
 
 export interface ForgeOptions {
@@ -97,13 +101,26 @@ function tokenHostAllowed(kind: ForgeKind, host: string): boolean {
   return TOKEN_HOSTS[kind].includes(h) || configuredForgeHosts().get(h) === kind;
 }
 
-// `||`, not `??`: an exported-but-empty variable is how CI spells "no secret",
-// and it must not shadow the next variable the user did set.
-function forgeToken(kind: ForgeKind): string | undefined {
-  const raw = (name: string) => process.env[name]?.trim() || undefined;
-  if (kind === "github") return env("GITHUB_TOKEN") || raw("GITHUB_TOKEN") || raw("GH_TOKEN");
-  if (kind === "gitlab") return env("GITLAB_TOKEN") || raw("GITLAB_TOKEN");
-  return env("GITEA_TOKEN") || raw("GITEA_TOKEN");
+const TOKEN_VARS: Record<ForgeKind, readonly string[]> = {
+  github: ["GITHUB_TOKEN", "GH_TOKEN"],
+  gitlab: ["GITLAB_TOKEN"],
+  gitea: ["GITEA_TOKEN"],
+};
+
+/**
+ * The token for `kind` and the variable it came from — `<PREFIX>_GITHUB_TOKEN`
+ * first, then the conventional names. A blank variable is skipped: an
+ * exported-but-empty one is how CI spells "no secret", and it must not shadow
+ * the next variable the user did set.
+ */
+function forgeToken(kind: ForgeKind): { value: string; name: string } | undefined {
+  const own = env(TOKEN_VARS[kind][0]!);
+  if (own) return { value: own, name: envName(TOKEN_VARS[kind][0]!) };
+  for (const name of TOKEN_VARS[kind]) {
+    const value = process.env[name]?.trim();
+    if (value) return { value, name };
+  }
+  return undefined;
 }
 
 /**
@@ -120,15 +137,7 @@ function forgeToken(kind: ForgeKind): string | undefined {
 export function forgeAuthHeaders(kind: ForgeKind, host?: string): Record<string, string> {
   const t = forgeToken(kind);
   if (!t || (host !== undefined && !tokenHostAllowed(kind, host))) return {};
-  return { authorization: kind === "gitea" ? `token ${t}` : `Bearer ${t}` };
-}
-
-function reqHeaders(kind: ForgeKind, ref: RepoRef, opts: ForgeOptions): Record<string, string> {
-  return {
-    "user-agent": contactUa(),
-    accept: kind === "github" ? "application/vnd.github+json" : "application/json",
-    ...(opts.apiBase ? forgeAuthHeaders(kind) : forgeAuthHeaders(kind, ref.host)),
-  };
+  return { authorization: kind === "gitea" ? `token ${t.value}` : `Bearer ${t.value}` };
 }
 
 interface ForgeResponse {
@@ -138,6 +147,28 @@ interface ForgeResponse {
   /** Why a request got no answer (status 0), or why its answer was unusable. */
   error?: string;
   timedOut?: boolean;
+  /** A quota answer: an explicit 429, or GitHub's 403 with its quota spent. */
+  rateLimited?: boolean;
+  /** When that quota resets, as the forge stated it. */
+  resetAt?: string;
+  /** The variable whose token went out with the request, if one did. */
+  tokenVar?: string;
+}
+
+// A quota answer looks like a normal failure unless you check for it, and the
+// two need opposite handling — one is "wait", the other is "this is wrong".
+function limited(status: number, headers: Headers, data: unknown): boolean {
+  if (status === 429) return true;
+  return status === 403 && (headers.get("x-ratelimit-remaining") === "0" || /rate limit/i.test(JSON.stringify(data ?? "")));
+}
+
+// GitHub and Gitea state the reset as epoch seconds in `x-ratelimit-reset`,
+// GitLab in `ratelimit-reset`; anything may send `retry-after` instead.
+function resetTime(headers: Headers): string | undefined {
+  const epoch = Number(headers.get("x-ratelimit-reset") ?? headers.get("ratelimit-reset"));
+  if (Number.isFinite(epoch) && epoch > 0) return new Date(epoch * 1000).toISOString();
+  const wait = parseRetryAfter(headers, Number.POSITIVE_INFINITY);
+  return wait === undefined ? undefined : new Date(Date.now() + wait).toISOString();
 }
 
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
@@ -198,7 +229,8 @@ async function forgeGetOnce(url: string, headers: Record<string, string>, timeou
       } catch {
         data = text;
       }
-      return { ok: res.ok, status: res.status, data };
+      const quota = !res.ok && limited(res.status, res.headers, data);
+      return { ok: res.ok, status: res.status, data, ...(quota ? { rateLimited: true, resetAt: resetTime(res.headers) } : {}) };
     }
   } catch (e) {
     return { ok: false, status: 0, data: undefined, error: timedOut ? `timed out after ${timeoutMs} ms` : failureText(e), timedOut };
@@ -214,13 +246,83 @@ async function forgeGetOnce(url: string, headers: Record<string, string>, timeou
  * network costs one timeout per call, not two.
  */
 async function forgeGet(url: string, kind: ForgeKind, ref: RepoRef, opts: ForgeOptions): Promise<ForgeResponse> {
-  const headers = reqHeaders(kind, ref, opts);
+  const auth = opts.apiBase ? forgeAuthHeaders(kind) : forgeAuthHeaders(kind, ref.host);
+  const headers = { "user-agent": contactUa(), accept: kind === "github" ? "application/vnd.github+json" : "application/json", ...auth };
+  const tokenVar = auth.authorization ? forgeToken(kind)?.name : undefined;
   const timeoutMs = opts.timeoutMs ?? 15_000;
-  const first = await forgeGetOnce(url, headers, timeoutMs);
-  const transient = RETRY_STATUS.has(first.status) || (first.status === 0 && !first.timedOut);
-  if (!transient) return first;
-  await sleep(envInt("RETRY_MS", 600, 0, 5000));
-  return forgeGetOnce(url, headers, timeoutMs);
+  let r = await forgeGetOnce(url, headers, timeoutMs);
+  if (RETRY_STATUS.has(r.status) || (r.status === 0 && !r.timedOut)) {
+    await sleep(envInt("RETRY_MS", 600, 0, 5000));
+    r = await forgeGetOnce(url, headers, timeoutMs);
+  }
+  return tokenVar ? { ...r, tokenVar } : r;
+}
+
+const FORGE_NAME: Record<ForgeKind, string> = { github: "GitHub", gitlab: "GitLab", gitea: "Gitea" };
+
+/** What a failed answer means, in words a caller can show — which failure it was is the whole point. */
+interface Failure {
+  note: string;
+  status: number;
+  rateLimited?: true;
+  resetAt?: string;
+}
+
+/**
+ * Describe a failed forge answer. `action` names what was being done ("GitHub
+ * search", "Reading https://…"), so the note reads on its own.
+ *
+ * Each cause gets its own words because each wants a different response: a
+ * missing repository is a typo, a rejected token is a stale secret, a quota is a
+ * wait, an outage is a retry later, and a network error is the machine's own
+ * connection. All of them used to read "is it public?".
+ */
+function failure(r: ForgeResponse, forge: ForgeKind, ref: RepoRef, action: string, opts: ForgeOptions): Failure {
+  const host = ref.host;
+  const tokenVar = TOKEN_VARS[forge][0]!;
+  if (r.rateLimited) {
+    const when = r.resetAt ? ` until ${r.resetAt}` : "";
+    const advice = r.tokenVar
+      ? `the quota for ${r.tokenVar} is spent`
+      : opts.apiBase || tokenHostAllowed(forge, host)
+        ? `set ${tokenVar} to raise the anonymous quota`
+        : `list ${host} in ${envName("FORGE_HOSTS")} and set ${tokenVar} to raise the anonymous quota`;
+    return {
+      note: `${FORGE_NAME[forge]} rate-limited this request${when} — ${advice}.`,
+      status: r.status,
+      rateLimited: true,
+      ...(r.resetAt ? { resetAt: r.resetAt } : {}),
+    };
+  }
+  if (r.status === 0) {
+    let apiHost = host;
+    try {
+      apiHost = new URL(apiBase(ref, opts)).host;
+    } catch {
+      /* an unparseable apiBase names itself in the error below */
+    }
+    return { note: `${action} failed: network error reaching ${apiHost} — ${r.error ?? "no response"}.`, status: 0 };
+  }
+  const why =
+    r.status === 404
+      ? `no such repository on ${host}, or it is private`
+      : r.status === 401
+        ? r.tokenVar
+          ? `${host} rejected ${r.tokenVar} — refresh it, or unset it to read public repositories anonymously`
+          : `${host} requires authentication — set ${tokenVar}`
+        : r.status === 403
+          ? `${host} refused access${r.tokenVar ? ` — ${r.tokenVar} may lack the scope this needs` : ""}`
+          : r.status === 422 && forge === "github"
+            ? "GitHub cannot search that repository — it does not exist, or it is private"
+            : r.status >= 500
+              ? `${host} is unavailable`
+              : (r.error ?? `${host} answered with an error`);
+  return { note: `${action} failed (status ${r.status}): ${why}.`, status: r.status };
+}
+
+/** A failed answer as the `ForgeResult` every list call returns. */
+function failed(r: ForgeResponse, forge: ForgeKind, ref: RepoRef, action: string, opts: ForgeOptions): ForgeResult {
+  return { items: [], ...failure(r, forge, ref, action, opts) };
 }
 
 // A dot segment as a URL parser reads one — `%2e` included, which WHATWG URL
@@ -257,13 +359,6 @@ function labelsOf(v: unknown): string[] {
   return v.map((l) => (typeof l === "string" ? l : ((l as { name?: string })?.name ?? ""))).filter(Boolean);
 }
 
-// A quota answer looks like a normal failure unless you check for it, and the
-// two need opposite handling — one is "wait", the other is "this is wrong".
-function limited(status: number, data: unknown): boolean {
-  if (status === 429) return true;
-  return status === 403 && /rate limit/i.test(JSON.stringify(data ?? ""));
-}
-
 /**
  * Map GitHub's issue-search payload into `ForgeItem`s.
  *
@@ -287,9 +382,18 @@ export function mapGithubIssues(raw: unknown[], kind: "issue" | "pr"): ForgeItem
     }));
 }
 
+interface Canonical {
+  owner: string;
+  repo: string;
+  /** The lookup's own failure — the names above are then the caller's, unconfirmed. */
+  failed?: ForgeResponse;
+}
+
 // One answer per (host, owner, repo) per process. The lookup is a round-trip and
-// every search of a run asks the same question.
-const canonCache = new Map<string, Promise<{ owner: string; repo: string }>>();
+// every search of a run asks the same question. A FAILED lookup is not kept: it
+// is not an answer, and a long-lived server would otherwise search under the
+// old name for the rest of its life after one bad minute.
+const canonCache = new Map<string, Promise<Canonical>>();
 
 /** Test seam: forget which repositories were resolved. */
 export function resetCanonicalRepoCache(): void {
@@ -329,23 +433,36 @@ function splitSlug(full: string, fallback: { owner: string; repo: string }): { o
  * Returns the parts rather than a slug because a provider layer builds URLs from
  * them; `canonicalRepo` below joins them for the callers that want the string.
  */
-export function canonicalRepoRef(ref: RepoRef, opts: ForgeOptions = {}): Promise<{ owner: string; repo: string }> {
+export async function canonicalRepoRef(ref: RepoRef, opts: ForgeOptions = {}): Promise<{ owner: string; repo: string }> {
+  const { owner, repo } = await canonicalLookup(ref, opts);
+  return { owner, repo };
+}
+
+// canonicalRepoRef, keeping the lookup's failure: a search after a lookup that
+// could not reach the forge would only spend a second timeout reaching the same
+// verdict, and a 404 here is the answer the search would have hidden in a 422.
+function canonicalLookup(ref: RepoRef, opts: ForgeOptions): Promise<Canonical> {
   const fallback = { owner: ref.owner ?? "", repo: ref.repo ?? "" };
   const path = forgeKind(ref.host) === "github" ? repoPath(ref, "github") : undefined;
   if (!path) return Promise.resolve(fallback);
   const key = `${ref.host}/${ref.owner}/${ref.repo}`;
   let hit = canonCache.get(key);
   if (!hit) {
-    hit = (async () => {
+    const lookup = (async (): Promise<Canonical> => {
       if (ghUsable(ref.host)) {
         const r = await shAsync("gh", ["api", path, "--jq", ".full_name"], { timeoutMs: opts.timeoutMs ?? 15_000 });
         if (r.ok && r.stdout.includes("/")) return splitSlug(r.stdout.trim(), fallback);
       }
       const r = await forgeGet(`${apiBase(ref, opts)}/${path}`, "github", ref, opts);
-      const full = r.ok ? r.data?.full_name : undefined;
+      if (!r.ok) return { ...fallback, failed: r };
+      const full = r.data?.full_name;
       return typeof full === "string" && full.includes("/") ? splitSlug(full, fallback) : fallback;
     })();
-    canonCache.set(key, hit);
+    hit = lookup;
+    canonCache.set(key, lookup);
+    void lookup.then((c) => {
+      if (c.failed && canonCache.get(key) === lookup) canonCache.delete(key);
+    });
   }
   return hit;
 }
@@ -374,13 +491,12 @@ export async function searchIssues(ref: RepoRef, terms: string[], kind: "issue" 
   const q = terms.filter(Boolean).join(" ");
 
   if (forge === "github") {
-    const slug = (await canonicalRepo(ref, opts)) ?? `${ref.owner}/${ref.repo}`;
+    const canon = await canonicalLookup(ref, opts);
+    if (canon.failed) return failed(canon.failed, forge, ref, "GitHub search", opts);
     const filter = kind === "pr" ? "is:pr" : "is:issue";
-    const url = `${apiBase(ref, opts)}/search/issues?q=${encodeURIComponent(`repo:${slug} ${filter} ${q}`)}&per_page=${limit}&sort=updated&order=desc`;
+    const url = `${apiBase(ref, opts)}/search/issues?q=${encodeURIComponent(`repo:${canon.owner}/${canon.repo} ${filter} ${q}`)}&per_page=${limit}&sort=updated&order=desc`;
     const r = await forgeGet(url, forge, ref, opts);
-    if (limited(r.status, r.data))
-      return { items: [], rateLimited: true, note: "GitHub rate-limited this search — set GITHUB_TOKEN to raise the anonymous quota." };
-    if (!r.ok) return { items: [], note: `GitHub search failed (status ${r.status}).` };
+    if (!r.ok) return failed(r, forge, ref, "GitHub search", opts);
     return { items: mapGithubIssues(r.data?.items ?? [], kind) };
   }
 
@@ -388,8 +504,7 @@ export async function searchIssues(ref: RepoRef, terms: string[], kind: "issue" 
     const path = kind === "pr" ? "merge_requests" : "issues";
     const url = `${apiBase(ref, opts)}/${repoAt}/${path}?search=${encodeURIComponent(q)}&per_page=${limit}&order_by=updated_at`;
     const r = await forgeGet(url, forge, ref, opts);
-    if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: "GitLab rate-limited this search." };
-    if (!r.ok) return { items: [], note: `GitLab request failed (status ${r.status}).` };
+    if (!r.ok) return failed(r, forge, ref, "GitLab search", opts);
     const items: ForgeItem[] = (Array.isArray(r.data) ? r.data : []).map((it: Record<string, unknown>) => ({
       kind,
       number: typeof it.iid === "number" ? it.iid : undefined,
@@ -406,8 +521,7 @@ export async function searchIssues(ref: RepoRef, terms: string[], kind: "issue" 
   const path = kind === "pr" ? "pulls" : "issues";
   const url = `${apiBase(ref, opts)}/${repoAt}/${path}?state=all&limit=${limit}&q=${encodeURIComponent(q)}`;
   const r = await forgeGet(url, forge, ref, opts);
-  if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: "Gitea rate-limited this request." };
-  if (!r.ok) return { items: [], note: `Gitea request failed (status ${r.status}).` };
+  if (!r.ok) return failed(r, forge, ref, "Gitea search", opts);
   const items: ForgeItem[] = (Array.isArray(r.data) ? r.data : []).map((it: Record<string, unknown>) => ({
     kind,
     number: typeof it.number === "number" ? it.number : undefined,
@@ -429,8 +543,7 @@ export async function listReleases(ref: RepoRef, opts: ForgeOptions = {}): Promi
   const limit = Math.max(1, opts.limit ?? 20);
   const url = `${apiBase(ref, opts)}/${repoAt}/releases?per_page=${limit}${forge === "gitlab" ? "" : `&limit=${limit}`}`;
   const r = await forgeGet(url, forge, ref, opts);
-  if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: `${forge} rate-limited the release list.` };
-  if (!r.ok) return { items: [], note: `Could not list releases (status ${r.status}).` };
+  if (!r.ok) return failed(r, forge, ref, "Listing releases", opts);
   const items: ForgeItem[] = (Array.isArray(r.data) ? r.data : []).map((it: Record<string, unknown>) => ({
     kind: "release" as const,
     title: String(it.name ?? it.tag_name ?? it.tag ?? "").trim() || String(it.tag_name ?? ""),
@@ -454,8 +567,7 @@ export async function listTags(ref: RepoRef, opts: ForgeOptions = {}): Promise<F
       ? `${apiBase(ref, opts)}/${repoAt}/repository/tags?per_page=${limit}`
       : `${apiBase(ref, opts)}/${repoAt}/tags?per_page=${limit}&limit=${limit}`;
   const r = await forgeGet(url, forge, ref, opts);
-  if (limited(r.status, r.data)) return { items: [], rateLimited: true, note: `${forge} rate-limited the tag list.` };
-  if (!r.ok) return { items: [], note: `Could not list tags (status ${r.status}).` };
+  if (!r.ok) return failed(r, forge, ref, "Listing tags", opts);
   const items: ForgeItem[] = (Array.isArray(r.data) ? r.data : []).map((it: Record<string, unknown>) => ({
     kind: "tag" as const,
     title: String(it.name ?? "").trim(),
@@ -480,6 +592,18 @@ export interface RepoFacts {
   topics: string[];
 }
 
+/** `repoFacts`, with the reason when there are none. */
+export interface RepoFactsResult {
+  facts?: RepoFacts;
+  /** Why there are no facts, in words a caller can show. */
+  note?: string;
+  /** The HTTP status of the answer — 0 when there was none; absent when nothing was asked. */
+  status?: number;
+  rateLimited?: boolean;
+  /** When a spent quota resets, as the forge stated it (ISO 8601). */
+  resetAt?: string;
+}
+
 /**
  * The repository's own metadata — stars, licence, homepage, whether it is
  * archived.
@@ -487,14 +611,30 @@ export interface RepoFacts {
  * Worth having for a reason beyond curiosity: "is this project maintained" is
  * otherwise answered by reading a README that says it is. `archived` and
  * `pushedAt` answer it from the record.
+ *
+ * Undefined for any failure; `repoFactsResult` says which one it was.
  */
 export async function repoFacts(ref: RepoRef, opts: ForgeOptions = {}): Promise<RepoFacts | undefined> {
+  return (await repoFactsResult(ref, opts)).facts;
+}
+
+/**
+ * `repoFacts`, and when it has none, why: no such repository, a rejected token,
+ * a quota (with its reset time), an outage, or no network at all. Each wants a
+ * different response, and all of them used to arrive as the same `undefined`.
+ */
+export async function repoFactsResult(ref: RepoRef, opts: ForgeOptions = {}): Promise<RepoFactsResult> {
   const forge = forgeKind(ref.host);
-  const repoAt = forge && repoPath(ref, forge);
-  if (!forge || !repoAt) return undefined;
+  if (!forge) return { note: `${ref.host} is not a forge this engine knows how to query.` };
+  const repoAt = repoPath(ref, forge);
+  if (!repoAt) return { note: `"${ref.raw}" does not name owner/repo.` };
   const r = await forgeGet(`${apiBase(ref, opts)}/${repoAt}`, forge, ref, opts);
-  if (!r.ok || !r.data || typeof r.data !== "object") return undefined;
-  const d = r.data as Record<string, any>;
+  if (!r.ok) return failure(r, forge, ref, `Reading ${ref.webUrl ?? ref.raw}`, opts);
+  if (!r.data || typeof r.data !== "object") return { status: r.status, note: `${ref.host} answered with something other than a repository record.` };
+  return { status: r.status, facts: mapRepoFacts(r.data as Record<string, any>) };
+}
+
+function mapRepoFacts(d: Record<string, any>): RepoFacts {
   return {
     fullName: d.full_name ?? d.path_with_namespace,
     description: d.description ?? undefined,

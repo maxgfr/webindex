@@ -1,6 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
-import { apiBase, forgeAuthHeaders, forgeKind, listReleases, mapGithubIssues, repoFacts, resetCanonicalRepoCache, searchIssues } from "../src/forge.js";
+import {
+  apiBase,
+  canonicalRepo,
+  forgeAuthHeaders,
+  forgeKind,
+  listReleases,
+  mapGithubIssues,
+  repoFacts,
+  repoFactsResult,
+  resetCanonicalRepoCache,
+  searchIssues,
+} from "../src/forge.js";
 import { lookupPackage, normalizeRepoUrl, resolvePackage } from "../src/registry.js";
 import { resolveRepo } from "../src/repo.js";
 import { slugify } from "../src/text.js";
@@ -317,6 +328,111 @@ describe("where a token is sent", () => {
     // A rename answers with a same-origin redirect, which keeps its token.
     await repoFacts(resolveRepo("github.com/old/name"));
     expect(seen[3]).toMatchObject({ url: "https://api.github.com/repositories/42", auth: "Bearer ghp_SECRET" });
+  });
+});
+
+describe("why a forge call failed", () => {
+  const REF = resolveRepo("github.com/a/b");
+  beforeEach(() => {
+    vi.stubEnv("GITHUB_TOKEN", "");
+    vi.stubEnv("GH_TOKEN", "");
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  /** A forge that answers every request with one status, counting them. */
+  function answer(status: number, body: unknown = {}, headers: Record<string, string> = {}) {
+    return installFetchMock(() => ({ status, body: JSON.stringify(body), contentType: "application/json", headers }));
+  }
+
+  it("tells 'no such repository' from every other failure", async () => {
+    // Each of these read "is it public, and is github.com a forge?" — the
+    // question a user asks about a typo, shown for an outage and a bad token.
+    answer(404, { message: "Not Found" });
+    const missing = await repoFactsResult(REF);
+    expect(missing.status).toBe(404);
+    expect(missing.facts).toBeUndefined();
+    expect(missing.note).toMatch(/no such repository on github\.com, or it is private/);
+    expect(await repoFacts(REF)).toBeUndefined();
+
+    answer(502);
+    expect((await repoFactsResult(REF)).note).toMatch(/status 502.*unavailable/);
+    answer(500);
+    expect((await repoFactsResult(REF)).note).toMatch(/status 500.*unavailable/);
+  });
+
+  it("names the token when the forge rejects it, and asks for one when it needs one", async () => {
+    // GitHub answers 401 even for a PUBLIC repository when the token is bad.
+    vi.stubEnv("GITHUB_TOKEN", "ghp_EXPIRED");
+    answer(401, { message: "Bad credentials" });
+    const rejected = await repoFactsResult(REF);
+    expect(rejected.status).toBe(401);
+    expect(rejected.note).toMatch(/rejected GITHUB_TOKEN/);
+    expect((await listReleases(REF)).note).toMatch(/rejected GITHUB_TOKEN/);
+
+    vi.stubEnv("GITHUB_TOKEN", "");
+    answer(401, { message: "Requires authentication" });
+    expect((await repoFactsResult(REF)).note).toMatch(/requires authentication.*GITHUB_TOKEN/);
+  });
+
+  it("reports a quota with the time it resets, and asks only once", async () => {
+    const reset = Math.floor(Date.UTC(2030, 0, 2, 3, 4, 5) / 1000);
+    const spy = answer(403, { message: "API rate limit exceeded for 1.2.3.4." }, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) });
+    const r = await repoFactsResult(REF);
+    expect(r).toMatchObject({ status: 403, rateLimited: true, resetAt: "2030-01-02T03:04:05.000Z" });
+    expect(r.note).toMatch(/rate-limited.*2030-01-02T03:04:05\.000Z.*GITHUB_TOKEN/);
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    // A 429 is a quota too — and it is not retried, even when it says how long to wait.
+    const again = answer(429, { message: "slow down" }, { "retry-after": "1" });
+    const search = await searchIssues(resolveRepo("gitlab.com/g/p"), ["x"], "issue");
+    expect(search).toMatchObject({ rateLimited: true, status: 429 });
+    expect(search.resetAt).toMatch(/^\d{4}-\d\d-\d\dT/);
+    expect(again).toHaveBeenCalledTimes(1);
+  });
+
+  it("says a network error is one, with its cause, instead of 'status 0'", async () => {
+    const spy = vi.fn(async (_url: unknown) => {
+      throw new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED 10.0.0.1:443"), { code: "ECONNREFUSED" }) });
+    });
+    vi.stubGlobal("fetch", spy);
+    const r = await repoFactsResult(REF);
+    expect(r.status).toBe(0);
+    expect(r.note).toMatch(/network error.*api\.github\.com.*ECONNREFUSED/);
+    // A refused connection may be a blip: one more try, no more.
+    expect(spy).toHaveBeenCalledTimes(2);
+
+    spy.mockClear();
+    const s = await searchIssues(REF, ["x"], "issue");
+    expect(s.note).toMatch(/network error.*ECONNREFUSED/);
+    expect(s.note).not.toMatch(/status 0/);
+    // The rename lookup failed; the search that would have failed the same way is not sent.
+    expect(spy.mock.calls.every(([u]) => String(u).includes("/repos/"))).toBe(true);
+  });
+
+  it("spends one timeout on a black-holed network, not one per request", async () => {
+    const spy = vi.fn(
+      (_input: unknown, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" })));
+        }),
+    );
+    vi.stubGlobal("fetch", spy);
+    const s = await searchIssues(REF, ["x"], "issue", { timeoutMs: 30 });
+    expect(s.note).toMatch(/timed out after 30 ms/);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("still resolves a rename the next time after a failed lookup", async () => {
+    // A failure is not an answer: caching it would pin a long-lived server to
+    // the old name for the rest of its life.
+    answer(503);
+    await searchIssues(REF, ["x"], "issue");
+    installFetchMock((url) =>
+      url.includes("/repos/")
+        ? { body: JSON.stringify({ full_name: "a/b-renamed" }), contentType: "application/json" }
+        : { body: JSON.stringify({ items: [] }), contentType: "application/json" },
+    );
+    expect(await canonicalRepo(REF)).toBe("a/b-renamed");
   });
 });
 
