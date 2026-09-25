@@ -796,7 +796,8 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
           description:
             "Find candidate URLs: a locally-running SearXNG first, then the keyless engines (DuckDuckGo, DuckDuckGo Lite, Mojeek — no key, no container), then Firecrawl. " +
             "Returns title, URL and snippet — not page text; follow up with webindex_fetch on the ones worth reading. " +
-            "When nothing answers it says which piece was missing rather than returning an empty result that reads like 'nothing exists'.",
+            "When nothing answers it says which piece was missing rather than returning an empty result that reads like 'nothing exists'. " +
+            `The whole cascade is bounded at ${SEARCH_TOOL_BUDGET_MS / 1000} s; the last line names each rung's outcome (rungs: searxng=unreachable ddg=hits(8) …).`,
           inputSchema: {
             type: "object",
             properties: {
@@ -828,7 +829,10 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
               url: { type: "string", description: "The http(s) URL to fetch." },
               lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." },
               fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
-              timeoutMs: { type: "number", description: "Give up on a silent host after this many ms (default 20000). A timed-out request is not retried." },
+              timeoutMs: {
+                type: "number",
+                description: "Give up on a silent host after this many ms (default 20000, at most 300000). A timed-out request is not retried.",
+              },
               cache: {
                 type: "boolean",
                 description: "Use the on-disk cache: a fresh copy is reused for its TTL (24 h by default), a stale one revalidated with a conditional GET.",
@@ -1028,14 +1032,17 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
           title: "Walk a site, within a budget",
           description:
             "Follow links from a seed page, breadth-first, honouring robots.txt at EVERY hop and staying on the origin the seed lands on. `max` pages is required — enumerating " +
-            "someone else's site is the one operation here that can inconvenience them, so the budget is not optional. Returns each page's URL, title and text.",
+            "someone else's site is the one operation here that can inconvenience them, so the budget is not optional. Returns each page's URL, title and text, " +
+            "the URLs robots.txt refused (`disallowed`), how many in-scope URLs the budget did not reach (`pending`), and `notes`.",
           inputSchema: {
             type: "object",
             properties: {
               url: { type: "string", description: "The seed page." },
               max: {
                 type: "number",
-                description: "Pages to return. Required. A failed fetch costs no page, but the crawl makes at most 3 × `max` page requests in all.",
+                description:
+                  "Pages to return. Required. A failed fetch costs no page, but the crawl makes at most 3 × `max` page requests in all. " +
+                  "Every page's text comes back inline and an answer over 1 MB is withheld, so ask for the tens of pages you will read, not hundreds.",
               },
               depth: { type: "number", description: "How many links deep to follow (default 2)." },
               prefix: { type: "string", description: "Only follow URLs whose path starts with this, e.g. `/docs/`." },

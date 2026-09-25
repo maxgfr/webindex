@@ -665,6 +665,17 @@ describe("the MCP tools", () => {
     expect(fetchTool.annotations).toMatchObject({ title: "Fetch a URL as clean text", readOnlyHint: true, openWorldHint: true });
   });
 
+  it("tells the model the limits it will actually meet", () => {
+    // The declarations are all a model reads before calling: a budget or a
+    // clamp that only the code knows about reads as a hang, or as ignored input.
+    const tool = (name: string) => adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === name)!;
+    expect(tool("webindex_search").description).toMatch(/45 s/);
+    expect(tool("webindex_search").description).toMatch(/rungs:/);
+    expect(tool("webindex_fetch").inputSchema.properties.timeoutMs!.description).toMatch(/300000/);
+    expect(tool("webindex_crawl").description).toMatch(/pending/);
+    expect(tool("webindex_crawl").inputSchema.properties.max!.description).toMatch(/1 MB/);
+  });
+
   it("does not promise a single network request for package metadata", () => {
     const packageTool = adapter.listTools(LATEST_PROTOCOL).find((tool) => tool.name === "webindex_package");
     const publicDescriptions = [
