@@ -16,7 +16,7 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { configure, env, envName } from "./brand.js";
+import { configure, env, envFlag, envName } from "./brand.js";
 import { decodeLocal } from "./charset.js";
 import { ENGINE_VERSION } from "./version.js";
 import { DOC_EXTRACTORS, docFormatForUrl, extractDocument, enabledDocExtractors, sniffDocument } from "./doc.js";
@@ -1243,11 +1243,13 @@ async function dispatch(argv: string[]): Promise<void> {
       emit({ url: target, allowed, ...r }, [
         `  allowed   ${allowed ? "yes" : "no"}`,
         `  rules     ${
-          r.unreachable
-            ? `none readable (${r.status ? `HTTP ${r.status}` : "no answer"}) — RFC 9309 says to assume nothing may be crawled`
-            : r.absent
-              ? `none (no robots.txt${r.status ? `, HTTP ${r.status}` : ""})`
-              : r.rules.length
+          envFlag("NO_ROBOTS")
+            ? `not consulted (${envName("NO_ROBOTS")})`
+            : r.unreachable
+              ? `none readable (${r.status ? `HTTP ${r.status}` : "no answer"}) — RFC 9309 says to assume nothing may be crawled`
+              : r.absent
+                ? `none (no robots.txt${r.status ? `, HTTP ${r.status}` : ""})`
+                : r.rules.length
         }`,
         ...(r.crawlDelayMs ? [`  delay     ${r.crawlDelayMs}ms`] : []),
         ...(r.sitemaps.length ? [`  sitemaps  ${r.sitemaps.join("\n            ")}`] : []),

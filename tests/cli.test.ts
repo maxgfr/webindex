@@ -1003,6 +1003,14 @@ describe("the forge, registry and page-metadata commands", () => {
     expect(stdout()).toMatch(/HTTP 503.*RFC 9309/);
   });
 
+  it("says robots checks were switched off, rather than that there was no file", async () => {
+    installFetchMock(() => ({ body: "User-agent: *\nDisallow: /", contentType: "text/plain" }));
+    process.env[envName("NO_ROBOTS")] = "1";
+    expect(await run(["robots", "https://off.test/x"])).toBe(0);
+    expect(stdout()).toMatch(/not consulted \(WEBINDEX_TEST_NO_ROBOTS\)/);
+    expect(stdout()).not.toMatch(/no robots\.txt/);
+  });
+
   it("lists the URLs a sitemap declares", async () => {
     installFetchMock((url) => (url.endsWith("robots.txt") ? { status: 404, body: "" } : { body: "<urlset><url><loc>https://ex.test/p1</loc></url></urlset>" }));
     expect(await run(["sitemap", "https://ex.test/x"])).toBe(0);
