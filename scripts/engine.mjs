@@ -598,6 +598,274 @@ function decodeWith(bytes, encoding) {
   }
 }
 
+// src/entities.ts
+var NAMED = `
+  quot 22 amp 26 apos 27 lt 3c gt 3e QUOT 22 AMP 26 LT 3c GT 3e COPY a9 REG ae
+  nbsp a0 iexcl a1 cent a2 pound a3 curren a4 yen a5 brvbar a6 sect a7 uml a8 copy a9 ordf aa laquo ab not ac shy ad reg ae macr af
+  deg b0 plusmn b1 sup2 b2 sup3 b3 acute b4 micro b5 para b6 middot b7 cedil b8 sup1 b9 ordm ba raquo bb frac14 bc frac12 bd frac34 be iquest bf
+  Agrave c0 Aacute c1 Acirc c2 Atilde c3 Auml c4 Aring c5 AElig c6 Ccedil c7 Egrave c8 Eacute c9 Ecirc ca Euml cb Igrave cc Iacute cd Icirc ce Iuml cf
+  ETH d0 Ntilde d1 Ograve d2 Oacute d3 Ocirc d4 Otilde d5 Ouml d6 times d7 Oslash d8 Ugrave d9 Uacute da Ucirc db Uuml dc Yacute dd THORN de szlig df
+  agrave e0 aacute e1 acirc e2 atilde e3 auml e4 aring e5 aelig e6 ccedil e7 egrave e8 eacute e9 ecirc ea euml eb igrave ec iacute ed icirc ee iuml ef
+  eth f0 ntilde f1 ograve f2 oacute f3 ocirc f4 otilde f5 ouml f6 divide f7 oslash f8 ugrave f9 uacute fa ucirc fb uuml fc yacute fd thorn fe yuml ff
+  OElig 152 oelig 153 Scaron 160 scaron 161 Yuml 178 fnof 192 circ 2c6 tilde 2dc
+  Alpha 391 Beta 392 Gamma 393 Delta 394 Epsilon 395 Zeta 396 Eta 397 Theta 398 Iota 399 Kappa 39a Lambda 39b Mu 39c Nu 39d Xi 39e Omicron 39f
+  Pi 3a0 Rho 3a1 Sigma 3a3 Tau 3a4 Upsilon 3a5 Phi 3a6 Chi 3a7 Psi 3a8 Omega 3a9
+  alpha 3b1 beta 3b2 gamma 3b3 delta 3b4 epsilon 3b5 zeta 3b6 eta 3b7 theta 3b8 iota 3b9 kappa 3ba lambda 3bb mu 3bc nu 3bd xi 3be omicron 3bf
+  pi 3c0 rho 3c1 sigmaf 3c2 sigma 3c3 tau 3c4 upsilon 3c5 phi 3c6 chi 3c7 psi 3c8 omega 3c9 thetasym 3d1 upsih 3d2 piv 3d6
+  ensp 2002 emsp 2003 thinsp 2009 zwnj 200c zwj 200d lrm 200e rlm 200f ndash 2013 mdash 2014 lsquo 2018 rsquo 2019 sbquo 201a
+  ldquo 201c rdquo 201d bdquo 201e dagger 2020 Dagger 2021 bull 2022 hellip 2026 permil 2030 prime 2032 Prime 2033 lsaquo 2039 rsaquo 203a
+  oline 203e frasl 2044 euro 20ac image 2111 weierp 2118 real 211c trade 2122 alefsym 2135
+  larr 2190 uarr 2191 rarr 2192 darr 2193 harr 2194 crarr 21b5 lArr 21d0 uArr 21d1 rArr 21d2 dArr 21d3 hArr 21d4
+  forall 2200 part 2202 exist 2203 empty 2205 nabla 2207 isin 2208 notin 2209 ni 220b prod 220f sum 2211 minus 2212 lowast 2217 radic 221a
+  prop 221d infin 221e ang 2220 and 2227 or 2228 cap 2229 cup 222a int 222b there4 2234 sim 223c cong 2245 asymp 2248 ne 2260 equiv 2261
+  le 2264 ge 2265 sub 2282 sup 2283 nsub 2284 sube 2286 supe 2287 oplus 2295 otimes 2297 perp 22a5 sdot 22c5
+  lceil 2308 rceil 2309 lfloor 230a rfloor 230b lang 27e8 rang 27e9 loz 25ca spades 2660 clubs 2663 hearts 2665 diams 2666
+`;
+var INVISIBLE = /* @__PURE__ */ new Set([173, 8203, 8204, 8205, 8206, 8207, 8288, 65279]);
+var charFor = (cp) => INVISIBLE.has(cp) ? "" : String.fromCodePoint(cp);
+var ENTITY_BY_NAME = /* @__PURE__ */ new Map();
+{
+  const parts = NAMED.trim().split(/\s+/);
+  for (let i = 0; i < parts.length; i += 2) ENTITY_BY_NAME.set(parts[i], charFor(Number.parseInt(parts[i + 1], 16)));
+  ENTITY_BY_NAME.set("nbsp", " ");
+}
+var ENTITY_RE = /&(#[xX][0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g;
+function numericChar(n) {
+  if (n >= 128 && n <= 159) return String.fromCodePoint(CP1252_C1[n - 128]);
+  if (n === 0 || !(n <= 1114111) || n >= 55296 && n <= 57343) return "\uFFFD";
+  return charFor(n);
+}
+function decodeEntities(s) {
+  return s.replace(ENTITY_RE, (m, ref) => {
+    if (ref[0] !== "#") return ENTITY_BY_NAME.get(ref) ?? m;
+    return numericChar(ref[1] === "x" || ref[1] === "X" ? Number.parseInt(ref.slice(2), 16) : Number(ref.slice(1)));
+  });
+}
+
+// src/html.ts
+var BLOCK_TAGS = /* @__PURE__ */ new Set([
+  "p",
+  "div",
+  "section",
+  "article",
+  "li",
+  "tr",
+  "td",
+  "th",
+  "ul",
+  "ol",
+  "pre",
+  "blockquote",
+  "table",
+  "caption",
+  "dl",
+  "dt",
+  "dd",
+  "header",
+  "footer",
+  "nav",
+  "aside",
+  "main",
+  "search",
+  "figure",
+  "figcaption",
+  "details",
+  "summary",
+  "address",
+  "form",
+  "fieldset",
+  "legend",
+  "hgroup",
+  "center",
+  "dialog",
+  "menu"
+]);
+var INLINE_TAGS = /* @__PURE__ */ new Set([
+  "a",
+  "abbr",
+  "acronym",
+  "b",
+  "bdi",
+  "bdo",
+  "big",
+  "cite",
+  "code",
+  "data",
+  "del",
+  "dfn",
+  "em",
+  "font",
+  "i",
+  "ins",
+  "kbd",
+  "label",
+  "mark",
+  "nobr",
+  "q",
+  "s",
+  "samp",
+  "small",
+  "span",
+  "strike",
+  "strong",
+  "sub",
+  "sup",
+  "time",
+  "tt",
+  "u",
+  "var",
+  "wbr"
+]);
+var TAG_RE = /<[a-zA-Z!/?][^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/g;
+var LOOSE_TAG_RE = /<[a-zA-Z!/?][^<>]*>/g;
+var tagName = (tag) => /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
+var CLOSE_TAG_RE = /* @__PURE__ */ new Map();
+function closeTagRe(name) {
+  let re = CLOSE_TAG_RE.get(name);
+  if (!re) CLOSE_TAG_RE.set(name, re = new RegExp(`</${name}\\s*>`, "gi"));
+  return re;
+}
+function htmlAttributes(tag) {
+  const attrs = /* @__PURE__ */ new Map();
+  for (const m of tag.matchAll(/(?<![^\s"'<>/=])([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) {
+    const name = m[1].toLowerCase();
+    if (!attrs.has(name)) attrs.set(name, m[2] ?? m[3] ?? m[4] ?? "");
+  }
+  return attrs;
+}
+function dropElements(html, names, toEof = /* @__PURE__ */ new Set()) {
+  const open = new RegExp(`<!--|<(${names.join("|")})(?=[\\s/>])`, "gi");
+  const unclosed = /* @__PURE__ */ new Set();
+  let out = "";
+  let last = 0;
+  let m;
+  while (m = open.exec(html)) {
+    const name = m[1]?.toLowerCase() ?? "!--";
+    if (unclosed.has(name)) continue;
+    let end;
+    if (name === "!--") {
+      const close = html.indexOf("-->", m.index + 2);
+      end = close < 0 ? -1 : close + 3;
+    } else {
+      const close = closeTagRe(name);
+      close.lastIndex = open.lastIndex;
+      const c = close.exec(html);
+      end = c ? c.index + c[0].length : toEof.has(name) ? html.length : -1;
+    }
+    if (end < 0) {
+      unclosed.add(name);
+      continue;
+    }
+    out += html.slice(last, m.index) + " ";
+    last = open.lastIndex = end;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
+function balancedRegions(html, tag, isCandidate) {
+  const re = new RegExp(`<${tag}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>|</${tag}\\s*>`, "gi");
+  const stack = [];
+  const out = [];
+  let m;
+  while (m = re.exec(html)) {
+    if (m[0][1] === "/") {
+      const top = stack.pop();
+      if (top?.open) out.push({ start: top.start, end: m.index, from: top.from, to: re.lastIndex, open: top.open });
+    } else {
+      stack.push({ start: re.lastIndex, from: m.index, open: isCandidate(m[0]) ? m[0] : void 0 });
+    }
+  }
+  return out;
+}
+function dropLandmarks(html, roles) {
+  const role = `\\srole\\s*=\\s*["']?(?:${roles.join("|")})(?=["'\\s/>])`;
+  const hasRole = new RegExp(role, "i");
+  const names = /* @__PURE__ */ new Set();
+  for (const m of html.matchAll(new RegExp(`<([a-zA-Z][a-zA-Z0-9-]*)(?=[\\s/>])[^<>]*${role}`, "gi"))) names.add(m[1].toLowerCase());
+  if (!names.size) return html;
+  const regions = [...names].flatMap((name) => balancedRegions(html, name, (open) => hasRole.test(open))).sort((a, b) => a.from - b.from);
+  let out = "";
+  let last = 0;
+  for (const r of regions) {
+    if (r.from < last) continue;
+    out += `${html.slice(last, r.from)} `;
+    last = r.to;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
+var CHROME_ROLES = ["navigation", "banner", "contentinfo"];
+var HIDDEN_ELEMENTS = ["script", "style", "noscript", "head", "svg", "template", "select", "datalist"];
+var CHROME_ELEMENTS = ["nav", "footer"];
+var RAW_TEXT_ELEMENTS = /* @__PURE__ */ new Set(["script", "style"]);
+
+// src/url.ts
+var TRACKING_PARAMS = /^(utm_|fbclid$|gclid$|gclsrc$|dclid$|msclkid$|yclid$|twclid$|ttclid$|li_fat_id$|mkt_tok$|_gl$|mc_|ref_src$|ref_url$|spm$|_hsenc$|_hsmi$|igshid$|igsh$)/i;
+var SHARE_SI_HOSTS = /(^|\.)(youtube\.com|youtu\.be|spotify\.com)$/;
+function canonicalizeUrl(raw) {
+  try {
+    const u = new URL(raw.trim());
+    const proto = u.protocol.toLowerCase();
+    const host = u.hostname.toLowerCase().replace(/^www\./, "");
+    let port = u.port;
+    if (proto === "http:" && port === "80" || proto === "https:" && port === "443") port = "";
+    const path = u.pathname.replace(/\/+$/, "");
+    const keep = [];
+    const shareSi = SHARE_SI_HOSTS.test(host);
+    for (const [k, v] of u.searchParams) {
+      if (!TRACKING_PARAMS.test(k) && !(shareSi && k === "si")) keep.push([k, v]);
+    }
+    keep.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+    const search2 = keep.length ? "?" + keep.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&") : "";
+    return `${proto}//${host}${port ? ":" + port : ""}${path}${search2}`.replace(/\/$/, "");
+  } catch {
+    return raw.trim().replace(/#.*$/, "").replace(/\/$/, "");
+  }
+}
+function normalizeDoi(doi) {
+  return doi.trim().toLowerCase().replace(/^https?:\/\/(dx\.)?doi\.org\//, "");
+}
+function domainOf(raw) {
+  try {
+    const u = new URL(raw);
+    if (u.protocol === "file:") return LOCAL_FILE_DOMAIN;
+    return u.hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+var LOCAL_FILE_DOMAIN = "local file";
+var FNV_OFFSET_HI = 3421674724;
+var FNV_OFFSET_LO = 2216829733;
+var FNV_PRIME_LOW = 435;
+var laneHi = 0;
+var laneLo = 0;
+function fnvMix(s) {
+  let hi = laneHi;
+  let lo = laneLo;
+  for (let i = 0; i < s.length; i++) {
+    lo = (lo ^ s.charCodeAt(i)) >>> 0;
+    const bP = (lo & 65535) * FNV_PRIME_LOW;
+    const aP = (lo >>> 16) * FNV_PRIME_LOW + (bP >>> 16);
+    const carry = aP >>> 16;
+    hi = carry + Math.imul(hi, FNV_PRIME_LOW) + (lo << 8) >>> 0;
+    lo = ((aP & 65535) << 16 | bP & 65535) >>> 0;
+  }
+  laneHi = hi;
+  laneLo = lo;
+}
+function fnv1a64(s) {
+  laneHi = FNV_OFFSET_HI;
+  laneLo = FNV_OFFSET_LO;
+  fnvMix(s);
+  return BigInt(laneHi) << 32n | BigInt(laneLo);
+}
+function fnv1a64Words(pieces, out) {
+  laneHi = FNV_OFFSET_HI;
+  laneLo = FNV_OFFSET_LO;
+  for (const p of pieces) fnvMix(p);
+  out[0] = laneHi;
+  out[1] = laneLo;
+}
+
 // src/text.ts
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -754,7 +1022,39 @@ var STOPWORDS = /* @__PURE__ */ new Set([
   "au",
   "aux",
   "si",
-  "ne"
+  "ne",
+  "vs",
+  // German question scaffolding: the locale layer targets DE as well as FR.
+  "der",
+  "die",
+  "das",
+  "und",
+  "ist",
+  "sind",
+  "wie",
+  "ein",
+  "eine",
+  "einen",
+  "einem",
+  "einer",
+  "mit",
+  "f\xFCr",
+  "von",
+  "zu",
+  "den",
+  "dem",
+  "im",
+  "auf",
+  "nicht",
+  "sich",
+  "oder",
+  "warum",
+  "wann",
+  "welche",
+  "welcher",
+  "welches",
+  "kann",
+  "wird"
 ]);
 function isStopword(term) {
   const t = term.toLowerCase();
@@ -762,11 +1062,11 @@ function isStopword(term) {
   const extra = brand().extraStopwords;
   return extra ? extra.some((w) => w.toLowerCase() === t) : false;
 }
+var TOKEN_RE2 = /(?<![\p{L}\p{N}_])\.net(?![\p{L}\p{N}_])|[\p{L}\p{N}_]+(?:[+#]{1,2}\d*(?![\p{L}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{N}_./]))?/giu;
 function keywords(question) {
   const seen = /* @__PURE__ */ new Set();
   const out = [];
-  for (const raw of question.split(/[^\p{L}\p{N}_]+/u)) {
-    if (!raw) continue;
+  for (const [raw] of question.matchAll(TOKEN_RE2)) {
     const lower = raw.toLowerCase();
     if (raw.length < 2) continue;
     if (isStopword(lower)) continue;
@@ -874,27 +1174,52 @@ function expandTokens(tokens, max = 8) {
   for (const ek of byCanonical.values()) ek.variants = ek.variants.filter((v) => kept.has(v));
   return [...byCanonical.values()];
 }
+var LIGATURE_SPELLING = { \u0153: "oe", \u00E6: "ae", \u00DF: "ss" };
+var LIGATURE_OF = { oe: "\u0153", ae: "\xE6", ss: "\xDF" };
+function charPattern(ch) {
+  const cls = ACCENT_CLASSES[baseChar(ch)];
+  return cls ? `[${cls}]` : escapeRegExp(ch);
+}
 function accentPattern(text) {
+  const chars = [...text];
   let out = "";
-  for (const ch of text) {
-    const cls = ACCENT_CLASSES[baseChar(ch)];
-    out += cls ? `[${cls}]` : escapeRegExp(ch);
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    const spelled = LIGATURE_SPELLING[ch.toLowerCase()];
+    if (spelled) {
+      out += `(?:${escapeRegExp(ch)}|${charPattern(spelled[0])}${charPattern(spelled[1])})`;
+      continue;
+    }
+    const next = chars[i + 1];
+    const ligature = next && LIGATURE_OF[(ch + next).toLowerCase()];
+    if (ligature) {
+      out += `(?:${charPattern(ch)}${charPattern(next)}|${ligature})`;
+      i++;
+      continue;
+    }
+    out += charPattern(ch);
   }
   return out;
 }
-function makeMatcher(expanded) {
-  const regexes = [];
-  for (const ek of expanded) {
-    for (const v of ek.variants) {
-      regexes.push({ re: new RegExp(accentPattern(v.text), "i"), canonical: ek.canonical });
+var SHORT_VARIANT = 3;
+function lineRegex(source, text) {
+  if ([...text].length <= SHORT_VARIANT) {
+    try {
+      return new RegExp(`(?<![\\p{L}\\p{N}])(?:${source})s?(?!\\p{L})`, "iu");
+    } catch {
     }
   }
-  const patterns = expanded.flatMap((ek) => ek.variants.map((v) => ({ source: accentPattern(v.text), canonical: ek.canonical })));
+  return new RegExp(source, "i");
+}
+function makeMatcher(expanded) {
+  const variants = expanded.flatMap((ek) => ek.variants.map((v) => ({ text: v.text, source: accentPattern(v.text), canonical: ek.canonical })));
+  const regexes = variants.map(({ text, source, canonical }) => ({ re: lineRegex(source, text), canonical }));
+  const anchored = variants.map(({ source, canonical }) => ({ re: new RegExp(`^(?:${source})$`, "i"), canonical }));
   return {
     expanded,
     canonicals: expanded.map((e) => e.canonical),
-    patterns,
-    canonicalOf: (span) => regexes.find(({ re }) => new RegExp(`^(?:${re.source})$`, "i").test(span))?.canonical,
+    patterns: variants.map(({ source, canonical }) => ({ source, canonical })),
+    canonicalOf: (span) => anchored.find(({ re }) => re.test(span))?.canonical,
     matchLine: (line) => {
       const hit = /* @__PURE__ */ new Set();
       for (const { re, canonical } of regexes) {
@@ -957,8 +1282,13 @@ function excerptWindows(text, question, opts = {}) {
   return out;
 }
 function slugify(input, opts = {}) {
-  const s = input.toLowerCase().replace(/^https?:\/\//, "").replace(/^git@/, "").replace(/\.git$/, "").replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, opts.max ?? 120);
-  return s || (opts.fallback ?? "");
+  const max = opts.max ?? 120;
+  const normalized = input.toLowerCase().replace(/^https?:\/\//, "").replace(/^git@/, "").replace(/\.git$/, "");
+  const s = normalized.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!/[\u0080-\uffff]/.test(normalized) && s.length <= max) return s || (opts.fallback ?? "");
+  const tag = fnv1a64(normalized).toString(16).padStart(16, "0").slice(0, 8);
+  const head = s.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");
+  return head ? `${head}-${tag}` : tag;
 }
 
 // src/firecrawl.ts
@@ -1382,213 +1712,225 @@ async function httpJson(method, url, body, opts = {}) {
   }
   return last;
 }
-var ENTITIES = {
-  "&amp;": "&",
-  "&lt;": "<",
-  "&gt;": ">",
-  "&quot;": '"',
-  "&#39;": "'",
-  "&apos;": "'",
-  "&nbsp;": " ",
-  "&mdash;": "\u2014",
-  "&ndash;": "\u2013",
-  "&hellip;": "\u2026",
-  "&copy;": "\xA9",
-  // Typographic punctuation CMSes emit as named refs (WordPress "smart" text) —
-  // otherwise a curly quote/apostrophe leaks into the report prose verbatim.
-  "&lsquo;": "\u2018",
-  "&rsquo;": "\u2019",
-  "&sbquo;": "\u201A",
-  "&ldquo;": "\u201C",
-  "&rdquo;": "\u201D",
-  "&bdquo;": "\u201E",
-  "&bull;": "\u2022",
-  "&middot;": "\xB7",
-  "&laquo;": "\xAB",
-  "&raquo;": "\xBB",
-  "&deg;": "\xB0",
-  "&plusmn;": "\xB1",
-  "&times;": "\xD7",
-  "&divide;": "\xF7",
-  "&frac12;": "\xBD",
-  "&frac14;": "\xBC",
-  "&frac34;": "\xBE",
-  "&sup2;": "\xB2",
-  "&sup3;": "\xB3",
-  "&micro;": "\xB5",
-  "&trade;": "\u2122",
-  "&reg;": "\xAE",
-  "&sect;": "\xA7",
-  "&para;": "\xB6",
-  "&dagger;": "\u2020",
-  "&Dagger;": "\u2021",
-  "&prime;": "\u2032",
-  "&Prime;": "\u2033",
-  "&iexcl;": "\xA1",
-  "&iquest;": "\xBF",
-  "&cent;": "\xA2",
-  "&pound;": "\xA3",
-  "&curren;": "\xA4",
-  "&yen;": "\xA5",
-  "&euro;": "\u20AC",
-  // Latin-1 accented letters — pervasive in non-English titles/snippets.
-  "&agrave;": "\xE0",
-  "&aacute;": "\xE1",
-  "&acirc;": "\xE2",
-  "&atilde;": "\xE3",
-  "&auml;": "\xE4",
-  "&aring;": "\xE5",
-  "&aelig;": "\xE6",
-  "&ccedil;": "\xE7",
-  "&egrave;": "\xE8",
-  "&eacute;": "\xE9",
-  "&ecirc;": "\xEA",
-  "&euml;": "\xEB",
-  "&igrave;": "\xEC",
-  "&iacute;": "\xED",
-  "&icirc;": "\xEE",
-  "&iuml;": "\xEF",
-  "&ntilde;": "\xF1",
-  "&ograve;": "\xF2",
-  "&oacute;": "\xF3",
-  "&ocirc;": "\xF4",
-  "&otilde;": "\xF5",
-  "&ouml;": "\xF6",
-  "&oslash;": "\xF8",
-  "&ugrave;": "\xF9",
-  "&uacute;": "\xFA",
-  "&ucirc;": "\xFB",
-  "&uuml;": "\xFC",
-  "&yacute;": "\xFD",
-  "&yuml;": "\xFF",
-  "&szlig;": "\xDF",
-  "&Agrave;": "\xC0",
-  "&Aacute;": "\xC1",
-  "&Acirc;": "\xC2",
-  "&Auml;": "\xC4",
-  "&Aring;": "\xC5",
-  "&AElig;": "\xC6",
-  "&Ccedil;": "\xC7",
-  "&Egrave;": "\xC8",
-  "&Eacute;": "\xC9",
-  "&Ecirc;": "\xCA",
-  "&Euml;": "\xCB",
-  "&Iacute;": "\xCD",
-  "&Ntilde;": "\xD1",
-  "&Oacute;": "\xD3",
-  "&Ouml;": "\xD6",
-  "&Oslash;": "\xD8",
-  "&Uacute;": "\xDA",
-  "&Uuml;": "\xDC"
-};
-var ENTITY_BY_NAME = new Map(Object.entries(ENTITIES).map(([k, v]) => [k.slice(1, -1), v]));
-var ENTITY_RE = /&(#[xX][0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g;
-function decodeEntities(s) {
-  return s.replace(ENTITY_RE, (m, ref) => {
-    if (ref[0] === "#") {
-      const n = ref[1] === "x" || ref[1] === "X" ? Number.parseInt(ref.slice(2), 16) : Number(ref.slice(1));
-      try {
-        return Number.isFinite(n) ? String.fromCodePoint(n) : " ";
-      } catch {
-        return " ";
-      }
-    }
-    return ENTITY_BY_NAME.get(ref) ?? m;
-  });
-}
+var INLINE_FORMAT = /* @__PURE__ */ new Set([...INLINE_TAGS, "br", "scp"]);
+var INLINE_FORMAT_TAG = /<(\/?)([a-zA-Z][\w.-]*(?::[\w.-]+)?)(?=[\s/>])([^<>]*)>/g;
 function cleanInline(s) {
-  return decodeEntities(String(s)).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  const text = decodeEntities(String(s));
+  const opened = /* @__PURE__ */ new Set();
+  const closed = /* @__PURE__ */ new Set();
+  for (const m of text.matchAll(INLINE_FORMAT_TAG)) (m[1] ? closed : opened).add(m[2].toLowerCase());
+  return text.replace(INLINE_FORMAT_TAG, (tag, slash, rawName, attrs) => {
+    const name = rawName.toLowerCase();
+    if (name.startsWith("mml:") || name.startsWith("jats:")) return "";
+    if (!INLINE_FORMAT.has(name)) return tag;
+    if (name === "br") return " ";
+    const markup = attrs.trim().replace(/\/$/, "") !== "" || name === "wbr" || (slash ? opened : closed).has(name);
+    return markup ? "" : tag;
+  }).replace(/\s+/g, " ").trim();
 }
-var BLOCK_TAGS = /* @__PURE__ */ new Set(["p", "div", "section", "article", "li", "tr", "td", "th", "ul", "ol", "pre", "blockquote", "table"]);
+var NUL = "\0";
+var PRE_SLOT = (i) => `
+${NUL}${i}${NUL}
+`;
+function preSlotIndex(line) {
+  if (line.length < 3 || line[0] !== NUL || line[line.length - 1] !== NUL) return void 0;
+  const i = Number(line.slice(1, -1));
+  return Number.isInteger(i) ? i : void 0;
+}
+function setAsidePre(html, blocks) {
+  const open = /<pre(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
+  const close = closeTagRe("pre");
+  let out = "";
+  let last = 0;
+  let m;
+  while (m = open.exec(html)) {
+    close.lastIndex = open.lastIndex;
+    const c = close.exec(html);
+    if (!c) break;
+    const inner = html.slice(open.lastIndex, c.index);
+    const text = decodeEntities(inner.replace(/<br\s*\/?>/gi, "\n").replace(LOOSE_TAG_RE, "")).replace(/\r\n?/g, "\n").replace(/^\n/, "").trimEnd();
+    blocks.push(text);
+    out += html.slice(last, m.index) + PRE_SLOT(blocks.length - 1);
+    last = open.lastIndex = c.index + c[0].length;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
+var HEADING_OPEN = /<h([1-6])(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
+var HEADING_BOUNDARY = /<\/h[1-6]\s*>|<h[1-6](?=[\s/>])/gi;
+var PERMALINK = /<a\b[^<>]*>\s*(?:(?:¶|#|§|🔗|&para;|&#182;|&#x[bB]6;|&sect;)\s*)?<\/a\s*>/gi;
+function flattenHeadings(html) {
+  let out = "";
+  let last = 0;
+  let m;
+  HEADING_OPEN.lastIndex = 0;
+  while (m = HEADING_OPEN.exec(html)) {
+    HEADING_BOUNDARY.lastIndex = HEADING_OPEN.lastIndex;
+    const b = HEADING_BOUNDARY.exec(html);
+    if (!b) break;
+    if (b[0][1] !== "/") continue;
+    const text = html.slice(HEADING_OPEN.lastIndex, b.index).replace(PERMALINK, "").replace(TAG_RE, (tag) => INLINE_TAGS.has(tagName(tag)) ? "" : " ").replace(/\s+/g, " ").trim();
+    out += html.slice(last, m.index) + (text ? `
+${"#".repeat(Number(m[1]))} ${text}
+` : "\n");
+    last = HEADING_OPEN.lastIndex = b.index + b[0].length;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
 function htmlToText(html, opts = {}) {
-  let s = html;
-  const hidden = opts.fullPage ? /<!--[\s\S]*?-->|<(script|style|noscript|head|svg|template)\b[\s\S]*?<\/\1\s*>/gi : /<!--[\s\S]*?-->|<(script|style|noscript|head|nav|footer|svg|template)\b[\s\S]*?<\/\1\s*>/gi;
-  s = s.replace(hidden, " ");
-  s = s.replace(/<[a-zA-Z!/?][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g, (tag) => {
-    const name = /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
+  const hidden = opts.fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
+  let s = dropElements(html.includes(NUL) ? html.split(NUL).join("\uFFFD") : html, hidden, RAW_TEXT_ELEMENTS);
+  if (!opts.fullPage) s = dropLandmarks(s, CHROME_ROLES);
+  const pre = [];
+  s = flattenHeadings(setAsidePre(s, pre));
+  let prevEnd = -1;
+  let prevClosed = false;
+  s = s.replace(TAG_RE, (tag, at) => {
+    const closing = tag[1] === "/";
+    const adjacent = at === prevEnd && prevClosed && !closing;
+    prevEnd = at + tag.length;
+    prevClosed = closing;
+    const name = tagName(tag);
     if (/^h[1-6]$/.test(name)) {
-      return tag.startsWith("</") ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
+      return closing ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
     }
     if (BLOCK_TAGS.has(name) || name === "br" || name === "hr") return "\n";
+    if (INLINE_TAGS.has(name)) return adjacent ? " " : "";
     return " ";
   });
-  s = s.replace(/<[a-zA-Z!/?][^>]*>/g, " ");
+  s = s.replace(LOOSE_TAG_RE, " ");
   s = decodeEntities(s);
   s = s.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n");
-  return s.split("\n").map((l) => l.trim()).filter((l) => l.length > 0).join("\n");
+  return s.split("\n").map((l) => {
+    const t = l.trim();
+    const slot = preSlotIndex(t);
+    return slot === void 0 ? t : pre[slot] ?? t;
+  }).filter((l) => l.length > 0).join("\n");
+}
+var NOT_TITLE = ["script", "style", "template", "svg"];
+function firstElementText(html, name) {
+  const open = new RegExp(`<${name}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>`, "i").exec(html);
+  if (!open) return void 0;
+  const close = closeTagRe(name);
+  close.lastIndex = open.index + open[0].length;
+  const c = close.exec(html);
+  if (!c) return void 0;
+  const inner = html.slice(open.index + open[0].length, c.index).replace(TAG_RE, (tag) => INLINE_TAGS.has(tagName(tag)) ? "" : " ");
+  return decodeEntities(inner).replace(/\s+/g, " ").trim() || void 0;
 }
 function htmlTitle(html) {
-  const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
-  if (!m) return void 0;
-  const t = decodeEntities(m[1].replace(/\s+/g, " ").trim());
-  return t || void 0;
+  return firstElementText(dropElements(html, NOT_TITLE), "title");
 }
-function htmlAttributes(tag) {
-  const attrs = /* @__PURE__ */ new Map();
-  for (const m of tag.matchAll(/([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) {
-    const name = m[1].toLowerCase();
-    if (!attrs.has(name)) attrs.set(name, m[2] ?? m[3] ?? m[4] ?? "");
+function metaContent(html, keys) {
+  const found = /* @__PURE__ */ new Map();
+  for (const m of html.matchAll(/<meta(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi)) {
+    const attrs = htmlAttributes(m[0]);
+    const key = (attrs.get("property") ?? attrs.get("name"))?.toLowerCase();
+    const value = attrs.get("content")?.trim();
+    if (key && value && keys.includes(key) && !found.has(key)) found.set(key, decodeEntities(value).replace(/\s+/g, " ").trim());
   }
-  return attrs;
+  return keys.map((k) => found.get(k)).find(Boolean);
+}
+function pageTitle(html) {
+  const clean2 = dropElements(html, NOT_TITLE);
+  return firstElementText(clean2, "title") ?? metaContent(clean2, ["og:title", "twitter:title"]) ?? firstElementText(clean2, "h1");
 }
 function htmlCanonicalUrl(html) {
-  const head = html.slice(0, 6e4);
-  const canonical = /<link\b[^>]*\brel=["']?canonical["']?[^>]*>/i.exec(head)?.[0];
-  const og = /<meta\b[^>]*\bproperty=["']?og:url["']?[^>]*>/i.exec(head)?.[0];
-  for (const tag of [canonical, og]) {
-    const href = tag && /\b(?:href|content)=["']([^"']+)["']/i.exec(tag)?.[1];
-    if (href?.trim()) return decodeEntities(href.trim());
-  }
-  return void 0;
-}
-function sliceToMatchingClose(html, start, tag) {
-  const re = new RegExp(`<${tag}\\b|</${tag}\\s*>`, "gi");
-  re.lastIndex = start;
-  let depth = 1;
-  let m;
-  while (m = re.exec(html)) {
-    if (m[0][1] === "/") {
-      if (--depth === 0) return html.slice(start, m.index);
-    } else {
-      depth++;
+  const clean2 = dropElements(html, ["script", "style", "template"]);
+  const end = clean2.search(/<\/head\s*>|<body(?=[\s/>])/i);
+  const head = end < 0 ? clean2 : clean2.slice(0, end);
+  let og;
+  for (const m of head.matchAll(/<(link|meta)(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi)) {
+    const attrs = htmlAttributes(m[0]);
+    if (m[1].toLowerCase() === "link") {
+      const href = attrs.get("href")?.trim();
+      if (href && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("canonical")) return decodeEntities(href);
+    } else if (og === void 0 && attrs.get("property")?.toLowerCase() === "og:url") {
+      og = attrs.get("content")?.trim() || void 0;
     }
   }
-  return null;
+  return og && decodeEntities(og);
+}
+function absoluteCanonical(href, base) {
+  if (!href) return void 0;
+  try {
+    const u = new URL(href, base);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.href : void 0;
+  } catch {
+    return void 0;
+  }
+}
+var visibleLength = (h) => h.replace(/<[^<>]*>/g, " ").replace(/\s+/g, " ").trim().length;
+var ROLE_MAIN = /\srole\s*=\s*["']?main(?=["'\s/>])/i;
+var ROLE_MAIN_TAG = /<([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>])[^<>]*\srole\s*=\s*["']?main(?=["'\s/>])/g;
+var CONTENT_WORDS = /* @__PURE__ */ new Set(["content", "article", "post", "entry", "story", "main", "prose"]);
+var CHROME_WORDS = /* @__PURE__ */ new Set([
+  "nav",
+  "navbar",
+  "navigation",
+  "menu",
+  "header",
+  "footer",
+  "sidebar",
+  "breadcrumb",
+  "breadcrumbs",
+  "banner",
+  "cookie",
+  "consent",
+  "comment",
+  "comments",
+  "related",
+  "share",
+  "social",
+  "toolbar",
+  "widget",
+  "meta",
+  "ad",
+  "ads",
+  "promo"
+]);
+function isContentContainer(open) {
+  const attrs = htmlAttributes(open);
+  for (const token of `${attrs.get("id") ?? ""} ${attrs.get("class") ?? ""}`.toLowerCase().split(/\s+/)) {
+    if (token === "markdown-body") return true;
+    const words = token.split(/\W+/);
+    if (words.some((w) => CONTENT_WORDS.has(w)) && !words.some((w) => CHROME_WORDS.has(w))) return true;
+  }
+  return false;
+}
+function blockKind(open) {
+  const tag = /^<([a-zA-Z][a-zA-Z0-9-]*)/.exec(open)?.[1]?.toLowerCase() ?? "";
+  const firstClass = (htmlAttributes(open).get("class") ?? "").trim().split(/\s+/)[0];
+  return `${tag} ${firstClass.replace(/\d+/g, "0")}`;
 }
 function extractMainHtml(html) {
-  const visible = (h) => h.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().length;
+  const clean2 = dropElements(html, ["script", "style", "template", "svg"]);
+  const roleMainTags = /* @__PURE__ */ new Set(["main"]);
+  for (const m of clean2.matchAll(ROLE_MAIN_TAG)) roleMainTags.add(m[1].toLowerCase());
   const tiers = [
-    /<(main)\b[^>]*>/gi,
-    /<(article)\b[^>]*>/gi,
-    /<(div|section)\b[^>]*\b(?:id|class)="[^"]*\b(?:content|article|post|entry|story|markdown-body|main|prose)\b[^"]*"[^>]*>/gi
+    { tags: [...roleMainTags], isCandidate: (open) => /^<main[\s/>]/i.test(open) || ROLE_MAIN.test(open) },
+    { tags: ["article"], isCandidate: () => true },
+    { tags: ["div", "section"], isCandidate: isContentContainer }
   ];
-  let candidates = [];
-  for (const re of tiers) {
-    const found = [];
-    re.lastIndex = 0;
-    let m;
-    while (m = re.exec(html)) {
-      const inner = sliceToMatchingClose(html, re.lastIndex, m[1].toLowerCase());
-      if (inner !== null) found.push(inner);
+  for (const tier of tiers) {
+    const regions = tier.tags.flatMap((tag) => balancedRegions(clean2, tag, tier.isCandidate)).sort((a, b) => a.start - b.start);
+    if (!regions.length) continue;
+    const outer = [];
+    let reach = -1;
+    for (const r of regions) {
+      if (r.start < reach) continue;
+      reach = r.end;
+      outer.push({ ...r, len: visibleLength(clean2.slice(r.start, r.end)) });
     }
-    if (found.length) {
-      candidates = found;
-      break;
-    }
+    let best = outer[0];
+    for (const r of outer) if (r.len > best.len) best = r;
+    const kind = blockKind(best.open);
+    const kept = outer.filter((r) => r === best || blockKind(r.open) === kind);
+    const keptLen = kept.reduce((n, r) => n + r.len, 0);
+    if (keptLen < 500 && keptLen < visibleLength(clean2) * 0.3) return html;
+    if (kept.length === 1) return clean2.slice(best.start, best.end);
+    return kept.map((r) => `<div>${clean2.slice(r.start, r.end)}</div>`).join("\n");
   }
-  if (!candidates.length) return html;
-  let best = candidates[0];
-  let bestLen = visible(best);
-  for (const c of candidates.slice(1)) {
-    const len = visible(c);
-    if (len > bestLen) {
-      best = c;
-      bestLen = len;
-    }
-  }
-  const fullLen = visible(html);
-  if (bestLen < 500 && bestLen < fullLen * 0.3) return html;
-  return best;
+  return html;
 }
 var PDF_URL_RE = /\.pdf($|[?#])/i;
 var PDF_ROUTE_RE = /\/pdf\/[^/?#]+($|[?#])/i;
@@ -1691,8 +2033,8 @@ async function fetchAndExtract(url, opts = {}) {
   const isHtml = /^(?:text\/html|application\/xhtml\+xml)$/.test(mime) || ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(res.body);
   const stripped = isHtml ? htmlToText(opts.fullPage ? res.body : extractMainHtml(res.body), opts) : res.body;
   const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped) : { text: stripped, dropped: 0 };
-  const title = isHtml ? htmlTitle(res.body) : void 0;
-  const canonical = isHtml ? htmlCanonicalUrl(res.body) : void 0;
+  const title = isHtml ? pageTitle(res.body) : void 0;
+  const canonical = isHtml ? absoluteCanonical(htmlCanonicalUrl(res.body), res.url) : void 0;
   const metaDescription = isHtml ? metaDescriptionOf(res.body) : void 0;
   const cut = res.truncated ? `Read only the first ${res.bytesRead} bytes of ${url} (the response size cap), so this text is a prefix.` : void 0;
   return {
@@ -1721,24 +2063,36 @@ async function rescueViaWayback(url, opts = {}) {
   return { text: got.text, title: got.title, snapshotUrl: snap.url, timestamp: String(snap.timestamp ?? "") };
 }
 var JUNK_PATTERNS = [
-  [/\b(accept|manage)\s+(all\s+)?cookies\b/i, "cookie/consent wall"],
-  [/\bwe use cookies\b/i, "cookie/consent wall"],
-  [/\bcookie (policy|settings|consent|preferences)\b/i, "cookie/consent wall"],
-  [/\b(please )?enable javascript\b/i, "JavaScript-required shell"],
-  [/\bjavascript is (disabled|required|not enabled)\b/i, "JavaScript-required shell"],
-  [/\bverify (you are|you're|you are a)\b|\bare you a human\b|\bhuman verification\b/i, "anti-bot interstitial"],
-  [/\baccess denied\b|\battention required\b.*cloudflare|\bunusual traffic\b|\bare you a robot\b/i, "anti-bot interstitial"],
-  [/\benable cookies\b|\bchecking your browser\b/i, "anti-bot interstitial"],
+  [/\b(accept|manage)\s+(all\s+)?cookies\b/i, "cookie/consent wall", "strong"],
+  [/\bwe use cookies\b/i, "cookie/consent wall", "strong"],
+  [/\bcookie (policy|settings|consent|preferences)\b/i, "cookie/consent wall", "weak"],
+  [/\b(accept|reject|allow|decline) all\b/i, "cookie/consent wall", "weak"],
+  [/\b(please )?enable javascript\b/i, "JavaScript-required shell", "strong"],
+  [/\bjavascript is (disabled|required|not enabled)\b/i, "JavaScript-required shell", "strong"],
+  [
+    /\bverify(ing)? (that )?(you are|you're) (a )?(human|not a (ro)?bot)\b|\bare you a (human|robot)\b|\bhuman verification\b/i,
+    "anti-bot interstitial",
+    "strong"
+  ],
+  [/\battention required\b.*cloudflare|\bunusual traffic from your (computer )?network\b|\bchecking your browser\b/i, "anti-bot interstitial", "strong"],
+  // Akamai's and Cloudflare's denials carry an incident reference; without one
+  // the phrase is as likely a permission-error article.
+  [/\baccess denied\b[\s\S]{0,300}?(\breference #|\bray id\b|\bpermission to access\b)/i, "anti-bot interstitial", "strong"],
+  [/\baccess denied\b|\benable cookies\b/i, "anti-bot interstitial", "weak"],
   // FR / DE (the locale layer targets non-EN markets)
-  [/\bnous utilisons des cookies\b|\baccepter (tous )?les cookies\b|\bactiver javascript\b/i, "cookie/consent wall (fr)"],
-  [/\bwir verwenden cookies\b|\bcookies akzeptieren\b|\bjavascript aktivieren\b/i, "cookie/consent wall (de)"]
+  [/\bnous utilisons des cookies\b|\baccepter (tous )?les cookies\b|\bactiver javascript\b/i, "cookie/consent wall (fr)", "strong"],
+  [/\bwir verwenden cookies\b|\bcookies akzeptieren\b|\bjavascript aktivieren\b/i, "cookie/consent wall (de)", "strong"]
 ];
 function looksLikeJunkExtraction(text) {
   const t = text.trim();
   if (t.length >= 2e3) return void 0;
   const head = t.slice(0, 800);
-  for (const [re, reason] of JUNK_PATTERNS) if (re.test(head)) return reason;
-  return void 0;
+  const hits = JUNK_PATTERNS.filter(([re]) => re.test(head));
+  const strong = hits.find(([, , kind]) => kind === "strong");
+  if (!strong) return void 0;
+  if (hits.length >= 2) return strong[1];
+  const prose = t.split("\n").filter((l) => l.trim().length >= 60 && !JUNK_PATTERNS.some(([re]) => re.test(l))).length;
+  return prose < 3 ? strong[1] : void 0;
 }
 var CONSENT_PATTERNS = [
   /\bcookies?\b/i,
@@ -1751,18 +2105,29 @@ var CONSENT_PATTERNS = [
   /privacy (?:policy|preferences|choices)/i,
   /tracking technolog/i,
   /advertising partners/i,
-  /legitimate interest/i
+  /legitimate interest/i,
+  // FR / DE: the locale layer targets those markets, and their consent
+  // managers (Didomi, Usercentrics, OneTrust) speak the local language.
+  /\bconsentement\b/i,
+  /\brgpd\b/i,
+  /\beinwilligung\b/i,
+  /\bdsgvo\b/i
 ];
 var CONSENT_ACTIONS = [
   /\b(?:accept|reject|decline|agree|allow|manage|preferences|settings|choices)\b/i,
   /\b(?:opt[ -]out|we use cookies|this (?:site|website) uses cookies|by continuing)\b/i,
   /\b(?:learn more|privacy policy|cookie policy)\b/i
 ];
+var BANNER_VOICE = /\b(?:we|us|our)\b[^.]{0,60}?\b(?:cookies?|partners|consent|tracking)\b|\bby (?:clicking|continuing|using|browsing)\b|\bthis (?:site|website) uses cookies\b|\bnous (?:utilisons|et nos partenaires)\b|\ben cliquant sur\b|\bwir (?:verwenden|nutzen|setzen|und unsere partner)\b|\bmit (?:dem )?klick auf\b/i;
+var BUTTON_LABEL = /^(?:tout (?:accepter|refuser)|(?:accepter|refuser) tout|accepter et (?:fermer|continuer)|continuer sans accepter|(?:param[ée]trer|g[ée]rer|personnaliser|accepter|refuser) (?:les|mes) cookies|alle (?:cookies )?(?:akzeptieren|ablehnen)|nur (?:notwendige|essenzielle)(?: cookies)?|cookie-einstellungen|einstellungen verwalten|akzeptieren und schlie(?:ß|ss)en)$/i;
+var BUTTON_LENGTH = 40;
+var NOTICE_LENGTH = 400;
 function stripConsentBoilerplate(text) {
   let dropped = 0;
   const kept = text.split("\n").filter((line) => {
-    const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(line) ? 1 : 0), 0);
-    const isBanner = hits >= 2 || hits === 1 && line.trim().length < 120 && CONSENT_ACTIONS.some((re) => re.test(line));
+    const t = line.trim();
+    const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(t) ? 1 : 0), 0);
+    const isBanner = BUTTON_LABEL.test(t) || hits >= 1 && t.length <= BUTTON_LENGTH && (hits >= 2 || CONSENT_ACTIONS.some((re) => re.test(t))) || hits >= 1 && t.length < NOTICE_LENGTH && BANNER_VOICE.test(t);
     if (isBanner) dropped++;
     return !isBanner;
   });
@@ -1811,73 +2176,6 @@ function capExtract(text, depth) {
   const slice = text.slice(0, cap);
   const lastNl = slice.lastIndexOf("\n");
   return (lastNl > cap * 0.6 ? slice.slice(0, lastNl) : slice) + "\n\n\u2026 [truncated]";
-}
-
-// src/url.ts
-var TRACKING_PARAMS = /^(utm_|fbclid$|gclid$|mc_|ref$|ref_src$|ref_url$|spm$|_hsenc$|_hsmi$|igshid$)/i;
-function canonicalizeUrl(raw) {
-  try {
-    const u = new URL(raw.trim());
-    const proto = u.protocol.toLowerCase();
-    const host = u.hostname.toLowerCase().replace(/^www\./, "");
-    let port = u.port;
-    if (proto === "http:" && port === "80" || proto === "https:" && port === "443") port = "";
-    const path = u.pathname.replace(/\/+$/, "");
-    const keep = [];
-    for (const [k, v] of u.searchParams) {
-      if (!TRACKING_PARAMS.test(k)) keep.push([k, v]);
-    }
-    keep.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-    const search2 = keep.length ? "?" + keep.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&") : "";
-    return `${proto}//${host}${port ? ":" + port : ""}${path}${search2}`.replace(/\/$/, "");
-  } catch {
-    return raw.trim().replace(/#.*$/, "").replace(/\/$/, "");
-  }
-}
-function normalizeDoi(doi) {
-  return doi.trim().toLowerCase().replace(/^https?:\/\/(dx\.)?doi\.org\//, "");
-}
-function domainOf(raw) {
-  try {
-    const u = new URL(raw);
-    if (u.protocol === "file:") return LOCAL_FILE_DOMAIN;
-    return u.hostname.toLowerCase().replace(/^www\./, "");
-  } catch {
-    return "";
-  }
-}
-var LOCAL_FILE_DOMAIN = "local file";
-var FNV_OFFSET_HI = 3421674724;
-var FNV_OFFSET_LO = 2216829733;
-var FNV_PRIME_LOW = 435;
-var laneHi = 0;
-var laneLo = 0;
-function fnvMix(s) {
-  let hi = laneHi;
-  let lo = laneLo;
-  for (let i = 0; i < s.length; i++) {
-    lo = (lo ^ s.charCodeAt(i)) >>> 0;
-    const bP = (lo & 65535) * FNV_PRIME_LOW;
-    const aP = (lo >>> 16) * FNV_PRIME_LOW + (bP >>> 16);
-    const carry = aP >>> 16;
-    hi = carry + Math.imul(hi, FNV_PRIME_LOW) + (lo << 8) >>> 0;
-    lo = ((aP & 65535) << 16 | bP & 65535) >>> 0;
-  }
-  laneHi = hi;
-  laneLo = lo;
-}
-function fnv1a64(s) {
-  laneHi = FNV_OFFSET_HI;
-  laneLo = FNV_OFFSET_LO;
-  fnvMix(s);
-  return BigInt(laneHi) << 32n | BigInt(laneLo);
-}
-function fnv1a64Words(pieces, out) {
-  laneHi = FNV_OFFSET_HI;
-  laneLo = FNV_OFFSET_LO;
-  for (const p of pieces) fnvMix(p);
-  out[0] = laneHi;
-  out[1] = laneLo;
 }
 
 // src/rank.ts
@@ -2202,8 +2500,24 @@ function externalHosts(url, text) {
 }
 
 // src/citable.ts
-var API_HOSTS = /* @__PURE__ */ new Set(["eutils.ncbi.nlm.nih.gov", "api.crossref.org", "api.openalex.org", "api.semanticscholar.org", "export.arxiv.org"]);
-var API_PATHS = [/^\/europepmc\/webservices\//i, /^\/search\/publ\/api/i, /^\/api\/(?!.*\.html?$)/i, /\.(fcgi|cgi)$/i];
+var API_HOSTS = /* @__PURE__ */ new Set([
+  "eutils.ncbi.nlm.nih.gov",
+  "api.crossref.org",
+  "api.openalex.org",
+  "api.semanticscholar.org",
+  "export.arxiv.org",
+  "api.github.com",
+  "registry.npmjs.org",
+  "api.stackexchange.com"
+]);
+var API_PATHS = [
+  /^\/europepmc\/webservices\//i,
+  /^\/search\/publ\/api/i,
+  /^\/api\/(?!.*\.html?$)/i,
+  /^\/entrez\/eutils\//i,
+  /^\/pypi\/[^/]+(?:\/[^/]+)?\/json\/?$/i,
+  /^\/wayback\/available\b/i
+];
 var API_FORMATS = /[?&](format|retmode|rettype|output)=(json|xml|text|atom|csv|bibtex)\b/i;
 function isApiEndpoint(url) {
   try {
@@ -2238,8 +2552,9 @@ function isCitableUrl(url) {
   }
 }
 var DOI_RE = /\b(10\.\d{4,9}\/[^\s"'<>()[\],;]+)/;
-var ARXIV_RE = /\barxiv[:\s/]+((?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?\/\d{7})(?:v\d+)?)/i;
+var ARXIV_RE = /\barxiv(?:\.org\/(?:abs|pdf)\/|[:\s/]+)((?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?\/\d{7})(?:v\d+)?)/i;
 var PMID_RE = /\bPMID:?\s*(\d{4,9})\b/i;
+var PMCID_RE = /\b(PMC\d{5,9})\b/;
 var ARXIV_ID_PATH_RE = /\/(\d{4}\.\d{4,5}(?:v\d+)?)(?:$|[/?#])/;
 function urlDeclaresIdentity(url) {
   return DOI_RE.test(url) || ARXIV_ID_PATH_RE.test(url);
@@ -2253,6 +2568,8 @@ function deriveCitableUrl(text, canonical) {
   if (arxiv) return `https://arxiv.org/abs/${arxiv}`;
   const pmid = head.match(PMID_RE)?.[1];
   if (pmid) return `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`;
+  const pmcid = head.match(PMCID_RE)?.[1];
+  if (pmcid) return `https://pmc.ncbi.nlm.nih.gov/articles/${pmcid}/`;
   return void 0;
 }
 
@@ -3029,100 +3346,191 @@ async function fetchRobots(url, opts = {}) {
 }
 
 // src/structured.ts
-var META_TAG2 = /<meta\b[^>]*>/gi;
-var ATTR = (tag, name) => {
-  const re = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i");
-  const m = re.exec(tag);
-  const v = m?.[1] ?? m?.[2] ?? m?.[3];
-  return v ? decodeEntities(v).trim() : void 0;
-};
+var openTag = (name) => new RegExp(`<${name}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>`, "gi");
+function parseJsonLd(raw) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+  }
+  const lenient = raw.replace(/^\s*(?:\/\*\s*<!\[CDATA\[\s*\*\/|\/\/\s*<!\[CDATA\[|<!\[CDATA\[)/, "").replace(/(?:\/\*\s*\]\]>\s*\*\/|\/\/\s*\]\]>|\]\]>)\s*$/, "").replace(/\s+/g, " ").replace(/,(\s*[}\]])/g, "$1");
+  try {
+    return JSON.parse(lenient);
+  } catch {
+    return void 0;
+  }
+}
+function flattenJsonLd(v, out) {
+  if (Array.isArray(v)) for (const x of v) flattenJsonLd(x, out);
+  else if (v && typeof v === "object" && Array.isArray(v["@graph"])) {
+    for (const x of v["@graph"]) out.push(x);
+  } else out.push(v);
+}
 function extractJsonLd(html) {
   const out = [];
-  const re = /<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  const open = openTag("script");
+  const close = closeTagRe("script");
   let m;
-  while (m = re.exec(html)) {
-    const raw = m[1].replace(/^\s*<!--/, "").replace(/-->\s*$/, "").trim();
-    if (!raw) continue;
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object" && Array.isArray(parsed["@graph"])) {
-        out.push(...parsed["@graph"]);
-      } else if (Array.isArray(parsed)) {
-        out.push(...parsed);
-      } else {
-        out.push(parsed);
-      }
-    } catch {
+  while (m = open.exec(html)) {
+    close.lastIndex = open.lastIndex;
+    const c = close.exec(html);
+    if (!c) break;
+    const type = (htmlAttributes(m[0]).get("type") ?? "").split(";")[0].trim().toLowerCase();
+    if (type === "application/ld+json") {
+      const raw = html.slice(open.lastIndex, c.index).replace(/^\s*<!--/, "").replace(/-->\s*$/, "").trim();
+      const parsed = raw ? parseJsonLd(raw) : void 0;
+      if (parsed !== void 0) flattenJsonLd(parsed, out);
     }
+    open.lastIndex = c.index + c[0].length;
+  }
+  return out;
+}
+function metaEntries(html) {
+  const out = [];
+  for (const m of dropElements(html, ["script", "style", "template"]).matchAll(openTag("meta"))) {
+    const attrs = htmlAttributes(m[0]);
+    const key = (attrs.get("property") ?? attrs.get("name") ?? attrs.get("itemprop"))?.trim().toLowerCase();
+    const content = attrs.has("content") ? decodeEntities(attrs.get("content")).trim() : "";
+    if (key && content) out.push([key, content]);
   }
   return out;
 }
 function extractMetaTags(html) {
   const out = /* @__PURE__ */ new Map();
-  META_TAG2.lastIndex = 0;
-  for (const m of html.matchAll(META_TAG2)) {
-    const tag = m[0];
-    const key = (ATTR(tag, "property") ?? ATTR(tag, "name") ?? ATTR(tag, "itemprop"))?.toLowerCase();
-    const content = ATTR(tag, "content");
-    if (key && content && !out.has(key)) out.set(key, content);
-  }
+  for (const [key, content] of metaEntries(html)) if (!out.has(key)) out.set(key, content);
   return out;
 }
-function firstString(v) {
-  if (typeof v === "string") return v.trim() || void 0;
-  if (Array.isArray(v)) {
-    for (const x of v) {
-      const s = firstString(x);
-      if (s) return s;
+var isNode = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+var CHROME_TYPES = /* @__PURE__ */ new Set([
+  "Organization",
+  "Corporation",
+  "NewsMediaOrganization",
+  "WebSite",
+  "BreadcrumbList",
+  "ListItem",
+  "SiteNavigationElement",
+  "WPHeader",
+  "WPFooter",
+  "WPSideBar",
+  "WPAdBlock",
+  "Person",
+  "ImageObject",
+  "SearchAction",
+  "ContactPoint",
+  "PostalAddress"
+]);
+var PAGE_TYPES = /* @__PURE__ */ new Set([
+  "WebPage",
+  "ItemPage",
+  "AboutPage",
+  "CollectionPage",
+  "ContactPage",
+  "ProfilePage",
+  "SearchResultsPage",
+  "CheckoutPage",
+  "QAPage",
+  "FAQPage",
+  "MedicalWebPage"
+]);
+var typesOf = (n) => allStrings(n["@type"]).map((t) => t.slice(Math.max(t.lastIndexOf("/"), t.lastIndexOf(":")) + 1));
+function rank(n) {
+  const types = typesOf(n);
+  if (!types.length) return 1;
+  if (types.some((t) => !CHROME_TYPES.has(t) && !PAGE_TYPES.has(t))) return 3;
+  return types.some((t) => PAGE_TYPES.has(t)) ? 2 : 0;
+}
+function indexById(nodes) {
+  const byId = /* @__PURE__ */ new Map();
+  const visit = (v, depth) => {
+    if (depth > 6) return;
+    if (Array.isArray(v)) {
+      for (const x of v) visit(x, depth + 1);
+      return;
     }
-    return void 0;
-  }
-  if (v && typeof v === "object") return firstString(v.name);
-  return void 0;
+    if (!isNode(v)) return;
+    const id = v["@id"];
+    if (typeof id === "string" && Object.keys(v).length > 1 && !byId.has(id)) byId.set(id, v);
+    for (const x of Object.values(v)) if (typeof x === "object") visit(x, depth + 1);
+  };
+  visit(nodes, 0);
+  return byId;
 }
 function allStrings(v) {
   if (typeof v === "string") return v.trim() ? [v.trim()] : [];
   if (Array.isArray(v)) return v.flatMap(allStrings);
-  if (v && typeof v === "object") return allStrings(v.name);
   return [];
 }
-function pageMetadata(html) {
-  const meta = extractMetaTags(html);
+function firstString(v) {
+  return allStrings(v)[0];
+}
+function pageMetadata(html, opts = {}) {
+  const entries = metaEntries(html);
+  const meta = /* @__PURE__ */ new Map();
+  for (const [key, content] of entries) if (!meta.has(key)) meta.set(key, content);
   const jsonLd = extractJsonLd(html);
   const out = { authors: [], jsonLd };
   const set = (k, v) => {
     if (v !== void 0 && out[k] === void 0) out[k] = v;
   };
-  for (const node of jsonLd) {
-    if (!node || typeof node !== "object") continue;
-    const n = node;
+  const nodes = jsonLd.filter(isNode);
+  const byId = indexById(jsonLd);
+  const deref = (v) => {
+    if (!isNode(v) || typeof v["@id"] !== "string" || "name" in v || "url" in v) return v;
+    return byId.get(v["@id"]) ?? v;
+  };
+  const names = (v) => {
+    if (Array.isArray(v)) return v.flatMap(names);
+    const d = deref(v);
+    return isNode(d) ? allStrings(d.name) : allStrings(d);
+  };
+  const image = (v) => {
+    if (Array.isArray(v)) return v.map(image).find(Boolean);
+    const d = deref(v);
+    return isNode(d) ? firstString(d.url) ?? firstString(d.contentUrl) : firstString(d);
+  };
+  let primary;
+  for (const n of nodes) if (rank(n) > (primary ? rank(primary) : 0)) primary = n;
+  const sources = primary ? [primary, ...nodes.filter((n) => n !== primary && rank(n) === 2)] : [];
+  for (const n of sources) {
     set("type", firstString(n["@type"]));
-    set("title", firstString(n.headline) ?? firstString(n.name));
+    set("title", firstString(n.headline) ?? names(n.name)[0]);
     set("description", firstString(n.description));
     set("publishedAt", firstString(n.datePublished));
     set("modifiedAt", firstString(n.dateModified));
-    set("canonicalUrl", firstString(n.url) ?? firstString(n["@id"]));
-    set("imageUrl", firstString(n.image));
-    set("siteName", firstString(n.publisher));
-    for (const a of allStrings(n.author)) if (!out.authors.includes(a)) out.authors.push(a);
+    set("imageUrl", image(n.image));
+    set("siteName", names(n.publisher)[0]);
+    if (!out.authors.length) out.authors.push(...new Set(names(n.author)));
   }
+  const nameOfA = (...types) => nodes.filter((n) => typesOf(n).some((t) => types.includes(t))).flatMap((n) => names(n.name))[0];
+  set("siteName", nameOfA("WebSite"));
   set("title", meta.get("og:title") ?? meta.get("twitter:title"));
   set("description", meta.get("og:description") ?? meta.get("description") ?? meta.get("twitter:description"));
   set("type", meta.get("og:type"));
   set("siteName", meta.get("og:site_name"));
+  set("siteName", nameOfA("Organization", "NewsMediaOrganization", "Corporation"));
   set("publishedAt", meta.get("article:published_time") ?? meta.get("datepublished") ?? meta.get("citation_publication_date"));
   set("modifiedAt", meta.get("article:modified_time") ?? meta.get("datemodified"));
   set("imageUrl", meta.get("og:image") ?? meta.get("twitter:image"));
-  set("canonicalUrl", meta.get("og:url"));
-  for (const key of ["article:author", "author", "citation_author", "dc.creator"]) {
-    const v = meta.get(key);
-    if (v && !out.authors.includes(v)) out.authors.push(v);
-  }
-  if (out.title === void 0) {
-    const t = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1];
-    if (t) out.title = decodeEntities(t).replace(/\s+/g, " ").trim() || void 0;
+  set("canonicalUrl", htmlCanonicalUrl(html) ?? sources.map((n) => firstString(n.url)).find(Boolean));
+  const authorKeys = /* @__PURE__ */ new Set(["article:author", "author", "citation_author", "dc.creator"]);
+  for (const [key, v] of entries) if (authorKeys.has(key) && !out.authors.includes(v)) out.authors.push(v);
+  set("title", htmlTitle(html));
+  if (opts.baseUrl) {
+    for (const k of ["canonicalUrl", "imageUrl"]) {
+      if (out[k] === void 0) continue;
+      const abs = resolveUrl(out[k], opts.baseUrl);
+      if (abs) out[k] = abs;
+      else delete out[k];
+    }
   }
   return out;
+}
+function resolveUrl(url, base) {
+  try {
+    const abs = new URL(url, base);
+    return abs.protocol === "http:" || abs.protocol === "https:" ? abs.href : void 0;
+  } catch {
+    return void 0;
+  }
 }
 
 // src/feed.ts
@@ -4373,80 +4781,151 @@ async function hasChanged(url, previous, opts = {}) {
 }
 
 // src/tables.ts
-function decodeEntities2(s) {
-  return s.replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(Number.parseInt(h, 16))).replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d))).replace(/&nbsp;/gi, " ").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&amp;/gi, "&");
+function fragmentText(html) {
+  return decodeEntities(html.replace(TAG_RE, (tag) => INLINE_TAGS.has(tagName(tag)) ? "" : " ").replace(LOOSE_TAG_RE, " "));
 }
-function cellText(html) {
-  return decodeEntities2(
-    html.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]*>/g, "").replace(/\s+/g, " ")
-  ).trim();
-}
-function intAttr(tag, name) {
-  const m = new RegExp(`\\b${name}\\s*=\\s*["']?(\\d+)`, "i").exec(tag);
-  const n = m ? Number(m[1]) : 1;
+var collapse = (s) => s.replace(/\s+/g, " ").trim();
+function spanAttr(attrs, name) {
+  const n = Number.parseInt(attrs.get(name) ?? "", 10);
   return Number.isFinite(n) && n >= 1 ? Math.min(n, 100) : 1;
 }
-function parseRow(rowHtml) {
-  const cells = [];
-  for (const m of rowHtml.matchAll(/<(t[hd])\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi)) {
-    cells.push({
-      text: cellText(m[3]),
-      colspan: intAttr(m[2], "colspan"),
-      rowspan: intAttr(m[2], "rowspan"),
-      header: m[1].toLowerCase() === "th"
-    });
-  }
-  return cells;
-}
+var MAX_SLOTS = 1e6;
 function expand(rows) {
-  const grid = [];
-  const carried = /* @__PURE__ */ new Map();
-  rows.forEach((cells, r) => {
-    const out = [];
+  const grid = rows.map(() => []);
+  let slots = 0;
+  for (let r = 0; r < rows.length; r++) {
+    const out = grid[r];
     let c = 0;
-    const skipCarried = () => {
-      while (carried.has(`${r}:${c}`)) {
-        out[c] = carried.get(`${r}:${c}`);
-        c++;
-      }
-      return c;
-    };
-    for (const cell of cells) {
-      const startCol = skipCarried();
-      for (let i = 0; i < cell.colspan; i++) {
-        out[startCol + i] = cell.text;
-        for (let j = 1; j < cell.rowspan; j++) carried.set(`${r + j}:${startCol + i}`, cell.text);
-      }
-      c = startCol + cell.colspan;
+    for (const cell of rows[r]) {
+      while (out[c] !== void 0) c++;
+      const down = Math.min(cell.rowspan, rows.length - r);
+      slots += down * cell.colspan;
+      if (slots > MAX_SLOTS) return void 0;
+      for (let j = 0; j < down; j++) for (let i = 0; i < cell.colspan; i++) grid[r + j][c + i] = cell.text;
+      c += cell.colspan;
     }
-    skipCarried();
-    grid.push(out);
-  });
+  }
   const width = grid.reduce((w, row) => Math.max(w, row.length), 0);
+  if (width * grid.length > MAX_SLOTS) return void 0;
   return grid.map((row) => Array.from({ length: width }, (_, i) => row[i] ?? ""));
 }
 function extractTables(html) {
-  const tables = [];
-  for (const m of html.matchAll(/<table\b[^>]*>([\s\S]*?)<\/table\s*>/gi)) {
-    const inner = m[1];
-    const caption = /<caption\b[^>]*>([\s\S]*?)<\/caption\s*>/i.exec(inner);
-    const rawRows = [];
-    for (const r of inner.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr\s*>/gi)) {
-      const cells = parseRow(r[1]);
-      if (cells.length) rawRows.push(cells);
+  const src = dropElements(html, NOT_RENDERED, RAW_TEXT_ELEMENTS);
+  const tag = /<(\/?)(table|caption|thead|tbody|tfoot|tr|td|th)(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
+  const done = [];
+  const stack = [];
+  let order = 0;
+  let last = 0;
+  let buried = 0;
+  let m;
+  while (m = tag.exec(src)) {
+    const top = stack[stack.length - 1];
+    if (top) top.text(src.slice(last, m.index));
+    last = tag.lastIndex;
+    const closing = m[1] === "/";
+    const name = m[2].toLowerCase();
+    if (top && (buried || name === "table" && !closing && stack.length >= MAX_DEPTH)) {
+      if (name === "table") buried += closing ? -1 : 1;
+      top.text(" ");
+      continue;
     }
-    if (!rawRows.length) continue;
-    const grid = expand(rawRows);
-    const headerIndex = rawRows.findIndex((cells) => cells.every((c) => c.header));
-    const headers = headerIndex === 0 ? grid[0] : [];
-    const rows = headerIndex === 0 ? grid.slice(1) : grid;
-    if (!rows.length) continue;
-    tables.push({ ...caption ? { caption: cellText(caption[1]) } : {}, headers, rows });
+    if (name === "table") {
+      if (!closing) stack.push(new OpenTable(order++));
+      else if (top) closeTable(stack, done);
+      continue;
+    }
+    if (!top) continue;
+    if (name === "td" || name === "th") {
+      if (closing) top.endCell();
+      else top.startCell(name === "th", htmlAttributes(m[0]));
+    } else if (name === "tr") {
+      top.endRow();
+      if (!closing) top.startRow();
+    } else if (name === "caption") {
+      top.endRow();
+      top.inCaption = !closing;
+    } else {
+      top.endRow();
+      top.inHead = name === "thead" && !closing;
+    }
   }
-  return tables;
+  while (stack.length) closeTable(stack, done);
+  return done.sort((a, b) => a.order - b.order).map((d) => d.table);
+}
+var NOT_RENDERED = ["script", "style", "template", "svg", "select", "datalist"];
+var MAX_DEPTH = 8;
+var OpenTable = class {
+  constructor(order) {
+    this.order = order;
+  }
+  order;
+  rows = [];
+  caption = [];
+  inCaption = false;
+  inHead = false;
+  row;
+  cell;
+  /** Text between two table tags: it belongs to the open cell, else the caption. */
+  text(fragment) {
+    if (this.cell) this.cell.parts.push(fragmentText(fragment));
+    else if (this.inCaption) this.caption.push(fragmentText(fragment));
+  }
+  /** A nested table's text, already clean, joins the cell that holds it. */
+  nested(text) {
+    this.cell?.parts.push(` ${text} `);
+  }
+  startRow() {
+    this.inCaption = false;
+    this.row = { cells: [], head: this.inHead };
+  }
+  startCell(header2, attrs) {
+    this.endCell();
+    if (!this.row) this.startRow();
+    this.cell = { parts: [], header: header2, colspan: spanAttr(attrs, "colspan"), rowspan: spanAttr(attrs, "rowspan") };
+  }
+  endCell() {
+    if (!this.cell || !this.row) return;
+    const { parts, header: header2, colspan, rowspan } = this.cell;
+    this.row.cells.push({ text: collapse(parts.join("")), header: header2, colspan, rowspan });
+    this.cell = void 0;
+  }
+  endRow() {
+    this.endCell();
+    if (this.row?.cells.length) this.rows.push(this.row);
+    this.row = void 0;
+  }
+};
+function closeTable(stack, done) {
+  const t = stack.pop();
+  t.endRow();
+  const caption = collapse(t.caption.join(""));
+  const table = buildTable(t.rows, caption);
+  if (table) done.push({ order: t.order, table });
+  const flat = [caption, ...t.rows.flatMap((r) => r.cells.map((c) => c.text))].filter(Boolean).join(" ");
+  stack[stack.length - 1]?.nested(flat);
+}
+function buildTable(rows, caption) {
+  if (!rows.length) return void 0;
+  const grid = expand(rows.map((r) => r.cells));
+  if (!grid) return void 0;
+  let headers = [];
+  let body = grid;
+  if (rows.some((r) => r.head)) {
+    const head = grid.filter((_, i) => rows[i].head);
+    headers = head[0].map((_, c) => [...new Set(head.map((r) => r[c]).filter(Boolean))].join(" "));
+    body = grid.filter((_, i) => !rows[i].head);
+  } else if (isHeaderRow(rows[0].cells)) {
+    headers = grid[0];
+    body = grid.slice(1);
+  }
+  if (!body.length) return void 0;
+  return { ...caption ? { caption } : {}, headers, rows: body };
+}
+function isHeaderRow(cells) {
+  return cells.some((c) => c.header) && cells.every((c) => c.header || !c.text);
 }
 function tableToMarkdown(table) {
-  const width = Math.max(table.headers.length, ...table.rows.map((r) => r.length), 1);
+  const width = table.rows.reduce((w, r) => Math.max(w, r.length), Math.max(table.headers.length, 1));
   const esc = (s) => s.replace(/\|/g, "\\|");
   const line = (cells) => `| ${Array.from({ length: width }, (_, i) => esc(cells[i] ?? "")).join(" | ")} |`;
   const out = [];
@@ -4789,7 +5268,7 @@ async function hybridSearch(question, docs, opts = {}) {
 }
 
 // src/cite.ts
-var TOKEN_RE2 = /\[([^\]\n]+)\](?!\()/g;
+var TOKEN_RE3 = /\[([^\]\n]+)\](?!\()/g;
 var SOURCE_TOKEN = /^S\d+$/;
 var EVIDENCE_TOKEN = /^E\d+$/;
 var FILE_LINE_TOKEN = /^(.+?):(\d+)(?:-(\d+))?$/;
@@ -4957,7 +5436,7 @@ function unitTexts(unit) {
 function citationTokensIn(text, isCitation) {
   const masked = stripInlineCode(text);
   const out = [];
-  for (const m of masked.matchAll(TOKEN_RE2)) {
+  for (const m of masked.matchAll(TOKEN_RE3)) {
     const tok = m[1].trim();
     if (isCitation(tok) && !out.includes(tok)) out.push(tok);
   }
@@ -4966,7 +5445,7 @@ function citationTokensIn(text, isCitation) {
 function bracketedTokensIn(text) {
   const masked = stripInlineCode(text);
   const out = [];
-  for (const m of masked.matchAll(TOKEN_RE2)) {
+  for (const m of masked.matchAll(TOKEN_RE3)) {
     const tok = m[1].trim();
     if (!out.includes(tok)) out.push(tok);
   }
@@ -4980,7 +5459,7 @@ function collectCitations(text, isCitation, opts = {}) {
     }
   }
   const all = [];
-  for (const m of text.matchAll(TOKEN_RE2)) {
+  for (const m of text.matchAll(TOKEN_RE3)) {
     const tok = m[1].trim();
     if (isCitation(tok) && !all.includes(tok)) all.push(tok);
   }
@@ -5932,6 +6411,7 @@ export {
   ASSUMED_HTTP_PROTOCOL,
   BATCH_SIZE,
   COMPOSE_YAML,
+  CP1252_C1,
   DEAD_LINK_STATUS,
   DEFAULT_MAX_RESPONSE_BYTES2 as DEFAULT_MAX_RESPONSE_BYTES,
   DOC_EXTENSIONS,
@@ -5964,7 +6444,7 @@ export {
   SMALL_WORKLIST,
   SOURCE_TOKEN,
   STACK_SERVICES,
-  TOKEN_RE2 as TOKEN_RE,
+  TOKEN_RE3 as TOKEN_RE,
   ToolError,
   UsageError,
   WORKFLOW_FORBIDDEN,

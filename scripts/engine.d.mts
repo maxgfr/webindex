@@ -301,6 +301,23 @@ interface RunResult {
 declare function runWithInput(cmd: string, args: string[], input: Buffer, timeoutMs: number): Promise<RunResult>;
 
 /**
+ * Decode named and decimal/hex numeric character references, in ONE
+ * non-rescanning pass.
+ *
+ * The pass count is the whole design. Decoding numeric refs and then walking the
+ * named table with split/join re-reads its own output, so `&amp;lt;` — which is
+ * how a document writes the literal text "&lt;" — becomes "&lt;" and then "<".
+ * The page said one thing and the extract says another, which for a page
+ * documenting markup is most of its content. One pass cannot do that: each
+ * reference is replaced exactly once, from the original text.
+ *
+ * Names are matched case-SENSITIVELY, because case is meaningful here: `&dagger;`
+ * is † and `&Dagger;` is ‡. An unknown name is left exactly as written rather
+ * than guessed at or blanked.
+ */
+declare function decodeEntities(s: string): string;
+
+/**
  * A realistic desktop-browser User-Agent. Several keyless web endpoints (DDG,
  * Mojeek) serve 403 or empty to obvious bot UAs, so scrapers default to this.
  * Override with `<PREFIX>_UA`.
@@ -424,28 +441,23 @@ declare function httpJson(method: string, url: string, body?: unknown, opts?: {
     bytesRead?: number;
     truncated?: boolean;
 }>;
-/**
- * Decode the common named entities plus decimal/hex numeric references, in ONE
- * non-rescanning pass.
- *
- * The pass count is the whole design. Decoding numeric refs and then walking the
- * named table with split/join re-reads its own output, so `&amp;lt;` — which is
- * how a document writes the literal text "&lt;" — becomes "&lt;" and then "<".
- * The page said one thing and the extract says another, which for a page
- * documenting markup is most of its content. One pass cannot do that: each
- * reference is replaced exactly once, from the original text.
- *
- * Names are matched case-SENSITIVELY, because case is meaningful here: `&dagger;`
- * is † and `&Dagger;` is ‡. An unknown name is left exactly as written rather
- * than guessed at or blanked.
- */
-declare function decodeEntities(s: string): string;
+
 declare function cleanInline(s: string): string;
 declare function htmlToText(html: string, opts?: {
     fullPage?: boolean;
 }): string;
 declare function htmlTitle(html: string): string | undefined;
 declare function htmlCanonicalUrl(html: string): string | undefined;
+/**
+ * The main content region of `html`, or `html` itself when none is found with
+ * confidence.
+ *
+ * Candidates are found and measured on the page WITHOUT its comments, scripts,
+ * styles, templates and SVGs, and a region is returned from that cleaned page.
+ * Inline scripts count as characters but are not text: a sidebar holding a chat
+ * widget's JSON outscored the article, and a `__NEXT_DATA__` blob outside
+ * `<main>` inflated the page until the size gate refused the real region.
+ */
 declare function extractMainHtml(html: string): string;
 declare const PDF_URL_RE: RegExp;
 /**
@@ -547,10 +559,18 @@ declare function looksLikeJunkExtraction(text: string): string | undefined;
 /**
  * Drop consent-banner lines from extracted text, and say how many went.
  *
- * Deliberately conservative: a line goes only on two distinct pattern hits, or
- * on one hit when the line is short and reads as a consent action or notice
- * ("Accept all cookies"). Prose that merely mentions cookies once stays —
- * this must never quietly delete the paragraph someone wanted to cite.
+ * Deliberately conservative, because this must never quietly delete the
+ * paragraph someone wanted to cite. A line goes when it is:
+ *
+ * - a known FR/DE button label, the whole line;
+ * - button-length and either names two consent topics ("Accept all cookies")
+ *   or names one next to a consent action ("Cookie settings");
+ * - a notice in the banner's own voice ("We use cookies…", "By clicking…")
+ *   that names a consent topic.
+ *
+ * Counting topic words alone is not enough on a longer line: an article about
+ * the GDPR names two of them per sentence, and a recipe says "allow the cookies
+ * to cool".
  */
 declare function stripConsentBoilerplate(text: string): {
     text: string;
@@ -817,6 +837,12 @@ declare function excerptWindows(text: string, question: string | string[], opts?
  * `max` is a parameter because the two uses want different lengths — a repo
  * identity is short and a research question is not — and truncating a question
  * at a repo's length collides distinct runs.
+ *
+ * A slug that had to drop letters (anything outside ASCII) or be cut at `max`
+ * ends in eight hex digits of a hash of the whole input. Without them
+ * `file:///srv/git/项目` and `file:///srv/git/文档` were both `file-srv-git`,
+ * and the second repository was handed the first one's checkout. An ASCII
+ * input that fits keeps its readable name as it always had.
  */
 declare function slugify(input: string, opts?: {
     max?: number;
@@ -1037,7 +1063,7 @@ declare function urlDeclaresIdentity(url: string): boolean;
  *
  *   1. the canonical link the page declares (`<link rel=canonical>` / `og:url`),
  *   2. a DOI — the identifier publishers agree on,
- *   3. an arXiv id, 4. a PMID.
+ *   3. an arXiv id, 4. a PMID, 5. a PMC id.
  *
  * Returns undefined when the payload names no document, which is the honest
  * answer: the caller then refuses or asks the agent for the page.
@@ -1394,6 +1420,7 @@ declare function decodeBody(bytes: Buffer, contentType?: string): string;
 declare function decodeLocal(bytes: Buffer, opts?: {
     sniffHtmlCharset?: boolean;
 }): string;
+declare const CP1252_C1: readonly number[];
 
 interface RobotsRule {
     allow: boolean;
@@ -1458,21 +1485,37 @@ interface PageMetadata {
 /**
  * Every `<script type="application/ld+json">` block that parses.
  *
- * A block that does not parse is skipped rather than thrown: malformed JSON-LD
- * is common (trailing commas, templating artefacts, HTML comments wrapped around
- * it) and must never cost the caller the rest of the page.
+ * A block that does not parse, even leniently, is skipped rather than thrown:
+ * malformed JSON-LD is common and must never cost the caller the rest of the
+ * page. The type may be unquoted or carry a charset parameter.
+ *
+ * One forward pass: each script's close is searched from its opener, and a
+ * script that never closes ends the scan, since nothing after it can close
+ * either. A lazy `[\s\S]*?</script>` per opener re-read the rest of the page
+ * from every unclosed one.
  */
 declare function extractJsonLd(html: string): unknown[];
-/** Every `<meta>` name/property and its content, lower-cased keys. */
+/** Every `<meta>` name/property and its content, lower-cased keys; the first of a repeated key wins. */
 declare function extractMetaTags(html: string): Map<string, string>;
 /**
  * What a page says about itself, merged from JSON-LD and its meta tags.
  *
  * JSON-LD wins on conflict: OpenGraph is written for social-preview cards and is
  * routinely stale or templated, while JSON-LD is what the site feeds search
- * engines and tends to be generated from the real record.
+ * engines and tends to be generated from the real record. But only the JSON-LD
+ * that describes THIS page: the primary entity is the first node presenting
+ * something (an Article, a Product, a Recipe…), else the page node, and only
+ * then site chrome. Taking every field from whichever node came first reported
+ * a news story as the newspaper's Organization block, titled with its name.
+ *
+ * The canonical URL is the page's own `<link rel="canonical">`, then `og:url`,
+ * then the JSON-LD `url` — never an `@id`, which is an identifier such as
+ * "…/post-slug/#article", not an address. With `baseUrl` (the address the page
+ * was fetched from), relative canonical and image URLs are resolved against it.
  */
-declare function pageMetadata(html: string): PageMetadata;
+declare function pageMetadata(html: string, opts?: {
+    baseUrl?: string;
+}): PageMetadata;
 
 interface FeedItem {
     title?: string;
@@ -2032,7 +2075,7 @@ declare function hasChanged(url: string, previous?: Pick<Fingerprint, "etag" | "
 interface Table {
     /** The `<caption>`, when there is one. */
     caption?: string;
-    /** Header cells, from `<thead>` or the first row of `<th>`. Empty when the table declares none. */
+    /** Header cells, from `<thead>` or a first row of `<th>`. Empty when the table declares none. */
     headers: string[];
     /** Body rows, each padded to the widest row so a column index means one thing. */
     rows: string[][];
@@ -2042,7 +2085,8 @@ interface Table {
  *
  * A table with no data rows is dropped: a layout table used for positioning is
  * still common on older sites, and returning it as data is a false positive a
- * caller has no way to filter.
+ * caller has no way to filter. A table nested in another's cell is reported on
+ * its own, and its text also stays in the cell that holds it.
  */
 declare function extractTables(html: string): Table[];
 /**
@@ -3013,4 +3057,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ChangeVerdict, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type Fingerprint, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type Table, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, awaitHostSlot, backOffHost, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, contentHash, cosine, crawlConcurrency, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, decodeLocal, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, extractTables, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, fingerprint, firecrawlBase, firecrawlIsExplicit, fnv1a64, fnv1a64Words, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, hasChanged, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, looksLikeChallenge, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOcrTools, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, tableToMarkdown, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, CP1252_C1, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ChangeVerdict, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type Fingerprint, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type Table, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, awaitHostSlot, backOffHost, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, contentHash, cosine, crawlConcurrency, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, decodeLocal, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, extractTables, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, fingerprint, firecrawlBase, firecrawlIsExplicit, fnv1a64, fnv1a64Words, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, hammingDistance, hasChanged, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, looksLikeChallenge, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOcrTools, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, tableToMarkdown, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };
