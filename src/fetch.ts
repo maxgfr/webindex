@@ -1140,7 +1140,7 @@ export async function fetchAndExtract(
       return {
         text: fc.data.markdown,
         title: fc.data.title,
-        finalUrl: fc.data.sourceURL || url,
+        finalUrl: fc.data.finalUrl || url,
         status: fc.data.statusCode ?? 200,
         extractor: "firecrawl",
       };

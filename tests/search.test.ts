@@ -277,6 +277,27 @@ describe("search", () => {
     expect(r.notes.join(" ")).toContain("SearXNG returned no results");
   });
 
+  it("holds Firecrawl's hits to the limit, deduped, and asks it in the caller's language", async () => {
+    // The other rungs trim and canonical-dedupe; Firecrawl's hits came back
+    // as-is, twice the limit with a tracking-parameter duplicate among them.
+    const fc = "http://fc-trim.test";
+    const spy = installFetchMock((url) =>
+      url.includes("/search")
+        ? {
+            body: JSON.stringify({
+              success: true,
+              data: { web: ["https://a.test/1", "https://a.test/1?utm_source=x", "https://a.test/2", "https://a.test/3"].map((u) => ({ url: u, title: u })) },
+            }),
+            contentType: "application/json",
+          }
+        : { body: "ok" },
+    );
+    const r = await search("q", { firecrawl: fc, engines: [], limit: 2, lang: "fr-FR" });
+    expect(r.hits.map((h) => h.url)).toEqual(["https://a.test/1", "https://a.test/2"]);
+    const body = JSON.parse(String((spy.mock.calls.find((c) => String(c[0]).includes("/search"))![1] as RequestInit).body));
+    expect(body).toMatchObject({ lang: "fr", country: "fr", limit: 2 });
+  });
+
   it("distinguishes 'nothing found' from 'nothing running'", async () => {
     // Both produce zero hits. Conflating them makes a tool report an empty web
     // when the real answer is that the user never started the stack.

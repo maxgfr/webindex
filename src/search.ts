@@ -343,8 +343,18 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
 
   // searchViaFirecrawl runs its own probe and reports why it could not, so
   // there is no second copy of that logic here.
-  const fc = await searchViaFirecrawl(q, opts.limit ?? 10, opts);
-  const hits: SearchHit[] = (fc.hits ?? []).map((h) => ({ url: h.url, title: h.title, snippet: h.description, via: "firecrawl" as const }));
+  const limit = Math.max(1, opts.limit ?? 10);
+  const fc = await searchViaFirecrawl(q, limit, { firecrawl: opts.firecrawl, lang: opts.lang, region: opts.region });
+  // Held to the same rules as every other rung: canonical dedupe, then the limit.
+  const seen = new Set<string>();
+  const hits: SearchHit[] = [];
+  for (const h of fc.hits ?? []) {
+    const key = canonicalizeUrl(h.url);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    hits.push({ url: h.url, title: h.title, snippet: h.description, via: "firecrawl" });
+    if (hits.length >= limit) break;
+  }
   if (fc.why) notes.push(fc.why);
   rungs.push(report("firecrawl", firecrawlOutcome(fc), hits.length, fc.why));
   if (!hits.length) notes.push(closingNote(rungs));

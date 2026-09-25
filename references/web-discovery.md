@@ -15,8 +15,16 @@ parts.
 | **Mojeek** (`mojeek`) | nothing | Its **own crawler and index**, not a Bing/Google reseller. It answers when the DDG family has nothing. |
 | **Firecrawl** | the local container | Last, because its keyless `/search` delegates to SearXNG anyway — reaching for it early pays for a browser stack to arrive at the same index. |
 
-`--engine <name>` pins one rung. `--engine off` (or `WEBINDEX_ENGINES=off`)
-disables the keyless rungs entirely.
+`--engine <name>` restricts the keyless rung to that one engine; SearXNG and
+Firecrawl still run before and after it. `--engine off` (or
+`WEBINDEX_ENGINES=off`) disables the keyless rungs entirely.
+
+Firecrawl's `/search` is held to the same rules as the other rungs: the limit is
+kept inside the 1–100 it accepts, its hits are deduped and trimmed, and `--lang`
+and `--region` are sent as its `lang` and `country` (without them it answers in
+US English). An instance that only serves `/v1` is asked without the v2-only
+`sources` field, and a request it rejects says so, with its reason, instead of
+calling it unreachable.
 
 SearXNG and Firecrawl are probed before they are asked. On the localhost
 defaults the probe checks it is really them — SearXNG's `/healthz` answers `OK`,

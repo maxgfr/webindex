@@ -62,6 +62,16 @@ describe("mapScrapeResponse", () => {
     expect(r!.statusCode).toBeUndefined();
   });
 
+  it("takes metadata.url as where the page ended up, and sourceURL as what was asked", () => {
+    // Firecrawl sets `sourceURL` to the URL it was GIVEN and `url` to the one
+    // the browser landed on (scrapeURL/index.ts). Read the other way round,
+    // every page it followed a redirect for was cited at its old address.
+    const r = mapScrapeResponse({ success: true, data: { markdown: "# x", metadata: { sourceURL: "http://old.test/a", url: "https://new.test/b" } } });
+    expect(r!.finalUrl).toBe("https://new.test/b");
+    expect(r!.sourceURL).toBe("http://old.test/a");
+    expect(mapScrapeResponse({ success: true, data: { markdown: "# x", metadata: { sourceURL: "https://only.test/" } } })!.finalUrl).toBe("https://only.test/");
+  });
+
   it("returns null on success:false, missing data, or empty markdown", () => {
     expect(mapScrapeResponse({ success: false, data: { markdown: "# x" } })).toBeNull();
     expect(mapScrapeResponse({ success: true })).toBeNull();
@@ -220,6 +230,28 @@ describe("scrapeViaFirecrawl", () => {
     expect((await scrapeViaFirecrawl("https://x.test/a", { firecrawl: empty })).why).toMatch(/no markdown/i);
   });
 
+  it("stops asking an instance that died mid-run, instead of paying its timeout on every page", async () => {
+    const base = nextBase();
+    let posts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (u: string) => {
+        if (String(u).includes("/scrape")) {
+          posts++;
+          throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET", message: "socket hang up" } });
+        }
+        return new Response('{"message":"Firecrawl API"}', { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+    const first = await scrapeViaFirecrawl("https://x.test/a", { firecrawl: base });
+    expect(first.why).toMatch(/socket hang up/);
+    expect(first.why).toMatch(/fell back to the built-in extractor/);
+    expect(posts).toBe(1); // not retried: the built-in extractor is the retry
+    const second = await scrapeViaFirecrawl("https://x.test/b", { firecrawl: base });
+    expect(posts).toBe(1);
+    expect(second.why).toMatch(/not reachable/i);
+  });
+
   it("sends a bearer only when <PREFIX>_FIRECRAWL_KEY is set", async () => {
     const base = nextBase();
     const spy = installFetchMock((url) =>
@@ -242,6 +274,18 @@ describe("scrapeViaFirecrawl", () => {
 
 describe("fetchAndExtract — the extraction seam", () => {
   const PAGE = `<html><head><title>Native</title></head><body><article><p>${"Built-in reader prose about token buckets. ".repeat(6)}</p></article></body></html>`;
+
+  it("gives the post-redirect URL as finalUrl", async () => {
+    const base = nextBase();
+    const scraped = {
+      success: true,
+      data: { markdown: "# Moved\n\nThe page after the redirect.", metadata: { sourceURL: "http://old.test/a", url: "https://new.test/b", statusCode: 200 } },
+    };
+    installFetchMock((url) => (url.includes("/scrape") ? { body: JSON.stringify(scraped), contentType: "application/json" } : { body: "ok" }));
+    const r = await fetchAndExtract("http://old.test/a", { firecrawl: base });
+    expect(r.extractor).toBe("firecrawl");
+    expect(r.finalUrl).toBe("https://new.test/b");
+  });
 
   it("prefers Firecrawl for HTML and marks the extractor", async () => {
     const base = nextBase();
@@ -344,7 +388,7 @@ describe("searchViaFirecrawl", () => {
     expect(r.hits).toHaveLength(1);
     expect(r.hits![0]!.url).toBe("https://a.test/1");
     const call = spy.mock.calls.find((c) => String(c[0]).includes("/search"))!;
-    expect(JSON.parse((call[1] as RequestInit).body as string)).toMatchObject({ query: "rate limiting", limit: 5, sources: ["web"] });
+    expect(JSON.parse((call[1] as RequestInit).body as string)).toMatchObject({ query: "rate limiting", limit: 5, sources: ["web"], timeout: 30_000 });
   });
 
   it("explains a disabled instance instead of returning hits", async () => {
@@ -376,5 +420,80 @@ describe("searchViaFirecrawl", () => {
     );
     const r = await searchViaFirecrawl("x", 5, { firecrawl: base });
     expect(r.why).toMatch(/rate-limited \(HTTP 429\)/);
+  });
+
+  const json = (body: unknown, status = 200) => ({ status, body: JSON.stringify(body), contentType: "application/json" });
+  const bodyOf = (spy: ReturnType<typeof installFetchMock>, path: string) =>
+    JSON.parse(String((spy.mock.calls.find((c) => String(c[0]).includes(path))![1] as RequestInit).body));
+
+  it("drops `sources` on the /v1 fallback, whose strict schema rejects it", async () => {
+    // v1's search schema is a strict object with no `sources` key: resending
+    // the v2 body there made every v1-only instance answer 400.
+    const base = nextBase();
+    const spy = installFetchMock((url, init) => {
+      if (url.includes("/v2/search")) return { status: 404, body: "Cannot POST /v2/search" };
+      if (url.includes("/v1/search")) {
+        return "sources" in JSON.parse(String(init?.body))
+          ? json({ success: false, error: "Bad Request: Unrecognized key(s) in object: 'sources'" }, 400)
+          : json({ success: true, data: [{ url: "https://a.test/1", title: "A", description: "d" }] });
+      }
+      return { body: "ok" };
+    });
+    const r = await searchViaFirecrawl("x", 5, { firecrawl: base });
+    expect(r.hits?.map((h) => h.url)).toEqual(["https://a.test/1"]);
+    expect(bodyOf(spy, "/v2/search").sources).toEqual(["web"]);
+  });
+
+  it("says a reachable instance REJECTED the request, with its reason", async () => {
+    const base = nextBase();
+    installFetchMock((url) => (url.includes("/search") ? json({ success: false, error: "Unauthorized: Invalid token" }, 401) : { body: "ok" }));
+    const r = await searchViaFirecrawl("x", 5, { firecrawl: base });
+    expect(r.why).toMatch(/rejected the request \(HTTP 401: Unauthorized: Invalid token\)/);
+    expect(r.why).not.toMatch(/unreachable/);
+    expect(r.status).toBe(401);
+  });
+
+  it("reports a 200 that says success:false instead of calling it an empty web", async () => {
+    const base = nextBase();
+    installFetchMock((url) => (url.includes("/search") ? json({ success: false, error: "All search engines failed" }) : { body: "ok" }));
+    const r = await searchViaFirecrawl("x", 5, { firecrawl: base });
+    expect(r.hits).toBeUndefined();
+    expect(r.why).toContain("All search engines failed");
+  });
+
+  it("keeps the limit inside Firecrawl's 1–100 and carries the locale", async () => {
+    // Firecrawl requires an integer 1–100, so 0 or 150 turned the rung into a
+    // 400; and with no `lang`/`country` it answers in US English.
+    const base = nextBase();
+    const spy = installFetchMock((url) => (url.includes("/search") ? json({ success: true, data: { web: [] } }) : { body: "ok" }));
+    await searchViaFirecrawl("x", 0, { firecrawl: base, lang: "fr-FR" });
+    expect(bodyOf(spy, "/search")).toMatchObject({ limit: 1, lang: "fr", country: "fr" });
+    spy.mockClear();
+    await searchViaFirecrawl("x", 150, { firecrawl: base });
+    const plain = bodyOf(spy, "/search");
+    expect(plain.limit).toBe(100);
+    expect(plain).not.toHaveProperty("lang");
+    expect(plain).not.toHaveProperty("country");
+    spy.mockClear();
+    await searchViaFirecrawl("x", 5, { firecrawl: base, lang: "es", region: "419" });
+    expect(bodyOf(spy, "/search")).not.toHaveProperty("country"); // not a country code
+  });
+
+  it("marks an instance that stopped answering down", async () => {
+    const base = nextBase();
+    let searches = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (u: string) => {
+        if (String(u).includes("/search")) {
+          searches++;
+          throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET", message: "socket hang up" } });
+        }
+        return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+    expect((await searchViaFirecrawl("x", 5, { firecrawl: base })).why).toMatch(/socket hang up/);
+    expect((await searchViaFirecrawl("x", 5, { firecrawl: base })).why).toMatch(/not reachable/);
+    expect(searches).toBe(1);
   });
 });

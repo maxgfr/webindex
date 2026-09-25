@@ -1,8 +1,9 @@
 import { brand, env, envName } from "./brand.js";
 import { cleanInline, httpJson } from "./fetch.js";
+import { baseLang, resolveRegion } from "./locale.js";
 
 // Self-hosted Firecrawl client — a content-CLEANING layer in front of the
-// built-in regex extractor, plus an explicit search backend.
+// built-in regex extractor, plus the last rung of the search cascade.
 //
 // Firecrawl fetches a page with a real headless browser and returns
 // main-content markdown. That beats `htmlToText(extractMainHtml(html))` on
@@ -17,11 +18,10 @@ import { cleanInline, httpJson } from "./fetch.js";
 // Everything here degrades to a NOTE, never a throw: when Firecrawl is absent
 // the caller keeps using the built-in extractor exactly as before.
 
-// The docker-compose stack publishes the API on this port. Unlike SearXNG —
-// which is deliberately opt-in so a fresh install never pays a dead-localhost
-// timeout — Firecrawl gets a default base, because it is protected by the
-// memoised 2s availability probe below: one cheap connection-refused per
-// process, then every later call short-circuits.
+// The docker-compose stack publishes the API on this port. Like SearXNG's
+// localhost:8888, it is a default base rather than opt-in, because it is
+// protected by the memoised 2s availability probe below: an absent instance
+// costs one cheap connection-refused, then later calls short-circuit.
 export const FIRECRAWL_DEFAULT_BASE = "http://localhost:3002";
 
 // The probe's hard ceiling. Deliberately small: a dead localhost must cost
@@ -194,20 +194,39 @@ export function apiPrefix(base: string): string {
 }
 
 // POST a JSON body to `{base}{prefix}{path}`, transparently downgrading /v2 →
-// /v1 (once, memoised per base) when the versioned route 404s.
-async function postJson(base: string, path: string, body: unknown, timeoutMs: number): Promise<{ ok: boolean; status: number; data: any; error?: string }> {
-  const headers = authHeaders();
-  const first = await httpJson("POST", `${base}${apiPrefix(base)}${path}`, body, { timeoutMs, headers });
-  if (first.status !== 404 || apiPrefix(base) !== "/v2") return first;
+// /v1 (once, memoised per base) when the versioned route 404s. The body is
+// built PER PREFIX: v1's schemas are strict objects, so a field only v2 knows
+// (search's `sources`) turns the fallback into a 400.
+async function postJson(
+  base: string,
+  path: string,
+  body: (prefix: string) => unknown,
+  opts: { timeoutMs: number; retries?: number },
+): Promise<{ ok: boolean; status: number; data: any; error?: string }> {
+  const req = { timeoutMs: opts.timeoutMs, retries: opts.retries, headers: authHeaders() };
+  const prefix = apiPrefix(base);
+  const first = await httpJson("POST", `${base}${prefix}${path}`, body(prefix), req);
+  if (first.status !== 404 || prefix !== "/v2") return first;
   prefixCache.set(base, "/v1");
-  return httpJson("POST", `${base}/v1${path}`, body, { timeoutMs, headers });
+  return httpJson("POST", `${base}/v1${path}`, body("/v1"), req);
+}
+
+// The reason a Firecrawl response gives for itself — its `error` field, or a
+// plain-text body — cut to one readable line.
+function serverReason(data: unknown): string | undefined {
+  const raw = typeof data === "string" ? data : typeof (data as { error?: unknown })?.error === "string" ? (data as { error: string }).error : "";
+  const line = cleanInline(raw).slice(0, 200);
+  return line || undefined;
 }
 
 /** A page as Firecrawl returned it: main-content markdown plus provenance. */
 export interface FirecrawlScrape {
   markdown: string;
   title?: string;
+  /** The URL Firecrawl was asked for (`metadata.sourceURL`, else `metadata.url`). */
   sourceURL?: string;
+  /** Where the page ended up after redirects (`metadata.url`, else `sourceURL`) — the address to cite. */
+  finalUrl?: string;
   statusCode?: number;
 }
 
@@ -226,13 +245,19 @@ export function mapScrapeResponse(json: any): FirecrawlScrape | null {
   if (!markdown) return null;
   const meta = data.metadata && typeof data.metadata === "object" ? data.metadata : {};
   const rawTitle = typeof meta.title === "string" ? cleanInline(meta.title) : "";
-  // sourceURL is the post-redirect URL; `url` is the older field name.
-  const src = typeof meta.sourceURL === "string" ? meta.sourceURL : typeof meta.url === "string" ? meta.url : undefined;
+  // Firecrawl sets `sourceURL` to the URL it was GIVEN and `url` to the one the
+  // browser ended on (scrapeURL/index.ts). Taking sourceURL for the final one
+  // cited every redirected page at its old address.
+  const asked = typeof meta.sourceURL === "string" && meta.sourceURL ? meta.sourceURL : undefined;
+  const landed = typeof meta.url === "string" && meta.url ? meta.url : undefined;
+  const src = asked ?? landed;
+  const final = landed ?? asked;
   const status = typeof meta.statusCode === "number" ? meta.statusCode : undefined;
   return {
     markdown,
     ...(rawTitle ? { title: rawTitle } : {}),
     ...(src ? { sourceURL: src } : {}),
+    ...(final ? { finalUrl: final } : {}),
     ...(status !== undefined ? { statusCode: status } : {}),
   };
 }
@@ -297,7 +322,7 @@ export async function scrapeViaFirecrawl(url: string, opts: FirecrawlOptions = {
   const r = await postJson(
     base,
     "/scrape",
-    {
+    () => ({
       url,
       formats: ["markdown"],
       onlyMainContent: true,
@@ -305,16 +330,30 @@ export async function scrapeViaFirecrawl(url: string, opts: FirecrawlOptions = {
       removeBase64Images: true,
       maxAge: SCRAPE_MAX_AGE_MS,
       timeout: SCRAPE_TIMEOUT_MS,
-    },
-    SCRAPE_TIMEOUT_MS,
+    }),
+    // No retry: the built-in extractor is the fallback, and a second attempt
+    // at a browser render that just failed doubles the wait for nothing.
+    { timeoutMs: SCRAPE_TIMEOUT_MS, retries: 0 },
   );
   if (!r.ok) {
+    // No status at all is the instance going away (a timeout, a dropped
+    // connection), not this page failing: without marking it, every
+    // remaining page of a crawl paid the full timeout again.
+    if (!r.status) markFirecrawlDown(base);
     const why = r.status ? `status ${r.status}` : (r.error ?? "no response");
     return { why: `Firecrawl could not scrape ${url} (${why}) — fell back to the built-in extractor.` };
   }
   const data = mapScrapeResponse(r.data);
   if (!data) return { why: `Firecrawl returned no markdown for ${url} — fell back to the built-in extractor.` };
   return { data };
+}
+
+/** What `searchViaFirecrawl` may be told besides the base. */
+export interface FirecrawlSearchOptions extends FirecrawlOptions {
+  /** BCP-47 language tag. Sent as Firecrawl's `lang`, with the `country` it implies; without one Firecrawl answers in US English. */
+  lang?: string;
+  /** A country code overriding the one `lang` implies; "wt" names none. */
+  region?: string;
 }
 
 /**
@@ -324,7 +363,7 @@ export async function scrapeViaFirecrawl(url: string, opts: FirecrawlOptions = {
 export async function searchViaFirecrawl(
   query: string,
   limit: number,
-  opts: FirecrawlOptions = {},
+  opts: FirecrawlSearchOptions = {},
 ): Promise<{
   hits?: FirecrawlHit[];
   why?: string;
@@ -336,19 +375,45 @@ export async function searchViaFirecrawl(
   if (!(await probeFirecrawl(base, firecrawlIsExplicit(opts)))) {
     return { why: `Firecrawl not reachable at ${base} (bring it up with \`${brand().cli} firecrawl up\`). Skipping.`, status: 0 };
   }
-  const r = await postJson(base, "/search", { query, limit, sources: ["web"] }, SEARCH_TIMEOUT_MS);
+  // Firecrawl takes an integer 1–100 and answers anything else with a 400.
+  const n = Number.isFinite(limit) ? Math.min(100, Math.max(1, Math.trunc(limit))) : 10;
+  // Only a locale the caller asked for: Firecrawl's own default is en/us, and
+  // inventing one here would be the same guess made twice. A region that is
+  // not a two-letter country (`419`, `wt`) is left for Firecrawl to decide.
+  const locale: Record<string, string> = {};
+  if (opts.lang || opts.region) {
+    if (opts.lang) locale.lang = baseLang(opts.lang);
+    const country = resolveRegion(opts.lang, opts.region);
+    if (/^[a-z]{2}$/.test(country) && country !== "wt") locale.country = country;
+  }
+  const r = await postJson(
+    base,
+    "/search",
+    // `sources` is v2's; v1's strict schema rejects any key it does not know.
+    // `timeout` tells Firecrawl to stop when we do: its own default is 60 s,
+    // double the time this client waits.
+    (prefix) => ({ query, limit: n, ...locale, timeout: SEARCH_TIMEOUT_MS, ...(prefix === "/v2" ? { sources: ["web"] } : {}) }),
+    // No retry: this is the cascade's last rung, and a second attempt at an
+    // instance that just failed or throttled us doubles the wait for nothing.
+    { timeoutMs: SEARCH_TIMEOUT_MS, retries: 0 },
+  );
   if (!r.ok) {
-    const why = r.status === 429 || r.status === 503 ? `rate-limited (HTTP ${r.status})` : `unreachable (status ${r.status || 0})`;
+    if (!r.status) markFirecrawlDown(base);
+    const reason = serverReason(r.data);
+    const why =
+      r.status === 429 || r.status === 503
+        ? `rate-limited (HTTP ${r.status})`
+        : !r.status
+          ? `unreachable (${r.error ?? "no response"})`
+          : // It answered: a 4xx is this request refused (a bad field, a key a
+            // Cloud base wants), which "unreachable" misreported as an outage.
+            `${r.status < 500 ? "rejected the request" : "failed"} (HTTP ${r.status}${reason ? `: ${reason}` : ""})`;
     return { why: `Firecrawl search ${why} at ${base}.`, status: r.status };
+  }
+  // A 200 can still carry `success: false` — every upstream engine failing —
+  // which is a failure to report, not an empty web.
+  if (r.data?.success === false) {
+    return { why: `Firecrawl search failed at ${base}${serverReason(r.data) ? `: ${serverReason(r.data)}` : ""}.`, status: r.status };
   }
   return { hits: mapSearchResponse(r.data) };
 }
-
-/**
- * Discovery via a self-hosted Firecrawl's `/search`. An EXPLICIT engine only —
- * it is not part of the `auto` cascade, because it needs ~3GB of containers
- * running and its upstream is the same SearXNG the `searxng` backend already
- * queries directly. Reach for it with `--backends firecrawl` or
- * `--web-engine firecrawl` when you want Firecrawl's cleaned markdown to come
- * back WITH the search hits.
- */
