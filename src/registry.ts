@@ -265,6 +265,8 @@ function record(r: JsonAnswer): Record<string, any> | undefined {
 // string that cannot exist (`^18`). Each lets the next registry answer.
 const ABSENT: ReadonlySet<number> = new Set([400, 404, 410]);
 
+const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+
 /** No facts: an ABSENT status says "no such package or version"; anything else says why. */
 function miss(r: JsonAnswer): PackageLookup {
   if (ABSENT.has(r.status)) return { status: r.status };
@@ -272,8 +274,6 @@ function miss(r: JsonAnswer): PackageLookup {
   const said = r.data && typeof r.data === "object" ? (str(r.data.errors?.[0]?.detail) ?? str(r.data.message) ?? str(r.data.error)) : undefined;
   return { status: r.status, error: r.error ?? said ?? (r.ok ? "the registry answered with something other than a package record" : `status ${r.status}`) };
 }
-
-const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
 
 /**
  * Look a package up in one registry.
@@ -482,6 +482,7 @@ export async function resolvePackage(name: string, opts: { registry?: RegistryKi
  * `react` (python-react 4.3.0) was a wrong answer that looked like a right one.
  */
 export async function resolvePackageResult(name: string, opts: { registry?: RegistryKind; version?: string } = {}): Promise<PackageResolution> {
+  if (!name.trim()) return { tried: [], note: "no package name given" };
   const order = opts.registry ? [opts.registry] : REGISTRIES;
   const tried: PackageResolution["tried"] = [];
   for (const registry of order) {
