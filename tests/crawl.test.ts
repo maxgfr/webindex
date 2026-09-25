@@ -447,3 +447,250 @@ describe("crawlSite concurrency", () => {
     expect(order.slice(0, 3)).toEqual(["https://s.test/robots.txt", "https://s.test/sitemap.xml", "https://s.test/"]);
   });
 });
+
+describe("crawlSite request ceiling", () => {
+  const dead = (n: number) => `<urlset>${Array.from({ length: n }, (_, i) => `<url><loc>https://s.test/dead-${i}</loc></url>`).join("")}</urlset>`;
+
+  it("counts failed fetches against a request ceiling, so a dead sitemap cannot run the crawl on", async () => {
+    // The budget buys pages; a URL that fails costs no page. With the sitemap
+    // seeding the frontier, 300 dead entries meant 300 requests for `max: 3`.
+    const asked: string[] = [];
+    installFetchMock((url) => {
+      if (url.includes("robots.txt")) return { status: 404, body: "", contentType: "text/plain" };
+      if (url.endsWith("/sitemap.xml")) return { body: dead(300), contentType: "application/xml" };
+      asked.push(url);
+      if (url === "https://s.test/") return html('<a href="/a">a</a>');
+      if (url === "https://s.test/a") return html("<p>a</p>");
+      return { status: 404, body: "", contentType: "text/plain" };
+    });
+    const r = await crawlSite("https://s.test/", { maxPages: 3, maxDepth: 1, delayMs: 0 });
+    expect(asked).toHaveLength(9);
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/"]);
+    expect(r.notes.filter((n) => /Could not fetch/.test(n))).toHaveLength(8);
+    expect(r.notes.join(" ")).toMatch(/stopped after 9 page requests, 8 of them failed/);
+    // Only as many sitemap entries are queued as the ceiling could ever reach.
+    expect(r.notes.join(" ")).toMatch(/seeded 8 URL\(s\) from the sitemap; 292 more are past this crawl's request ceiling/);
+    expect(r.pending).toContain("https://s.test/a");
+  });
+
+  it("lets a caller set the ceiling", async () => {
+    installFetchMock((url) => {
+      if (url.includes("robots.txt")) return { status: 404, body: "", contentType: "text/plain" };
+      if (url.endsWith("/sitemap.xml")) return { body: dead(20), contentType: "application/xml" };
+      if (url === "https://s.test/") return html("<p>seed</p>");
+      return { status: 500, body: "", contentType: "text/plain" };
+    });
+    const r = await crawlSite("https://s.test/", { maxPages: 3, maxDepth: 1, delayMs: 0, maxRequests: 12 });
+    expect(r.notes.join(" ")).toMatch(/stopped after 12 page requests, 11 of them failed/);
+  });
+
+  it("reads a budget that is not a number as the default, not as zero", async () => {
+    installFetchMock((url) => (url.includes("robots.txt") || url.includes("sitemap") ? { status: 404, body: "" } : html("<p>ok</p>")));
+    const r = await crawlSite("https://s.test/", { maxPages: Number("ten"), maxDepth: Number.NaN, useSitemap: false, delayMs: 0 });
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/"]);
+    expect(r.notes.join(" ")).not.toMatch(/NaN/);
+  });
+});
+
+describe("crawlSite redirects", () => {
+  it("follows the seed's own redirect to another origin, and walks that one", async () => {
+    // http→https and apex→www are how most sites answer their own name. The
+    // origin guard is there to stop the walk wandering, not to refuse the
+    // site the caller named: it gave 0 pages and a note.
+    installFetchMock((url) => {
+      if (url.includes("robots.txt") || url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+      if (url === "http://s.test/") return { status: 301, headers: { location: "https://www.s.test/" } };
+      if (url === "https://www.s.test/") return html('<a href="/a">a</a><a href="http://s.test/old">old</a>');
+      if (url === "https://www.s.test/a") return html("<p>a</p>");
+      return undefined;
+    });
+    const r = await crawlSite("http://s.test/", { maxPages: 5, maxDepth: 1, useSitemap: false, delayMs: 0 });
+    expect(r.pages.map((p) => p.url)).toEqual(["https://www.s.test/", "https://www.s.test/a"]);
+    expect(r.notes.join(" ")).toMatch(/redirected to https:\/\/www\.s\.test\/.*https:\/\/www\.s\.test/);
+  });
+
+  it("reads the redirected site's own robots.txt and sitemap", async () => {
+    installFetchMock((url) => {
+      if (url === "https://s.test/robots.txt") return { body: "User-agent: *\nDisallow: /private\nSitemap: https://s.test/sm.xml", contentType: "text/plain" };
+      if (url === "https://s.test/sm.xml")
+        return {
+          body: "<urlset><url><loc>https://s.test/listed</loc></url><url><loc>https://s.test/private</loc></url></urlset>",
+          contentType: "application/xml",
+        };
+      if (url.startsWith("http://s.test/")) return { status: 301, headers: { location: url.replace("http:", "https:") } };
+      return html("<p>ok</p>");
+    });
+    const r = await crawlSite("http://s.test/", { maxPages: 5, maxDepth: 1, delayMs: 0 });
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/", "https://s.test/listed"]);
+    expect(r.disallowed).toEqual(["https://s.test/private"]);
+    expect(r.notes.join(" ")).not.toMatch(/no robots\.txt|outside the crawl origin/);
+  });
+
+  it("reads a page once however many URLs redirect to it", async () => {
+    const asked: string[] = [];
+    installFetchMock((url) => {
+      if (url.includes("robots.txt") || url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+      asked.push(new URL(url).pathname);
+      if (url === "https://s.test/") return { status: 301, headers: { location: "/home" } };
+      if (url === "https://s.test/home") return html('<a href="/home">home</a><a href="/x">x</a><a href="/y">y</a>');
+      if (url.endsWith("/x") || url.endsWith("/y")) return { status: 301, headers: { location: "/t" } };
+      if (url.endsWith("/t")) return html('<p>t</p><a href="/home">home</a>');
+      return undefined;
+    });
+    const r = await crawlSite("https://s.test/", { maxPages: 10, maxDepth: 2, useSitemap: false, delayMs: 0 });
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/home", "https://s.test/t"]);
+    expect(asked.filter((p) => p === "/home")).toHaveLength(1);
+    expect(r.notes.join(" ")).toMatch(/https:\/\/s\.test\/y redirected to https:\/\/s\.test\/t, already read/);
+  });
+});
+
+describe("crawlSite politeness", () => {
+  it("holds the host's other requests for a Retry-After the retry is waiting out", async () => {
+    // httpGet sleeps out a short Retry-After for its own retry; the crawl's
+    // other workers had already claimed their slots and went out inside the
+    // window the server asked us to stay away.
+    vi.stubEnv(envName("CRAWL_CONCURRENCY"), "4");
+    const log: { path: string; at: number; status: number }[] = [];
+    let throttled = false;
+    installFetchMock((url) => {
+      if (url.includes("robots.txt") || url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+      if (url === "https://s.test/") return html('<a href="/r1">1</a><a href="/r2">2</a><a href="/r3">3</a><a href="/r4">4</a>');
+      const path = new URL(url).pathname;
+      if (path === "/r1" && !throttled) {
+        throttled = true;
+        log.push({ path, at: Date.now(), status: 429 });
+        return { status: 429, body: "", contentType: "text/plain", headers: { "retry-after": "1" } };
+      }
+      log.push({ path, at: Date.now(), status: 200 });
+      return html("<p>ok</p>");
+    });
+    const r = await crawlSite("https://s.test/", { maxPages: 10, maxDepth: 1, useSitemap: false, delayMs: 30 });
+    expect(r.pages).toHaveLength(5);
+    const t429 = log.find((l) => l.status === 429)!.at;
+    for (const l of log.filter((x) => x.status === 200)) expect(l.at - t429, l.path).toBeGreaterThanOrEqual(950);
+  });
+
+  it("will not wait out a Crawl-delay past its ceiling, and says so instead of sleeping", async () => {
+    // Honoured literally, `Crawl-delay: 3600` sleeps an hour per page; past
+    // 2^31 ms setTimeout overflows to 1 ms and the site gets hammered.
+    const asked: string[] = [];
+    installFetchMock((url) => {
+      if (url.includes("robots.txt")) return { body: "User-agent: *\nCrawl-delay: 3000000", contentType: "text/plain" };
+      asked.push(url);
+      return html("<p>ok</p>");
+    });
+    const started = performance.now();
+    const r = await crawlSite("https://s.test/", { maxPages: 2, useSitemap: false });
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(asked).toEqual([]);
+    expect(r.pages).toEqual([]);
+    expect(r.pending).toEqual(["https://s.test/"]);
+    expect(r.notes.join(" ")).toMatch(/Crawl-delay of 3000000 s.*over the 60 s/);
+  });
+
+  it("lets <PREFIX>_MAX_CRAWL_DELAY_MS move that ceiling", async () => {
+    installFetchMock((url) => (url.includes("robots.txt") ? { body: "User-agent: *\nCrawl-delay: 0.05", contentType: "text/plain" } : html("<p>ok</p>")));
+    vi.stubEnv(envName("MAX_CRAWL_DELAY_MS"), "10");
+    expect((await crawlSite("https://s.test/", { maxPages: 1, useSitemap: false })).pages).toEqual([]);
+    resetRobotsCache();
+    vi.stubEnv(envName("MAX_CRAWL_DELAY_MS"), "100");
+    expect((await crawlSite("https://s.test/", { maxPages: 1, useSitemap: false })).pages).toHaveLength(1);
+  });
+
+  it("waits out a delay longer than one timer can hold, rather than none of it", async () => {
+    // setTimeout fires a delay past 2^31-1 ms after 1 ms, with a warning.
+    vi.useFakeTimers();
+    try {
+      await awaitHostSlot("https://big.test/1", 3_000_000_000, 0);
+      let done = false;
+      const second = awaitHostSlot("https://big.test/2", 1, 0).then((waited) => {
+        done = true;
+        return waited;
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(3_000_000_000);
+      expect(await second).toBe(3_000_000_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops when the site's robots.txt errors, as RFC 9309 requires, and says why", async () => {
+    const asked: string[] = [];
+    installFetchMock((url) => {
+      if (url.includes("robots.txt")) return { status: 503, body: "", contentType: "text/plain" };
+      asked.push(url);
+      return html("<p>ok</p>");
+    });
+    const r = await crawlSite("https://s.test/", { maxPages: 5, delayMs: 0 });
+    expect(asked).toEqual([]);
+    expect(r.pages).toEqual([]);
+    expect(r.notes.join(" ")).toMatch(/robots\.txt at https:\/\/s\.test answered HTTP 503.*RFC 9309/);
+    expect(r.notes.join(" ")).not.toMatch(/no robots\.txt/);
+  });
+
+  it("names why robots.txt was not read: missing, or switched off", async () => {
+    installFetchMock((url) => (url.includes("robots.txt") || url.includes("sitemap") ? { status: 410, body: "" } : html("<p>ok</p>")));
+    const missing = await crawlSite("https://s.test/", { maxPages: 1, maxDepth: 0, delayMs: 0 });
+    expect(missing.notes.join(" ")).toMatch(/no robots\.txt \(HTTP 410\)/);
+    process.env[envName("NO_ROBOTS")] = "1";
+    const off = await crawlSite("https://s.test/", { maxPages: 1, maxDepth: 0, delayMs: 0 });
+    expect(off.notes.join(" ")).toMatch(/NO_ROBOTS/);
+    expect(off.notes.join(" ")).not.toMatch(/no robots\.txt/);
+  });
+});
+
+describe("crawlSite scope", () => {
+  it("does not spend a request on a link to an image, media or an archive", async () => {
+    const asked: string[] = [];
+    installFetchMock((url) => {
+      if (url.includes("robots.txt") || url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+      asked.push(new URL(url).pathname);
+      if (url === "https://s.test/")
+        return html(
+          '<a href="/img/photo.PNG">p</a><a href="/archive.zip">z</a><a href="/v.mp4?x=1">v</a><a href="/f.woff2">f</a><a href="/paper.pdf">d</a><a href="/page">g</a>',
+        );
+      return html("<p>ok</p>");
+    });
+    const r = await crawlSite("https://s.test/", { maxPages: 10, maxDepth: 1, useSitemap: false, delayMs: 0 });
+    expect(asked).toEqual(["/", "/paper.pdf", "/page"]);
+    // Still links the page has; just not pages to read.
+    expect(r.pages[0]!.links).toContain("https://s.test/archive.zip");
+    expect(r.notes.join(" ")).toMatch(/skipped 4 link\(s\) to images, media, fonts or archives/);
+  });
+
+  /** /docs/ links to two pages of its own; the sitemap lists the shop, and one docs page. */
+  const sectioned = () =>
+    installFetchMock((url) => {
+      if (url.includes("robots.txt")) return { status: 404, body: "", contentType: "text/plain" };
+      if (url.endsWith("/sitemap.xml"))
+        return {
+          body: `<urlset>${Array.from({ length: 10 }, (_, i) => `<url><loc>https://s.test/shop/item-${i}</loc></url>`).join("")}<url><loc>https://s.test/docs/api</loc></url></urlset>`,
+          contentType: "application/xml",
+        };
+      if (url === "https://s.test/docs/") return html('<a href="/docs/install">i</a><a href="/docs/usage">u</a><a href="/shop/">shop</a>');
+      if (url === "https://s.test/") return html('<a href="/docs/usage">u</a><a href="/shop/">shop</a>');
+      return html("<p>ok</p>");
+    });
+
+  it("keeps a section seed's own links ahead of the sitemap, and the sitemap to that section", async () => {
+    // The sitemap is the whole site's list: seeded ahead of a /docs/ seed's
+    // own links, it spent the budget on the shop.
+    sectioned();
+    const r = await crawlSite("https://s.test/docs/", { maxPages: 3, maxDepth: 1, delayMs: 0 });
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/docs/", "https://s.test/docs/install", "https://s.test/docs/usage"]);
+    resetRobotsCache();
+    const all = await crawlSite("https://s.test/docs/", { maxPages: 20, maxDepth: 1, delayMs: 0 });
+    const urls = all.pages.map((p) => p.url);
+    expect(urls).toContain("https://s.test/docs/api");
+    expect(urls.filter((u) => u.includes("/shop/item"))).toEqual([]);
+    expect(all.notes.join(" ")).toMatch(/seeded 1 URL\(s\) from the sitemap.*10 outside \/docs\//);
+  });
+
+  it("stays under an explicit prefix, links and sitemap alike", async () => {
+    sectioned();
+    const r = await crawlSite("https://s.test/", { maxPages: 20, maxDepth: 2, delayMs: 0, prefix: "/docs/" });
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/", "https://s.test/docs/api", "https://s.test/docs/usage"]);
+  });
+});
