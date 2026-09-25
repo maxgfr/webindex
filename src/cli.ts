@@ -504,7 +504,8 @@ export function webindexAdapter(): McpAdapter {
             pages: { type: "number", description: `Result pages to walk per engine (default 1, at most ${SEARCH_TOOL_MAX_PAGES}).` },
             engine: {
               type: "string",
-              description: "Pin one keyless engine: ddg | ddglite | mojeek. Omit to let the cascade choose.",
+              description:
+                "Restrict the keyless rung to one engine: ddg | ddglite | mojeek (SearXNG and Firecrawl still run around it). Omit to try all three in turn.",
               enum: [...KEYLESS_ENGINES],
             },
           },

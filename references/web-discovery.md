@@ -88,6 +88,8 @@ single ones, and every Lite snippet came back empty while the suite stayed green
   ignores the offset parameter costs one extra request, not one per page.
 - With no `--lang` or `--region`, DuckDuckGo is asked for `kl=wt-wt` (all
   regions) and Mojeek for no locale: nothing is biased toward one country.
+- `webindex robots <url>` before enumerating a site. It is advisory and `fetch`
+  does not consult it: following a citation is not crawling.
 
 ## Language and region
 
@@ -101,5 +103,3 @@ region preferences (`lb`/`rb`), SearXNG a `language` like `fr-CA`, Firecrawl
 `lang` and `country`, and every request an `Accept-Language`. Full tags
 (`zh-Hant-TW`, `es-419`) and the POSIX spelling (`fr_FR`) are understood.
 `webindex_search` takes `region` too, and `pages` up to 5.
-- `webindex robots <url>` before enumerating a site. It is advisory and `fetch`
-  does not consult it: following a citation is not crawling.
