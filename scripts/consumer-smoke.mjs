@@ -152,7 +152,10 @@ try {
     encoding: "utf8",
     timeout: 30_000,
   });
-  const frames = reply.trim().split("\n").map((l) => JSON.parse(l));
+  const frames = reply
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
   if (frames[0].result?.serverInfo?.name !== "webindex") throw new Error("the CLI's MCP server did not identify itself");
   const names = frames[1].result.tools.map((t) => t.name).join(", ");
   if (!names.includes("webindex_fetch")) throw new Error("the CLI's MCP server advertised no fetch tool");
