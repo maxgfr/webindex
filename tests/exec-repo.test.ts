@@ -329,16 +329,34 @@ describe("the branches a forge and a repo ref actually take", () => {
       license: "Apache-2.0",
       publishedAt: "2026-07-08T15:55:18.431Z",
     });
+    // 256 KiB first: the map opens 80–190 KB from the end of the biggest
+    // packuments, and a 2 MiB read did not finish inside the budget on a slow link.
     expect(seen).toEqual([
       { url: "https://registry.npmjs.org/typescript/latest", range: undefined },
-      { url: "https://registry.npmjs.org/typescript", range: "bytes=-2097152" },
+      { url: "https://registry.npmjs.org/typescript", range: "bytes=-262144" },
     ]);
+  });
+
+  it("reads further back only when a real range came back without a closed time map", async () => {
+    const ranges: string[] = [];
+    installFetchMock((url, init) => {
+      const range = (init?.headers as Record<string, string> | undefined)?.range;
+      if (url.endsWith("/deep/latest")) return json({ name: "deep", version: "2.0.0", license: "MIT" });
+      if (!url.endsWith("/deep") || !range) return { status: 404, body: "{}", contentType: "application/json" };
+      ranges.push(range);
+      // The short suffix opens INSIDE the time map, so no map closes in it.
+      return range === "bytes=-262144"
+        ? { status: 206, body: '"1.0.0":"2020-01-01T00:00:00.000Z","2.0.0":"2021-0', contentType: "application/json" }
+        : { status: 206, body: '"x":1,"time":{"2.0.0":"2021-02-03T04:05:06.000Z"}}', contentType: "application/json" };
+    });
+    expect((await lookupPackage("npm", "deep"))?.publishedAt).toBe("2021-02-03T04:05:06.000Z");
+    expect(ranges).toEqual(["bytes=-262144", "bytes=-2097152"]);
   });
 
   it("preserves npm publication time for an explicit scoped version", async () => {
     installFetchMock((url, init) => {
       if (url.endsWith("/@types%2Fnode/22.0.0")) return json({ name: "@types/node", version: "22.0.0", license: "MIT" });
-      if (url.endsWith("/@types%2Fnode") && (init?.headers as Record<string, string> | undefined)?.range === "bytes=-2097152") {
+      if (url.endsWith("/@types%2Fnode") && (init?.headers as Record<string, string> | undefined)?.range === "bytes=-262144") {
         return json({ time: { "22.0.0": "2024-07-22T17:04:35.367Z" } });
       }
       return { status: 404, body: "{}", contentType: "application/json" };
@@ -411,17 +429,21 @@ describe("the branches a forge and a repo ref actually take", () => {
       if (url.endsWith("/wide/latest")) return json({ name: "wide", version: "9.9.9", license: "MIT" });
       if (url.endsWith("/wide")) {
         // The header went out; this registry simply answers 200 with everything.
-        expect((init?.headers as Record<string, string> | undefined)?.range).toBe("bytes=-2097152");
+        ranges.push((init?.headers as Record<string, string> | undefined)?.range);
         return { body: oversized, contentType: "application/json", chunkSize: CHUNK, onPull: (n: number) => (pulled += n) };
       }
       return { status: 404, body: "{}", contentType: "application/json" };
     });
+    const ranges: (string | undefined)[] = [];
 
     const p = await lookupPackage("npm", "wide");
     expect(p).toMatchObject({ registry: "npm", name: "wide", version: "9.9.9", license: "MIT" });
     expect(p?.publishedAt).toBeUndefined();
-    // At most the 2 MiB cap plus the chunk that crossed it — not the whole 6 MiB.
-    expect(pulled).toBeLessThanOrEqual(2 * 1024 * 1024 + CHUNK);
+    // One read: a 200 is the document's head, and reading more of it cannot
+    // reach the tail. At most the 256 KiB cap plus the chunk that crossed it —
+    // not the whole 6 MiB.
+    expect(ranges).toEqual(["bytes=-262144"]);
+    expect(pulled).toBeLessThanOrEqual(256 * 1024 + CHUNK);
   });
 
   it("degrades to no timestamp when a proxy declares a packument larger than the cap", async () => {
@@ -529,9 +551,17 @@ describe("the branches a forge and a repo ref actually take", () => {
     // the three phases finds a timestamp and all three run the body end to end.
     const CHUNK = `"time":${" ".repeat(55)}{}`;
     const adversarial = `\\${CHUNK.repeat((2 * 1024 * 1024 - 64) / CHUNK.length)}`;
-    installFetchMock((url) => {
+    const ranges: string[] = [];
+    installFetchMock((url, init) => {
       if (url.endsWith("/adversarial/latest")) return json({ name: "adversarial", version: "1.0.0", license: "MIT" });
-      if (url.endsWith("/adversarial")) return { body: adversarial, contentType: "application/json" };
+      if (url.endsWith("/adversarial")) {
+        const range = (init?.headers as Record<string, string> | undefined)?.range ?? "";
+        ranges.push(range);
+        // The short suffix closes no map, so the full-cap one is read after it.
+        return range === "bytes=-262144"
+          ? { status: 206, body: '"readme":"no braces here', contentType: "application/json" }
+          : { status: 206, body: adversarial, contentType: "application/json" };
+      }
       return { status: 404, body: "{}", contentType: "application/json" };
     });
 
@@ -542,6 +572,7 @@ describe("the branches a forge and a repo ref actually take", () => {
     expect(p).toMatchObject({ name: "adversarial", version: "1.0.0", license: "MIT" });
     // Every `time` map here is empty, so no timestamp is the honest answer.
     expect(p?.publishedAt).toBeUndefined();
+    expect(ranges).toEqual(["bytes=-262144", "bytes=-2097152"]);
     // Three linear passes over 2 MiB are tens of milliseconds; the bound is
     // loose enough that only a superlinear scan can cross it.
     expect(elapsed).toBeLessThan(2_000);

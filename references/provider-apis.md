@@ -16,12 +16,18 @@ tool ends up documenting a fork, an abandoned mirror or a name-squat.
 
 | Registry | Notes |
 |---|---|
-| npm | Deprecation lives on the **version**, not the package — a package whose latest release is deprecated looks healthy at the top level. |
-| PyPI | The repository is in `project_urls`, not `home_page`, which is usually a docs site. |
-| crates.io | Publishes download counts. |
+| npm | Deprecation lives on the **version**, not the package — a package whose latest release is deprecated looks healthy at the top level. A dist-tag (`next`, `beta`) resolves to the version it stands for; a monorepo package carries `repositoryDirectory`. |
+| PyPI | The repository is in `project_urls` (any label spelling: `Source`, `source`, `Source Code`), not `home_page`, which is usually a docs site. The licence is PEP 639's `license_expression` where set, never a whole licence text. A project classified "7 - Inactive" is reported as deprecated. |
+| crates.io | Publishes download counts. Only the crate and its default version are fetched; the licence and date are that version's. |
 
 Order without `--registry` is npm → PyPI → crates, because npm has the most
 names. Pass `--registry` when you know the ecosystem.
+
+Only a definite 404 moves on to the next registry. A registry that is down,
+rate-limited or unreachable **stops** the search and says so: the next
+ecosystem's namesake is a different project (`react` on PyPI is
+python-react). `--version` is asked of each registry by name — that version
+or nothing, never the latest one with the asked-for number pasted on.
 
 ## Forges
 

@@ -18,7 +18,7 @@ import {
   resetCanonicalRepoCache,
   searchIssues,
 } from "../src/forge.js";
-import { lookupPackage, normalizeRepoUrl, resolvePackage } from "../src/registry.js";
+import { lookupPackage, lookupPackageResult, normalizeRepoUrl, resolvePackage, resolvePackageResult } from "../src/registry.js";
 import { resolveRepo } from "../src/repo.js";
 import { slugify } from "../src/text.js";
 import { installFetchMock } from "./fetchmock.js";
@@ -796,5 +796,181 @@ describe("package registries", () => {
   it("returns undefined for a name no registry has", async () => {
     installFetchMock(() => ({ status: 404, body: "{}", contentType: "application/json" }));
     expect(await resolvePackage("definitely-not-a-package-xyz")).toBeUndefined();
+  });
+});
+
+describe("a registry that could not answer is not a registry that said no", () => {
+  const json = (o: unknown, status = 200) => ({ status, body: JSON.stringify(o), contentType: "application/json" });
+
+  it("stops at an outage instead of answering from the next ecosystem", async () => {
+    // npm down → `react` resolved to python-react on PyPI.
+    const hosts: string[] = [];
+    installFetchMock((url) => {
+      hosts.push(new URL(url).hostname);
+      return url.includes("npmjs") ? json({ error: "unavailable" }, 503) : json({ info: { name: "react", version: "4.3.0" } });
+    });
+    const r = await resolvePackageResult("react");
+    expect(r.facts).toBeUndefined();
+    expect(r.note).toMatch(/npm could not be asked \(status 503\)/);
+    expect(hosts.every((h) => h === "registry.npmjs.org")).toBe(true);
+    expect(await resolvePackage("react")).toBeUndefined();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND registry.npmjs.org"), { code: "ENOTFOUND" }) });
+      }),
+    );
+    expect((await resolvePackageResult("react")).note).toMatch(/npm could not be asked: .*ENOTFOUND/);
+    expect(await lookupPackageResult("npm", "react")).toMatchObject({ status: 0, error: expect.stringMatching(/ENOTFOUND/) });
+  });
+
+  it("still moves on after a definite 'no such package'", async () => {
+    installFetchMock((url) => (url.includes("crates.io") ? json({ crate: { name: "x", max_stable_version: "1.0.0" } }) : json({}, 404)));
+    const r = await resolvePackageResult("x");
+    expect(r.facts?.registry).toBe("crates");
+    expect(r.tried.map((t) => [t.registry, t.status])).toEqual([
+      ["npm", 404],
+      ["pypi", 404],
+      ["crates", 200],
+    ]);
+  });
+
+  it("declines a registry it does not know, rather than throwing", async () => {
+    expect(await lookupPackage("maven" as never, "x")).toBeUndefined();
+    expect((await resolvePackageResult("x", { registry: "maven" as never })).note).toMatch(/unknown registry "maven"/);
+  });
+});
+
+describe("the version asked for is the version answered", () => {
+  const json = (o: unknown, status = 200) => ({ status, body: JSON.stringify(o), contentType: "application/json" });
+
+  it("asks PyPI and crates.io for that release, and 404s like npm when there is none", async () => {
+    installFetchMock((url) => {
+      if (url === "https://pypi.org/pypi/requests/2.0.0/json") return json({ info: { name: "requests", version: "2.0.0" } });
+      if (url === "https://crates.io/api/v1/crates/serde/1.0.100")
+        return json({ version: { num: "1.0.100", license: "MIT OR Apache-2.0", created_at: "2019-09-01T00:00:00Z" } });
+      if (url.startsWith("https://crates.io/api/v1/crates/serde?"))
+        return json({ crate: { name: "serde", default_version: "1.0.229", description: "ser/de" } });
+      return json({ errors: [{ detail: "Not Found" }] }, 404);
+    });
+    expect(await lookupPackage("pypi", "requests", "2.0.0")).toMatchObject({ version: "2.0.0" });
+    expect(await lookupPackage("crates", "serde", "1.0.100")).toMatchObject({
+      version: "1.0.100",
+      license: "MIT OR Apache-2.0",
+      publishedAt: "2019-09-01T00:00:00Z",
+      description: "ser/de",
+    });
+    expect(await lookupPackage("crates", "serde", "99.0.0")).toBeUndefined();
+    expect(await lookupPackage("pypi", "requests", "99.0.0")).toBeUndefined();
+  });
+
+  it("does not answer a version from an ecosystem that never confirmed it", async () => {
+    // `react --version ^18`: npm said no, and PyPI's latest python-react came back.
+    installFetchMock((url) => (url.includes("pypi.org/pypi/react/json") ? json({ info: { name: "react", version: "4.3.0" } }) : json({}, 404)));
+    const r = await resolvePackageResult("react", { version: "^18" });
+    expect(r.facts).toBeUndefined();
+    expect(r.note).toMatch(/no registry knows a package called "react" at version \^18/);
+  });
+
+  it("reports the version a dist-tag stands for, with its date", async () => {
+    installFetchMock((url, init) => {
+      if (url.endsWith("/typescript/beta")) return json({ name: "typescript", version: "6.0.0-beta" });
+      if (url.endsWith("/typescript") && (init?.headers as Record<string, string>)?.range) return json({ time: { "6.0.0-beta": "2026-01-01T00:00:00.000Z" } });
+      return json({}, 404);
+    });
+    expect(await lookupPackage("npm", "typescript", "beta")).toMatchObject({ version: "6.0.0-beta", publishedAt: "2026-01-01T00:00:00.000Z" });
+  });
+});
+
+describe("PyPI's modern metadata", () => {
+  const pypi = (info: Record<string, unknown>) => installFetchMock(() => ({ body: JSON.stringify({ info }), contentType: "application/json" }));
+
+  it("finds the repository under PEP 753's lower-case labels", async () => {
+    pypi({
+      name: "numpy",
+      version: "2.3.0",
+      project_urls: { homepage: "https://numpy.org", source: "https://github.com/numpy/numpy", documentation: "https://numpy.org/doc" },
+    });
+    expect(await lookupPackage("pypi", "numpy")).toMatchObject({
+      repository: "https://github.com/numpy/numpy",
+      homepage: "https://numpy.org",
+      documentation: "https://numpy.org/doc",
+    });
+    pypi({ name: "pandas", version: "2.3.0", project_urls: { repository: "https://github.com/pandas-dev/pandas" } });
+    expect((await lookupPackage("pypi", "pandas"))?.repository).toBe("https://github.com/pandas-dev/pandas");
+  });
+
+  it("does not take a documentation site for the repository", async () => {
+    pypi({ name: "x", version: "1", home_page: "https://x.readthedocs.io" });
+    expect((await lookupPackage("pypi", "x"))?.repository).toBeUndefined();
+    pypi({ name: "x", version: "1", home_page: "https://github.com/o/x" });
+    expect((await lookupPackage("pypi", "x"))?.repository).toBe("https://github.com/o/x");
+  });
+
+  it("reads the licence from PEP 639's expression, never a whole licence text", async () => {
+    pypi({ name: "django", version: "5", license: "", license_expression: "BSD-3-Clause" });
+    expect((await lookupPackage("pypi", "django"))?.license).toBe("BSD-3-Clause");
+    pypi({
+      name: "pandas",
+      version: "2",
+      license: `BSD 3-Clause License\n\n${"Copyright… ".repeat(6000)}`,
+      classifiers: ["License :: OSI Approved :: BSD License"],
+    });
+    expect((await lookupPackage("pypi", "pandas"))?.license).toBe("BSD License");
+    pypi({ name: "old", version: "1", license: "MIT" });
+    expect((await lookupPackage("pypi", "old"))?.license).toBe("MIT");
+  });
+
+  it("says a project that declares itself inactive is", async () => {
+    pypi({ name: "x", version: "1", classifiers: ["Development Status :: 7 - Inactive"] });
+    expect((await lookupPackage("pypi", "x"))?.deprecated).toMatch(/Inactive/);
+  });
+});
+
+describe("crates.io, without every version of the crate", () => {
+  it("asks for the default version only, and reads its licence and date", async () => {
+    // The full record embeds every version: 441 KB for serde, and over the 4 MiB
+    // cap for web-sys, which then "did not exist".
+    const seen: string[] = [];
+    installFetchMock((url) => {
+      seen.push(url);
+      return {
+        body: JSON.stringify({
+          crate: { name: "web-sys", default_version: "0.3.77", repository: "https://github.com/rustwasm/wasm-bindgen", downloads: 9 },
+          versions: [{ num: "0.3.77", license: "MIT OR Apache-2.0", created_at: "2025-01-01T00:00:00Z", yanked: false }],
+        }),
+        contentType: "application/json",
+      };
+    });
+    expect(await lookupPackage("crates", "web-sys")).toMatchObject({ version: "0.3.77", license: "MIT OR Apache-2.0", publishedAt: "2025-01-01T00:00:00Z" });
+    expect(seen).toEqual(["https://crates.io/api/v1/crates/web-sys?include=default_version"]);
+  });
+});
+
+describe("normalizeRepoUrl, over the shapes npm still carries", () => {
+  it("reads shorthands, any case, ssh forms and fragments", () => {
+    expect(normalizeRepoUrl("github:facebook/react")).toBe("https://github.com/facebook/react");
+    expect(normalizeRepoUrl("gitlab:gitlab-org/gitlab")).toBe("https://gitlab.com/gitlab-org/gitlab");
+    expect(normalizeRepoUrl("bitbucket:o/r")).toBe("https://bitbucket.org/o/r");
+    expect(normalizeRepoUrl("GIT+HTTPS://github.com/a/b.git")).toBe("https://github.com/a/b");
+    expect(normalizeRepoUrl("git+ssh://git@github.com:npm/cli.git")).toBe("https://github.com/npm/cli");
+    expect(normalizeRepoUrl("ssh://git@gitlab.company.com:2222/g/r.git")).toBe("https://gitlab.company.com/g/r");
+    expect(normalizeRepoUrl("git+https://github.com/owner/repo.git#main")).toBe("https://github.com/owner/repo");
+  });
+
+  it("keeps where a monorepo package lives", async () => {
+    installFetchMock(() => ({
+      body: JSON.stringify({
+        name: "@babel/core",
+        version: "7.0.0",
+        repository: { url: "https://github.com/babel/babel.git", directory: "packages/babel-core" },
+      }),
+      contentType: "application/json",
+    }));
+    expect(await lookupPackage("npm", "@babel/core", "7.0.0")).toMatchObject({
+      repository: "https://github.com/babel/babel",
+      repositoryDirectory: "packages/babel-core",
+    });
   });
 });

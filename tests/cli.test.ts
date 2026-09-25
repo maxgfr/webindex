@@ -783,7 +783,7 @@ describe("rank", () => {
 });
 
 describe("the forge, registry and page-metadata commands", () => {
-  const json = (o: unknown) => ({ body: JSON.stringify(o), contentType: "application/json" });
+  const json = (o: unknown, status = 200) => ({ status, body: JSON.stringify(o), contentType: "application/json" });
 
   it("prints a repository's record, and flags an archived one", async () => {
     vi.stubGlobal(
@@ -910,6 +910,28 @@ describe("the forge, registry and page-metadata commands", () => {
     );
     expect(await run(["package", "p", "--json"])).toBe(0);
     expect(JSON.parse(stdout())).toMatchObject({ registry: "npm", version: "2.0.0", repository: "https://github.com/a/b" });
+  });
+
+  it("names the package it found, so a namesake from another ecosystem shows", async () => {
+    installFetchMock((url) =>
+      url.includes("pypi.org") ? json({ info: { name: "react", version: "4.3.0", summary: "Server-side rendering of React components" } }) : json({}, 404),
+    );
+    expect(await run(["package", "react"])).toBe(0);
+    expect(stdout()).toMatch(/name {8}react\n/);
+    expect(stdout()).toMatch(/registry {4}pypi/);
+    expect(stdout()).toContain("Server-side rendering of React components");
+  });
+
+  it("says a registry was down rather than that it had no such package", async () => {
+    installFetchMock(() => json({}, 503));
+    expect(await run(["package", "react"])).toBe(1);
+    expect(stderr()).toMatch(/npm could not be asked \(status 503\)/);
+    await expect(webindexAdapter().callTool("webindex_package", { name: "react" })).rejects.toThrow(/npm could not be asked/);
+  });
+
+  it("refuses a registry it does not know as a usage error, not a TypeError", async () => {
+    expect(await run(["package", "react", "--registry", "foo"])).toBe(2);
+    expect(stderr()).toMatch(/--registry expects npm, pypi or crates/);
   });
 
   it("says so when no registry knows the name", async () => {

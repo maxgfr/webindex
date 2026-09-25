@@ -39,7 +39,7 @@ import { discoverFeeds, fetchFeed, fetchSitemap, parseFeed } from "./feed.js";
 import { pageMetadata } from "./structured.js";
 import { type RepoRef, resolveRepo } from "./repo.js";
 import { type ForgeKind, forgeRef, listReleases, listTags, repoFactsResult, searchIssues } from "./forge.js";
-import { resolvePackage, type RegistryKind } from "./registry.js";
+import { type RegistryKind, resolvePackageResult } from "./registry.js";
 import { bm25MatchedTerms, bm25Score, bm25Tokenize, buildBm25Index, dedupeNearDuplicates, diversify } from "./rank.js";
 import {
   argBool,
@@ -139,6 +139,9 @@ COMMANDS
              publishing releases.
   package    A library NAME resolved through npm, PyPI or crates.io to its
              repository, docs, current version, licence and deprecation.
+             --version answers for that version (or an npm dist-tag) or not
+             at all. A registry that cannot be reached stops the search, so
+             another ecosystem's namesake never answers in its place.
   meta       What a page says about itself: JSON-LD, OpenGraph and meta tags —
              author, dates, type, canonical URL.
   robots     Whether robots.txt permits fetching that URL. Exits non-zero when
@@ -320,6 +323,7 @@ function toolTimeoutMs(value: unknown): number | undefined {
 
 const FORGE_KINDS: readonly ForgeKind[] = ["github", "gitlab", "gitea"];
 const isForgeKind = (v: string): v is ForgeKind => (FORGE_KINDS as readonly string[]).includes(v);
+const isRegistryKind = (v: string): v is RegistryKind => v === "npm" || v === "pypi" || v === "crates";
 
 // The optional `forge` argument the repository tools share.
 const FORGE_ARG: JsonSchemaProp = {
@@ -768,9 +772,13 @@ export function webindexAdapter(): McpAdapter {
       if (name === "webindex_package") {
         const pkg = String(args.name ?? "").trim();
         if (!pkg) throw new ToolError("`name` is required.");
-        const reg = args.registry ? (String(args.registry) as RegistryKind) : undefined;
-        const p = await resolvePackage(pkg, { ...(reg ? { registry: reg } : {}), ...(args.version ? { version: String(args.version) } : {}) });
-        if (!p) throw new ToolError(`No registry knows a package called "${pkg}".`);
+        const reg = args.registry === undefined ? undefined : String(args.registry);
+        if (reg !== undefined && !isRegistryKind(reg)) throw new InvalidParamsError("`registry` must be one of: npm, pypi, crates");
+        const { facts: p, note } = await resolvePackageResult(pkg, {
+          ...(reg ? { registry: reg } : {}),
+          ...(args.version ? { version: String(args.version) } : {}),
+        });
+        if (!p) throw new ToolError(note ?? `No registry knows a package called "${pkg}".`);
         return { text: JSON.stringify(p, null, 2) };
       }
       if (name === "webindex_repo" || name === "webindex_issues" || name === "webindex_releases" || name === "webindex_tags") {
@@ -1103,14 +1111,19 @@ async function dispatch(argv: string[]): Promise<void> {
     const emit = (obj: unknown, human: string[]) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}\n`);
 
     if (cmd === "package") {
-      const reg = argValue(args, "registry") as RegistryKind | undefined;
-      const p = await resolvePackage(target, {
+      const reg = argValue(args, "registry");
+      if (reg !== undefined && !isRegistryKind(reg)) usage(`--registry expects npm, pypi or crates, got "${reg}"`);
+      const { facts: p, note } = await resolvePackageResult(target, {
         ...(reg ? { registry: reg } : {}),
         ...(argValue(args, "version") ? { version: argValue(args, "version") } : {}),
       });
-      if (!p) fail(`no registry knows a package called "${target}"`);
+      if (!p) fail(note ?? `no registry knows a package called "${target}"`);
+      // The name and what it is come first: without --registry the answer may
+      // be another ecosystem's namesake, and that must be visible at a glance.
       emit(p, [
+        `  name        ${p.name}`,
         `  registry    ${p.registry}`,
+        `  description ${p.description ?? "—"}`,
         `  version     ${p.version ?? "—"}`,
         `  repository  ${p.repository ?? "—"}`,
         `  homepage    ${p.homepage ?? "—"}`,
