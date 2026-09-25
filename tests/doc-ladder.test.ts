@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, afterEach, vi } from "vitest";
 // Env names are resolved through the brand, exactly as the engine resolves them
 // — so these tests stay correct whichever prefix a consumer configures.
@@ -5,6 +7,7 @@ import { envName } from "../src/brand.js";
 import { extractDocument, enabledDocExtractors, resetDocLadderCache } from "../src/doc.js";
 import { extractPdf, resetPdfLadderCache } from "../src/pdf.js";
 import { runWithInput, ANYDOC_SPEC } from "../src/pdf/exec.js";
+import { docx } from "./zipfile.js";
 
 // The anydoc rung spawns `npx`, which on a cold machine is a network download —
 // the suite stays offline and deterministic (CONTRIBUTING.md, rule 3), so the
@@ -34,7 +37,7 @@ afterEach(() => {
 describe("enabledDocExtractors", () => {
   it("defaults to the full ladder, strongest first", () => {
     vi.stubEnv(envName("DOC_ENGINE"), undefined);
-    expect(enabledDocExtractors()).toEqual(["anydoc", "firecrawl"]);
+    expect(enabledDocExtractors()).toEqual(["anydoc", "firecrawl", "builtin"]);
   });
 
   it("honours <PREFIX>_DOC_ENGINE by running exactly that rung", () => {
@@ -52,12 +55,17 @@ describe("enabledDocExtractors", () => {
   it("drops the rung that needs an implicit install under <PREFIX>_NO_NPX", () => {
     vi.stubEnv(envName("DOC_ENGINE"), undefined);
     vi.stubEnv(envName("NO_NPX"), "1");
-    expect(enabledDocExtractors()).toEqual(["firecrawl"]);
+    expect(enabledDocExtractors()).toEqual(["firecrawl", "builtin"]);
   });
 
   it("ignores an unknown engine name rather than emptying the ladder", () => {
     vi.stubEnv(envName("DOC_ENGINE"), "nope");
-    expect(enabledDocExtractors()).toEqual(["anydoc", "firecrawl"]);
+    expect(enabledDocExtractors()).toEqual(["anydoc", "firecrawl", "builtin"]);
+  });
+
+  it("forces the built-in reader on <PREFIX>_DOC_ENGINE=builtin", () => {
+    vi.stubEnv(envName("DOC_ENGINE"), "builtin");
+    expect(enabledDocExtractors()).toEqual(["builtin"]);
   });
 
   it("reads a comma list, whatever the case and spacing", () => {
@@ -211,5 +219,50 @@ describe("a document the converter rejects", () => {
     const r = await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
     expect(runMock).not.toHaveBeenCalled();
     expect(r.reason).toMatch(/anydoc could not be installed/);
+  });
+});
+
+// Offline, under NO_NPX, or wherever anydoc cannot be installed, every office
+// document used to be refused: the ladder had no rung of its own.
+describe("the built-in rung", () => {
+  const fixture = (name: string) => readFileSync(join(__dirname, "fixtures", "docs", name));
+
+  it("reads an OOXML document with no converter and no network", async () => {
+    const r = await extractDocument(fixture("report.docx"), BINARY, { engines: ["builtin"] });
+    expect(r.via).toBe("builtin");
+    expect(r.text).toContain("# Quarterly report");
+    expect(r.text).toContain("| EMEA | 1.2 | 1.5 |");
+    expect(runMock).not.toHaveBeenCalled();
+  });
+
+  it("is where the default ladder ends up when anydoc cannot run", async () => {
+    vi.stubEnv(envName("DOC_ENGINE"), undefined);
+    const r = await extractDocument(fixture("sales.xlsx"), BINARY);
+    expect(r.via).toBe("builtin");
+    expect(r.text).toContain("## Sales");
+  });
+
+  it("says why it could not read a file, and still reads the next one", async () => {
+    const r = await extractDocument(fixture("legacy.xls"), BINARY, { engines: ["builtin"] });
+    expect(r.text).toBe("");
+    expect(r.reason).toMatch(/^builtin: a legacy binary or password-protected Office file/);
+    expect((await extractDocument(fixture("deck.pptx"), BINARY, { engines: ["builtin"] })).via).toBe("builtin");
+  });
+
+  // Allowed to fail, not to lie: its output answers to the same gate as every
+  // other rung's.
+  it("puts its output through the quality gate", async () => {
+    const garbled = docx(`<w:p><w:r><w:t>${"&#1;&#2;&#3;".repeat(200)}</w:t></w:r></w:p>`);
+    const r = await extractDocument(garbled, BINARY, { engines: ["builtin"] });
+    expect(r.text).toBe("");
+    expect(r.reason).toMatch(/binary\/control characters/);
+  });
+
+  // A CSV is not a package: its text fallback is the caller's, and a reason
+  // blaming the ZIP reader would only mislead.
+  it("leaves a CSV to the caller's text fallback without blaming the ZIP reader", async () => {
+    const r = await extractDocument(Buffer.from("a,b\n1,2\n"), { format: "csv", textFallback: true }, { engines: ["builtin"] });
+    expect(r.text).toBe("");
+    expect(r.reason).toBe("no document converter available");
   });
 });

@@ -186,7 +186,8 @@ ENVIRONMENT
   WEBINDEX_PDF_ENGINE    the PDF rungs to run, in order: a comma list of
                          pdf-inspector|anydoc|firecrawl|pdftotext|native|ocr, or "none"
   WEBINDEX_DOC_ENGINE    the office rungs to run, in order: a comma list of
-                         anydoc|firecrawl, or "none" to disable
+                         anydoc|firecrawl|builtin, or "none" to disable
+                         (builtin reads OOXML and OpenDocument with no network)
   WEBINDEX_NO_NPX        skip the rungs that would install through npx
   WEBINDEX_NPX_TIMEOUT_MS  how long one npx rung may run, first download included
                          (default 90000)
@@ -456,7 +457,7 @@ export function webindexAdapter(): McpAdapter {
         name: "webindex_fetch",
         title: "Fetch a URL as clean text",
         description:
-          "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR) and office documents, " +
+          "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR) and office documents (anydoc → Firecrawl → a built-in OOXML/OpenDocument reader), " +
           "and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text, then a trailer with the final URL after redirects, the page's canonical URL and title, any note, and which rung produced it — never raw bytes. " +
           "Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
         inputSchema: {

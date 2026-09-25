@@ -101,6 +101,27 @@ describe("office documents behind a download route", () => {
     expect(r.note).toMatch(/could not extract text/i);
   });
 
+  // The built-in rung, end to end: offline and without npx, a download route's
+  // .docx is still read — and the refusals above still hold for what it cannot.
+  it("reads a .docx behind a download route through the built-in rung", async () => {
+    vi.stubEnv(envName("DOC_ENGINE"), "builtin");
+    const report = readFileSync(join(__dirname, "fixtures", "docs", "report.docx"));
+    installFetchMock(routes([["x.test/download", { bytes: report, contentType: "application/octet-stream" }]]));
+    const r = await fetchAndExtract("https://x.test/download?id=9");
+    expect(r).toMatchObject({ documentType: "doc", extractor: "builtin" });
+    expect(r.text).toContain("# Quarterly report");
+    expect(r.note).toBeUndefined();
+  });
+
+  it("still refuses, with the reader's reason, a document the built-in rung cannot read", async () => {
+    vi.stubEnv(envName("DOC_ENGINE"), "builtin");
+    const legacy = readFileSync(join(__dirname, "fixtures", "docs", "legacy.xls"));
+    installFetchMock(routes([["x.test/old.xls", { bytes: legacy, contentType: "application/vnd.ms-excel" }]]));
+    const r = await fetchAndExtract("https://x.test/old.xls");
+    expect(r.text).toBe("");
+    expect(r.note).toMatch(/could not extract text — builtin: a legacy binary or password-protected Office file/);
+  });
+
   it("reads a CSV named by Content-Disposition as its text when nothing converts it", async () => {
     installFetchMock(() => ({
       body: "region,q1\nEMEA,1.2\n",

@@ -4,6 +4,7 @@ import { enginesFromEnv } from "../pdf/ladder.js";
 import { failureDetail, resetNpxState, runNpx, skipNpxHint } from "../pdf/npx.js";
 import { assessExtractedText } from "../pdf/quality.js";
 import type { DocFormat } from "./formats.js";
+import { readOffice } from "./office.js";
 
 // The office-document extractor ladder: convert a fetched .docx/.pptx/.xlsx/…
 // to Markdown, and REFUSE rather than cite what nothing could read.
@@ -16,22 +17,23 @@ import type { DocFormat } from "./formats.js";
 // hundreds of kilobytes of U+FFFD under a citation, with no note saying so.
 //
 // Rung order, and why:
-//   1. anydoc     the only local converter for these formats. One npx download
-//                 (~4 MB) the first time it is ever used, then a local cache hit.
-//                 Reads the format from the BYTES, so a mislabelled file still
-//                 converts — see ./formats.ts.
+//   1. anydoc     the strongest converter for these formats, and the only one
+//                 for the legacy binary ones (.doc, .xls, .ppt) and RTF. One npx
+//                 download (~4 MB) the first time it is ever used, then a local
+//                 cache hit. Reads the format from the BYTES, so a mislabelled
+//                 file still converts — see ./formats.ts.
 //   2. firecrawl  the caller's already-running container, injected as a callback
 //                 so this module stays free of the client. Covers hosts without
 //                 npm, and platforms npm has no anydoc binary for.
-//
-// There is deliberately no built-in last rung. For PDFs one exists because a
-// text layer is plain enough to mine with zlib and a regex; unzipping OOXML and
-// walking its parts is a different order of problem, and a wrong answer here is
-// worse than no answer.
+//   3. builtin    the zero-dependency OOXML/OpenDocument reader in ./office.ts.
+//                 Always present, no subprocess, no network: what an offline or
+//                 NO_NPX run reads .docx, .xlsx, .pptx, .odt, .ods and .odp
+//                 with. Last because anydoc's Markdown is richer; its output
+//                 passes the same gate as everyone else's.
 
-export type DocExtractorId = "anydoc" | "firecrawl";
+export type DocExtractorId = "anydoc" | "firecrawl" | "builtin";
 
-export const DOC_EXTRACTORS: DocExtractorId[] = ["anydoc", "firecrawl"];
+export const DOC_EXTRACTORS: DocExtractorId[] = ["anydoc", "firecrawl", "builtin"];
 
 export interface DocExtraction {
   text: string;
@@ -100,6 +102,14 @@ async function viaAnydoc(bytes: Buffer, format?: string): Promise<{ text?: strin
   return { failure: `anydoc: ${failureDetail(r)}` };
 }
 
+/** What the built-in reader made of the document. Never unavailable: it needs nothing. */
+function viaBuiltin(bytes: Buffer, fmt: DocFormat): { text?: string; failure?: string } {
+  // A CSV is plain text, not a package; its fallback is the caller's to apply.
+  if (fmt.format === "csv") return {};
+  const r = readOffice(bytes);
+  return r.text === undefined ? { failure: `builtin: ${r.failure}` } : { text: r.text };
+}
+
 /**
  * Convert an office document to Markdown, trying each enabled rung in order and
  * returning the first result that the quality gate accepts.
@@ -123,6 +133,7 @@ export async function extractDocument(bytes: Buffer, fmt: DocFormat, opts: DocLa
     let got: { text?: string; failure?: string; unavailable?: boolean };
     try {
       if (id === "anydoc") got = await viaAnydoc(bytes, fmt.format);
+      else if (id === "builtin") got = viaBuiltin(bytes, fmt);
       // Never remembered as unavailable: Firecrawl's own client memoises its
       // probe, and it can legitimately fail on one URL and work on the next.
       else got = { text: opts.firecrawl ? await opts.firecrawl() : undefined };

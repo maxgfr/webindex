@@ -1397,6 +1397,16 @@ describe("audit regressions", () => {
     expect(result.reason).toMatch(/no document converter available/);
   });
 
+  it("reads a local office document through the built-in rung, whatever its name", async () => {
+    process.env[envName("DOC_ENGINE")] = "builtin";
+    const file = join(dir, "report.bin");
+    writeFileSync(file, readFileSync(join(__dirname, "fixtures", "docs", "report.docx")));
+    expect(await run(["extract", file, "--json"])).toBe(0);
+    const result = JSON.parse(stdout());
+    expect(result.extractor).toBe("builtin");
+    expect(result.text).toContain("| EMEA | 1.2 | 1.5 |");
+  });
+
   it("reads a local PDF with no extension through the PDF ladder", async () => {
     const file = join(dir, "paper");
     writeFileSync(file, "%PDF-1.4\n1 0 obj\n<< /Length 30 >>\nstream\nBT (Local PDF text) Tj ET\nendstream\nendobj\n");

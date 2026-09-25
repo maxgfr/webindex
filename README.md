@@ -21,7 +21,7 @@ rather than an error.
 |---|---|
 | **Discovery** | A cascade: a local SearXNG, then the keyless engines (DuckDuckGo, DDG Lite, **Mojeek** — its own index, not a reseller), then Firecrawl. Pagination that stops when a page adds nothing new, cross-page dedupe, and throttled-upstream detection. `search` · `webindex_search` |
 | **Retrieval** | HTTP with retry, **streaming byte caps** (the transfer is cancelled at the cap, not trimmed after), **conditional GET** (a stale cache entry costs a 304, not a re-download), rate-limit and `Retry-After` semantics, and **encoding detection** — BOM, `Content-Type` charset, the XML declaration, `<meta charset>` (HTML only), then a UTF-8 validity check that falls back to Windows-1252 — so an undeclared Latin-1 page or feed is not silently mojibake. `fetch` · `webindex_fetch` |
-| **Extraction** | HTML→text with main-content isolation and consent-banner stripping; the **PDF ladder** (`pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → native → **OCR**) with a length-independent garbage gate; the **office ladder** over 20 formats; an explicit library primitive for Wayback rescue. `extract` · `webindex_extract` |
+| **Extraction** | HTML→text with main-content isolation and consent-banner stripping; the **PDF ladder** (`pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → native → **OCR**) with a length-independent garbage gate; the **office ladder** over 20 formats (`anydoc` → Firecrawl → a built-in OOXML/OpenDocument reader that needs no network); an explicit library primitive for Wayback rescue. `extract` · `webindex_extract` |
 | **Ranking** | RRF fusion, **BM25F** with title/heading weighting and an off-topic floor, **SimHash** near-duplicate collapse, **MMR** diversification so the top of a list says several different things. Generic over your item type — the engine ranks, it never sees your evidence model. `rank` · `webindex_rank` |
 | **Forges** | GitHub, GitLab and Gitea: issues, pull requests, releases, tags, and a repository's own record — stars, licence, last push, **archived**. Rename-following, GitHub Enterprise bases, and a quota reported rather than retried. `repo` `issues` `prs` `releases` |
 | **Registries** | A library **name** → its repository, homepage, docs, current version, licence and **deprecation**, through npm, PyPI or crates.io. Bounded registry requests instead of a web search and a guess. `package` · `webindex_package` |
@@ -133,7 +133,7 @@ A library of **primitives**, not a pipeline.
 | Layer | What it owns |
 |---|---|
 | Discovery | the SearXNG JSON API and Firecrawl's `/search`, with pagination, cross-page dedupe, and throttled-upstream detection |
-| Retrieval | HTTP with retry, **streaming** byte caps and conditional GET, HTML→text, main-content extraction, consent-banner stripping, Firecrawl, the PDF ladder (`pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → native → OCR), the office-document ladder, explicit Wayback rescue, the revalidating fetch cache |
+| Retrieval | HTTP with retry, **streaming** byte caps and conditional GET, HTML→text, main-content extraction, consent-banner stripping, Firecrawl, the PDF ladder (`pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → native → OCR), the office-document ladder (`anydoc` → Firecrawl → built-in), explicit Wayback rescue, the revalidating fetch cache |
 | Text | keyword extraction, accent- and plural-folded matching, camelCase splitting, excerpting, URL canonicalisation and identity |
 | Ranking | RRF fusion, BM25F with field weighting and a relevance floor, SimHash near-duplicate collapse, MMR diversification, DOI/arXiv identity, pool-relative recency |
 | MCP | the whole protocol — negotiation, cancellation, schema validation, response capping, the error taxonomy — plus the stdio and HTTP transports |
@@ -178,6 +178,17 @@ keys are already set in the environment, so an offline machine falls through in
 seconds rather than ~70 s per rung; once the registry proved unreachable the other
 npx rung is not asked, and the note says `WEBINDEX_NO_NPX=1` skips them.
 `WEBINDEX_NPX_TIMEOUT_MS` bounds one npx run (default 90000, first download included).
+
+The office ladder ends in a built-in reader (`officeToText`) for OOXML (`.docx`,
+`.xlsx`, `.pptx`) and OpenDocument (`.odt`, `.ods`, `.odp`): no subprocess, no
+network, so an offline or `WEBINDEX_NO_NPX` run still reads them —
+`WEBINDEX_DOC_ENGINE=builtin` forces it. It returns headings, lists, tables, each
+sheet as a table and each slide with its speaker notes, and it is strict about
+the ZIP it opens: ZIP64, encrypted entries and unknown compression methods are
+refused, and every entry, the whole archive and the text it produces are capped,
+so a decompression bomb costs 64 MB of work, not its full size. Its output passes
+the same garbage gate as every other rung. Legacy `.doc`/`.xls`/`.ppt` and RTF
+still need `anydoc` or Firecrawl.
 
 A `Retry-After` of up to 5 s is waited out and retried once; a longer one is
 not slept through and not retried early — the call returns at once with the

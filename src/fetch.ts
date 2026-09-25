@@ -1025,11 +1025,12 @@ const DOC_FETCH_OPTS = { accept: "*/*", binary: true, maxBytes: 16 * 1024 * 1024
 // extractor is never served to a run configured for the other (see src/cache.ts).
 //
 // `pdf-inspector` and `pdftotext` are PDF-only rungs (see backends/pdf/ladder.ts);
-// `anydoc` reads office documents (backends/doc/ladder.ts) and PDFs. They are
+// `anydoc` reads office documents (backends/doc/ladder.ts) and PDFs, and
+// `builtin` is the office ladder's own OOXML/OpenDocument reader. They are
 // reported so a dossier can say which tool read a paper, but PDFs and office
 // documents each share a single cache namespace — see the note on
 // currentExtractor in src/cache.ts.
-export type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext" | "anydoc" | "ocr";
+export type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext" | "anydoc" | "ocr" | "builtin";
 
 export interface ExtractResult {
   text: string;
