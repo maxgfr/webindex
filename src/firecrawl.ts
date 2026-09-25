@@ -354,6 +354,8 @@ export interface FirecrawlSearchOptions extends FirecrawlOptions {
   lang?: string;
   /** A country code overriding the one `lang` implies; "wt" names none. */
   region?: string;
+  /** The most this call may take, in ms: its request's timeout is the smaller of this and 30 s. */
+  budgetMs?: number;
 }
 
 /**
@@ -386,16 +388,17 @@ export async function searchViaFirecrawl(
     const country = resolveRegion(opts.lang, opts.region);
     if (/^[a-z]{2}$/.test(country) && country !== "wt") locale.country = country;
   }
+  const timeoutMs = Math.max(1, Math.round(Math.min(SEARCH_TIMEOUT_MS, opts.budgetMs ?? SEARCH_TIMEOUT_MS)));
   const r = await postJson(
     base,
     "/search",
     // `sources` is v2's; v1's strict schema rejects any key it does not know.
     // `timeout` tells Firecrawl to stop when we do: its own default is 60 s,
     // double the time this client waits.
-    (prefix) => ({ query, limit: n, ...locale, timeout: SEARCH_TIMEOUT_MS, ...(prefix === "/v2" ? { sources: ["web"] } : {}) }),
+    (prefix) => ({ query, limit: n, ...locale, timeout: timeoutMs, ...(prefix === "/v2" ? { sources: ["web"] } : {}) }),
     // No retry: this is the cascade's last rung, and a second attempt at an
     // instance that just failed or throttled us doubles the wait for nothing.
-    { timeoutMs: SEARCH_TIMEOUT_MS, retries: 0 },
+    { timeoutMs, retries: 0 },
   );
   if (!r.ok) {
     if (!r.status) markFirecrawlDown(base);

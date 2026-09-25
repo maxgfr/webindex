@@ -202,6 +202,19 @@ describe("search", () => {
     expect(stderr()).toContain("stack up");
   });
 
+  it("holds the whole search to --timeout", async () => {
+    vi.stubGlobal("fetch", hangingFetch());
+    const t0 = performance.now();
+    try {
+      expect(await run(["search", "q", "--engine", "ddg", "--timeout", "150"])).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(performance.now() - t0).toBeLessThan(3000); // not DuckDuckGo's 12 s
+    expect(stderr()).toMatch(/DuckDuckGo unreachable \(timed out after \d+ ms\)/);
+    expect(await run(["search", "q", "--timeout", "0"])).toBe(2);
+  });
+
   it("asks for a query rather than searching for nothing", async () => {
     expect(await run(["search"])).toBe(2);
     expect(stderr()).toContain("usage: webindex search");

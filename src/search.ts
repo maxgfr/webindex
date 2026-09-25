@@ -1,6 +1,6 @@
 import { brand, env, envName } from "./brand.js";
 import { httpGet, pageDelayMs, sleep } from "./fetch.js";
-import { firecrawlBase, ProbeMemo, searchViaFirecrawl } from "./firecrawl.js";
+import { firecrawlBase, ProbeMemo, searchViaFirecrawl, type FirecrawlHit } from "./firecrawl.js";
 import { acceptLanguageHeader } from "./locale.js";
 import { canonicalizeUrl } from "./url.js";
 import { isKeylessEngine, KEYLESS_ENGINES, keylessEngines, searchViaKeyless, unknownEngines, type EngineResult, type KeylessEngine } from "./engines.js";
@@ -40,9 +40,21 @@ export interface SearchOptions {
   limit?: number;
   /** BCP-47 language tag, e.g. "fr-FR". */
   lang?: string;
+  /** Country code overriding the one `lang` implies, e.g. "ca"; "wt" asks for no region. */
   region?: string;
   /** Result pages to walk. SearXNG paginates with `&pageno=`. */
   pages?: number;
+  /**
+   * The whole search's budget in ms, every rung and page included. No rung or
+   * page starts after it, and each request's own timeout is capped to what is
+   * left, so the worst case is this plus one 2 s availability probe.
+   */
+  timeoutMs?: number;
+  /**
+   * Abandons the search: checked before each rung and page. A request already
+   * in flight finishes first, within its own timeout.
+   */
+  signal?: AbortSignal;
   /**
    * Which keyless engines the cascade may fall back to, in order. Defaults to
    * all of them; `[]` disables the keyless rung entirely, leaving the local
@@ -193,8 +205,16 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
   // failure: the pages before it stand.
   let failed: RungOutcome | undefined;
 
+  const deadline = budgetDeadline(opts);
   for (let p = 0; p < pages && hits.length < limit; p++) {
-    const r = await httpGet(root + (p > 0 ? `&pageno=${p + 1}` : ""), { accept: "application/json", acceptLanguage, timeoutMs: QUERY_TIMEOUT_MS });
+    if (p > 0 && halted(opts, deadline)) break;
+    const r = await httpGet(root + (p > 0 ? `&pageno=${p + 1}` : ""), {
+      accept: "application/json",
+      acceptLanguage,
+      timeoutMs: Math.max(1, Math.min(QUERY_TIMEOUT_MS, deadline - Date.now())),
+      // No retry: the cascade's next rung is the retry.
+      retries: 0,
+    });
     if (!r.ok) {
       if (p === 0) {
         failed = r.status === 429 || r.status === 503 ? "throttled" : r.status === 0 ? "unreachable" : "error";
@@ -255,6 +275,19 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
   return rungResult("searxng", outcome, hits, notes);
 }
 
+// When the caller's overall budget runs out, as a Date.now() instant.
+function budgetDeadline(opts: SearchOptions): number {
+  return opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? Date.now() + opts.timeoutMs : Number.POSITIVE_INFINITY;
+}
+
+// Why no further rung or page may start, if none may. Checked between them
+// because a request in flight cannot be recalled — httpGet takes no signal —
+// so the budget ALSO caps each request's own timeout.
+function halted(opts: SearchOptions, deadline: number): string | undefined {
+  if (opts.signal?.aborted) return "the search was cancelled";
+  return Date.now() >= deadline ? `the ${opts.timeoutMs} ms budget ran out` : undefined;
+}
+
 // A one-rung SearchResult: the hits and notes, plus the report that says the same in data.
 function rungResult(rung: SearchRung, outcome: RungOutcome, hits: SearchHit[], notes: string[]): SearchResult {
   return { hits, notes, rungs: [report(rung, outcome, hits.length, notes.join(" "))], searched: answered(outcome) };
@@ -298,69 +331,91 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
   const q = query.trim();
   if (!q) return { hits: [], notes: ["Empty query."] };
 
+  const deadline = budgetDeadline(opts);
+  // What each rung may still spend: undefined when the caller set no budget.
+  const left = () => (deadline === Number.POSITIVE_INFINITY ? undefined : Math.max(1, deadline - Date.now()));
   const keyless = keylessEngines(opts);
-  const fcOff = !firecrawlBase(opts);
-  // The rungs the cascade stopped before, reported as such: a caller reading
+  const order: SearchRung[] = ["searxng", ...keyless, "firecrawl"];
+  // A rung the cascade never reached, reported as such: a caller reading
   // `rungs` sees where it ended, not just what the winner said.
-  const untried = (from: number): RungReport[] => [
-    ...keyless.slice(from).map((e) => report(e, "not-tried")),
-    report("firecrawl", fcOff ? "disabled" : "not-tried"),
-  ];
-  const done = (hits: SearchHit[], notes: string[], rungs: RungReport[]): SearchResult => ({
-    hits,
-    notes,
-    rungs,
-    searched: rungs.some((r) => answered(r.outcome)),
-  });
+  const untried = (rung: SearchRung): RungReport =>
+    report(rung, (rung === "searxng" && !searxngBase(opts)) || (rung === "firecrawl" && !firecrawlBase(opts)) ? "disabled" : "not-tried");
 
-  const viaSearxng = await searchViaSearxng(q, opts);
-  const rungs = [...(viaSearxng.rungs ?? [])];
-  if (viaSearxng.hits.length) return done(viaSearxng.hits, viaSearxng.notes, [...rungs, ...untried(0)]);
-  const notes = [...viaSearxng.notes];
-
-  // The keyless rung. Each engine is tried in turn and the FIRST one with hits
-  // wins — this is a fallback chain, not a fan-out: pooling several engines and
-  // fusing them is a ranking decision, and ranking belongs to the caller.
-  const unknown = unknownEngines(opts);
-  if (unknown.length) {
-    notes.push(`${envName("ENGINES")} names no engine this knows: ${unknown.join(", ")} (expected ${KEYLESS_ENGINES.join(", ")}) — ignored.`);
-  }
-  for (const [i, engine] of keyless.entries()) {
-    const r = await searchViaKeyless(engine, q, { limit: opts.limit, pages: opts.pages, lang: opts.lang, region: opts.region });
-    rungs.push(report(engine, keylessOutcome(r), r.hits.length, r.note));
-    if (r.hits.length) {
-      return done(
-        r.hits.map((h) => ({ ...h, via: engine })),
-        notes,
-        [...rungs, ...untried(i + 1)],
-      );
+  const notes: string[] = [];
+  const rungs: RungReport[] = [];
+  let hits: SearchHit[] = [];
+  for (let i = 0; i < order.length; i++) {
+    const rung = order[i]!;
+    if (hits.length) {
+      rungs.push(untried(rung));
+      continue;
     }
-    // Every failure is worth reporting; only "returned no results" is not.
-    // That one repeated by every engine in turn would bury the note that
-    // matters under three that say the same thing.
-    if (!r.answered && r.note) notes.push(r.note);
-  }
+    const stop = halted(opts, deadline);
+    if (stop) {
+      const rest = order.slice(i).map(untried);
+      const skipped = rest.filter((r) => r.outcome === "not-tried").map((r) => r.rung);
+      if (skipped.length) notes.push(`Stopped before ${skipped.join(", ")}: ${stop}.`);
+      rungs.push(...rest);
+      break;
+    }
 
-  // searchViaFirecrawl runs its own probe and reports why it could not, so
-  // there is no second copy of that logic here.
-  const limit = Math.max(1, opts.limit ?? 10);
-  const fc = await searchViaFirecrawl(q, limit, { firecrawl: opts.firecrawl, lang: opts.lang, region: opts.region });
-  // Held to the same rules as every other rung: canonical dedupe, then the limit.
+    if (rung === "searxng") {
+      const r = await searchViaSearxng(q, { ...opts, timeoutMs: left() });
+      hits = r.hits;
+      notes.push(...r.notes);
+      rungs.push(...(r.rungs ?? []));
+      // The keyless rung. Each engine is tried in turn and the FIRST one with
+      // hits wins — this is a fallback chain, not a fan-out: pooling several
+      // engines and fusing them is a ranking decision, and ranking belongs to
+      // the caller.
+      const unknown = unknownEngines(opts);
+      if (unknown.length) {
+        notes.push(`${envName("ENGINES")} names no engine this knows: ${unknown.join(", ")} (expected ${KEYLESS_ENGINES.join(", ")}) — ignored.`);
+      }
+    } else if (rung === "firecrawl") {
+      // searchViaFirecrawl runs its own probe and reports why it could not, so
+      // there is no second copy of that logic here.
+      const fc = await searchViaFirecrawl(q, limitOf(opts), { firecrawl: opts.firecrawl, lang: opts.lang, region: opts.region, budgetMs: left() });
+      hits = firecrawlHits(fc.hits ?? [], limitOf(opts));
+      if (fc.why) notes.push(fc.why);
+      rungs.push(report("firecrawl", firecrawlOutcome(fc), hits.length, fc.why));
+    } else {
+      const r = await searchViaKeyless(rung, q, {
+        limit: opts.limit,
+        pages: opts.pages,
+        lang: opts.lang,
+        region: opts.region,
+        budgetMs: left(),
+        signal: opts.signal,
+      });
+      hits = r.hits.map((h) => ({ ...h, via: rung }));
+      rungs.push(report(rung, keylessOutcome(r), r.hits.length, r.note));
+      // Every failure is worth reporting; only "returned no results" is not.
+      // That one repeated by every engine in turn would bury the note that
+      // matters under three that say the same thing.
+      if (!r.answered && r.note) notes.push(r.note);
+    }
+  }
+  if (!hits.length) notes.push(closingNote(rungs));
+  return { hits, notes, rungs, searched: rungs.some((r) => answered(r.outcome)) };
+}
+
+const limitOf = (opts: SearchOptions) => Math.max(1, opts.limit ?? 10);
+
+// Firecrawl's hits, held to the rules every other rung keeps: canonical dedupe,
+// then the limit.
+function firecrawlHits(found: FirecrawlHit[], limit: number): SearchHit[] {
   const seen = new Set<string>();
   const hits: SearchHit[] = [];
-  for (const h of fc.hits ?? []) {
+  for (const h of found) {
     const key = canonicalizeUrl(h.url);
     if (seen.has(key)) continue;
     seen.add(key);
     hits.push({ url: h.url, title: h.title, snippet: h.description, via: "firecrawl" });
     if (hits.length >= limit) break;
   }
-  if (fc.why) notes.push(fc.why);
-  rungs.push(report("firecrawl", firecrawlOutcome(fc), hits.length, fc.why));
-  if (!hits.length) notes.push(closingNote(rungs));
-  return done(hits, notes, rungs);
+  return hits;
 }
-
 function firecrawlOutcome(fc: { hits?: unknown[]; status?: number }): RungOutcome {
   if (fc.hits) return fc.hits.length ? "hits" : "empty";
   if (fc.status === undefined) return "disabled";

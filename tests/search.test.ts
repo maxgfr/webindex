@@ -191,9 +191,28 @@ describe("searchViaSearxng", () => {
 
   it("names rate limiting rather than reporting no results", async () => {
     const base = nextBase();
-    installFetchMock((url) => (url.includes("/search") ? { status: 429, body: "slow down" } : { body: "ok" }));
+    const spy = installFetchMock((url) => (url.includes("/search") ? { status: 429, body: "slow down" } : { body: "ok" }));
     const r = await searchViaSearxng("q", { searxng: base });
     expect(r.notes[0]).toContain("rate-limited (HTTP 429)");
+    // Asked once: the cascade's next rung is the retry, not the same instance.
+    expect(spy.mock.calls.filter((c) => String(c[0]).includes("/search"))).toHaveLength(1);
+  });
+
+  it("caps each query at what is left of the caller's budget", async () => {
+    const base = nextBase();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (u: string, init?: RequestInit) => {
+        if (!String(u).includes("/search")) return new Response("OK");
+        return new Promise<Response>((_resolve, reject) =>
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError"))),
+        );
+      }),
+    );
+    const t0 = performance.now();
+    const r = await searchViaSearxng("q", { searxng: base, timeoutMs: 100 });
+    expect(performance.now() - t0).toBeLessThan(2000); // not the 8 s query timeout
+    expect(r.notes[0]).toMatch(/timed out/);
   });
 
   it("reads a 403 from /search as format=json switched off, not as an outage", async () => {
@@ -296,6 +315,17 @@ describe("search", () => {
     expect(r.hits.map((h) => h.url)).toEqual(["https://a.test/1", "https://a.test/2"]);
     const body = JSON.parse(String((spy.mock.calls.find((c) => String(c[0]).includes("/search"))![1] as RequestInit).body));
     expect(body).toMatchObject({ lang: "fr", country: "fr", limit: 2 });
+  });
+
+  it("gives Firecrawl no more than what is left of the budget, and tells it so", async () => {
+    const fc = "http://fc-budget.test";
+    const spy = installFetchMock((url) =>
+      url.includes("/search") ? { body: JSON.stringify({ success: true, data: { web: [] } }), contentType: "application/json" } : { body: "ok" },
+    );
+    await search("q", { firecrawl: fc, engines: [], timeoutMs: 5000 });
+    const body = JSON.parse(String((spy.mock.calls.find((c) => String(c[0]).includes("/search"))![1] as RequestInit).body));
+    expect(body.timeout).toBeGreaterThan(0);
+    expect(body.timeout).toBeLessThanOrEqual(5000);
   });
 
   it("distinguishes 'nothing found' from 'nothing running'", async () => {

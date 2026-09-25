@@ -71,8 +71,15 @@ returning nothing. They have to be real captures: a hand-written DDG Lite
 fixture quoted `class="result-snippet"` with double quotes, the live page uses
 single ones, and every Lite snippet came back empty while the suite stayed green.
 
-## Politeness
+## Politeness, and how long it takes
 
+- No rung retries a request: in a cascade the next rung is the retry, and asking
+  an engine that just answered 429 again is how a throttle becomes a block.
+- `--timeout <ms>` (`timeoutMs` in the library, 45 s under `webindex_search`)
+  bounds the whole search. No rung or page starts after it, each request's own
+  timeout is capped to what is left, and the note names the rungs never reached.
+  A library caller can also pass an `AbortSignal`, checked before every rung and
+  page.
 - `WEBINDEX_PAGE_DELAY_MS` (350) between result pages.
 - DuckDuckGo's next page is the one its own "Next" form names (offset `s`, `dc`
   and the `vqd` token), and a page without one is the last. Mojeek's offset is

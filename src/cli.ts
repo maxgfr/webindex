@@ -74,6 +74,7 @@ documents — and serve that to an agent over MCP. Zero dependencies, no API key
 USAGE
   webindex search <query> [--json] [--limit <n>] [--pages <n>] [--lang <tag>]
                           [--engine ddg|ddglite|mojeek|off] [--searxng <base>|off]
+                          [--timeout <ms>]
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>] [--full-page]
                        [--cache] [--refresh] [--offline] [--timeout <ms>]
   webindex extract <file> [--json] [--full-page]
@@ -111,6 +112,9 @@ COMMANDS
              engines (DuckDuckGo, DDG Lite, Mojeek — no key, no container),
              then Firecrawl. Prints what it found, or says which backend was
              missing and how to start it — those are different answers.
+             --timeout bounds the WHOLE cascade, every rung and page; the
+             rungs it never reached are named. --json adds each rung's
+             outcome (rungs) and whether anything answered (searched).
   fetch      Fetch a URL and print the extracted text. Routes PDFs and office
              documents to their ladders automatically — by URL, content-type,
              download filename or the bytes themselves; images, media and
@@ -334,6 +338,9 @@ function toolTimeoutMs(value: unknown): number | undefined {
   const n = typeof value === "string" ? Number(value) : value;
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(300_000, Math.max(1, Math.round(n))) : undefined;
 }
+
+// The whole webindex_search cascade's budget: every rung and page within it.
+const SEARCH_TOOL_BUDGET_MS = 45_000;
 
 const FORGE_KINDS: readonly ForgeKind[] = ["github", "gitlab", "gitea"];
 const isForgeKind = (v: string): v is ForgeKind => (FORGE_KINDS as readonly string[]).includes(v);
@@ -767,6 +774,10 @@ export function webindexAdapter(): McpAdapter {
         const r = await search(q, {
           limit: typeof args.limit === "number" ? args.limit : undefined,
           lang: args.lang ? String(args.lang) : undefined,
+          // An MCP host gives up on a tool call long before a cascade of
+          // timeouts would: better a partial answer that says where it
+          // stopped than none at all.
+          timeoutMs: SEARCH_TOOL_BUDGET_MS,
           ...(engines ? { engines } : {}),
         });
         // The notes are prose; this line is the same facts in a form an agent
@@ -955,6 +966,8 @@ async function dispatch(argv: string[]): Promise<void> {
       lang: argValue(args, "lang"),
       searxng: argValue(args, "searxng"),
       firecrawl: argValue(args, "firecrawl"),
+      // The budget for the whole cascade, not one request.
+      timeoutMs: argTimeout(args),
       ...(engine ? { engines: engine === "off" ? [] : [engine as KeylessEngine] } : {}),
     });
     if (argBool(args, "json")) {

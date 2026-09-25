@@ -559,6 +559,78 @@ describe("a cascade in which no engine answered says nothing was searched", () =
   });
 });
 
+describe("a search is bounded in time", () => {
+  // Every rung went through the default retry: a 429 was asked twice (the
+  // cascade's next rung IS the retry), and with no overall deadline one
+  // search() could outlast any MCP host's patience.
+  const ALL = { engines: ["ddg", "ddglite", "mojeek"] as ("ddg" | "ddglite" | "mojeek")[] };
+  const hanging = () =>
+    vi.fn(
+      (_u: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) =>
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError"))),
+        ),
+    );
+
+  it("asks a throttling engine once, and moves on", async () => {
+    const spy = installFetchMock(() => ({ status: 429, body: "" }));
+    await search("x", ALL);
+    expect(spy).toHaveBeenCalledTimes(3);
+    installFetchMock(() => ({ status: 503, body: "" }));
+    const one = vi.mocked(globalThis.fetch);
+    await searchViaKeyless("mojeek", "x");
+    expect(one).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops at the overall budget and says which rungs it never reached", async () => {
+    const spy = hanging();
+    vi.stubGlobal("fetch", spy);
+    const t0 = performance.now();
+    const r = await search("x", { ...ALL, timeoutMs: 150 });
+    expect(performance.now() - t0).toBeLessThan(3000); // not 3 × 12 s
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(r.rungs?.map((x) => [x.rung, x.outcome])).toEqual([
+      ["searxng", "disabled"],
+      ["ddg", "unreachable"],
+      ["ddglite", "not-tried"],
+      ["mojeek", "not-tried"],
+      ["firecrawl", "disabled"],
+    ]);
+    expect(r.notes.join(" ")).toMatch(/Stopped before ddglite, mojeek: the 150 ms budget ran out/);
+    expect(r.searched).toBe(false);
+  });
+
+  it("does not start once the caller's signal has fired", async () => {
+    const spy = installFetchMock(() => ({ body: DDG_LITE }));
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const r = await search("x", { ...ALL, signal: ctrl.signal });
+    expect(spy).not.toHaveBeenCalled();
+    expect(r.hits).toEqual([]);
+    expect(r.notes.join(" ")).toMatch(/cancelled/);
+  });
+
+  it("checks the signal between rungs and between pages", async () => {
+    const ctrl = new AbortController();
+    const spy = installFetchMock(() => {
+      ctrl.abort(); // the caller gives up while page one is in flight
+      return { body: "<html>nothing</html>" };
+    });
+    const r = await search("x", { ...ALL, signal: ctrl.signal });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(r.rungs?.find((x) => x.rung === "ddglite")?.outcome).toBe("not-tried");
+
+    const later = new AbortController();
+    const paged = installFetchMock(() => {
+      later.abort();
+      return { body: DDG_LITE };
+    });
+    const walked = await searchViaKeyless("ddglite", "x", { pages: 3, limit: 50, signal: later.signal });
+    expect(paged).toHaveBeenCalledTimes(1); // page two never asked
+    expect(walked.hits).toHaveLength(3); // page one's results stand
+  });
+});
+
 describe("the notes name the switch the user actually threw", () => {
   it("reports engine names it does not know, instead of dropping the rung in silence", async () => {
     vi.stubEnv(envName("ENGINES"), "duckduckgo,mojek");

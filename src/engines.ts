@@ -419,7 +419,18 @@ const SPECS: Record<KeylessEngine, EngineSpec> = {
 export async function searchViaKeyless(
   engine: KeylessEngine,
   query: string,
-  opts: { limit?: number; pages?: number; lang?: string; region?: string; timeoutMs?: number } = {},
+  opts: {
+    limit?: number;
+    pages?: number;
+    lang?: string;
+    region?: string;
+    /** Each request's timeout, in ms (default 12000). */
+    timeoutMs?: number;
+    /** The whole call's budget in ms, every page included: no page starts after it, and each request's timeout is capped to what is left. */
+    budgetMs?: number;
+    /** Checked before each page. A page already in flight finishes, within its timeout. */
+    signal?: AbortSignal;
+  } = {},
 ): Promise<EngineResult> {
   const spec = SPECS[engine];
   const q = query.trim();
@@ -440,9 +451,21 @@ export async function searchViaKeyless(
   const seen = new Set<string>();
   const hits: EngineHit[] = [];
 
+  const deadline = opts.budgetMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + opts.budgetMs;
   let url = spec.url(q, 0, kl, locale);
   for (let p = 0; p < pages && hits.length < limit; p++) {
-    const r = await httpGet(url, { accept: "text/html", acceptLanguage, timeoutMs: opts.timeoutMs ?? 12000 });
+    if (opts.signal?.aborted || Date.now() >= deadline) {
+      if (p > 0) break; // the pages already read stand
+      return { hits: [], note: `${spec.label} was not asked: ${opts.signal?.aborted ? "the search was cancelled" : "no time was left"}.` };
+    }
+    // No retry: in a cascade the next engine IS the retry, and asking an
+    // engine that just answered 429 again is how a throttle becomes a block.
+    const r = await httpGet(url, {
+      accept: "text/html",
+      acceptLanguage,
+      timeoutMs: Math.max(1, Math.min(opts.timeoutMs ?? 12000, deadline - Date.now())),
+      retries: 0,
+    });
     if (!r.ok || !r.body.trim()) {
       // A later page failing is not a failure — page one's results stand.
       if (p > 0) break;
