@@ -462,6 +462,11 @@ declare function httpGet(url: string, opts?: {
      *  Per-call because the right number is per-endpoint: a probe wants 0, a
      *  paper download off a flaky mirror wants 2. */
     retries?: number;
+    /** Told, BEFORE the wait, that a transient answer (429, 502–504) will be
+     *  retried after `waitMs` — so a caller queueing other requests for that
+     *  host (crawlSite) holds them for the same window instead of sending them
+     *  into it while this one sleeps. */
+    onBackOff?: (url: string, waitMs: number) => void;
 }): Promise<HttpResult>;
 declare function httpJson(method: string, url: string, body?: unknown, opts?: {
     timeoutMs?: number;
@@ -582,6 +587,8 @@ declare function fetchAndExtract(url: string, opts?: {
      * the page it just read; see ExtractResult.html for why it is opt-in.
      */
     keepHtml?: boolean;
+    /** Passed to httpGet: told before a transient answer is waited out and retried. */
+    onBackOff?: (url: string, waitMs: number) => void;
 }): Promise<ExtractResult>;
 declare const DEAD_LINK_STATUS: Set<number>;
 declare function rescueViaWayback(url: string, opts?: {
@@ -646,20 +653,21 @@ declare function firecrawlIsExplicit(opts?: FirecrawlOptions): boolean;
 /**
  * Test seam: forget which bases were probed.
  *
- * The memoisation is per-process and deliberately sticky — the whole cost of an
- * absent Firecrawl is meant to be one refused connection. That is right in
- * production and wrong across test cases, where one case's "down" verdict would
- * silently decide the next case's behaviour. Mirrors resetOcrBudget,
- * resetPdfLadderCache and resetDocLadderCache.
+ * An "up" verdict is sticky for the process and a "down" one lasts 30 s, so
+ * the whole cost of an absent Firecrawl is one refused connection per burst of
+ * calls. That is right in production and wrong across test cases, where one
+ * case's verdict would silently decide the next case's behaviour. Mirrors
+ * resetOcrBudget, resetPdfLadderCache and resetDocLadderCache.
  */
 declare function resetFirecrawlProbeCache(): void;
 /**
- * Record that `base` stopped answering, so the rest of this run skips it.
+ * Record that `base` stopped answering, so the calls that follow skip it.
  *
- * The probe runs once and is then trusted for the process — which is right for
- * "it was never there" and wrong for "the container died at page 4 of 40". A
- * caller that sees a request abort with no status knows something the memoised
- * verdict does not, and without this every remaining page pays the timeout again.
+ * An "up" verdict is trusted for the process — which is right for "it is
+ * there" and wrong for "the container died at page 4 of 40". A caller that
+ * sees a request fail with no status knows something the memoised verdict does
+ * not, and without this every remaining page pays the timeout again. Like any
+ * "down" verdict it expires, so an instance that comes back is found again.
  * Both probe modes are marked down: the instance is gone whether or not the user
  * named it.
  */
@@ -685,9 +693,9 @@ declare function looksLikeFirecrawl(contentType: string | null, body: string): b
  * ceiling. The response must also look like Firecrawl (see above) unless the
  * caller named the instance itself — pointing `--firecrawl` somewhere is a
  * statement about what lives there, and it may legitimately sit behind a proxy
- * that masks the root. Connection refused / timeout ⇒ down. Memoised for the
- * process, so the whole cost of an absent Firecrawl is one refused connection.
- * Never throws.
+ * that masks the root. Connection refused / timeout ⇒ down. Memoised — "up"
+ * for the process, "down" for 30 s — so the whole cost of an absent Firecrawl is
+ * one refused connection per burst of calls. Never throws.
  *
  * Deliberately bypasses `httpGet`: that layer retries once with a backoff,
  * which would turn a 2s ceiling into ~4.6s on a blackholed host. A probe wants
@@ -700,7 +708,10 @@ declare function apiPrefix(base: string): string;
 interface FirecrawlScrape {
     markdown: string;
     title?: string;
+    /** The URL Firecrawl was asked for (`metadata.sourceURL`, else `metadata.url`). */
     sourceURL?: string;
+    /** Where the page ended up after redirects (`metadata.url`, else `sourceURL`) — the address to cite. */
+    finalUrl?: string;
     statusCode?: number;
 }
 /**
@@ -740,13 +751,24 @@ interface ScrapeAttempt {
  * Returns `{}` (silently) when Firecrawl is disabled or unreachable.
  */
 declare function scrapeViaFirecrawl(url: string, opts?: FirecrawlOptions): Promise<ScrapeAttempt>;
+/** What `searchViaFirecrawl` may be told besides the base. */
+interface FirecrawlSearchOptions extends FirecrawlOptions {
+    /** BCP-47 language tag. Sent as Firecrawl's `lang`, with the `country` it implies; without one Firecrawl answers in US English. */
+    lang?: string;
+    /** A country code overriding the one `lang` implies; "wt" names none. */
+    region?: string;
+    /** The most this call may take, in ms: its request's timeout is the smaller of this and 30 s. */
+    budgetMs?: number;
+}
 /**
  * Query Firecrawl's keyless `/search` (Fire-Engine → SearXNG → DuckDuckGo
  * internally). Returns the `web` hits, or a reason.
  */
-declare function searchViaFirecrawl(query: string, limit: number, opts?: FirecrawlOptions): Promise<{
+declare function searchViaFirecrawl(query: string, limit: number, opts?: FirecrawlSearchOptions): Promise<{
     hits?: FirecrawlHit[];
     why?: string;
+    /** When it produced no hit list: the HTTP status that ended it, 0 when nothing answered. Absent when disabled. */
+    status?: number;
 }>;
 
 declare function escapeRegExp(s: string): string;
@@ -921,6 +943,11 @@ interface Ranked {
  * reads POSITION, so it needs no calibration: an item's contribution from each
  * list is `1/(k + rank)`, and `k` damps the tail so rank 40 cannot outvote a
  * couple of top-tens.
+ *
+ * An item counts ONCE per list, at its best rank, as in Cormack et al. Callers
+ * key by canonical URL or DOI, so tracking-param variants, pagination overlap
+ * and abs/pdf twins inside one engine's list share a key — summed, one engine
+ * repeating a URL counted as much as two engines agreeing on it.
  */
 declare function rrf<T>(lists: T[][], keyOf: (item: T) => string, k?: number): Map<string, number>;
 /**
@@ -932,8 +959,10 @@ declare function rrf<T>(lists: T[][], keyOf: (item: T) => string, k?: number): M
 declare function arxivIdFromUrl(url: string): string | undefined;
 /**
  * The DOI inside a URL — a doi.org resolver link, or a publisher landing page
- * that carries the DOI in its path (`dl.acm.org/doi/…`, `/doi/full/…`). Returned
- * normalised, so a DOI-in-path collapses with a bare one.
+ * that carries the DOI in its path (`dl.acm.org/doi/…`, `/doi/full/…`,
+ * `link.springer.com/article/10.1007/…`, bioRxiv's `/content/10.1101/…v1`) or
+ * its query (PLOS's `?id=10.1371/…`). Returned normalised, so a DOI-in-path
+ * collapses with a bare one.
  */
 declare function doiFromUrl(url: string): string | undefined;
 /**
@@ -964,11 +993,19 @@ interface Bm25Index {
 /**
  * Tokenise into canonical terms WITH repetition, so term frequency survives.
  *
- * Shares `foldTerm` and `isStopword` with `buildMatcher`, which is the point:
- * two scorers that disagree about whether "requests" and "request" are the same
- * term will disagree about relevance for reasons nobody can debug.
+ * Shares `foldTerm`, `isStopword` and `subtokens` with `buildMatcher`, which is
+ * the point: two scorers that disagree about whether "requests" and "request"
+ * — or "RateLimiter" and "rate limiter" — are the same term will disagree about
+ * relevance for reasons nobody can debug. An identifier therefore yields its
+ * whole folded form AND its inner words (`subtokens: false` keeps the whole
+ * form only).
+ *
+ * Chinese and Japanese, written without spaces, come back as overlapping
+ * character bigrams; a lone ideograph is kept as a unigram.
  */
-declare function bm25Tokenize(text: string): string[];
+declare function bm25Tokenize(text: string, opts?: {
+    subtokens?: boolean;
+}): string[];
 /**
  * Build the index over the candidate pool — the pool IS the corpus, so IDF is
  * relative to what was actually retrieved.
@@ -976,10 +1013,15 @@ declare function bm25Tokenize(text: string): string[];
  * Below three documents IDF is too noisy to mean anything, so it degrades to
  * uniform (pure TF). A three-result pool where one term happens to be missing
  * from two of them would otherwise assign that term a huge weight on no evidence.
+ *
+ * `tokensOf` supplies a body's tokens, exactly as `bm25Tokenize(doc.body)`
+ * returns them, when the caller already has them — so a pipeline that also
+ * hashes and diversifies the same bodies tokenises each one once.
  */
 declare function buildBm25Index(question: string, docs: readonly Bm25Doc[], opts?: {
     k1?: number;
     b?: number;
+    tokensOf?: (doc: Bm25Doc) => readonly string[];
 }): Bm25Index;
 /** BM25F score of one document against the index (raw, ≥0). */
 declare function bm25Score(index: Bm25Index, doc: Bm25Doc): number;
@@ -1022,8 +1064,14 @@ declare function recencyScore(meta: {
 /**
  * 64-bit SimHash over 3-gram shingles. Near-duplicate documents land a few bits
  * apart; unrelated ones sit around 32.
+ *
+ * `tokens` hashes words the caller already has instead of tokenising `text`
+ * again — a pipeline that indexed a document need not read it a second time.
+ * Only hashes built from the same kind of tokens are comparable.
  */
-declare function simhash(text: string): bigint;
+declare function simhash(text: string, opts?: {
+    tokens?: readonly string[];
+}): bigint;
 /**
  * How many bits two SimHashes differ by.
  *
@@ -1039,13 +1087,24 @@ declare function hammingDistance(a: bigint, b: bigint): number;
  * Collapse near-duplicate items by SimHash over their text, keeping the
  * best-scored copy. Items shorter than `minChars` carry too little signal and
  * are never collapsed. Expects best-first input and preserves that order.
+ *
+ * `duplicates` names each dropped URL and the kept one it duplicated: a mirror
+ * is an alternate citation, and the evidence when a collapse was wrong.
+ *
+ * `tokensOf` hands over words the caller already tokenised (see `simhash`), so
+ * a pipeline reads each text once.
  */
 declare function dedupeNearDuplicates<T extends Ranked>(items: readonly T[], opts?: {
     maxBits?: number;
     minChars?: number;
+    tokensOf?: (it: T) => readonly string[];
 }): {
     items: T[];
     dropped: number;
+    duplicates: {
+        url: string;
+        of: string;
+    }[];
 };
 /**
  * Re-order a ranked list so the top of it says several DIFFERENT things.
@@ -1062,9 +1121,17 @@ declare function dedupeNearDuplicates<T extends Ranked>(items: readonly T[], opt
  *
  * It REORDERS ONLY. Every input comes back exactly once: this changes what you
  * read first, never what you have. λ = 0.75 keeps relevance dominant, so
- * diversity breaks ties and demotes redundancy rather than promoting noise.
+ * diversity breaks ties and demotes redundancy rather than promoting noise —
+ * and every item scoring above zero is placed before any item that does not.
+ *
+ * MMR is quadratic in the pool. `window` bounds it: only the `window` most
+ * relevant items are diversified, and the rest follow in relevance order — the
+ * top of a long list is where diversity is read, and a 2 000-document pool then
+ * costs what a `window`-sized one does.
  */
-declare function diversify<T extends Ranked>(items: readonly T[], tokensOf: (it: T) => Set<string>, lambda?: number): T[];
+declare function diversify<T extends Ranked>(items: readonly T[], tokensOf: (it: T) => Iterable<string>, lambda?: number, opts?: {
+    window?: number;
+}): T[];
 /**
  * The hosts a text links out to, excluding its own domain and `www.` noise.
  *
@@ -1591,23 +1658,30 @@ interface Robots {
     crawlDelayMs?: number;
     /** Every `Sitemap:` line — they are file-level, not per-group. */
     sitemaps: string[];
-    /** True when the file could not be read at all (which means "allowed"). */
+    /** True when there was no file to read (a 4xx, or an empty one), which means "allowed". */
     absent: boolean;
+    /** The status robots.txt answered with; 0 when no answer came. Absent when it was never requested. */
+    status?: number;
+    /**
+     * The server errored (5xx, 429) or never answered. RFC 9309 §2.3.1.4: the
+     * crawler MUST then assume complete disallow, so `rules` holds `Disallow: /`.
+     */
+    unreachable?: boolean;
 }
 /**
  * Parse a robots.txt for one user-agent token.
  *
- * Group selection follows the spec's precedence: the most specific matching
- * `User-agent` wins, and `*` is the fallback. A file with no group for us and no
- * `*` group imposes nothing.
+ * Group selection follows the spec's precedence: the group naming our product
+ * token wins, and `*` is the fallback. A file with no group for us and no `*`
+ * group imposes nothing. A full User-Agent string is reduced to its product
+ * token (`MyBot/2.1 (compatible; …)` is `mybot`), the same way the file's lines are.
  */
 declare function parseRobots(body: string, userAgent: string): Robots;
 /**
  * Does this robots.txt permit fetching `url`?
  *
- * An absent or unparseable file means yes — that is what the spec says, and it
- * is also the only safe default for a tool that must not turn a network hiccup
- * into "this site is off limits".
+ * An absent file means yes — that is what the spec says. An unreachable one
+ * means no, which is also what the spec says: its rules are `Disallow: /`.
  */
 declare function isAllowed(robots: Robots, url: string): boolean;
 type UrlAuthorizer = (url: string) => Promise<boolean>;
@@ -1617,9 +1691,10 @@ declare function resetRobotsCache(): void;
  * Fetch and parse the robots.txt governing `url`, memoised per origin.
  *
  * Memoised because the alternative is one extra request per page fetched, which
- * is precisely the kind of load robots.txt exists to prevent. Disabled entirely
- * by `<PREFIX>_NO_ROBOTS`, for an operator who knows they are crawling their own
- * site.
+ * is precisely the kind of load robots.txt exists to prevent — for a day at
+ * most, and for a few minutes when the file was unreachable. Disabled entirely
+ * by `<PREFIX>_NO_ROBOTS`, for an operator who knows they are crawling their
+ * own site.
  */
 declare function fetchRobots(url: string, opts?: {
     authorizeUrl?: UrlAuthorizer;
@@ -1685,18 +1760,28 @@ interface FeedItem {
 }
 interface Feed {
     title?: string;
-    kind: "rss" | "atom";
+    kind: "rss" | "atom" | "json";
     items: FeedItem[];
 }
 /**
- * Parse an RSS 2.0 or Atom feed.
+ * Parse an RSS 2.0, RSS 1.0 (RDF), Atom or JSON Feed document.
  *
- * Returns an empty item list rather than throwing on anything unrecognised —
- * the caller asked "does this site publish a feed", and "no" is a valid answer
- * that must not look like a crash.
+ * Returns undefined for anything that is not one — judged by the element the
+ * document opens with, not by a `<channel` anywhere in it: a page using a
+ * `<channel-nav>` element is still a page, and must fall through to discovery.
+ * A feed with no entries is an empty list rather than a throw — "no" is a
+ * valid answer that must not look like a crash.
+ *
+ * `baseUrl` is where the feed was fetched from. Relative links — and Atom's
+ * `xml:base` — resolve against it; without it they are returned as written.
  */
-declare function parseFeed(xml: string): Feed | undefined;
-/** Feed URLs a page advertises via `<link rel="alternate">`. */
+declare function parseFeed(xml: string, baseUrl?: string): Feed | undefined;
+/**
+ * Feed URLs a page advertises via `<link rel="alternate">`.
+ *
+ * A bare `application/json` alternate is not taken: that is how WordPress
+ * advertises its REST API, and JSON Feed's own discovery type is `feed+json`.
+ */
 declare function discoverFeeds(html: string, baseUrl: string): string[];
 interface Sitemap {
     /** Page URLs, for a urlset. */
@@ -1706,9 +1791,14 @@ interface Sitemap {
     }[];
     /** Nested sitemap URLs, for a sitemapindex — fetch these to go deeper. */
     sitemaps: string[];
+    /** fetchSitemap: the nested sitemaps its document budget did not reach. Raise `max` to read them. */
+    unfetched?: string[];
+    /** fetchSitemap: why a document was not read, or not read whole. */
+    notes?: string[];
 }
 /**
- * Parse a sitemap.xml, whether it is a `urlset` or a `sitemapindex`.
+ * Parse a sitemap, whether it is a `urlset`, a `sitemapindex`, or the
+ * protocol's plain-text form (one URL per line).
  *
  * The two are reported separately rather than followed automatically: a sitemap
  * index can name hundreds of children, and deciding how much of a site to
@@ -1718,17 +1808,22 @@ declare function parseSitemap(xml: string): Sitemap;
 /**
  * Fetch and parse the sitemap(s) for an origin.
  *
- * Tries the ones robots.txt names first — a site that publishes its sitemap
- * location there means it — then falls back to `/sitemap.xml`. `max` bounds how
- * many documents are fetched, because a sitemap index is an invitation to
- * enumerate a site and that has to stay a budget the caller sets.
+ * Reads the ones robots.txt names — a site that publishes its sitemap location
+ * there means it — and their children, breadth-first. `/sitemap.xml` is only a
+ * guess, so it is tried only when robots.txt named none or the named ones gave
+ * nothing: fetched ahead of the index's children, it spent the budget on a
+ * usually-404 request.
+ *
+ * `max` bounds how many documents are fetched (default 3), because a sitemap
+ * index is an invitation to enumerate a site and that has to stay a budget the
+ * caller sets. The children it did not reach come back in `unfetched`.
  */
 declare function fetchSitemap(url: string, opts?: {
     sitemaps?: string[];
     max?: number;
     authorizeUrl?: (url: string) => Promise<boolean>;
 }): Promise<Sitemap>;
-/** Fetch and parse a feed URL. */
+/** Fetch and parse a feed URL, resolving its links against where it was served from. */
 declare function fetchFeed(url: string): Promise<Feed | undefined>;
 
 /** A keyless engine this module knows how to query. */
@@ -1750,6 +1845,15 @@ declare function isKeylessEngine(v: string): v is KeylessEngine;
 declare function keylessEngines(opts?: {
     engines?: KeylessEngine[];
 }): KeylessEngine[];
+/**
+ * The names in `<PREFIX>_ENGINES` that are not engines — what `keylessEngines`
+ * skipped. Ignoring a typo is right; ignoring it SILENTLY is not: a list with
+ * no valid name removed the whole keyless rung, and the run then reported "no
+ * results" for a search nobody made.
+ */
+declare function unknownEngines(opts?: {
+    engines?: KeylessEngine[];
+}): string[];
 interface EngineHit {
     url: string;
     title: string;
@@ -1771,8 +1875,17 @@ interface EngineResult {
      * was asked. Blocked implies throttled: it is worth retrying later too.
      */
     blocked?: boolean;
+    /**
+     * The engine served a result page and it was read — hits, or a genuinely
+     * empty page. Anything else (a refusal, an error status, a timeout, no
+     * connection) says nothing about the web, and a caller counting "no results"
+     * must not count it.
+     */
+    answered?: boolean;
+    /** When it did not answer: the HTTP status that ended it, 0 when no response came back at all. */
+    status?: number;
 }
-/** Tags out, entities decoded, whitespace collapsed. */
+/** Tags out, entities decoded, whitespace collapsed. Inline markup vanishes; a block or `<br>` leaves a space. */
 declare function stripTags(s: string): string;
 /**
  * The real destination behind a DuckDuckGo redirector link, which rides in the
@@ -1787,8 +1900,12 @@ declare function ddgRedirectTarget(href: string): string;
  * again in a few minutes and the second will not, and a caller that reports the
  * wrong one sends its user down the wrong path. Repeated identically across six
  * backends before it lived here.
+ *
+ * `error` is the transport's own account of a request that got no status at
+ * all — "timed out after 12000 ms", "ENOTFOUND: …" — which says far more than
+ * "status 0".
  */
-declare function throttleReason(status: number): {
+declare function throttleReason(status: number, error?: string): {
     throttled: boolean;
     why: string;
 };
@@ -1819,16 +1936,22 @@ declare function parseMojeek(body: string, limit?: number): EngineHit[];
 /**
  * Ask one keyless engine, walking `pages` result pages.
  *
- * Pagination stops as soon as a page adds no NEW canonical URL. An engine that
- * ignores the offset parameter and re-serves page one would otherwise be walked
- * to the requested depth, paying a request per page for the same ten results.
+ * Pagination stops at a page that names no next page, and as soon as a page
+ * adds no NEW canonical URL. An engine that ignores the offset parameter and
+ * re-serves page one would otherwise be walked to the requested depth, paying a
+ * request per page for the same ten results.
  */
 declare function searchViaKeyless(engine: KeylessEngine, query: string, opts?: {
     limit?: number;
     pages?: number;
     lang?: string;
     region?: string;
+    /** Each request's timeout, in ms (default 12000). */
     timeoutMs?: number;
+    /** The whole call's budget in ms, every page included: no page starts after it, and each request's timeout is capped to what is left. */
+    budgetMs?: number;
+    /** Checked before each page. A page already in flight finishes, within its timeout. */
+    signal?: AbortSignal;
 }): Promise<EngineResult>;
 
 /** The docker stack publishes SearXNG here. */
@@ -1849,9 +1972,22 @@ interface SearchOptions {
     limit?: number;
     /** BCP-47 language tag, e.g. "fr-FR". */
     lang?: string;
+    /** Country code overriding the one `lang` implies, e.g. "ca"; "wt" asks for no region. */
     region?: string;
     /** Result pages to walk. SearXNG paginates with `&pageno=`. */
     pages?: number;
+    /**
+     * The whole search's budget in ms, every rung and page included. No rung or
+     * page starts after it, and each request's own timeout is capped to what is
+     * left, so the worst case is this plus the 2 s availability probes of
+     * SearXNG and Firecrawl.
+     */
+    timeoutMs?: number;
+    /**
+     * Abandons the search: checked before each rung and page. A request already
+     * in flight finishes first, within its own timeout.
+     */
+    signal?: AbortSignal;
     /**
      * Which keyless engines the cascade may fall back to, in order. Defaults to
      * all of them; `[]` disables the keyless rung entirely, leaving the local
@@ -1859,10 +1995,44 @@ interface SearchOptions {
      */
     engines?: KeylessEngine[];
 }
+/** A rung of the cascade: SearXNG, one keyless engine, or Firecrawl. */
+type SearchRung = "searxng" | "firecrawl" | KeylessEngine;
+/**
+ * What one rung did. The first two are ANSWERS — the rung read a result page —
+ * and only they say anything about the web:
+ *
+ * - `hits` / `empty`: it answered, with results or with none;
+ * - `throttled`: it refused for load, and will work again later;
+ * - `blocked`: it turned this client away as automated traffic;
+ * - `unreachable`: nothing answered — not running, no connection, timed out;
+ * - `error`: something answered, but not with results — an error status, an
+ *   empty or unreadable page, a request the backend rejected;
+ * - `disabled`: switched off; `not-tried`: the cascade stopped before it.
+ */
+type RungOutcome = "hits" | "empty" | "throttled" | "blocked" | "unreachable" | "error" | "disabled" | "not-tried";
+interface RungReport {
+    rung: SearchRung;
+    outcome: RungOutcome;
+    /** How many hits it returned, when it returned any. */
+    hits?: number;
+    /** Its note, when it had one. */
+    note?: string;
+}
 interface SearchResult {
     hits: SearchHit[];
     /** What degraded, in words a caller can show a user. Never an exception. */
     notes: string[];
+    /**
+     * What each rung did, in cascade order: the facts behind `notes`, for a
+     * caller that must tell "blocked" from "empty" without reading English.
+     */
+    rungs?: RungReport[];
+    /**
+     * True when at least one rung ANSWERED (outcome `hits` or `empty`). False
+     * means nothing was searched — every rung was off, refused or failed — and
+     * an empty `hits` is then no finding about the web.
+     */
+    searched?: boolean;
 }
 /**
  * Resolve the SearXNG base: an explicit option wins, else `<PREFIX>_SEARXNG`,
@@ -1875,14 +2045,23 @@ declare function searxngIsExplicit(opts?: SearchOptions): boolean;
 declare function resetSearxngProbeCache(): void;
 /**
  * Is a SearXNG instance answering at `base`? A single `GET {base}/healthz` with
- * a hard 2s ceiling; ANY HTTP response counts as up, because a 404 from a proxy
- * in front of it still proves something is listening. Memoised per base, so the
- * whole cost of an absent instance is one refused connection per process.
+ * a hard 2s ceiling.
+ *
+ * What counts as an answer depends on who chose the base, as for Firecrawl's
+ * probe. On the localhost DEFAULT it must be SearXNG's own `OK`: 8888 is also
+ * Jupyter's default port, and taking a notebook server for SearXNG made doctor
+ * report it "answering" and every search blame SearXNG's JSON setting. A base
+ * the caller NAMED is a statement about what lives there, so ANY HTTP response
+ * counts — a proxy in front of it may not route /healthz.
+ *
+ * Memoised per base: "up" for the process, "down" for 30 s, so an absent
+ * instance costs one refused connection per burst of calls while a long-lived
+ * MCP server still finds one started later.
  *
  * Deliberately bypasses httpGet, whose retry-with-backoff would turn a 2s
  * ceiling into roughly 4.6s on a blackholed host. A probe wants a single shot.
  */
-declare function probeSearxng(base: string): Promise<boolean>;
+declare function probeSearxng(base: string, explicit?: boolean): Promise<boolean>;
 /**
  * Query a SearXNG instance's keyless JSON API.
  *
@@ -1908,7 +2087,7 @@ declare function searchViaSearxng(query: string, opts?: SearchOptions): Promise<
  * Never throws. When nothing answers, the result is empty hits plus notes saying
  * which piece was missing and how to start it — "no results" and "no search
  * engine running" are different facts, and a caller that cannot tell them apart
- * reports the wrong one.
+ * reports the wrong one. `rungs` and `searched` carry the same facts as data.
  */
 declare function search(query: string, opts?: SearchOptions): Promise<SearchResult>;
 
@@ -1974,9 +2153,12 @@ declare function stackControl(service: string | string[], action: string, deps?:
 /**
  * Map `items` through `fn` with at most `limit` in flight, preserving order.
  *
- * A rejecting `fn` rejects the whole call, the same contract as `Promise.all`.
- * A caller that must degrade per item catches inside `fn` — which is what
- * retrieval wants, since one unreachable page should never abandon the rest.
+ * A rejecting `fn` rejects the whole call, the same contract as `Promise.all`,
+ * and no further item is started — the same at every width. A caller that must
+ * degrade per item catches inside `fn` — which is what retrieval wants, since
+ * one unreachable page should never abandon the rest.
+ *
+ * A `limit` that is not a number runs sequentially.
  */
 declare function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]>;
 
@@ -2267,6 +2449,13 @@ declare function resetHostSchedule(): void;
  */
 declare function hostDelayMs(): number;
 /**
+ * The longest `Crawl-delay` a crawl will wait out (`<PREFIX>_MAX_CRAWL_DELAY_MS`,
+ * default 60 s). A host that asks for more is not crawled, and a note says so:
+ * `Crawl-delay: 3600` honoured literally stalls a walk for an hour per page,
+ * and none of the ways of not honouring it is polite.
+ */
+declare function maxCrawlDelayMs(): number;
+/**
  * Wait until this host is willing to hear from us again, then claim the slot.
  *
  * The claim happens BEFORE the await returns, so two concurrent callers for one
@@ -2274,12 +2463,16 @@ declare function hostDelayMs(): number;
  * together — which is the bug a naive "sleep if too soon" has, and the one that
  * makes a rate limiter look like it works right up until the pool widens.
  *
+ * A back-off (backOffHost) holds every departure, with or without a delay, and
+ * is checked again after each sleep: a slot claimed before the server said
+ * "not now" must not go out inside the window it asked for.
+ *
  * Different hosts never wait on each other: the whole point is to keep
  * concurrency high across a candidate list while staying single-file per site.
  */
 declare function awaitHostSlot(url: string, delayMs?: number, now?: number): Promise<number>;
 /**
- * Push a host's next departure out by `ms` — what a `Retry-After` means.
+ * Hold a host's departures for `ms` — what a `Retry-After` means.
  *
  * `httpGet` already honours Retry-After for the request that received it; this
  * is how that answer applies to every OTHER request queued for the same host,
@@ -2290,18 +2483,34 @@ interface CrawlOptions {
     /**
      * Ceiling on pages RETURNED. Required in spirit; defaulted low on purpose.
      *
-     * A URL that yields no readable text costs a request but no slot, so a site
-     * answering 500s can be asked for more URLs than this — the budget buys
-     * pages, not requests. That is what the sequential walk always did: stopping
-     * at the first dead link would hand back a fraction of the asked-for pages.
+     * A URL that yields no readable text costs a request but no slot, so the walk
+     * goes on to the next URL rather than hand back a fraction of the asked-for
+     * pages — up to `maxRequests`, which is what keeps a site answering 404s from
+     * being asked for every URL its sitemap lists.
      */
     maxPages?: number;
+    /**
+     * Ceiling on page REQUESTS, failed ones included (default 3 × maxPages).
+     * robots.txt and sitemap reads are not counted here: they are bounded on
+     * their own, one per origin and a few documents.
+     */
+    maxRequests?: number;
     /** How many links deep to follow. The seed is depth 0. */
     maxDepth?: number;
-    /** Leave the seed's origin. Off by default — a crawl that wanders is not a site walk. */
+    /**
+     * Leave the crawl's origin. Off by default — a crawl that wanders is not a
+     * site walk. The origin is the seed's, or wherever the seed's own redirect
+     * lands (http→https, apex→www): that is the site the caller named.
+     */
     crossOrigin?: boolean;
-    /** Seed the frontier from the site's sitemap as well as the seed page. Default true. */
+    /**
+     * Seed the frontier from the site's sitemap as well as the seed page. Default
+     * true. For a seed below the root (`/docs/`, or `/docs`), only the sitemap's
+     * entries under that path are taken, after the seed's own links.
+     */
     useSitemap?: boolean;
+    /** Only follow URLs whose path starts with this (`/docs/`): links and sitemap entries alike. The seed itself is always read. */
+    prefix?: string;
     /** Ignore robots.txt. For a site you own, and named so it cannot happen by accident. */
     ignoreRobots?: boolean;
     /** Per-host delay override. Otherwise robots' own Crawl-delay, else hostDelayMs(). */
@@ -2330,7 +2539,13 @@ interface CrawlResult {
     disallowed: string[];
     notes: string[];
 }
-/** Absolute, canonical links out of a page's HTML. */
+/**
+ * Absolute, canonical links out of a page's HTML: `<a href>` and `<area href>`,
+ * resolved against the page's `<base href>` when it has one.
+ *
+ * Attributes are read by exact name, quoted or not — `href=/about` is valid
+ * HTML that minifiers emit everywhere, and a `data-href` is not an `href`.
+ */
 declare function linksFrom(html: string, baseUrl: string): string[];
 /**
  * How many pages a crawl keeps in flight at once (`<PREFIX>_CRAWL_CONCURRENCY`,
@@ -2341,17 +2556,20 @@ declare function crawlConcurrency(): number;
 /**
  * Walk a site from a seed, breadth-first.
  *
- * Bounded three independent ways — pages, depth, and origin — because any one
- * of them alone leaves a hole: a depth limit still admits a combinatorial
- * frontier, a page limit alone will spend the whole budget on a paginated
- * archive, and neither stops a link out to an unrelated host.
+ * Bounded four independent ways — pages, requests, depth, and origin — because
+ * any one of them alone leaves a hole: a depth limit still admits a
+ * combinatorial frontier, a page limit alone will spend the whole budget on a
+ * paginated archive and keeps asking while every answer fails, and none of
+ * them stops a link out to an unrelated host.
  *
  * robots.txt is consulted at EVERY hop, not once for the seed, and per ORIGIN
  * when the walk crosses one. That is the difference between this and `fetch`,
  * and it is deliberate: `fetch` follows a URL the caller was handed, which is
  * not crawling; this enumerates, which is. A refused URL is reported in
  * `disallowed` rather than dropped, because a silent skip is indistinguishable
- * from a page that does not exist.
+ * from a page that does not exist. A robots.txt that errors stops the walk
+ * before it starts (RFC 9309 §2.3.1.4), and so does a Crawl-delay over
+ * `maxCrawlDelayMs()`.
  *
  * Breadth-first, so a shallow budget returns the pages nearest the seed — the
  * ones a reader would have reached first — rather than one deep spur. Each
@@ -2377,9 +2595,9 @@ declare function resetOllamaProbe(): void;
 /**
  * Whether the local embedding server answers.
  *
- * Cached per base for the process: a probe per call would double the request count of
- * every batch, and a server that goes away mid-run shows up as a failed embed
- * anyway.
+ * Cached per base: a probe per call would double the request count of every
+ * batch, and a server that goes away mid-run shows up as a failed embed anyway.
+ * A "no" is asked again after 30 s, so a server started mid-run is found.
  */
 declare function probeOllama(base?: string): Promise<boolean>;
 /**
@@ -2398,6 +2616,20 @@ declare function embed(texts: readonly string[], opts?: {
     model?: string;
     concurrency?: number;
 }): Promise<EmbedResult>;
+/**
+ * The prefixes to put before a query and before a document for `model` (the
+ * configured one by default): from a small table of the common local models,
+ * overridden by `${PREFIX}_EMBED_QUERY_PREFIX` / `${PREFIX}_EMBED_DOC_PREFIX`
+ * (`none` for no prefix; a space is added after a non-empty one). A model the
+ * table does not know gets none — the right answer for most models.
+ *
+ * `embed` itself never adds them: it embeds exactly what it is given. A caller
+ * indexing documents and querying them later applies the same pair both times.
+ */
+declare function embedPrefixes(model?: string): {
+    query: string;
+    doc: string;
+};
 /** Embed one text. Convenience over `embed`, same degradation. */
 declare function embedOne(text: string, opts?: {
     base?: string;
@@ -2427,7 +2659,7 @@ declare function normalize(v: readonly number[]): number[];
 declare function qdrantBase(): string;
 /** Test seam, and the escape hatch for a store that came up mid-run. */
 declare function resetQdrantProbe(): void;
-/** Whether the local vector store answers. Cached per base for the process, like the Ollama probe. */
+/** Whether the local vector store answers. Cached per base like the Ollama probe: a "no" is asked again after 30 s. */
 declare function probeQdrant(base?: string): Promise<boolean>;
 interface VectorPoint {
     /** Qdrant accepts an unsigned integer or a UUID. A caller keying by URL should hash it. */
@@ -2451,6 +2683,10 @@ interface VectorHit {
  * Distance defaults to cosine because that is what `nomic-embed-text` is trained
  * for and what `cosine()` here computes; a caller using a dot-product model says
  * so explicitly.
+ *
+ * An existing collection is checked against both: one built by another
+ * embedding model (768 dimensions where 1024 are asked) is refused here, by
+ * name, instead of every later upsert failing with an opaque 400.
  */
 declare function ensureCollection(name: string, size: number, opts?: {
     base?: string;
@@ -2459,7 +2695,15 @@ declare function ensureCollection(name: string, size: number, opts?: {
     ok: boolean;
     note?: string;
 }>;
-/** Insert or replace points. Waits for the write, so a search right after sees them. */
+/**
+ * Insert or replace points. Waits for the write, so a search right after sees them.
+ *
+ * Sent in chunks of `${PREFIX}_QDRANT_UPSERT_BATCH` points (default 256), one
+ * after another: 3 000 nomic vectors in one request is ~47 MB, and Qdrant
+ * refuses anything over 32 MB by default. A failed chunk stops the upsert and
+ * is named; the chunks before it are written, and re-running is safe, since an
+ * upsert of the same ids replaces them.
+ */
 declare function upsert(name: string, points: readonly VectorPoint[], opts?: {
     base?: string;
 }): Promise<{
@@ -2514,12 +2758,25 @@ interface HybridHit<D extends HybridDoc> {
  * With the embedding server absent, this degrades to exactly the lexical
  * ranking the caller would have got from `bm25Score` alone, plus a note. It
  * never throws and never returns fewer documents than it was given.
+ *
+ * The question and the documents are embedded with the model's task prefixes
+ * (`embedPrefixes`; `queryPrefix`/`docPrefix` override them verbatim), and each
+ * document is cut to `maxChars` (`${PREFIX}_EMBED_MAX_CHARS`, default 8 000,
+ * 0 for no cut) — the model truncates to its context window anyway, so the rest
+ * was bandwidth.
+ *
+ * Fusion is by POSITION in `docs`, not by `id`: two documents sharing an id
+ * (the same URL from two engines) are still two documents, each with its own
+ * ranks.
  */
 declare function hybridSearch<D extends HybridDoc>(question: string, docs: readonly D[], opts?: {
     limit?: number;
     base?: string;
     model?: string;
     k?: number;
+    queryPrefix?: string;
+    docPrefix?: string;
+    maxChars?: number;
 }): Promise<{
     hits: HybridHit<D>[];
     note?: string;
@@ -2563,6 +2820,11 @@ declare function stripInlineCode(line: string): string;
  *
  * A report that documents its own citation format has `[S1]` in a code block;
  * that is a sample, not a source.
+ *
+ * A fence closes the way CommonMark closes it: with the SAME character, at
+ * least as many of them, and nothing after. Flipping on any fence-looking line
+ * inverted the mask for a ```` block quoting a ``` sample, or a bash block
+ * echoing ~~~ — the sample's citation grounded, the real claim went inert.
  */
 declare function codeMask(lines: readonly string[]): boolean[];
 /**
@@ -2585,8 +2847,16 @@ declare function markedQuoteMask(lines: readonly string[], marker: RegExp): {
  * citing happens. Counting its `[S#]` entries marks every source as cited and
  * pads any coverage number computed downstream, which is the failure mode this
  * exists for.
+ *
+ * The title is matched whole, accents and case aside, in English, French,
+ * German, Spanish, Portuguese, Italian and Dutch ("Références", "Quellen",
+ * "Works cited"…), with or without a trailing colon or `{#anchor}`, as an ATX
+ * or a setext heading. `headings` adds the caller's own titles; it is tested
+ * against the heading text as written, without its `#` markers.
  */
-declare function appendixMask(lines: readonly string[]): boolean[];
+declare function appendixMask(lines: readonly string[], opts?: {
+    headings?: RegExp;
+}): boolean[];
 /** OR a set of per-line masks together. Length is taken from the first. */
 declare function orMasks(...masks: readonly boolean[][]): boolean[];
 /**
@@ -2710,6 +2980,11 @@ declare function uncitedIds(cited: Iterable<string>, known: Iterable<string>): s
  * three-digit group is the far more common convention in the corpora these
  * tools fetch. NBSP, narrow NBSP and apostrophe are never decimal marks, so
  * they are still stripped between any two digits.
+ *
+ * The group pass consumes no digit, only the separator. When it consumed the
+ * digit before each one, the second comma of "1,000,000" had no free leading
+ * digit left, was skipped, and the decimal pass made it "1000.000" — every
+ * figure of a million or more was misread.
  */
 declare function normalizeNumeralText(text: string): string;
 /**
@@ -3215,4 +3490,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, CP1252_C1, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ChangeVerdict, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type Fingerprint, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PackageLookup, type PackageResolution, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoFactsResult, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type Table, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, awaitHostSlot, backOffHost, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, contentHash, cosine, crawlConcurrency, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, decodeLocal, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, extractTables, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, fingerprint, firecrawlBase, firecrawlIsExplicit, fnv1a64, fnv1a64Words, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, forgeRef, hammingDistance, hasChanged, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, looksLikeChallenge, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, lookupPackageResult, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, officeToText, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, repoFactsResult, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOcrTools, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolvePackageResult, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, sniffDocument, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, tableToMarkdown, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, CP1252_C1, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ChangeVerdict, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type Fingerprint, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type FirecrawlSearchOptions, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PackageLookup, type PackageResolution, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoFactsResult, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RungOutcome, type RungReport, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type SearchRung, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type Table, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, awaitHostSlot, backOffHost, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, contentHash, cosine, crawlConcurrency, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, decodeLocal, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embedPrefixes, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, extractTables, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, fingerprint, firecrawlBase, firecrawlIsExplicit, fnv1a64, fnv1a64Words, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, forgeRef, hammingDistance, hasChanged, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, looksLikeChallenge, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, lookupPackageResult, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, maxCrawlDelayMs, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, officeToText, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, repoFactsResult, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOcrTools, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolvePackageResult, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, sniffDocument, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, tableToMarkdown, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, unknownEngines, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };

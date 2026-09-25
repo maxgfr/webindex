@@ -408,6 +408,15 @@ const SPECS: Record<KeylessEngine, EngineSpec> = {
   },
 };
 
+// A timer can fire a millisecond or two before Date.now() reaches the instant
+// it was set for, so a request aborted AT the deadline could leave a sliver of
+// budget on the clock and let the next page start with ~1 ms to run — a
+// request that can only fail, sent to a real engine. A remainder this small
+// counts as spent; a tiny budget keeps a proportionate slack.
+function spentSlackMs(budgetMs: number | undefined): number {
+  return budgetMs === undefined ? 0 : Math.min(25, budgetMs / 4);
+}
+
 /**
  * Ask one keyless engine, walking `pages` result pages.
  *
@@ -454,7 +463,7 @@ export async function searchViaKeyless(
   const deadline = opts.budgetMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + opts.budgetMs;
   let url = spec.url(q, 0, kl, locale);
   for (let p = 0; p < pages && hits.length < limit; p++) {
-    if (opts.signal?.aborted || Date.now() >= deadline) {
+    if (opts.signal?.aborted || Date.now() >= deadline - spentSlackMs(opts.budgetMs)) {
       if (p > 0) break; // the pages already read stand
       return { hits: [], note: `${spec.label} was not asked: ${opts.signal?.aborted ? "the search was cancelled" : "no time was left"}.` };
     }

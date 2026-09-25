@@ -600,8 +600,9 @@ describe("HTML scans stay linear on hostile markup", () => {
   // Every shape below used to cost O(n²): a scan that, from each opener, read
   // to the end of the input looking for a terminator that never came. About
   // 1 MB of any of them froze the process — CLI and MCP server alike — for
-  // over a minute. The bounds are an order of magnitude above the linear cost
-  // and two below the quadratic one, so a slow CI box cannot flake them.
+  // over a minute. The bounds sit far above the linear cost (≤ ~200 ms here)
+  // and well below the quadratic one: a shared CI runner has measured an order
+  // of magnitude slower than a laptop, and a guard must not flake on that.
   const within = (ms: number, fn: () => unknown) => {
     const started = performance.now();
     fn();
@@ -623,24 +624,24 @@ describe("HTML scans stay linear on hostile markup", () => {
     ["nested navigation landmarks", `${'<div role="navigation"><div>x'.repeat(20_000)}${"</div>".repeat(40_000)}`],
     ["a heading anchor holding a long run of whitespace", `<h2><a href="#x">${" ".repeat(300_000)}x</a></h2>`],
   ])("htmlToText: %s", (_label, html) => {
-    within(2000, () => htmlToText(html));
+    within(10_000, () => htmlToText(html));
   });
 
   it("extractMainHtml: thousands of unclosed content containers", () => {
-    within(2000, () => extractMainHtml(`<div class="comment-content"><p>${"word ".repeat(40)}</p>`.repeat(20_000)));
+    within(10_000, () => extractMainHtml(`<div class="comment-content"><p>${"word ".repeat(40)}</p>`.repeat(20_000)));
   });
 
   it("extractMainHtml: deeply nested content containers", () => {
     const n = 20_000;
-    within(2000, () => extractMainHtml(`${'<div class="post"><p>word word</p>'.repeat(n)}${"</div>".repeat(n)}`));
+    within(10_000, () => extractMainHtml(`${'<div class="post"><p>word word</p>'.repeat(n)}${"</div>".repeat(n)}`));
   });
 
   it("extractMainHtml: one opening tag holding a long unbroken attribute run", () => {
-    within(2000, () => extractMainHtml(`<div ${"a".repeat(300_000)}><p>text</p></div>`));
+    within(10_000, () => extractMainHtml(`<div ${"a".repeat(300_000)}><p>text</p></div>`));
   });
 
   it("extractMainHtml: many unclosed <main>/<article> openers", () => {
-    within(2000, () => extractMainHtml(`<main><article><p>${"word ".repeat(20)}</p>`.repeat(20_000)));
+    within(10_000, () => extractMainHtml(`<main><article><p>${"word ".repeat(20)}</p>`.repeat(20_000)));
   });
 });
 
