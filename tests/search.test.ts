@@ -212,6 +212,17 @@ describe("searchViaSearxng", () => {
     expect(spy.mock.calls.filter((c) => String(c[0]).includes("/search"))).toHaveLength(1);
   });
 
+  it("does not query once the caller's signal has fired", async () => {
+    const base = nextBase();
+    const spy = installFetchMock(routes([["/search", page([hit("https://a.test/1")])]]));
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const r = await searchViaSearxng("q", { searxng: base, signal: ctrl.signal });
+    expect(spy.mock.calls.some((c) => String(c[0]).includes("/search?"))).toBe(false);
+    expect(r.rungs?.[0]).toMatchObject({ rung: "searxng", outcome: "not-tried" });
+    expect(r.notes[0]).toMatch(/cancelled/);
+  });
+
   it("caps each query at what is left of the caller's budget", async () => {
     const base = nextBase();
     vi.stubGlobal(

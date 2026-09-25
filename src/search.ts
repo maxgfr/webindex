@@ -47,7 +47,8 @@ export interface SearchOptions {
   /**
    * The whole search's budget in ms, every rung and page included. No rung or
    * page starts after it, and each request's own timeout is capped to what is
-   * left, so the worst case is this plus one 2 s availability probe.
+   * left, so the worst case is this plus the 2 s availability probes of
+   * SearXNG and Firecrawl.
    */
   timeoutMs?: number;
   /**
@@ -172,6 +173,8 @@ export function probeSearxng(base: string, explicit = false): Promise<boolean> {
 export async function searchViaSearxng(query: string, opts: SearchOptions = {}): Promise<SearchResult> {
   const base = searxngBase(opts);
   if (!base) return rungResult("searxng", "disabled", [], [`SearXNG disabled (--searxng off / ${envName("SEARXNG")}=off).`]);
+  // Counted from here, so the probe is spent from the same budget.
+  const deadline = budgetDeadline(opts);
 
   if (!(await probeSearxng(base, searxngIsExplicit(opts)))) {
     return rungResult(
@@ -206,9 +209,12 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
   // failure: the pages before it stand.
   let failed: RungOutcome | undefined;
 
-  const deadline = budgetDeadline(opts);
   for (let p = 0; p < pages && hits.length < limit; p++) {
-    if (p > 0 && halted(opts, deadline)) break;
+    const stop = halted(opts, deadline);
+    if (stop) {
+      if (p > 0) break; // the pages already read stand
+      return rungResult("searxng", "not-tried", [], [`SearXNG was not asked: ${stop}.`]);
+    }
     const r = await httpGet(root + (p > 0 ? `&pageno=${p + 1}` : ""), {
       accept: "application/json",
       acceptLanguage,
@@ -336,7 +342,7 @@ function keylessOutcome(r: EngineResult): RungOutcome {
  * Never throws. When nothing answers, the result is empty hits plus notes saying
  * which piece was missing and how to start it — "no results" and "no search
  * engine running" are different facts, and a caller that cannot tell them apart
- * reports the wrong one.
+ * reports the wrong one. `rungs` and `searched` carry the same facts as data.
  */
 export async function search(query: string, opts: SearchOptions = {}): Promise<SearchResult> {
   const q = query.trim();
@@ -353,6 +359,10 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
     report(rung, (rung === "searxng" && !searxngBase(opts)) || (rung === "firecrawl" && !firecrawlBase(opts)) ? "disabled" : "not-tried");
 
   const notes: string[] = [];
+  const unknown = unknownEngines(opts);
+  if (unknown.length) {
+    notes.push(`${envName("ENGINES")} names no engine this knows: ${unknown.join(", ")} (expected ${KEYLESS_ENGINES.join(", ")}) — ignored.`);
+  }
   const rungs: RungReport[] = [];
   let hits: SearchHit[] = [];
   for (let i = 0; i < order.length; i++) {
@@ -375,14 +385,6 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
       hits = r.hits;
       notes.push(...r.notes);
       rungs.push(...(r.rungs ?? []));
-      // The keyless rung. Each engine is tried in turn and the FIRST one with
-      // hits wins — this is a fallback chain, not a fan-out: pooling several
-      // engines and fusing them is a ranking decision, and ranking belongs to
-      // the caller.
-      const unknown = unknownEngines(opts);
-      if (unknown.length) {
-        notes.push(`${envName("ENGINES")} names no engine this knows: ${unknown.join(", ")} (expected ${KEYLESS_ENGINES.join(", ")}) — ignored.`);
-      }
     } else if (rung === "firecrawl") {
       // searchViaFirecrawl runs its own probe and reports why it could not, so
       // there is no second copy of that logic here.
@@ -391,6 +393,10 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
       if (fc.why) notes.push(fc.why);
       rungs.push(report("firecrawl", firecrawlOutcome(fc), hits.length, fc.why));
     } else {
+      // The keyless rung. Each engine is tried in turn and the FIRST one with
+      // hits wins — this is a fallback chain, not a fan-out: pooling several
+      // engines and fusing them is a ranking decision, and ranking belongs to
+      // the caller.
       const r = await searchViaKeyless(rung, q, {
         limit: opts.limit,
         pages: opts.pages,
@@ -427,6 +433,7 @@ function firecrawlHits(found: FirecrawlHit[], limit: number): SearchHit[] {
   }
   return hits;
 }
+
 function firecrawlOutcome(fc: { hits?: unknown[]; status?: number }): RungOutcome {
   if (fc.hits) return fc.hits.length ? "hits" : "empty";
   if (fc.status === undefined) return "disabled";
