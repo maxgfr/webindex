@@ -533,6 +533,48 @@ describe("mapGithubIssues", () => {
 describe("searchIssues", () => {
   const REF = resolveRepo("github.com/expressjs/express");
 
+  /** A GitHub whose search answers each query through `answer`, recording the terms it saw. */
+  function github(answer: (q: string) => unknown[]) {
+    const queries: string[] = [];
+    const urls: string[] = [];
+    installFetchMock((url) => {
+      if (url.includes("/repos/")) return { body: JSON.stringify({ full_name: "expressjs/express" }), contentType: "application/json" };
+      urls.push(url);
+      const q = new URL(url).searchParams.get("q") ?? "";
+      queries.push(q.replace(/^repo:\S+ is:\w+ ?/, ""));
+      return { body: JSON.stringify({ items: answer(q) }), contentType: "application/json" };
+    });
+    return { queries, urls };
+  }
+
+  it("lets GitHub order a search by relevance, and a bare listing by recency", async () => {
+    // An explicit sort REPLACES GitHub's best-match order, so every search came
+    // back by last update while the docs promised relevance.
+    const { urls } = github(() => []);
+    await searchIssues(REF, ["memory", "leak"], "issue", { relax: false });
+    await searchIssues(REF, [], "issue");
+    expect(urls[0]).not.toMatch(/[?&]sort=/);
+    expect(urls[1]).toMatch(/[?&]sort=updated&order=desc/);
+  });
+
+  it("retries once with the most distinctive terms when all of them match nothing", async () => {
+    const { queries } = github((q) => (q.includes("the") ? [] : [{ number: 1, title: "Leak", html_url: "u", state: "open" }]));
+    const r = await searchIssues(REF, ["the", "memory", "leak", "after", "upgrading", "express5", "label:bug"], "issue");
+    expect(queries).toHaveLength(2);
+    expect(queries[0]).toBe("the memory leak after upgrading express5 label:bug");
+    // A qualifier is a filter the caller chose, not a keyword to trade away.
+    expect(queries[1]!.split(" ").sort()).toEqual(["express5", "label:bug", "memory", "upgrading"]);
+    expect(r.items).toHaveLength(1);
+    expect(r.note).toMatch(/No match for all the terms; relaxed to "express5 upgrading memory label:bug"/);
+  });
+
+  it("keeps it to one request when asked to, or when there is nothing to relax", async () => {
+    const { queries } = github(() => []);
+    await searchIssues(REF, ["memory", "leak", "after", "upgrade"], "issue", { relax: false });
+    await searchIssues(REF, ["memory", "leak"], "issue");
+    expect(queries).toEqual(["memory leak after upgrade", "memory leak"]);
+  });
+
   it("searches GitHub by canonical slug, following a rename", () => {
     const seen: string[] = [];
     installFetchMock((url) => {

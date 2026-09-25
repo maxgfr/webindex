@@ -512,7 +512,8 @@ export function webindexAdapter(): McpAdapter {
         title: "Search a repository's issues or pull requests",
         description:
           "Search issues (or pull/merge requests) in one repository across GitHub, GitLab and Gitea. Returns number, title, state, labels and body. " +
-          "GitHub results are relevance-ranked and carry a score; GitLab and Gitea have no search endpoint, so theirs are recency-ordered and carry none — deliberately, rather than inventing one.",
+          "GitHub results for `terms` are relevance-ranked and carry a score; GitLab and Gitea have no search endpoint, so theirs are recency-ordered and carry none — deliberately, rather than inventing one. " +
+          "Every term must match; when all of them together match nothing, it searches once more with the most distinctive ones and says so in `note`.",
         inputSchema: {
           type: "object",
           properties: {

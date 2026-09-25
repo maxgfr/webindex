@@ -32,9 +32,15 @@ names. Pass `--registry` when you know the ecosystem.
   resolved once and used for the search.
 - **GitHub Enterprise** serves `<host>/api/v3`; github.com serves
   `api.github.com`. Getting this wrong is a 404 that reads like "no such repo".
-- **Only GitHub ranks.** GitLab and Gitea have no search endpoint, so their
-  results are recency-ordered and carry **no score** — deliberately, rather than
-  inventing one a caller might rank on.
+- **Only GitHub ranks.** A search with terms comes back best match first, with
+  GitHub's `score`; a listing with no terms, most recently updated first. GitLab
+  and Gitea have no search endpoint, so their results are recency-ordered and
+  carry **no score** — deliberately, rather than inventing one a caller might
+  rank on.
+- **Every term must match**, so a natural five-word description often matches
+  nothing. Then the search runs once more with the most distinctive half of the
+  words (qualifiers such as `label:bug` kept), and `note` says what it was
+  relaxed to. `relax: false` keeps it to one request.
 - **`archived` and `pushedAt`** answer "is this maintained" from the record. A
   README that says the project is active is not evidence.
 

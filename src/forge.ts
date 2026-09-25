@@ -3,6 +3,7 @@ import { have, shAsync } from "./exec.js";
 import { contactUa, parseRetryAfter, readCappedBytes, sleep } from "./fetch.js";
 import { configuredForgeHosts, hostForgeKind, normalizeForgeHost } from "./forge-host.js";
 import type { RepoRef } from "./repo.js";
+import { rankedKeywords } from "./text.js";
 
 // Forge APIs: asking a code host about a repository.
 //
@@ -53,6 +54,12 @@ export interface ForgeOptions {
   apiBase?: string;
   limit?: number;
   timeoutMs?: number;
+  /**
+   * searchIssues: when every term together matches nothing, search once more
+   * with the most distinctive half of them, and say so in the note. Default on;
+   * `false` keeps a search to exactly one request.
+   */
+  relax?: boolean;
 }
 
 /**
@@ -478,23 +485,57 @@ export async function canonicalRepo(ref: RepoRef, opts: ForgeOptions = {}): Prom
  * Search a repository's issues or pull requests.
  *
  * GitHub gets its search API — the only one of the three that ranks by
- * relevance. GitLab and Gitea have no such endpoint, so they get a scoped list
- * filtered by search terms, which is why their `score` is absent: they are
- * ordered by recency and saying otherwise would be a lie the caller might rank on.
+ * relevance, and it does so only when left to its default order: terms are
+ * best-match first, a listing with no terms most recently updated first. GitLab
+ * and Gitea have no such endpoint, so they get a scoped list filtered by search
+ * terms, which is why their `score` is absent: they are ordered by recency and
+ * saying otherwise would be a lie the caller might rank on.
+ *
+ * Every term must match, so a natural five-word description often matches
+ * nothing. Then — unless `relax: false` — it searches once more with the most
+ * distinctive half of the words (qualifiers such as `label:bug` kept), and the
+ * note says so: a looser answer must never pass for the one asked for.
  */
 export async function searchIssues(ref: RepoRef, terms: string[], kind: "issue" | "pr", opts: ForgeOptions = {}): Promise<ForgeResult> {
   const forge = forgeKind(ref.host);
   if (!forge) return { items: [], note: `${ref.host} is not a forge this engine knows how to query.` };
   const repoAt = repoPath(ref, forge);
   if (!repoAt) return { items: [], note: `"${ref.raw}" does not name owner/repo.` };
+  const wanted = terms.map((t) => t.trim()).filter(Boolean);
+  const first = await searchOnce(ref, forge, repoAt, wanted, kind, opts);
+  if (first.items.length || first.note || opts.relax === false) return first;
+  const relaxed = relaxTerms(wanted);
+  if (!relaxed) return first;
+  const second = await searchOnce(ref, forge, repoAt, relaxed, kind, opts);
+  if (second.note) return second;
+  return { ...second, note: `No match for all the terms; relaxed to "${relaxed.join(" ")}".` };
+}
+
+/**
+ * The most distinctive half of the words, qualifiers kept — or undefined when
+ * that would not change the query. Fewer than three words have nothing to
+ * give up: two is where a search stops being specific.
+ */
+function relaxTerms(terms: string[]): string[] | undefined {
+  const qualifiers = terms.filter((t) => t.includes(":"));
+  const words = terms.filter((t) => !t.includes(":"));
+  if (words.length < 3) return undefined;
+  const best = rankedKeywords(words.join(" ")).slice(0, Math.max(2, Math.ceil(words.length / 2)));
+  if (best.length < 2 || best.length >= words.length) return undefined;
+  return [...best, ...qualifiers];
+}
+
+async function searchOnce(ref: RepoRef, forge: ForgeKind, repoAt: string, terms: string[], kind: "issue" | "pr", opts: ForgeOptions): Promise<ForgeResult> {
   const limit = Math.max(1, opts.limit ?? 10);
-  const q = terms.filter(Boolean).join(" ");
+  const q = terms.join(" ");
 
   if (forge === "github") {
     const canon = await canonicalLookup(ref, opts);
     if (canon.failed) return failed(canon.failed, forge, ref, "GitHub search", opts);
     const filter = kind === "pr" ? "is:pr" : "is:issue";
-    const url = `${apiBase(ref, opts)}/search/issues?q=${encodeURIComponent(`repo:${canon.owner}/${canon.repo} ${filter} ${q}`)}&per_page=${limit}&sort=updated&order=desc`;
+    // Any explicit sort REPLACES best match, so terms get none.
+    const order = q ? "" : "&sort=updated&order=desc";
+    const url = `${apiBase(ref, opts)}/search/issues?q=${encodeURIComponent(`repo:${canon.owner}/${canon.repo} ${filter} ${q}`.trim())}&per_page=${limit}${order}`;
     const r = await forgeGet(url, forge, ref, opts);
     if (!r.ok) return failed(r, forge, ref, "GitHub search", opts);
     return { items: mapGithubIssues(r.data?.items ?? [], kind) };
