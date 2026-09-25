@@ -203,7 +203,10 @@ other requests to that host wait with it instead of going out inside the window.
 
 The crawler checks its origin and robots restrictions before each redirected
 request, including sitemap requests, and resolves links against the final URL.
-The origin boundary also applies to robots.txt redirects.
+The origin is the one the seed's own redirect lands on — `http://example.com`
+that answers from `https://www.example.com` is crawled there. The origin
+boundary also applies to robots.txt redirects, which may move only within their
+own site (`https`, `www`).
 It uses local extraction so a remote browser cannot bypass those checks.
 Library callers can supply the same asynchronous `authorizeUrl` check to
 `httpGet`, `fetchAndExtract`, `fetchSitemap`, and `fetchRobots`. Authorization
