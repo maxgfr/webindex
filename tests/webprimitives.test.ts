@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { charsetFromContentType, charsetFromHtml, decodeBody, decodeLocal } from "../src/charset.js";
-import { discoverFeeds, fetchFeed, parseFeed, parseSitemap } from "../src/feed.js";
+import { discoverFeeds, fetchFeed, fetchSitemap, parseFeed, parseSitemap } from "../src/feed.js";
 import { httpGet } from "../src/fetch.js";
 import { fetchRobots, isAllowed, parseRobots, resetRobotsCache } from "../src/robots.js";
 import { extractJsonLd, extractMetaTags, pageMetadata } from "../src/structured.js";
@@ -659,8 +660,12 @@ describe("feeds", () => {
     expect(discoverFeeds("<link rel=alternate type=application/rss+xml href=/feed.xml>", "https://ex.test/blog/")).toEqual(["https://ex.test/feed.xml"]);
   });
 
-  it("does not advertise JSON Feed, which parseFeed does not support", () => {
-    expect(discoverFeeds('<link rel="alternate" type="application/feed+json" href="/feed.json">', "https://ex.test/")).toEqual([]);
+  it("discovers JSON Feed, and a type written with parameters", () => {
+    const html = `<link rel="alternate" type="application/rss+xml; charset=utf-8" href="/feed.xml">
+      <link rel="alternate" type="application/feed+json" href="/feed.json">
+      <link rel="alternate" type="application/json" href="/wp-json/wp/v2/pages/42">`;
+    // A bare application/json alternate is WordPress's REST API, not a feed.
+    expect(discoverFeeds(html, "https://ex.test/")).toEqual(["https://ex.test/feed.xml", "https://ex.test/feed.json"]);
   });
 
   it("scans long valueless attribute runs in linear time", () => {
@@ -669,6 +674,220 @@ describe("feeds", () => {
     expect(discoverFeeds(`<link ${hostile}>`, "https://ex.test/")).toEqual([]);
     expect(parseFeed(`<feed><entry><title>T</title><link ${hostile}></entry></feed>`)?.items[0]?.title).toBe("T");
     expect(performance.now() - started).toBeLessThan(200);
+  });
+
+  it("scans unclosed items and link tags in linear time", () => {
+    // A lazy `<item[\s\S]*?</item>` re-scanned to the end from every unclosed
+    // opener, and `<link\b[^>]*>` did the same from every `<link` with no `>`.
+    const started = performance.now();
+    expect(parseFeed(`<rss><channel><title>T</title>${"<item><title>x".repeat(40_000)}</channel></rss>`)?.items).toEqual([]);
+    expect(discoverFeeds("<link rel=alternate ".repeat(40_000), "https://ex.test/")).toEqual([]);
+    expect(parseSitemap(`<urlset>${"<url><loc>https://ex.test/".repeat(40_000)}`).urls).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it("reads the HTML a description carries escaped, as text", () => {
+    const f = parseFeed(`<rss><channel><item><title>&lt;em&gt;Big&lt;/em&gt; news</title><link>https://ex.test/1</link>
+      <description>&lt;p&gt;Hello &lt;b&gt;world&lt;/b&gt; &amp;amp; more&lt;/p&gt;</description></item></channel></rss>`)!;
+    expect(f.items[0]).toMatchObject({ title: "Big news", summary: "Hello world & more" });
+    const atom = parseFeed(`<feed xmlns="http://www.w3.org/2005/Atom"><entry><title type="html">&lt;em&gt;Atom&lt;/em&gt; one</title>
+      <summary type="text">Use &lt;b&gt; for bold</summary><link href="https://ex.test/a"/></entry></feed>`)!;
+    // type="text" is text: its angle brackets are the content, not markup.
+    expect(atom.items[0]).toMatchObject({ title: "Atom one", summary: "Use <b> for bold" });
+  });
+
+  it("keeps the text around a CDATA section, and a section split to carry `]]>`", () => {
+    const f = parseFeed(`<rss><channel><item><title><![CDATA[Mixed ]]> tail</title><link>https://ex.test/1</link>
+      <description>A <![CDATA[<i>cdata</i>]]> and plain</description></item>
+      <item><title><![CDATA[x ]]]]><![CDATA[> y is the end]]></title><link>https://ex.test/2</link></item></channel></rss>`)!;
+    expect(f.items[0]).toMatchObject({ title: "Mixed tail", summary: "A cdata and plain" });
+    expect(f.items[1]!.title).toBe("x ]]> y is the end");
+  });
+
+  it("does not mistake an HTML page for a feed", () => {
+    // `\b` matches before `-`, so a `<channel-nav>` element, or `<entry>` in a
+    // script, made any page an empty feed — and skipped discovery.
+    expect(parseFeed("<!doctype html><html><body><channel-nav></channel-nav><rss-reader></rss-reader></body></html>")).toBeUndefined();
+    expect(parseFeed('<!DOCTYPE html><html><script>var t = "<entry>";</script></html>')).toBeUndefined();
+    expect(parseFeed("<html><body><feed-list></feed-list></body></html>")).toBeUndefined();
+    // …while a feed may open with a BOM, a declaration, a stylesheet PI, comments and a doctype.
+    const rss =
+      String.fromCharCode(0xfeff) +
+      '<?xml version="1.0"?>\n<?xml-stylesheet href="/rss.xsl" type="text/xsl"?><!-- generated -->' +
+      '<!DOCTYPE rss PUBLIC "-//Netscape Communications//DTD RSS 0.91//EN" "http://my.netscape.com/publish/formats/rss-0.91.dtd">' +
+      "<rss><channel><title>B</title><item><title>One</title></item></channel></rss>";
+    expect(parseFeed(rss)?.items).toHaveLength(1);
+    expect(parseFeed('<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><item><title>R</title></item></rdf:RDF>')?.kind).toBe("rss");
+  });
+
+  it("takes an Atom entry's alternate link, resolved against xml:base and the feed's URL", () => {
+    const f = parseFeed(
+      `<feed xmlns="http://www.w3.org/2005/Atom" xml:base="https://ex.test/blog/">
+        <entry><title>One</title><link rel="related" href="https://other.example/related"/><link rel="alternate" href="post-1"/>
+          <content type="html">&lt;p&gt;Body text&lt;/p&gt;</content></entry>
+        <entry xml:base="/archive/"><title>Two</title><link href="post-2"/></entry>
+      </feed>`,
+      "https://ex.test/feed.atom",
+    )!;
+    expect(f.items[0]).toMatchObject({ url: "https://ex.test/blog/post-1", summary: "Body text" });
+    expect(f.items[1]!.url).toBe("https://ex.test/archive/post-2");
+    // Without xml:base, a relative href resolves against the feed's own URL.
+    expect(parseFeed('<feed><entry><title>E</title><link href="/p/3"/></entry></feed>', "https://ex.test/f.xml")!.items[0]!.url).toBe("https://ex.test/p/3");
+  });
+
+  it("reads no element out of a CDATA section or a comment", () => {
+    // An article's own markup — a stylesheet link, an SVG title — sits inside
+    // content:encoded's CDATA, and is not the entry's link or title.
+    const f = parseFeed(`<rss><channel><title>Blog</title><item>
+      <content:encoded><![CDATA[<svg><title>Icon</title></svg><link rel="stylesheet" href="/style.css"><p>Body</p>]]></content:encoded>
+      <!-- <title>Draft title</title> -->
+      <title>Real <!-- not this --> title</title><link>https://ex.test/real</link></item></channel></rss>`)!;
+    expect(f.items[0]).toMatchObject({ title: "Real title", url: "https://ex.test/real" });
+    expect(f.items[0]!.summary).toBe("Icon Body");
+  });
+
+  it("reads Atom xhtml as markup whose entities are text", () => {
+    const f =
+      parseFeed(`<feed xmlns="http://www.w3.org/2005/Atom"><entry><title type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">Use &lt;b&gt; <em>here</em></div></title>
+      <link href="https://ex.test/x"/></entry></feed>`)!;
+    expect(f.items[0]!.title).toBe("Use <b> here");
+  });
+
+  it("uses a guid as the URL only when it is a permalink", () => {
+    const f = parseFeed(`<rss><channel>
+      <item><title>A</title><guid isPermaLink="false">post-123</guid></item>
+      <item><title>B</title><guid isPermaLink="false">https://ex.test/not-a-page</guid></item>
+      <item><title>C</title><guid>https://ex.test/c</guid></item></channel></rss>`)!;
+    expect(f.items.map((i) => i.url)).toEqual([undefined, undefined, "https://ex.test/c"]);
+    expect(f.items[0]!.id).toBe("post-123");
+  });
+
+  it("falls back to content:encoded for a summary, and keeps it a summary", () => {
+    const long = "word ".repeat(400);
+    const f = parseFeed(`<rss><channel><item><title>A</title><content:encoded><![CDATA[<p>${long}</p>]]></content:encoded></item></channel></rss>`)!;
+    expect(f.items[0]!.summary!.startsWith("word word")).toBe(true);
+    expect(f.items[0]!.summary!.length).toBeLessThanOrEqual(501);
+  });
+
+  it("reads JSON Feed", () => {
+    const f = parseFeed(
+      JSON.stringify({
+        version: "https://jsonfeed.org/version/1.1",
+        title: "Micro",
+        items: [
+          { id: "1", url: "https://ex.test/1", title: "First", date_published: "2024-05-01T00:00:00Z", summary: "S" },
+          { id: 2, external_url: "/elsewhere", content_html: "<p>Only <b>html</b></p>" },
+          { id: "3" },
+        ],
+      }),
+      "https://ex.test/feed.json",
+    )!;
+    expect(f).toMatchObject({ kind: "json", title: "Micro" });
+    expect(f.items).toEqual([
+      { id: "1", url: "https://ex.test/1", title: "First", published: "2024-05-01T00:00:00Z", summary: "S" },
+      { id: "2", url: "https://ex.test/elsewhere", summary: "Only html" },
+    ]);
+    // JSON that is not a JSON Feed is not a feed.
+    expect(parseFeed('{"version":"1","items":[]}')).toBeUndefined();
+    expect(parseFeed("{not json")).toBeUndefined();
+  });
+
+  it("resolves a fetched feed's relative links against where it was fetched from", async () => {
+    installFetchMock(() => ({ body: '<feed><entry><title>E</title><link href="/p/1"/></entry></feed>', contentType: "application/atom+xml" }));
+    expect((await fetchFeed("https://ex.test/blog/atom.xml"))?.items[0]?.url).toBe("https://ex.test/p/1");
+  });
+});
+
+describe("fetching sitemaps", () => {
+  const urlset = (...locs: string[]) => `<urlset>${locs.map((l) => `<url><loc>${l}</loc></url>`).join("")}</urlset>`;
+  const index = (...locs: string[]) => `<sitemapindex>${locs.map((l) => `<sitemap><loc>${l}</loc></sitemap>`).join("")}</sitemapindex>`;
+
+  it("reads the children of a named index before guessing /sitemap.xml", async () => {
+    const asked: string[] = [];
+    installFetchMock((url) => {
+      asked.push(new URL(url).pathname);
+      if (url.endsWith("/sitemap_index.xml")) return { body: index("https://ex.test/a.xml", "https://ex.test/b.xml"), contentType: "application/xml" };
+      if (url.endsWith("/a.xml")) return { body: urlset("https://ex.test/p1"), contentType: "application/xml" };
+      if (url.endsWith("/b.xml")) return { body: urlset("https://ex.test/p2"), contentType: "application/xml" };
+      return { status: 404, body: "" };
+    });
+    const s = await fetchSitemap("https://ex.test/", { sitemaps: ["https://ex.test/sitemap_index.xml"] });
+    expect(s.urls.map((u) => u.loc)).toEqual(["https://ex.test/p1", "https://ex.test/p2"]);
+    expect(asked).toEqual(["/sitemap_index.xml", "/a.xml", "/b.xml"]);
+    expect(s.unfetched).toEqual([]);
+  });
+
+  it("guesses /sitemap.xml only when robots named none, or the named ones gave nothing", async () => {
+    const asked: string[] = [];
+    installFetchMock((url) => {
+      asked.push(new URL(url).pathname);
+      if (url.endsWith("/small.xml")) return { body: urlset("https://ex.test/p"), contentType: "application/xml" };
+      if (url.endsWith("/sitemap.xml")) return { body: urlset("https://ex.test/fallback"), contentType: "application/xml" };
+      return { status: 404, body: "" };
+    });
+    await fetchSitemap("https://ex.test/", { sitemaps: ["https://ex.test/small.xml"] });
+    expect(asked).toEqual(["/small.xml"]);
+    asked.length = 0;
+    const s = await fetchSitemap("https://ex.test/", { sitemaps: ["https://ex.test/gone.xml"] });
+    expect(asked).toEqual(["/gone.xml", "/sitemap.xml"]);
+    expect(s.urls.map((u) => u.loc)).toEqual(["https://ex.test/fallback"]);
+  });
+
+  it("names the child sitemaps the budget did not reach", async () => {
+    installFetchMock((url) =>
+      url.endsWith("/index.xml")
+        ? { body: index("https://ex.test/1.xml", "https://ex.test/2.xml", "https://ex.test/3.xml"), contentType: "application/xml" }
+        : { body: urlset(url.replace(".xml", "-page")), contentType: "application/xml" },
+    );
+    const s = await fetchSitemap("https://ex.test/", { sitemaps: ["https://ex.test/index.xml"], max: 2 });
+    expect(s.urls.map((u) => u.loc)).toEqual(["https://ex.test/1-page"]);
+    expect(s.unfetched).toEqual(["https://ex.test/2.xml", "https://ex.test/3.xml"]);
+  });
+
+  it("reads a gzipped sitemap", async () => {
+    installFetchMock(() => ({ bytes: gzipSync(Buffer.from(urlset("https://ex.test/g1", "https://ex.test/g2"))), contentType: "application/x-gzip" }));
+    const s = await fetchSitemap("https://ex.test/", { sitemaps: ["https://ex.test/sitemap.xml.gz"] });
+    expect(s.urls.map((u) => u.loc)).toEqual(["https://ex.test/g1", "https://ex.test/g2"]);
+  });
+
+  it("reads a sitemap up to the protocol's 50 MB, whatever its Content-Length", async () => {
+    // 4 MB was the generic text cap: a valid 5 MB sitemap with a declared
+    // length was refused outright, and gave zero URLs with no note.
+    const locs = Array.from({ length: 60_000 }, (_, i) => `https://ex.test/page-with-a-long-enough-path/${i}`);
+    const body = urlset(...locs);
+    expect(body.length).toBeGreaterThan(4 * 1024 * 1024);
+    installFetchMock(() => ({ body, contentType: "application/xml", headers: { "content-length": String(body.length) } }));
+    const s = await fetchSitemap("https://ex.test/", { sitemaps: ["https://ex.test/big.xml"] });
+    expect(s.urls).toHaveLength(60_000);
+  });
+
+  it("says when a sitemap is over the protocol's size", async () => {
+    installFetchMock(() => ({ body: urlset("https://ex.test/p"), contentType: "application/xml", headers: { "content-length": String(60 * 1024 * 1024) } }));
+    const s = await fetchSitemap("https://ex.test/", { sitemaps: ["https://ex.test/huge.xml"] });
+    expect(s.notes?.join(" ")).toMatch(/huge\.xml.*50 MB/);
+  });
+
+  it("refuses a gzipped sitemap that inflates past 50 MB, or arrived cut short", async () => {
+    // Capped on the way out: a small gzip can inflate a thousandfold.
+    const bomb = gzipSync(Buffer.alloc(51 * 1024 * 1024, 0x20));
+    installFetchMock(() => ({ bytes: bomb, contentType: "application/x-gzip" }));
+    const s = await fetchSitemap("https://ex.test/", { sitemaps: ["https://ex.test/bomb.xml.gz"] });
+    expect(s.urls).toEqual([]);
+    expect(s.notes?.join(" ")).toMatch(/bomb\.xml\.gz decompresses past the 50 MB/);
+    installFetchMock(() => ({ bytes: Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x01]), contentType: "application/x-gzip" }));
+    const cut = await fetchSitemap("https://ex.test/", { sitemaps: ["https://ex.test/cut.xml.gz"] });
+    expect(cut.notes?.join(" ")).toMatch(/cut\.xml\.gz is not valid gzip/);
+  });
+
+  it("says nothing of a sitemap the caller's own policy refused", async () => {
+    installFetchMock(() => ({ body: urlset("https://ex.test/p"), contentType: "application/xml" }));
+    const s = await fetchSitemap("https://ex.test/", { sitemaps: ["https://ex.test/s.xml"], authorizeUrl: async () => false });
+    expect(s).toMatchObject({ urls: [], sitemaps: [] });
+    expect(s.notes).toBeUndefined();
+  });
+
+  it("reads a plain-text sitemap, one URL per line", () => {
+    expect(parseSitemap("https://ex.test/a\r\n\nhttps://ex.test/b\nnot a url\n").urls).toEqual([{ loc: "https://ex.test/a" }, { loc: "https://ex.test/b" }]);
   });
 });
 

@@ -1009,6 +1009,61 @@ describe("the forge, registry and page-metadata commands", () => {
     expect(stdout()).toContain("https://ex.test/p1");
   });
 
+  it("names the child sitemaps --max did not reach, rather than printing an empty line", async () => {
+    const index = "<sitemapindex><sitemap><loc>https://sm.test/a.xml</loc></sitemap><sitemap><loc>https://sm.test/b.xml</loc></sitemap></sitemapindex>";
+    installFetchMock((url) =>
+      url.endsWith("robots.txt")
+        ? { body: "Sitemap: https://sm.test/index.xml", contentType: "text/plain" }
+        : url.endsWith("/index.xml")
+          ? { body: index, contentType: "application/xml" }
+          : { body: `<urlset><url><loc>${url.replace(".xml", "-page")}</loc></url></urlset>`, contentType: "application/xml" },
+    );
+    expect(await run(["sitemap", "https://sm.test/", "--max", "1"])).toBe(1);
+    expect(stderr()).toMatch(/2 child sitemap\(s\) not read.*raise --max/s);
+    expect(stderr()).toContain("https://sm.test/b.xml");
+
+    out = [];
+    err = [];
+    expect(await run(["sitemap", "https://sm.test/", "--max", "2"])).toBe(0);
+    expect(stdout().trim()).toBe("https://sm.test/a-page");
+    expect(stderr()).toMatch(/1 child sitemap\(s\) not read.*raise --max/s);
+  });
+
+  it("resolves a feed's relative links, reads JSON Feed, and looks past a page that only looks like a feed", async () => {
+    installFetchMock(() => ({ body: '<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Rel</title><link href="/blog/post-2"/></entry></feed>' }));
+    expect(await run(["feed", "https://ex.test/atom.xml"])).toBe(0);
+    expect(stdout()).toContain("https://ex.test/blog/post-2");
+
+    out = [];
+    installFetchMock(() => ({
+      body: JSON.stringify({ version: "https://jsonfeed.org/version/1.1", items: [{ id: "1", title: "Jay", url: "/j" }] }),
+      contentType: "application/feed+json",
+    }));
+    expect(await run(["feed", "https://ex.test/feed.json"])).toBe(0);
+    expect(stdout()).toContain("https://ex.test/j");
+
+    out = [];
+    installFetchMock((url) =>
+      url.includes("feed.xml")
+        ? { body: "<rss><channel><title>B</title><item><title>Real</title><link>https://ex.test/r</link></item></channel></rss>" }
+        : {
+            body: "<!doctype html><html><head><link rel=alternate type=application/rss+xml href=/feed.xml></head><body><channel-nav></channel-nav></body></html>",
+          },
+    );
+    expect(await run(["feed", "https://ex.test/page"])).toBe(0);
+    expect(stdout()).toContain("Real");
+  });
+
+  it("follows the feed an empty feed points to", async () => {
+    installFetchMock((url) =>
+      url.includes("full.xml")
+        ? { body: "<rss><channel><title>B</title><item><title>Moved here</title><link>https://ex.test/m</link></item></channel></rss>" }
+        : { body: '<feed xmlns="http://www.w3.org/2005/Atom"><title>Stub</title><link rel="alternate" type="application/rss+xml" href="/full.xml"/></feed>' },
+    );
+    expect(await run(["feed", "https://ex.test/stub.xml"])).toBe(0);
+    expect(stdout()).toContain("Moved here");
+  });
+
   it("parses a feed directly, and discovers one from a page", async () => {
     installFetchMock(() => ({ body: "<rss><channel><title>B</title><item><title>One</title><link>https://ex.test/1</link></item></channel></rss>" }));
     expect(await run(["feed", "https://ex.test/feed.xml"])).toBe(0);

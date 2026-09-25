@@ -152,9 +152,13 @@ COMMANDS
              author, dates, type, canonical URL.
   robots     Whether robots.txt permits fetching that URL. Exits non-zero when
              it does not, so it composes in a shell.
-  sitemap    The URLs a site lists in its sitemap, following the index at most
-             --max documents deep (default 3).
-  feed       A site's RSS/Atom feed, or the feeds the page advertises.
+  sitemap    The URLs a site lists in its sitemap: the ones robots.txt names,
+             and an index's children, reading at most --max documents
+             (default 3); /sitemap.xml is guessed only when robots.txt names
+             none. Gzipped and plain-text sitemaps too, up to the protocol's
+             50 MB. The children --max did not reach are named on stderr.
+  feed       A site's RSS, Atom or JSON Feed, or the feeds the page
+             advertises. Relative entry links are resolved.
   mcp        Serve fetch/extract to an agent over MCP (stdio by default).
   searxng    Bring the keyless SearXNG container up or down, or show it.
   firecrawl  Same for Firecrawl, which cleans a page with a real browser. It
@@ -652,8 +656,8 @@ export function webindexAdapter(): McpAdapter {
         name: "webindex_sitemap",
         title: "What pages does this site list?",
         description:
-          "Fetch and parse the site's sitemap (following the ones robots.txt names first), returning page URLs with their last-modified dates. " +
-          "A sitemap index is followed at most `max` documents deep — enumerating a site is a budget you set, not something this does on its own.",
+          "Fetch and parse the site's sitemap (the ones robots.txt names, else /sitemap.xml; gzipped and plain-text ones too), returning page URLs with their last-modified dates. " +
+          "At most `max` documents are read — enumerating a site is a budget you set, not something this does on its own — and the child sitemaps it did not reach come back in `unfetched`.",
         inputSchema: {
           type: "object",
           properties: {
@@ -665,9 +669,9 @@ export function webindexAdapter(): McpAdapter {
       },
       {
         name: "webindex_feed",
-        title: "A site's RSS or Atom feed",
+        title: "A site's RSS, Atom or JSON feed",
         description:
-          "Parse a feed URL, or discover and parse the feeds a page advertises. Returns dated, ordered entries — the site telling you what it published and when, " +
+          "Parse a feed URL (RSS, Atom or JSON Feed), or discover and parse the feeds a page advertises. Returns dated, ordered entries with absolute URLs — the site telling you what it published and when, " +
           "instead of a web search guessing.",
         inputSchema: { type: "object", properties: { url: { type: "string", description: "A feed URL, or a page that links to one." } }, required: ["url"] },
       },
@@ -849,16 +853,17 @@ export function webindexAdapter(): McpAdapter {
         if (name === "webindex_sitemap") {
           const robots = await fetchRobots(url);
           const s = await fetchSitemap(url, { sitemaps: robots.sitemaps, max: typeof args.max === "number" ? args.max : undefined });
-          if (!s.urls.length && !s.sitemaps.length) throw new ToolError(`No sitemap found for ${url}.`);
+          if (!s.urls.length && !s.sitemaps.length) throw new ToolError(`No sitemap found for ${url}.${s.notes?.length ? ` ${s.notes.join(" ")}` : ""}`);
           return { text: JSON.stringify(s, null, 2) };
         }
-        const page = await httpGet(url, { accept: "text/html,application/xml,*/*" });
+        const page = await httpGet(url, { accept: "text/html,application/xml,application/feed+json,*/*" });
         if (!page.ok) throw new ToolError(`Could not fetch ${url} (status ${page.status}).`);
         if (name === "webindex_meta") return { text: JSON.stringify(pageMetadata(page.body, { baseUrl: page.url }), null, 2) };
 
-        const direct = parseFeed(page.body);
-        if (direct) return { text: JSON.stringify(direct, null, 2) };
-        const found = discoverFeeds(page.body, page.url);
+        const direct = parseFeed(page.body, page.url);
+        // A feed with no entries may still point at the one that has them.
+        const found = direct?.items.length ? [] : discoverFeeds(page.body, page.url);
+        if (direct && !found.length) return { text: JSON.stringify(direct, null, 2) };
         if (!found.length) throw new ToolError(`${url} is not a feed and advertises none.`);
         const feeds = [];
         for (const f of found) {
@@ -1229,25 +1234,33 @@ async function dispatch(argv: string[]): Promise<void> {
     if (cmd === "sitemap") {
       const robots = await fetchRobots(target);
       const s = await fetchSitemap(target, { sitemaps: robots.sitemaps, max: argInt(args, "max") });
+      if (!asJson) for (const n of s.notes ?? []) process.stderr.write(`${n}\n`);
       if (!s.urls.length && !s.sitemaps.length) fail(`no sitemap found for ${target}`);
+      // An index whose children the budget did not reach is not an empty
+      // site: say which documents are left, and what reads them.
+      const unread = s.unfetched ?? [];
+      if (!asJson && unread.length)
+        process.stderr.write(`${unread.length} child sitemap(s) not read — raise --max to follow them:\n  ${unread.join("\n  ")}\n`);
+      if (!s.urls.length && !asJson) fail(`no page URLs in the ${s.sitemaps.length ? "sitemap index" : "sitemap"} read so far`);
       emit(
         s,
         s.urls.map((u) => u.loc),
       );
       return;
     }
-    const page = await httpGet(target, { accept: "text/html,application/xml,*/*" });
+    const page = await httpGet(target, { accept: "text/html,application/xml,application/feed+json,*/*" });
     if (!page.ok) fail(`could not fetch ${target} (status ${page.status})`);
     if (cmd === "feed") {
-      const direct = parseFeed(page.body);
-      if (direct) {
+      const direct = parseFeed(page.body, page.url);
+      // A feed with no entries may still point at the one that has them.
+      const found = direct?.items.length ? [] : discoverFeeds(page.body, page.url);
+      if (direct && !found.length) {
         emit(
           direct,
           direct.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}\n  ${i.url ?? ""}`),
         );
         return;
       }
-      const found = discoverFeeds(page.body, page.url);
       if (!found.length) fail(`${target} advertises no feed`);
       const feeds = [];
       for (const f of found) {
