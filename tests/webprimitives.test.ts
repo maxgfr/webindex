@@ -796,6 +796,22 @@ describe("feeds", () => {
     installFetchMock(() => ({ body: '<feed><entry><title>E</title><link href="/p/1"/></entry></feed>', contentType: "application/atom+xml" }));
     expect((await fetchFeed("https://ex.test/blog/atom.xml"))?.items[0]?.url).toBe("https://ex.test/p/1");
   });
+
+  it("puts a fetched feed through the caller's policy, every hop of it", async () => {
+    // A page can advertise a feed anywhere; a caller confining what it fetches
+    // had no way to confine this request.
+    const spy = installFetchMock(() => ({ body: '<feed><entry><title>E</title><link href="/p/1"/></entry></feed>', contentType: "application/atom+xml" }));
+    const asked: string[] = [];
+    const refuse = async (u: string) => {
+      asked.push(u);
+      return false;
+    };
+    expect(await fetchFeed("https://ex.test/blog/atom.xml", { authorizeUrl: refuse })).toBeUndefined();
+    expect(asked).toEqual(["https://ex.test/blog/atom.xml"]);
+    expect(spy).not.toHaveBeenCalled();
+    expect(await fetchFeed("https://ex.test/blog/atom.xml", { signal: AbortSignal.abort() })).toBeUndefined();
+    expect(spy).not.toHaveBeenCalled();
+  });
 });
 
 describe("fetching sitemaps", () => {
@@ -884,6 +900,34 @@ describe("fetching sitemaps", () => {
     const s = await fetchSitemap("https://ex.test/", { sitemaps: ["https://ex.test/s.xml"], authorizeUrl: async () => false });
     expect(s).toMatchObject({ urls: [], sitemaps: [] });
     expect(s.notes).toBeUndefined();
+  });
+
+  it("stops walking an index when its signal aborts, and reports each document it read", async () => {
+    const asked: string[] = [];
+    installFetchMock((url) => {
+      asked.push(new URL(url).pathname);
+      return url.endsWith("/index.xml")
+        ? { body: index("https://ex.test/1.xml", "https://ex.test/2.xml", "https://ex.test/3.xml"), contentType: "application/xml" }
+        : { body: urlset(url.replace(".xml", "-page")), contentType: "application/xml" };
+    });
+    const ctrl = new AbortController();
+    const read: [string, number][] = [];
+    const s = await fetchSitemap("https://ex.test/", {
+      sitemaps: ["https://ex.test/index.xml"],
+      max: 10,
+      signal: ctrl.signal,
+      onDocument: (url, fetched) => {
+        read.push([url, fetched]);
+        if (fetched === 2) ctrl.abort();
+      },
+    });
+    expect(asked).toEqual(["/index.xml", "/1.xml"]);
+    expect(read).toEqual([
+      ["https://ex.test/index.xml", 1],
+      ["https://ex.test/1.xml", 2],
+    ]);
+    expect(s.unfetched).toEqual(["https://ex.test/2.xml", "https://ex.test/3.xml"]);
+    expect(s.notes?.join(" ")).toMatch(/cancelled/);
   });
 
   it("reads a plain-text sitemap, one URL per line", () => {

@@ -120,6 +120,28 @@ describe("resources/read", () => {
     expect(() => readResource("skill://escape.md", join(root, "scripts"))).toThrow(/escapes the skill root/);
   });
 
+  it("serves only the documents it lists, not every file under the root", () => {
+    // Run from a checkout, the root is the repository: .git/config (which can
+    // hold a token in a remote URL), .env and the sources all sat under it,
+    // one resources/read away over HTTP.
+    const root = tmp();
+    mkdirSync(join(root, "scripts"), { recursive: true });
+    mkdirSync(join(root, "references", "deep"), { recursive: true });
+    writeFileSync(join(root, "SKILL.md"), "# skill\n\nBody.\n");
+    writeFileSync(join(root, "references", "guide.md"), "# guide\n\nBody.\n");
+    writeFileSync(join(root, "references", "deep", "nested.md"), "nested");
+    writeFileSync(join(root, "references", "notes.txt"), "notes");
+    writeFileSync(join(root, ".env"), "TOKEN=secret");
+    writeFileSync(join(root, "package.json"), "{}");
+    const moduleDir = join(root, "scripts");
+
+    expect(readResource("skill://references/guide.md", moduleDir).text).toContain("guide");
+    expect(readResource("skill://references/../SKILL.md", moduleDir).text).toContain("skill");
+    for (const uri of ["skill://.env", "skill://package.json", "skill://references/notes.txt", "skill://references/deep/nested.md"]) {
+      expect(() => readResource(uri, moduleDir), uri).toThrow(/not a resource this server serves/);
+    }
+  });
+
   it("rejects a directory and a file that is not there", () => {
     expect(() => readResource("skill://references", PAYLOAD_MODULE_DIR)).toThrow(/not a file/);
     expect(() => readResource("skill://references/nope.md", PAYLOAD_MODULE_DIR)).toThrow(/no such resource/);

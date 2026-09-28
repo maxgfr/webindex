@@ -160,6 +160,13 @@ export interface CrawlOptions {
   prefix?: string;
   /** Ignore robots.txt. For a site you own, and named so it cannot happen by accident. */
   ignoreRobots?: boolean;
+  /**
+   * The caller's own policy, asked before every request the crawl makes —
+   * each page and each of its redirects, robots.txt, the sitemaps. A URL it
+   * refuses is not requested, and a note says so. How a server that refuses
+   * private addresses keeps a crawl from walking into them.
+   */
+  authorizeUrl?: (url: string) => Promise<boolean>;
   /** Per-host delay override. Otherwise robots' own Crawl-delay, else hostDelayMs(). */
   delayMs?: number;
   /**
@@ -168,6 +175,12 @@ export interface CrawlOptions {
    * the fetches interleaved.
    */
   onPage?(page: CrawledPage): void;
+  /**
+   * Stops the walk: the page requests in flight are abandoned, none starts
+   * after, and what was still queued comes back in `pending` with a note. A
+   * caller that gave up must not leave a site still being walked for it.
+   */
+  signal?: AbortSignal;
 }
 
 export interface CrawledPage {
@@ -381,6 +394,14 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
   // how most sites answer) but not leave it — and the authorizer never asks
   // robots.txt whether it may fetch itself. One per origin, so the memo, which
   // is kept per authorizer, is shared by every page of that origin.
+  // The caller's own policy comes before the crawl's: a URL it refuses is not
+  // asked for at all — robots.txt, sitemaps and redirect hops included.
+  const permitted = async (url: string): Promise<boolean> => {
+    if (!opts.authorizeUrl || (await opts.authorizeUrl(url))) return true;
+    notes.push(`${url}: refused by the caller's policy.`);
+    return false;
+  };
+
   const NONE: Robots = { rules: [], sitemaps: [], absent: true };
   const robotsPolicy = new Map<string, (url: string) => Promise<boolean>>();
   const robotsFor = (url: string): Promise<Robots> => {
@@ -389,6 +410,7 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
     let authorize = robotsPolicy.get(home);
     if (!authorize) {
       authorize = async (target: string) => {
+        if (!(await permitted(target))) return false;
         if (sameSite(target, home) || inScope(target)) return true;
         notes.push(`${target}: destination is outside the crawl origin.`);
         return false;
@@ -428,6 +450,7 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
   // robots-refused page. Delays apply to the destination host as well. The
   // seed's own redirects may leave the origin: they are what settles it.
   const authorizeHop = async (url: string, seedHop: boolean): Promise<boolean> => {
+    if (!(await permitted(url))) return false;
     if (!seedHop && !inScope(url)) {
       notes.push(`${url}: destination is outside the crawl origin.`);
       return false;
@@ -500,7 +523,9 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
   // otherwise spend the budget the caller aimed at /docs/ on the shop. A
   // one-page budget has no room for anything it lists.
   const wantSitemap = opts.useSitemap !== false && maxDepth > 0 && maxPages > 1;
-  let sitemap: Promise<Sitemap> | undefined = wantSitemap ? fetchSitemap(seed, { sitemaps: robots.sitemaps, authorizeUrl: authorizeSitemap }) : undefined;
+  let sitemap: Promise<Sitemap> | undefined = wantSitemap
+    ? fetchSitemap(seed, { sitemaps: robots.sitemaps, authorizeUrl: authorizeSitemap, signal: opts.signal })
+    : undefined;
   let sitemapAgain = false;
   let requests = 0;
   let failed = 0;
@@ -534,11 +559,13 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
     if (!added && rerooted && !sitemapAgain) {
       sitemapAgain = true;
       const home = origin;
-      sitemap = robotsFor(home).then((r) => fetchSitemap(home, { sitemaps: r.sitemaps, authorizeUrl }));
+      sitemap = robotsFor(home).then((r) => fetchSitemap(home, { sitemaps: r.sitemaps, authorizeUrl, signal: opts.signal }));
     }
   };
 
-  type Fetched = { page: CrawledPage } | { note: string; duplicate?: boolean };
+  // `cancelled`: the caller's signal abandoned it, so it was never read — it is
+  // pending, not failed.
+  type Fetched = { page: CrawledPage } | { note: string; duplicate?: boolean } | { cancelled: true };
   const seedItem: Frontier = { url: seed, depth: 0 };
   const fetchOne = async (item: Frontier): Promise<Fetched> => {
     const isSeed = item === seedItem;
@@ -548,10 +575,12 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
       // A short Retry-After is waited out and retried inside httpGet; the rest
       // of this host's queue must wait with it, not go out meanwhile.
       onBackOff: (url, ms) => backOffHost(url, ms),
+      signal: opts.signal,
     });
     // Capped at a minute: honoured literally, one "come back in an hour" would stall the walk silently for that hour.
     if (got.retryAfterMs) backOffHost(got.finalUrl, Math.min(got.retryAfterMs, 60_000));
     if (isSeed) settle(got);
+    if (!got.text && opts.signal?.aborted) return { cancelled: true };
     if (!got.text) return { note: `${item.url}: ${got.note ?? "nothing readable"}` };
     return {
       page: {
@@ -574,6 +603,10 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
     // for a seed that moved): it is the only frontier left.
     if (!wave.length && sitemap) await takeSitemap(wave);
     if (!wave.length || pages.length >= maxPages || requests >= maxRequests) break;
+    if (opts.signal?.aborted) {
+      notes.push(`cancelled after ${requests} page request(s).`);
+      break;
+    }
     // Read only as far into the wave as the budget can reach. A URL the budget
     // will never get to must not cost its host a robots.txt request, and must
     // be reported as pending rather than judged — asking about a page we were
@@ -635,7 +668,13 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
     settleSeed();
 
     const parents: CrawledPage[] = [];
-    for (const r of settled as Fetched[]) {
+    const unread: Frontier[] = [];
+    for (const [i, r] of (settled as Fetched[]).entries()) {
+      if ("cancelled" in r) {
+        unread.push(batch[i]!);
+        requests--;
+        continue;
+      }
       if ("note" in r) {
         notes.push(r.note);
         if (!r.duplicate) failed++;
@@ -649,16 +688,18 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
     if (sitemap && rootSeed) await takeSitemap(next);
     for (const page of parents) for (const link of page.links) admit(link, page.depth + 1, next);
     if (sitemap && !rootSeed) await takeSitemap(next);
-    wave = [...leftover, ...next];
+    wave = [...unread, ...leftover, ...next];
   }
 
   // Say what was left rather than implying the site was exhausted. A budget
   // that ran out and a site that ended look identical from the outside.
   const pending = wave.map((q) => q.url);
   const queued = pending.length ? ` with ${pending.length} URL(s) still queued` : "";
-  if (pages.length < maxPages && requests >= maxRequests)
+  // A cancelled walk already said why it stopped; the budget did not stop it.
+  const budgetStopped = !opts.signal?.aborted;
+  if (budgetStopped && pages.length < maxPages && requests >= maxRequests)
     notes.push(`stopped after ${requests} page requests, ${failed} of them failed — the ceiling for a ${maxPages}-page budget${queued}.`);
-  else if (pending.length) notes.push(`stopped at the ${maxPages}-page budget${queued}.`);
+  else if (budgetStopped && pending.length) notes.push(`stopped at the ${maxPages}-page budget${queued}.`);
   if (skippedFiles) notes.push(`skipped ${skippedFiles} link(s) to images, media, fonts or archives without fetching them.`);
 
   // What governed the walk goes first: it is read against everything below it.

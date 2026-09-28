@@ -13,7 +13,7 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // What it offers is what the engine actually does today: discover candidate
 // URLs through the local keyless stack, turn a URL or a local file into clean
 // text, drive the containers, and serve all of that to an agent over MCP.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { configure, env, envFlag, envInt, envName } from "./brand.js";
@@ -24,7 +24,7 @@ import { enabledExtractors, extractPdf, ocrBudgetLeft, ocrTools, PDF_EXTRACTORS 
 import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./pdf/exec.js";
 import { npxCacheState } from "./pdf/npx.js";
 import { have } from "./exec.js";
-import { extractMainHtml, htmlToText, httpGet, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
+import { type ExtractResult, extractMainHtml, fetchAndExtract, htmlToText, httpGet, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
 import { firecrawlBase, probeFirecrawl } from "./firecrawl.js";
 import { embedModel, ensureComposeMaterialized, STACK_SERVICES, stackControl } from "./stack.js";
 import { ollamaBase, probeOllama } from "./embed.js";
@@ -41,7 +41,8 @@ import { fetchRobots, isAllowed } from "./robots.js";
 import { discoverFeeds, fetchFeed, fetchSitemap, parseFeed } from "./feed.js";
 import { pageMetadata } from "./structured.js";
 import { type RepoRef, resolveRepo } from "./repo.js";
-import { type ForgeKind, forgeRef, listReleases, listTags, repoFactsResult, searchIssues } from "./forge.js";
+import { apiBase, type ForgeKind, forgeRef, listReleases, listTags, repoFactsResult, searchIssues } from "./forge.js";
+import { configuredForgeHosts, normalizeForgeHost } from "./forge-host.js";
 import { type RegistryKind, resolvePackageResult } from "./registry.js";
 import { bm25MatchedTerms, bm25Score, bm25Tokenize, buildBm25Index, dedupeNearDuplicates, diversify } from "./rank.js";
 import {
@@ -63,6 +64,7 @@ import type { JsonSchemaProp } from "./mcp/protocol.js";
 import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
+import { confinePath, publicUrlRefusal, publicUrlsOnly } from "./mcp/policy.js";
 
 configure({ name: "webindex", envPrefix: "WEBINDEX", cli: "webindex", contactUrl: "https://github.com/maxgfr/webindex" });
 
@@ -91,6 +93,7 @@ USAGE
   webindex sitemap <url> [--max <n>] [--json]
   webindex feed <url> [--json]
   webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>] [--allow-remote]
+               [--public-only] [--allow-private] [--extract-root <dir>]
   webindex searxng   up|down|status
   webindex firecrawl up|down|status
   webindex semantic  up|down|status
@@ -175,7 +178,15 @@ COMMANDS
              50 MB. The children --max did not reach are named on stderr.
   feed       A site's RSS, Atom or JSON Feed, or the feeds the page
              advertises. Relative entry links are resolved.
-  mcp        Serve fetch/extract to an agent over MCP (stdio by default).
+  mcp        Serve the webindex_* tools to an agent over MCP (stdio by
+             default). --public-only refuses URLs that are, or resolve to,
+             loopback, private, link-local or metadata addresses, checked
+             again at every redirect; --extract-root <dir> confines
+             webindex_extract to one directory (symlinks resolved).
+             --allow-remote turns both walls on: no local file at all
+             without --extract-root, and --allow-private lifts the address
+             one. With WEBINDEX_MCP_TOKEN set, HTTP answers only requests
+             carrying it as a bearer token.
   searxng    Bring the keyless SearXNG container up or down, or show it.
   firecrawl  Same for Firecrawl, which cleans a page with a real browser. It
              delegates its own search to SearXNG, so this starts both.
@@ -258,6 +269,9 @@ ENVIRONMENT
   WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
   WEBINDEX_MAX_CRAWL_DELAY_MS the longest robots.txt Crawl-delay a crawl waits out, in ms
                               (default 60000); a site asking for more is not crawled
+  WEBINDEX_PUBLIC_ONLY   set to make every \`mcp\` run --public-only
+  WEBINDEX_EXTRACT_ROOT  the directory \`mcp\` confines webindex_extract to (--extract-root)
+  WEBINDEX_MCP_TOKEN     the bearer token \`mcp --transport http\` then requires
   WEBINDEX_UA            override the browser User-Agent
   GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, GITEA_TOKEN
                          optional forge tokens; each goes only to github.com, gitlab.com,
@@ -304,6 +318,7 @@ export const VALUE_FLAGS = [
   "timeout",
   "forge",
   "prefix",
+  "extract-root",
 ];
 export const BOOL_FLAGS = [
   "json",
@@ -319,6 +334,8 @@ export const BOOL_FLAGS = [
   "offline",
   "dense",
   "lines",
+  "public-only",
+  "allow-private",
 ];
 export const COMMANDS = [
   "search",
@@ -379,6 +396,46 @@ function argTimeout(args: CommandArgs): number | undefined {
 }
 
 /**
+ * The walls `webindex mcp` puts round its tools, from the flags and the
+ * environment.
+ *
+ * --allow-remote turns the two that matter on by default: a server others can
+ * reach refuses private addresses (lifted by --allow-private) and reads no
+ * local file (unless --extract-root names the one directory it may). Keyed on
+ * the flag rather than on the bind address, because "others can reach this" is
+ * what the flag says — a loopback server behind a reverse proxy is reachable
+ * too, and its operator can say so.
+ */
+function mcpPolicy(args: CommandArgs, allowRemote: boolean): WebindexToolPolicy {
+  const allowPrivate = argBool(args, "allow-private");
+  if (allowPrivate && argBool(args, "public-only")) usage("--public-only and --allow-private contradict each other");
+  const publicOnly = !allowPrivate && (argBool(args, "public-only") || envFlag("PUBLIC_ONLY") || allowRemote);
+  const rootArg = argValue(args, "extract-root") ?? env("EXTRACT_ROOT");
+  let extractRoot: string | undefined;
+  if (rootArg !== undefined) {
+    extractRoot = resolve(rootArg);
+    let isDir = false;
+    try {
+      isDir = statSync(extractRoot).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) usage(`--extract-root ${rootArg} is not a directory`);
+  }
+  return { publicOnly, ...(extractRoot !== undefined ? { extractRoot } : allowRemote ? { noLocalFiles: true } : {}) };
+}
+
+/** What the policy is, said once at startup — nothing when there is none. */
+function mcpPolicyNotice(policy: WebindexToolPolicy, allowRemote: boolean, allowPrivate: boolean): string[] {
+  const lines: string[] = [];
+  if (policy.publicOnly) lines.push(`fetches: public addresses only${allowRemote ? " (the --allow-remote default; --allow-private lifts it)" : ""}.`);
+  else if (allowRemote && allowPrivate) lines.push("fetches: any address, this machine's own network included (--allow-private).");
+  if (policy.extractRoot !== undefined) lines.push(`local files: only under ${policy.extractRoot}.`);
+  else if (policy.noLocalFiles) lines.push("local files: none, and webindex_extract is off (--extract-root <dir> offers one directory).");
+  return lines;
+}
+
+/**
  * The MCP fetch tool's `timeoutMs`. Clamped rather than refused: an agent's
  * odd value should cost it a default, not the call — but never an unbounded
  * wait on a server other clients share.
@@ -403,6 +460,9 @@ const FORGE_ARG: JsonSchemaProp = {
   description: "Which forge a self-hosted host runs when its name does not say (salsa.debian.org is gitlab). Omit for github.com, gitlab.com, Codeberg.",
   enum: [...FORGE_KINDS],
 };
+
+/** Why an httpGet failed: the status a server gave, or — when none answered — what went wrong instead. */
+const fetchFailure = (r: { status: number; error?: string }): string => (r.status ? `status ${r.status}` : (r.error ?? "no answer"));
 
 /** A repository argument as the forge commands read it: parsed, and a local checkout read as its origin. */
 function forgeTarget(raw: string, kind: ForgeKind | undefined): RepoRef {
@@ -626,6 +686,72 @@ function parseRankDocs(value: unknown, where: string): RankInput[] {
   });
 }
 
+// The tools that stay on this machine: a file on disk, a pool the caller sent,
+// the local embedding server. Every other one reaches the open web or a public
+// API, whose answers no one here controls.
+const CLOSED_WORLD_TOOLS = new Set(["webindex_extract", "webindex_rank", "webindex_embed"]);
+
+/**
+ * The hints a client reads before calling. Without them it must assume any
+ * tool may be destructive and ask before every call — and none of these writes,
+ * deletes or changes anything it reaches (the fetch cache is this engine's own
+ * bookkeeping, not the caller's environment), so a repeat call is harmless too.
+ */
+function withHints(tools: ToolDecl[]): ToolDecl[] {
+  return tools.map((t) => ({
+    ...t,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: !CLOSED_WORLD_TOOLS.has(t.name) },
+  }));
+}
+
+/**
+ * The declarations as this server's policy shapes them. A tool that could only
+ * fail is not offered — the model would spend a call learning that — and an
+ * argument the policy constrains says so where the model reads it.
+ */
+function withPolicy(policy: WebindexToolPolicy, tools: ToolDecl[]): ToolDecl[] {
+  const root = policy.extractRoot;
+  const offered = root === undefined && policy.noLocalFiles ? tools.filter((t) => t.name !== "webindex_extract") : tools;
+  const withArg = (t: ToolDecl, name: string, prop: JsonSchemaProp): ToolDecl => ({
+    ...t,
+    inputSchema: { ...t.inputSchema, properties: { ...t.inputSchema.properties, [name]: prop } },
+  });
+  return withHints(
+    offered.map((t) => {
+      if (t.name === "webindex_extract" && root !== undefined) {
+        return withArg(t, "path", {
+          type: "string",
+          description: `Path to the file, under ${root} — the only directory this server reads; a relative path is read from there.`,
+        });
+      }
+      if (t.name === "webindex_fetch" && policy.publicOnly) {
+        return withArg(t, "cache", {
+          type: "boolean",
+          description: "Ignored here: this server fetches public addresses only, and never reads the on-disk cache, which unguarded runs share.",
+        });
+      }
+      return t;
+    }),
+  );
+}
+
+/**
+ * The walls an operator can put round the tools (`webindex mcp` flags).
+ *
+ * Off by default: on a developer's own machine, fetching any URL and reading
+ * any file is the point. Exposed with --allow-remote, the first two are on
+ * unless lifted, because a fetch that reaches 169.254.169.254 hands out cloud
+ * credentials and a file tool reads ~/.ssh.
+ */
+export interface WebindexToolPolicy {
+  /** Refuse URLs that are, or resolve to, non-public addresses — checked again at every redirect. */
+  publicOnly?: boolean;
+  /** Read local files (webindex_extract, a repository named by its path) only under this directory. */
+  extractRoot?: string;
+  /** Read no local file at all: webindex_extract is not offered. `extractRoot` wins over it. */
+  noLocalFiles?: boolean;
+}
+
 /**
  * webindex's own MCP tools: fetch a URL, extract a file.
  *
@@ -633,268 +759,302 @@ function parseRankDocs(value: unknown, where: string): RankInput[] {
  * without a subprocess, and a host embedding several engines can mount these
  * tools inside its own server rather than spawning `webindex mcp`.
  */
-export function webindexAdapter(): McpAdapter {
+export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
+  // One authorizer for the adapter's life: fetchRobots keys its cache by it.
+  const guard = policy.publicOnly ? publicUrlsOnly() : undefined;
+  const refuseUrl = async (url: string): Promise<void> => {
+    if (!guard) return;
+    const why = await publicUrlRefusal(url);
+    if (why) throw new ToolError(`Refused ${url}: ${why} — this server fetches public addresses only.`);
+  };
+  const root = policy.extractRoot;
+  const localFiles = root !== undefined || !policy.noLocalFiles;
+  // A local path, as the policy allows it: under the root, or not at all.
+  const localPath = (requested: string): string => {
+    if (!localFiles) throw new ToolError(`${requested} is a path on this machine, and this server reads no local files.`);
+    if (root === undefined) return requested;
+    try {
+      return confinePath(root, requested);
+    } catch (e) {
+      throw new ToolError((e as Error).message);
+    }
+  };
+  // A forge host a caller named, where the operator did not: under the
+  // public-only policy it must resolve publicly like any URL. The forge client
+  // follows its own redirects, so this is checked once, on the API base.
+  const refuseForgeHost = async (ref: RepoRef, kind: ForgeKind | undefined): Promise<void> => {
+    if (!guard || configuredForgeHosts().has(normalizeForgeHost(ref.host))) return;
+    await refuseUrl(apiBase(ref, kind ? { kind } : {}));
+  };
   return {
     version: ENGINE_VERSION,
-    listTools: (): ToolDecl[] => [
-      {
-        name: "webindex_search",
-        title: "Search for candidate URLs",
-        description:
-          "Find candidate URLs: a locally-running SearXNG first, then the keyless engines (DuckDuckGo, DuckDuckGo Lite, Mojeek — no key, no container), then Firecrawl. " +
-          "Returns title, URL and snippet — not page text; follow up with webindex_fetch on the ones worth reading. " +
-          "When nothing answers it says which piece was missing rather than returning an empty result that reads like 'nothing exists'.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: { type: "string", description: "What to search for." },
-            limit: { type: "number", description: "How many hits to aim for (default 10)." },
-            lang: { type: "string", description: "BCP-47 language tag, e.g. fr-FR." },
-            region: { type: "string", description: "Country code overriding the one `lang` implies, e.g. ca for fr + Canada; wt asks for no region." },
-            pages: { type: "number", description: `Result pages to walk per engine (default 1, at most ${SEARCH_TOOL_MAX_PAGES}).` },
-            engine: {
-              type: "string",
-              description:
-                "Restrict the keyless rung to one engine: ddg | ddglite | mojeek (SearXNG and Firecrawl still run around it). Omit to try all three in turn.",
-              enum: [...KEYLESS_ENGINES],
+    listTools: (): ToolDecl[] =>
+      withPolicy(policy, [
+        {
+          name: "webindex_search",
+          title: "Search for candidate URLs",
+          description:
+            "Find candidate URLs: a locally-running SearXNG first, then the keyless engines (DuckDuckGo, DuckDuckGo Lite, Mojeek — no key, no container), then Firecrawl. " +
+            "Returns title, URL and snippet — not page text; follow up with webindex_fetch on the ones worth reading. " +
+            "When nothing answers it says which piece was missing rather than returning an empty result that reads like 'nothing exists'. " +
+            `The whole cascade is bounded at ${SEARCH_TOOL_BUDGET_MS / 1000} s; the last line names each rung's outcome (rungs: searxng=unreachable ddg=hits(8) …).`,
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "What to search for." },
+              limit: { type: "number", description: "How many hits to aim for (default 10)." },
+              lang: { type: "string", description: "BCP-47 language tag, e.g. fr-FR." },
+              region: { type: "string", description: "Country code overriding the one `lang` implies, e.g. ca for fr + Canada; wt asks for no region." },
+              pages: { type: "number", description: `Result pages to walk per engine (default 1, at most ${SEARCH_TOOL_MAX_PAGES}).` },
+              engine: {
+                type: "string",
+                description:
+                  "Restrict the keyless rung to one engine: ddg | ddglite | mojeek (SearXNG and Firecrawl still run around it). Omit to try all three in turn.",
+                enum: [...KEYLESS_ENGINES],
+              },
             },
+            required: ["query"],
           },
-          required: ["query"],
         },
-      },
-      {
-        name: "webindex_fetch",
-        title: "Fetch a URL as clean text",
-        description:
-          "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR) and office documents (anydoc → Firecrawl → a built-in OOXML/OpenDocument reader), " +
-          "and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text, then a trailer with the final URL after redirects, the page's canonical URL and title, any note, and which rung produced it — never raw bytes. " +
-          "Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "The http(s) URL to fetch." },
-            lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." },
-            fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
-            timeoutMs: { type: "number", description: "Give up on a silent host after this many ms (default 20000). A timed-out request is not retried." },
-            cache: {
-              type: "boolean",
-              description: "Use the on-disk cache: a fresh copy is reused for its TTL (24 h by default), a stale one revalidated with a conditional GET.",
+        {
+          name: "webindex_fetch",
+          title: "Fetch a URL as clean text",
+          description:
+            "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR) and office documents (anydoc → Firecrawl → a built-in OOXML/OpenDocument reader), " +
+            "and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text, then a trailer with the final URL after redirects, the page's canonical URL and title, any note, and which rung produced it — never raw bytes. " +
+            "Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "The http(s) URL to fetch." },
+              lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." },
+              fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
+              timeoutMs: {
+                type: "number",
+                description: "Give up on a silent host after this many ms (default 20000, at most 300000). A timed-out request is not retried.",
+              },
+              cache: {
+                type: "boolean",
+                description: "Use the on-disk cache: a fresh copy is reused for its TTL (24 h by default), a stale one revalidated with a conditional GET.",
+              },
             },
+            required: ["url"],
           },
-          required: ["url"],
         },
-      },
-      {
-        name: "webindex_extract",
-        title: "Extract text from a local file",
-        description: "Read a PDF, office document or HTML file already on disk and return its text, using the same extraction ladders as webindex_fetch.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            path: { type: "string", description: "Absolute path to the file." },
-            fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
-          },
-          required: ["path"],
-        },
-      },
-      {
-        name: "webindex_rank",
-        title: "Rank candidate documents against a question",
-        description:
-          "Order a pool of documents by relevance to a question: BM25F (title and headings weighted above body), then SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. " +
-          "Returns the ranking with a score, the matched query terms, and what was collapsed (each dropped mirror's URL and the URL it duplicated), plus a `note` when no document matched or the dense lane was missing — deterministic, no model, no network unless `dense` asks for the local embedding lane. " +
-          "Use it after gathering pages from any search provider to decide what to actually read. Scores measure relevance within this pool, not factual accuracy.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            question: { type: "string", description: "What the ranking is for." },
-            documents: {
-              type: "array",
-              description:
-                'The pool. Each item is {url, text} plus optional {title, headings, score}. A `score` (e.g. the search engine\'s own relevance) is fused with BM25F by rank; it never lifts a document sharing no term with the question. Passed as JSON, e.g. [{"url":"…","title":"…","text":"…"}].',
+        {
+          name: "webindex_extract",
+          title: "Extract text from a local file",
+          description: "Read a PDF, office document or HTML file already on disk and return its text, using the same extraction ladders as webindex_fetch.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Absolute path to the file." },
+              fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
             },
-            limit: { type: "number", description: "How many ranked entries to return (default all)." },
-            dense: {
-              type: "boolean",
-              description:
-                "Fuse the local embedding lane (Ollama) with BM25F before the collapse and MMR, so a page that never uses the question's words can still rank. Falls back to BM25F with a `note` when no embedding server answers. Default false: deterministic and offline.",
+            required: ["path"],
+          },
+        },
+        {
+          name: "webindex_rank",
+          title: "Rank candidate documents against a question",
+          description:
+            "Order a pool of documents by relevance to a question: BM25F (title and headings weighted above body), then SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. " +
+            "Returns the ranking with a score, the matched query terms, and what was collapsed (each dropped mirror's URL and the URL it duplicated), plus a `note` when no document matched or the dense lane was missing — deterministic, no model, no network unless `dense` asks for the local embedding lane. " +
+            "Use it after gathering pages from any search provider to decide what to actually read. Scores measure relevance within this pool, not factual accuracy.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              question: { type: "string", description: "What the ranking is for." },
+              documents: {
+                type: "array",
+                description:
+                  'The pool. Each item is {url, text} plus optional {title, headings, score}. A `score` (e.g. the search engine\'s own relevance) is fused with BM25F by rank; it never lifts a document sharing no term with the question. Passed as JSON, e.g. [{"url":"…","title":"…","text":"…"}].',
+              },
+              limit: { type: "number", description: "How many ranked entries to return (default all)." },
+              dense: {
+                type: "boolean",
+                description:
+                  "Fuse the local embedding lane (Ollama) with BM25F before the collapse and MMR, so a page that never uses the question's words can still rank. Falls back to BM25F with a `note` when no embedding server answers. Default false: deterministic and offline.",
+              },
             },
+            required: ["question", "documents"],
           },
-          required: ["question", "documents"],
         },
-      },
-      {
-        name: "webindex_repo",
-        title: "A repository's own facts",
-        description:
-          "Read a repository's record from GitHub, GitLab or Gitea: description, stars, licence, default branch, last push, topics, and whether it is ARCHIVED. " +
-          "Answers 'is this maintained' from the forge rather than from a README that says it is. Keyless; a token only raises the quota.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            repo: { type: "string", description: "owner/repo, a URL (a browser URL works), git@host:owner/repo, or a local checkout (read as its origin)." },
-            forge: FORGE_ARG,
-          },
-          required: ["repo"],
-        },
-      },
-      {
-        name: "webindex_issues",
-        title: "Search a repository's issues or pull requests",
-        description:
-          "Search issues (or pull/merge requests) in one repository across GitHub, GitLab and Gitea. Returns number, title, state, labels and body. " +
-          "GitHub results for `terms` are relevance-ranked and carry a score; GitLab and Gitea have no search endpoint, so theirs are recency-ordered and carry none — deliberately, rather than inventing one. " +
-          "Every term must match; when all of them together match nothing, it searches once more with the most distinctive ones and says so in `note`.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            repo: { type: "string", description: "owner/repo, or a repository URL." },
-            terms: { type: "string", description: "What to look for." },
-            kind: { type: "string", description: "issue (default) or pr.", enum: ["issue", "pr"] },
-            limit: { type: "number", description: "How many to return (default 10)." },
-            forge: FORGE_ARG,
-          },
-          required: ["repo"],
-        },
-      },
-      {
-        name: "webindex_releases",
-        title: "A repository's releases",
-        description:
-          "List releases newest-first with their notes and dates — the authoritative answer to 'what changed', and to 'when was X added'. " +
-          "A project that tags versions without publishing releases has none: use webindex_tags for it.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            repo: { type: "string", description: "owner/repo, or a repository URL." },
-            limit: { type: "number", description: "How many (default 20)." },
-            forge: FORGE_ARG,
-          },
-          required: ["repo"],
-        },
-      },
-      {
-        name: "webindex_tags",
-        title: "A repository's tags",
-        description:
-          "List a repository's tags with a link to each — the versions of a project that tags without publishing forge releases, where webindex_releases finds nothing.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            repo: { type: "string", description: "owner/repo, or a repository URL." },
-            limit: { type: "number", description: "How many (default 50)." },
-            forge: FORGE_ARG,
-          },
-          required: ["repo"],
-        },
-      },
-      {
-        name: "webindex_package",
-        title: "Resolve a library name to its real coordinates",
-        description:
-          "Look a package up in npm, PyPI or crates.io and return its repository, homepage, documentation URL, current version, licence and any DEPRECATION notice. " +
-          "Use this before searching the web for a library: it uses bounded registry requests, and it is the registry's own answer rather than whatever ranks for '<name> official documentation'.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            name: { type: "string", description: "The package name." },
-            registry: { type: "string", description: "Skip the guessing when you know the ecosystem.", enum: ["npm", "pypi", "crates"] },
-            version: { type: "string", description: "A specific version, instead of the latest." },
-          },
-          required: ["name"],
-        },
-      },
-      {
-        name: "webindex_meta",
-        title: "What a page says about itself",
-        description:
-          "Read a page's own structured metadata — JSON-LD, OpenGraph and meta tags — and return author, publication and modification dates, type, site name and canonical URL. " +
-          "Far cheaper and far more reliable than inferring a publication date from body text, and it does not need the page's prose at all.",
-        inputSchema: { type: "object", properties: { url: { type: "string", description: "The page to inspect." } }, required: ["url"] },
-      },
-      {
-        name: "webindex_robots",
-        title: "Is this URL ours to fetch?",
-        description:
-          "Check the site's robots.txt for this URL: whether it is allowed, any crawl-delay, and the sitemaps the file advertises. " +
-          "Advisory — webindex_fetch does not consult it, because following one citation is not crawling. Ask before enumerating a site.",
-        inputSchema: { type: "object", properties: { url: { type: "string", description: "The URL to check." } }, required: ["url"] },
-      },
-      {
-        name: "webindex_sitemap",
-        title: "What pages does this site list?",
-        description:
-          "Fetch and parse the site's sitemap (the ones robots.txt names, else /sitemap.xml; gzipped and plain-text ones too), returning page URLs with their last-modified dates. " +
-          "At most `max` documents are read — enumerating a site is a budget you set, not something this does on its own — and the child sitemaps it did not reach come back in `unfetched`.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "Any URL on the site." },
-            max: { type: "number", description: "Sitemap documents to fetch (default 3)." },
-          },
-          required: ["url"],
-        },
-      },
-      {
-        name: "webindex_feed",
-        title: "A site's RSS, Atom or JSON feed",
-        description:
-          "Parse a feed URL (RSS, Atom or JSON Feed), or discover and parse the feeds a page advertises. Returns dated, ordered entries with absolute URLs — the site telling you what it published and when, " +
-          "instead of a web search guessing.",
-        inputSchema: { type: "object", properties: { url: { type: "string", description: "A feed URL, or a page that links to one." } }, required: ["url"] },
-      },
-      {
-        name: "webindex_tables",
-        title: "The tables on a page, as data",
-        description:
-          "Extract every <table> as headers and rows, with colspan and rowspan resolved. Plain extraction flattens a table into a run of cell text, which reads " +
-          "plausibly while every figure has lost the row and column it belonged to — use this whenever the answer is IN a table.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "The page holding the table(s)." },
-            markdown: { type: "boolean", description: "Render as markdown instead of JSON rows." },
-          },
-          required: ["url"],
-        },
-      },
-      {
-        name: "webindex_embed",
-        title: "Embed text with the local model",
-        description:
-          "Turn text into vectors with the local Ollama, which needs no key and sends nothing off the machine. Returns one vector per input, in input order. " +
-          "Fails with a note naming the command that starts the service when it is not running.",
-        inputSchema: {
-          type: "object",
-          properties: { texts: { type: "array", items: { type: "string" }, description: "The texts to embed." } },
-          required: ["texts"],
-        },
-      },
-      {
-        name: "webindex_crawl",
-        title: "Walk a site, within a budget",
-        description:
-          "Follow links from a seed page, breadth-first, honouring robots.txt at EVERY hop and staying on the origin the seed lands on. `max` pages is required — enumerating " +
-          "someone else's site is the one operation here that can inconvenience them, so the budget is not optional. Returns each page's URL, title and text.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "The seed page." },
-            max: {
-              type: "number",
-              description: "Pages to return. Required. A failed fetch costs no page, but the crawl makes at most 3 × `max` page requests in all.",
+        {
+          name: "webindex_repo",
+          title: "A repository's own facts",
+          description:
+            "Read a repository's record from GitHub, GitLab or Gitea: description, stars, licence, default branch, last push, topics, and whether it is ARCHIVED. " +
+            "Answers 'is this maintained' from the forge rather than from a README that says it is. Keyless; a token only raises the quota.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              repo: { type: "string", description: "owner/repo, a URL (a browser URL works), git@host:owner/repo, or a local checkout (read as its origin)." },
+              forge: FORGE_ARG,
             },
-            depth: { type: "number", description: "How many links deep to follow (default 2)." },
-            prefix: { type: "string", description: "Only follow URLs whose path starts with this, e.g. `/docs/`." },
-            sitemap: {
-              type: "boolean",
-              description: "Seed the walk from the site's sitemap too (default true; a seed below the root takes only its own section's entries).",
-            },
+            required: ["repo"],
           },
-          required: ["url", "max"],
         },
-      },
-    ],
+        {
+          name: "webindex_issues",
+          title: "Search a repository's issues or pull requests",
+          description:
+            "Search issues (or pull/merge requests) in one repository across GitHub, GitLab and Gitea. Returns number, title, state, labels and body. " +
+            "GitHub results for `terms` are relevance-ranked and carry a score; GitLab and Gitea have no search endpoint, so theirs are recency-ordered and carry none — deliberately, rather than inventing one. " +
+            "Every term must match; when all of them together match nothing, it searches once more with the most distinctive ones and says so in `note`.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              repo: { type: "string", description: "owner/repo, or a repository URL." },
+              terms: { type: "string", description: "What to look for." },
+              kind: { type: "string", description: "issue (default) or pr.", enum: ["issue", "pr"] },
+              limit: { type: "number", description: "How many to return (default 10)." },
+              forge: FORGE_ARG,
+            },
+            required: ["repo"],
+          },
+        },
+        {
+          name: "webindex_releases",
+          title: "A repository's releases",
+          description:
+            "List releases newest-first with their notes and dates — the authoritative answer to 'what changed', and to 'when was X added'. " +
+            "A project that tags versions without publishing releases has none: use webindex_tags for it.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              repo: { type: "string", description: "owner/repo, or a repository URL." },
+              limit: { type: "number", description: "How many (default 20)." },
+              forge: FORGE_ARG,
+            },
+            required: ["repo"],
+          },
+        },
+        {
+          name: "webindex_tags",
+          title: "A repository's tags",
+          description:
+            "List a repository's tags with a link to each — the versions of a project that tags without publishing forge releases, where webindex_releases finds nothing.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              repo: { type: "string", description: "owner/repo, or a repository URL." },
+              limit: { type: "number", description: "How many (default 50)." },
+              forge: FORGE_ARG,
+            },
+            required: ["repo"],
+          },
+        },
+        {
+          name: "webindex_package",
+          title: "Resolve a library name to its real coordinates",
+          description:
+            "Look a package up in npm, PyPI or crates.io and return its repository, homepage, documentation URL, current version, licence and any DEPRECATION notice. " +
+            "Use this before searching the web for a library: it uses bounded registry requests, and it is the registry's own answer rather than whatever ranks for '<name> official documentation'.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "The package name." },
+              registry: { type: "string", description: "Skip the guessing when you know the ecosystem.", enum: ["npm", "pypi", "crates"] },
+              version: { type: "string", description: "A specific version, instead of the latest." },
+            },
+            required: ["name"],
+          },
+        },
+        {
+          name: "webindex_meta",
+          title: "What a page says about itself",
+          description:
+            "Read a page's own structured metadata — JSON-LD, OpenGraph and meta tags — and return author, publication and modification dates, type, site name and canonical URL. " +
+            "Far cheaper and far more reliable than inferring a publication date from body text, and it does not need the page's prose at all.",
+          inputSchema: { type: "object", properties: { url: { type: "string", description: "The page to inspect." } }, required: ["url"] },
+        },
+        {
+          name: "webindex_robots",
+          title: "Is this URL ours to fetch?",
+          description:
+            "Check the site's robots.txt for this URL: whether it is allowed, any crawl-delay, and the sitemaps the file advertises. " +
+            "Advisory — webindex_fetch does not consult it, because following one citation is not crawling. Ask before enumerating a site.",
+          inputSchema: { type: "object", properties: { url: { type: "string", description: "The URL to check." } }, required: ["url"] },
+        },
+        {
+          name: "webindex_sitemap",
+          title: "What pages does this site list?",
+          description:
+            "Fetch and parse the site's sitemap (the ones robots.txt names, else /sitemap.xml; gzipped and plain-text ones too), returning page URLs with their last-modified dates. " +
+            "At most `max` documents are read — enumerating a site is a budget you set, not something this does on its own — and the child sitemaps it did not reach come back in `unfetched`.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "Any URL on the site." },
+              max: { type: "number", description: "Sitemap documents to fetch (default 3)." },
+            },
+            required: ["url"],
+          },
+        },
+        {
+          name: "webindex_feed",
+          title: "A site's RSS, Atom or JSON feed",
+          description:
+            "Parse a feed URL (RSS, Atom or JSON Feed), or discover and parse the feeds a page advertises. Returns dated, ordered entries with absolute URLs — the site telling you what it published and when, " +
+            "instead of a web search guessing.",
+          inputSchema: { type: "object", properties: { url: { type: "string", description: "A feed URL, or a page that links to one." } }, required: ["url"] },
+        },
+        {
+          name: "webindex_tables",
+          title: "The tables on a page, as data",
+          description:
+            "Extract every <table> as headers and rows, with colspan and rowspan resolved. Plain extraction flattens a table into a run of cell text, which reads " +
+            "plausibly while every figure has lost the row and column it belonged to — use this whenever the answer is IN a table.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "The page holding the table(s)." },
+              markdown: { type: "boolean", description: "Render as markdown instead of JSON rows." },
+            },
+            required: ["url"],
+          },
+        },
+        {
+          name: "webindex_embed",
+          title: "Embed text with the local model",
+          description:
+            "Turn text into vectors with the local Ollama, which needs no key and sends nothing off the machine. Returns one vector per input, in input order. " +
+            "Fails with a note naming the command that starts the service when it is not running.",
+          inputSchema: {
+            type: "object",
+            properties: { texts: { type: "array", items: { type: "string" }, description: "The texts to embed." } },
+            required: ["texts"],
+          },
+        },
+        {
+          name: "webindex_crawl",
+          title: "Walk a site, within a budget",
+          description:
+            "Follow links from a seed page, breadth-first, honouring robots.txt at EVERY hop and staying on the origin the seed lands on. `max` pages is required — enumerating " +
+            "someone else's site is the one operation here that can inconvenience them, so the budget is not optional. Returns each page's URL, title and text, " +
+            "the URLs robots.txt refused (`disallowed`), how many in-scope URLs the budget did not reach (`pending`), and `notes`.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "The seed page." },
+              max: {
+                type: "number",
+                description:
+                  "Pages to return. Required. A failed fetch costs no page, but the crawl makes at most 3 × `max` page requests in all. " +
+                  "Every page's text comes back inline and an answer over 1 MB is withheld, so ask for the tens of pages you will read, not hundreds.",
+              },
+              depth: { type: "number", description: "How many links deep to follow (default 2)." },
+              prefix: { type: "string", description: "Only follow URLs whose path starts with this, e.g. `/docs/`." },
+              sitemap: {
+                type: "boolean",
+                description: "Seed the walk from the site's sitemap too (default true; a seed below the root takes only its own section's entries).",
+              },
+            },
+            required: ["url", "max"],
+          },
+        },
+      ]),
     capAdvice: {
       webindex_search: "lower `limit`",
       webindex_repo: "this repository's record is unusually large; ask for what you need instead",
@@ -913,16 +1073,29 @@ export function webindexAdapter(): McpAdapter {
       webindex_embed: "send fewer `texts` — a vector per input is large, and they are rarely worth reading inline",
       webindex_crawl: "lower `max`, or `depth` — a crawl's whole output is the sum of its pages",
     },
-    async callTool(name, args) {
+    async callTool(name, args, ctx) {
+      // What the server hands every call: the client's cancel, and a way to
+      // report progress. Passed on to whatever takes it — a cancelled call must
+      // stop fetching, not only have its answer dropped.
+      const signal = ctx?.signal;
       if (name === "webindex_fetch") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
+        await refuseUrl(url);
         const fullPage = args.fullPage === true;
-        const r = await cachedFetchAndExtract(
-          url,
-          { acceptLanguage: args.lang ? String(args.lang) : undefined, fullPage, stripConsent: !fullPage, timeoutMs: toolTimeoutMs(args.timeoutMs) },
-          args.cache === true,
-        );
+        const fetchOpts = {
+          acceptLanguage: args.lang ? String(args.lang) : undefined,
+          fullPage,
+          stripConsent: !fullPage,
+          timeoutMs: toolTimeoutMs(args.timeoutMs),
+          signal,
+        };
+        // Guarded, every hop is checked (which also keeps Firecrawl — a fetcher
+        // no hook reaches — out of it), and the cache is not read: it holds what
+        // unguarded runs fetched, a private page among them.
+        const r: ExtractResult & { cached?: boolean } = guard
+          ? await fetchAndExtract(url, { ...fetchOpts, authorizeUrl: guard })
+          : await cachedFetchAndExtract(url, fetchOpts, args.cache === true);
         if (!r.text) throw new ToolError(`Nothing readable at ${url}${r.note ? ` — ${r.note}` : ""}.`);
         // Provenance a citation needs — where the text came from after
         // redirects, what the page calls itself — plus anything the fetch had
@@ -957,6 +1130,7 @@ export function webindexAdapter(): McpAdapter {
           // timeouts would: better a partial answer that says where it
           // stopped than none at all.
           timeoutMs: SEARCH_TOOL_BUDGET_MS,
+          signal,
           ...(engines ? { engines } : {}),
         });
         // The notes are prose; this line is the same facts in a form an agent
@@ -968,7 +1142,7 @@ export function webindexAdapter(): McpAdapter {
         return { text: trailer.length ? `${body}\n\n---\n${trailer.join("\n")}` : body };
       }
       if (name === "webindex_extract") {
-        const r = await extractLocal(String(args.path ?? ""), args.fullPage === true);
+        const r = await extractLocal(localPath(String(args.path ?? "")), args.fullPage === true);
         if (!r.text) throw new ToolError(`Nothing readable in that file${r.reason ? ` — ${r.reason}` : ""}.`);
         return { text: `${r.text}\n\n---\nextractor: ${r.extractor}` };
       }
@@ -1002,8 +1176,15 @@ export function webindexAdapter(): McpAdapter {
       if (name === "webindex_repo" || name === "webindex_issues" || name === "webindex_releases" || name === "webindex_tags") {
         const forge = args.forge === undefined ? undefined : String(args.forge);
         if (forge !== undefined && !isForgeKind(forge)) throw new InvalidParamsError(`\`forge\` must be one of: ${FORGE_KINDS.join(", ")}`);
-        const ref = forgeTarget(String(args.repo ?? ""), forge);
-        if (ref.host === "generic") throw new ToolError(`"${String(args.repo ?? "")}" does not name a repository.`);
+        const raw = String(args.repo ?? "");
+        const kind = forge ? { kind: forge } : {};
+        // A local checkout is read (its origin remote) before anything else, so
+        // the file policy is applied before forgeRef runs git in it.
+        const parsed = resolveRepo(raw, kind);
+        if (parsed.isLocal) localPath(resolve(raw.trim()));
+        const ref = forgeRef(parsed, kind);
+        if (ref.host === "generic") throw new ToolError(`"${raw}" does not name a repository.`);
+        await refuseForgeHost(ref, forge);
         const limit = typeof args.limit === "number" ? args.limit : undefined;
         const opts = { ...(limit ? { limit } : {}), ...(forge ? { kind: forge } : {}) };
         if (name === "webindex_repo") {
@@ -1035,19 +1216,28 @@ export function webindexAdapter(): McpAdapter {
       if (name === "webindex_meta" || name === "webindex_robots" || name === "webindex_sitemap" || name === "webindex_feed") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
+        await refuseUrl(url);
+        const robotsOpts = guard ? { authorizeUrl: guard } : {};
 
         if (name === "webindex_robots") {
-          const r = await fetchRobots(url);
+          const r = await fetchRobots(url, robotsOpts);
           return { text: JSON.stringify({ url, allowed: isAllowed(r, url), ...r }, null, 2) };
         }
         if (name === "webindex_sitemap") {
-          const robots = await fetchRobots(url);
-          const s = await fetchSitemap(url, { sitemaps: robots.sitemaps, max: typeof args.max === "number" ? args.max : undefined });
+          const robots = await fetchRobots(url, robotsOpts);
+          const max = typeof args.max === "number" ? args.max : undefined;
+          const s = await fetchSitemap(url, {
+            sitemaps: robots.sitemaps,
+            max,
+            signal,
+            authorizeUrl: guard,
+            onDocument: (doc, fetched) => ctx?.progress(fetched, max ?? 3, doc),
+          });
           if (!s.urls.length && !s.sitemaps.length) throw new ToolError(`No sitemap found for ${url}.${s.notes?.length ? ` ${s.notes.join(" ")}` : ""}`);
           return { text: JSON.stringify(s, null, 2) };
         }
-        const page = await httpGet(url, { accept: "text/html,application/xml,application/feed+json,*/*" });
-        if (!page.ok) throw new ToolError(`Could not fetch ${url} (status ${page.status}).`);
+        const page = await httpGet(url, { accept: "text/html,application/xml,application/feed+json,*/*", signal, authorizeUrl: guard });
+        if (!page.ok) throw new ToolError(`Could not fetch ${url} (${fetchFailure(page)}).`);
         if (name === "webindex_meta") return { text: JSON.stringify(pageMetadata(page.body, { baseUrl: page.url }), null, 2) };
 
         const direct = parseFeed(page.body, page.url);
@@ -1057,7 +1247,7 @@ export function webindexAdapter(): McpAdapter {
         if (!found.length) throw new ToolError(`${url} is not a feed and advertises none.`);
         const feeds = [];
         for (const f of found) {
-          const parsed = await fetchFeed(f);
+          const parsed = await fetchFeed(f, { signal, authorizeUrl: guard });
           if (parsed) feeds.push({ url: f, ...parsed });
         }
         if (!feeds.length) throw new ToolError(`${url} advertises ${found.length} feed(s), none of which parsed.`);
@@ -1066,8 +1256,9 @@ export function webindexAdapter(): McpAdapter {
       if (name === "webindex_tables") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
-        const page = await httpGet(url, { accept: "text/html,*/*" });
-        if (!page.ok) throw new ToolError(`could not fetch ${url} (status ${page.status})`);
+        await refuseUrl(url);
+        const page = await httpGet(url, { accept: "text/html,*/*", signal, authorizeUrl: guard });
+        if (!page.ok) throw new ToolError(`could not fetch ${url} (${fetchFailure(page)})`);
         const tables = extractTables(page.body);
         if (!tables.length) throw new ToolError(`${url} has no tables — use webindex_fetch for its text.`);
         return { text: args.markdown ? tables.map(tableToMarkdown).join("\n\n") : JSON.stringify(tables, null, 2) };
@@ -1085,8 +1276,13 @@ export function webindexAdapter(): McpAdapter {
         const max = Number(args.max);
         if (!Number.isInteger(max) || max < 1)
           throw new ToolError("`max` is required and must be a positive whole number — a crawl without a budget is not one.");
+        await refuseUrl(url);
+        let read = 0;
         const r = await crawlSite(url, {
           maxPages: max,
+          signal,
+          ...(guard ? { authorizeUrl: guard } : {}),
+          onPage: (page) => ctx?.progress(++read, max, page.url),
           ...(args.depth !== undefined ? { maxDepth: Number(args.depth) } : {}),
           ...(typeof args.prefix === "string" && args.prefix ? { prefix: args.prefix } : {}),
           ...(args.sitemap === false ? { useSitemap: false } : {}),
@@ -1244,24 +1440,43 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "mcp") {
     const transport = argValue(args, "transport") ?? "stdio";
+    const allowRemote = argBool(args, "allow-remote");
+    const policy = mcpPolicy(args, allowRemote);
+    // stderr, not stdout: stdio's stdout is the protocol stream, and keeping
+    // the two transports identical here means no one has to remember which is
+    // which.
+    const notice = mcpPolicyNotice(policy, allowRemote, argBool(args, "allow-private"));
     if (transport === "stdio") {
-      await runStdioServer(webindexAdapter());
+      for (const line of notice) process.stderr.write(`webindex: ${line}\n`);
+      await runStdioServer(webindexAdapter(policy));
       return;
     }
     if (transport !== "http") fail(`unknown transport "${transport}" — expected stdio or http`);
     const port = argInt(args, "port") ?? 7340;
     if (!Number.isInteger(port) || port < 0 || port > 65535) fail("invalid --port");
+    const token = env("MCP_TOKEN");
     let running: Awaited<ReturnType<typeof startHttpServer>>;
     try {
-      running = await startHttpServer(webindexAdapter(), { port, bind: argValue(args, "bind"), allowRemote: argBool(args, "allow-remote") });
+      running = await startHttpServer(webindexAdapter(policy), {
+        port,
+        bind: argValue(args, "bind"),
+        allowRemote,
+        ...(token ? { bearerToken: token } : {}),
+      });
     } catch (e) {
       fail((e as Error).message);
     }
-    // stderr, not stdout: an HTTP server's stdout is not a protocol stream, but
-    // keeping the two transports identical here means no one has to remember
-    // which is which.
     process.stderr.write(`webindex: MCP server listening on ${running.url}\n`);
-    process.stderr.write(`  client: claude mcp add --transport http webindex ${running.url}\n`);
+    const header = token ? ` --header "Authorization: Bearer $${envName("MCP_TOKEN")}"` : "";
+    process.stderr.write(`  client: claude mcp add --transport http webindex ${running.url}${header}\n`);
+    if (allowRemote) {
+      process.stderr.write(
+        token
+          ? "  exposed beyond this machine (--allow-remote); every request needs the bearer token.\n"
+          : `  exposed beyond this machine (--allow-remote) with no authentication: anyone who can reach the port can use it. Set ${envName("MCP_TOKEN")} to require a bearer token.\n`,
+      );
+    }
+    for (const line of notice) process.stderr.write(`  ${line}\n`);
     return;
   }
 

@@ -269,6 +269,45 @@ describe("crawlSite", () => {
     await crawlSite("https://s.test/", { maxPages: 3, maxDepth: 1, useSitemap: false, delayMs: 0, onPage: (p) => seen.push(p.url) });
     expect(seen).toEqual(["https://s.test/", "https://s.test/a", "https://s.test/b"]);
   });
+
+  it("puts every request — robots.txt, the sitemap, each page — through the caller's own policy first", async () => {
+    // A server that refuses private addresses has to hold for a crawl too, at
+    // every hop, not only for the seed it was handed.
+    const spy = site();
+    const asked: string[] = [];
+    const r = await crawlSite("https://s.test/", {
+      maxPages: 10,
+      maxDepth: 2,
+      delayMs: 0,
+      authorizeUrl: async (url) => {
+        asked.push(url);
+        return !url.endsWith("/b");
+      },
+    });
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/", "https://s.test/a", "https://s.test/deep"]);
+    expect(spy.mock.calls.map((c) => String(c[0]))).not.toContain("https://s.test/b");
+    expect(asked).toEqual(expect.arrayContaining(["https://s.test/robots.txt", "https://s.test/sitemap.xml", "https://s.test/", "https://s.test/b"]));
+    expect(r.notes.join(" ")).toMatch(/https:\/\/s\.test\/b: refused by the caller's policy/);
+  });
+
+  it("stops when its signal aborts: nothing more is fetched, and it says why", async () => {
+    // A cancelled MCP call used to have only its answer dropped while the walk
+    // went on to its budget, sending the site every request it had planned.
+    const spy = site();
+    const ctrl = new AbortController();
+    const r = await crawlSite("https://s.test/", {
+      maxPages: 10,
+      maxDepth: 2,
+      delayMs: 0,
+      signal: ctrl.signal,
+      onPage: () => ctrl.abort(),
+    });
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/"]);
+    const pages = spy.mock.calls.map((c) => String(c[0])).filter((u) => !/robots|sitemap/.test(u));
+    expect(pages).toEqual(["https://s.test/"]);
+    expect(r.pending).toEqual(expect.arrayContaining(["https://s.test/a", "https://s.test/b"]));
+    expect(r.notes.join(" ")).toMatch(/cancelled/);
+  });
 });
 
 describe("crawlSite concurrency", () => {

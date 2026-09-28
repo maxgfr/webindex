@@ -453,7 +453,11 @@ const SITEMAP_MAX_BYTES = 50 * 1024 * 1024;
 const gunzipAsync = promisify(gunzip);
 
 /** One sitemap document as text: gunzipped when it is gzip, decoded by its own declarations. */
-async function readSitemapDocument(url: string, authorize: ((url: string) => Promise<boolean>) | undefined): Promise<{ text?: string; note?: string }> {
+async function readSitemapDocument(
+  url: string,
+  authorize: ((url: string) => Promise<boolean>) | undefined,
+  signal?: AbortSignal,
+): Promise<{ text?: string; note?: string }> {
   // A URL the caller's own policy refused is the caller's to report (a crawl
   // lists it as disallowed); a note here would only say it twice.
   let refused = false;
@@ -470,8 +474,10 @@ async function readSitemapDocument(url: string, authorize: ((url: string) => Pro
     binary: true,
     maxBytes: SITEMAP_MAX_BYTES,
     authorizeUrl,
+    signal,
   });
   if (!r.ok) {
+    if (r.error === "cancelled") return {};
     if (r.truncated) return { note: `${url} is larger than the 50 MB a sitemap may be; not read.` };
     // A missing sitemap is the common case, and not worth a note.
     if (refused || r.status === 404 || r.status === 410) return {};
@@ -514,7 +520,15 @@ async function readSitemapDocument(url: string, authorize: ((url: string) => Pro
  */
 export async function fetchSitemap(
   url: string,
-  opts: { sitemaps?: string[]; max?: number; authorizeUrl?: (url: string) => Promise<boolean> } = {},
+  opts: {
+    sitemaps?: string[];
+    max?: number;
+    authorizeUrl?: (url: string) => Promise<boolean>;
+    /** Stops the walk: the document in flight is abandoned and none is read after it. */
+    signal?: AbortSignal;
+    /** Told as each document has been read — the `fetched`-th of at most `max`. */
+    onDocument?: (url: string, fetched: number) => void;
+  } = {},
 ): Promise<Sitemap> {
   const out: Sitemap = { urls: [], sitemaps: [] };
   let origin: string;
@@ -539,11 +553,23 @@ export async function fetchSitemap(
       queue.push(fallback);
     }
     if (!queue.length || fetched >= max) break;
+    if (opts.signal?.aborted) {
+      notes.push(`cancelled after ${fetched} sitemap document(s).`);
+      break;
+    }
     const next = queue.shift()!;
     if (seen.has(next)) continue;
     seen.add(next);
     fetched++;
-    const doc = await readSitemapDocument(next, opts.authorizeUrl);
+    const doc = await readSitemapDocument(next, opts.authorizeUrl, opts.signal);
+    if (opts.signal?.aborted) {
+      // Abandoned mid-read: it was not read, so it is still to be.
+      queue.unshift(next);
+      seen.delete(next);
+      notes.push(`cancelled after ${fetched - 1} sitemap document(s).`);
+      break;
+    }
+    opts.onDocument?.(next, fetched);
     if (doc.note) notes.push(doc.note);
     if (!doc.text?.trim()) continue;
     const parsed = parseSitemap(doc.text);
@@ -560,9 +586,20 @@ export async function fetchSitemap(
   return out;
 }
 
-/** Fetch and parse a feed URL, resolving its links against where it was served from. */
-export async function fetchFeed(url: string): Promise<Feed | undefined> {
-  const r = await httpGet(url, { accept: "application/atom+xml,application/rss+xml,application/feed+json,application/xml,*/*", timeoutMs: 10000 });
+/**
+ * Fetch and parse a feed URL, resolving its links against where it was served from.
+ *
+ * `authorizeUrl` approves the URL and every redirect before it is requested —
+ * a page can advertise a feed anywhere, so a caller confining what it fetches
+ * needs it here too; `signal` abandons the request.
+ */
+export async function fetchFeed(url: string, opts: { authorizeUrl?: (url: string) => Promise<boolean>; signal?: AbortSignal } = {}): Promise<Feed | undefined> {
+  const r = await httpGet(url, {
+    accept: "application/atom+xml,application/rss+xml,application/feed+json,application/xml,*/*",
+    timeoutMs: 10000,
+    authorizeUrl: opts.authorizeUrl,
+    signal: opts.signal,
+  });
   if (!r.ok || !r.body.trim()) return undefined;
   return parseFeed(r.body, r.url);
 }

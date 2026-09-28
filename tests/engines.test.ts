@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
 import { ddgRedirectTarget, keylessEngines, parseDdgHtml, parseDdgLite, parseMojeek, searchViaKeyless, stripTags, throttleReason } from "../src/engines.js";
-import { search } from "../src/search.js";
+import { search, searchViaSearxng } from "../src/search.js";
 import { installFetchMock } from "./fetchmock.js";
 
 afterEach(() => {
@@ -658,6 +658,30 @@ describe("a search is bounded in time", () => {
     const walked = await searchViaKeyless("ddglite", "x", { pages: 3, limit: 50, signal: later.signal });
     expect(paged).toHaveBeenCalledTimes(1); // page two never asked
     expect(walked.hits).toHaveLength(3); // page one's results stand
+  });
+
+  it("abandons the request in flight too, not only the ones after it", async () => {
+    // A silent engine used to hold a cancelled search for its whole request
+    // timeout: the signal was only read between requests.
+    const hanging = vi.fn(async (u: string, init?: RequestInit) => {
+      // SearXNG's availability probe answers; every query hangs.
+      if (String(u).endsWith("/healthz")) return new Response("OK");
+      return new Promise<Response>((_resolve, reject) =>
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError"))),
+      );
+    });
+    vi.stubGlobal("fetch", hanging);
+    for (const run of [
+      (signal: AbortSignal) => searchViaKeyless("ddglite", "x", { timeoutMs: 30_000, signal }),
+      (signal: AbortSignal) => searchViaSearxng("x", { searxng: "http://sx-abort.test", signal }),
+    ]) {
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), 20);
+      const t0 = performance.now();
+      const r = await run(ctrl.signal);
+      expect(performance.now() - t0).toBeLessThan(2000);
+      expect(r.hits).toEqual([]);
+    }
   });
 });
 

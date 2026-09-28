@@ -388,13 +388,22 @@ export async function httpGet(
      *  host (crawlSite) holds them for the same window instead of sending them
      *  into it while this one sleeps. */
     onBackOff?: (url: string, waitMs: number) => void;
+    /** Abandons the request: an attempt in flight is aborted and none starts
+     *  after. Reported as `error: "cancelled"`, never retried — the caller
+     *  that cancelled is not waiting for a second try. */
+    signal?: AbortSignal;
   } = {},
 ): Promise<HttpResult> {
   const attempts = attemptsFor(opts.retries);
   let last: HttpResult = { ok: false, status: 0, body: "", contentType: "", url };
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
+  const cancelled = (): HttpResult => ({ ok: false, status: 0, body: "", contentType: "", url, error: "cancelled" });
   for (let attempt = 0; attempt < attempts; attempt++) {
+    if (opts.signal?.aborted) return cancelled();
     const ctrl = new AbortController();
+    // Linked by hand: AbortSignal.any is Node 20, and the bundle runs on 18.
+    const onCancel = () => ctrl.abort();
+    opts.signal?.addEventListener("abort", onCancel, { once: true });
     let t: ReturnType<typeof setTimeout> | undefined;
     let remainingMs = timeoutMs;
     let startedAt = 0;
@@ -520,6 +529,7 @@ export async function httpGet(
       }
       return result;
     } catch (e) {
+      if (!timedOut && opts.signal?.aborted) return cancelled();
       last = { ok: false, status: 0, body: "", contentType: "", url, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
       // A timeout has spent the whole budget the caller granted, and a host
       // silent for that long rarely answers a second time: retrying it made the
@@ -528,6 +538,7 @@ export async function httpGet(
       if (attempt < attempts - 1) await sleep(defaultRetryMs());
     } finally {
       clearTimeout(t);
+      opts.signal?.removeEventListener("abort", onCancel);
     }
   }
   return last;
@@ -1128,8 +1139,17 @@ export async function fetchAndExtract(
     keepHtml?: boolean;
     /** Passed to httpGet: told before a transient answer is waited out and retried. */
     onBackOff?: (url: string, waitMs: number) => void;
+    /**
+     * Abandons the fetch: the built-in request is aborted, and no extraction
+     * ladder starts after it. A Firecrawl request already sent finishes — it is
+     * short, and an aborted one would read to the probe as a Firecrawl that is
+     * down, for every other caller too.
+     */
+    signal?: AbortSignal;
   } = {},
 ): Promise<ExtractResult> {
+  const cancelled = (): ExtractResult => ({ text: "", finalUrl: url, status: 0, note: `Fetching ${url} was cancelled.` });
+  if (opts.signal?.aborted) return cancelled();
   const wantsPdf = looksLikePdfUrl(url);
   // An office document skips the HTML Firecrawl path for the same reason a PDF
   // does (see looksLikePdfUrl above): handing it to Firecrawl first would
@@ -1163,8 +1183,11 @@ export async function fetchAndExtract(
     authorizeUrl: opts.authorizeUrl,
     timeoutMs: opts.timeoutMs,
     onBackOff: opts.onBackOff,
+    signal: opts.signal,
   };
+  if (opts.signal?.aborted) return cancelled();
   let res = await httpGet(url, fetchOpts);
+  if (opts.signal?.aborted) return cancelled();
   // A brand that identifies itself honestly gets refused by some hosts. Retry
   // once wearing a browser UA before giving up — but only for a brand that had
   // actually chosen the polite one, since retrying a browser UA with the same
@@ -1225,7 +1248,8 @@ export async function fetchAndExtract(
     // downloaded twice. The refetch is only for a response that somehow arrived
     // without them.
     const bytes =
-      res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
+      res.bytes ??
+      (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs, signal: opts.signal })).bytes;
     // The ladder tries pdf-inspector, then an already-running Firecrawl, then
     // pdftotext, then the built-in reader — and refuses rather than hand back
     // text no extractor could vouch for. Firecrawl is injected as a callback so
@@ -1261,7 +1285,8 @@ export async function fetchAndExtract(
     // Same as the PDF path: the bytes of a content-type-only document are
     // already here; the refetch is the fallback, not the rule.
     const bytes =
-      res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
+      res.bytes ??
+      (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs, signal: opts.signal })).bytes;
     const got = bytes
       ? await extractDocument(bytes, docFmt, {
           firecrawl: async () => {

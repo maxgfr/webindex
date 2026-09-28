@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
-import { mapLimit } from "../pool.js";
+import { batchRefusal, type ProtocolVersion } from "./protocol.js";
 import { createServer, ERR_INVALID_REQUEST, type JsonRpcMessage, type McpAdapter, type ServerOptions } from "./server.js";
 
 // The stdio transport: one JSON-RPC message per line, in on stdin, out on
@@ -59,29 +59,69 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
     void p.finally(() => inFlight.delete(p));
     return p;
   };
-  const drainToLimit = async () => {
-    while (inFlight.size >= MAX_IN_FLIGHT) await Promise.race(inFlight);
-  };
 
   // The in-flight SET is lifecycle: what must finish before stdin's close is
   // allowed to end the session. It is not a budget, because one tracked promise
   // can be a whole batch — four batch frames each running four handlers is
   // sixteen tool calls at once, four times the ceiling this file advertises.
   //
-  // The budget is this counter, and every handler passes through it: a batch
+  // The budget is this counter, and every TOOL CALL passes through it: a batch
   // member competes for the same slots as a single frame, so the ceiling holds
   // however the client frames its requests.
+  //
+  // Nothing else waits for a slot, and the read loop never does. It used to
+  // stop reading while four calls ran, and then a ping went unanswered — and
+  // the notifications/cancelled meant for those very calls sat unread until
+  // one of them finished on its own. A ping, a tools/list or a cancel costs
+  // nothing, so it is handled the moment it arrives.
   let active = 0;
   const waiting: (() => void)[] = [];
-  const runHandler = async (msg: JsonRpcMessage, send: (out: JsonRpcMessage) => void): Promise<void> => {
-    while (active >= MAX_IN_FLIGHT) await new Promise<void>((resolve) => waiting.push(resolve));
+  // Tool calls still waiting for a slot. The server only learns of a request
+  // once it runs, so a cancel for one still queued is recorded here: the call
+  // is then never run and never answered, as the notification asks.
+  const queued = new Map<string | number, { cancelled: boolean }>();
+  // The revision `initialize` settled, which decides whether batches exist.
+  let negotiated: ProtocolVersion | undefined;
+
+  // `reply` is where the answer goes — a batch collects it — while progress
+  // notifications always go straight out as frames of their own.
+  const handleOpts = { notify: send };
+  const runToolCall = async (msg: JsonRpcMessage, id: string | number, reply: (out: JsonRpcMessage) => void): Promise<void> => {
+    const ticket = { cancelled: false };
+    queued.set(id, ticket);
+    try {
+      while (active >= MAX_IN_FLIGHT) await new Promise<void>((resolve) => waiting.push(resolve));
+    } finally {
+      if (queued.get(id) === ticket) queued.delete(id);
+    }
+    if (ticket.cancelled) {
+      // The slot this call was woken for goes to the next one in line.
+      waiting.shift()?.();
+      return;
+    }
     active++;
     try {
-      await server.handle(msg, send);
+      await server.handle(msg, reply, handleOpts);
     } finally {
       active--;
       waiting.shift()?.();
     }
+  };
+
+  const dispatch = async (msg: JsonRpcMessage, reply: (out: JsonRpcMessage) => void): Promise<void> => {
+    if (msg !== null && typeof msg === "object" && !Array.isArray(msg)) {
+      if (msg.method === "notifications/cancelled") {
+        const target = msg.params?.requestId;
+        const ticket = typeof target === "string" || typeof target === "number" ? queued.get(target) : undefined;
+        if (ticket) ticket.cancelled = true;
+      }
+      if (msg.method === "tools/call" && (typeof msg.id === "string" || typeof msg.id === "number")) {
+        await runToolCall(msg, msg.id, reply);
+        return;
+      }
+    }
+    await server.handle(msg, reply, handleOpts);
+    if (msg?.method === "initialize") negotiated = server.protocolVersion();
   };
 
   const rl = createInterface({ input, terminal: false });
@@ -98,19 +138,21 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
         continue;
       }
 
-      await drainToLimit();
-
       if (Array.isArray(parsed)) {
+        const refusal = batchRefusal(parsed, negotiated);
+        if (refusal) {
+          send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: refusal } });
+          continue;
+        }
         // A batch answers as one array, so the client can match it to what it
         // sent. Notifications inside it contribute nothing, and a batch of only
-        // notifications produces no frame at all. The array's length is the
-        // client's choice, so its members are both queued (mapLimit) and made
-        // to draw on the shared budget (runHandler) — a Promise.all over it was
-        // a way around the ceiling entirely.
+        // notifications produces no frame at all. Its tool calls draw on the
+        // shared budget like any other.
+        const batch = parsed as JsonRpcMessage[];
         track(
           (async () => {
             const out: JsonRpcMessage[] = [];
-            await mapLimit(parsed, MAX_IN_FLIGHT, (m) => runHandler(m as JsonRpcMessage, (r) => void out.push(r)));
+            await Promise.all(batch.map((m) => dispatch(m, (r) => void out.push(r))));
             if (out.length) emit(JSON.stringify(out) + "\n");
           })().catch(reportInternal(send)),
         );
@@ -124,7 +166,7 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
 
       // Deliberately not awaited: the loop goes back for the next frame while
       // this one works.
-      track(runHandler(parsed as JsonRpcMessage, send).catch(reportInternal(send)));
+      track(dispatch(parsed as JsonRpcMessage, send).catch(reportInternal(send)));
     }
 
     // stdin closed. Let whatever is still running finish and answer — calling

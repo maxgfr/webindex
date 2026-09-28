@@ -572,6 +572,13 @@ describe("unknown input", () => {
     expect(await run(["mcp", "--transport", "http", "--port", "99999"])).toBe(1);
     expect(stderr()).toMatch(/invalid --port/);
   });
+
+  it("refuses contradictory address policies, and a root that is not a directory", async () => {
+    expect(await run(["mcp", "--public-only", "--allow-private"])).toBe(2);
+    expect(stderr()).toMatch(/contradict/);
+    expect(await run(["mcp", "--extract-root", join(dir, "nope")])).toBe(2);
+    expect(stderr()).toMatch(/--extract-root .* is not a directory/);
+  });
 });
 
 describe("the MCP tools", () => {
@@ -635,6 +642,38 @@ describe("the MCP tools", () => {
       // names the argument to narrow — which only works if every tool has one.
       expect(adapter.capAdvice?.[t.name], t.name).toBeTruthy();
     }
+  });
+
+  it("annotates every tool as read-only, and the ones that reach the web as open-world", () => {
+    // Without hints a client has to treat each tool as possibly destructive
+    // and ask before every call; none of these changes anything anywhere.
+    const closed = ["webindex_extract", "webindex_rank", "webindex_embed"];
+    for (const t of adapter.listTools(LATEST_PROTOCOL)) {
+      expect(t.annotations, t.name).toEqual({
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: !closed.includes(t.name),
+      });
+      expect(t.title, t.name).toBeTruthy();
+    }
+    // What a 2025-03-26 client sees: the hints, with the title carried inside.
+    const server = createServer(webindexAdapter());
+    server.setProtocolVersion("2025-03-26");
+    const fetchTool = server.tools().find((t) => t.name === "webindex_fetch")!;
+    expect(fetchTool.title).toBeUndefined();
+    expect(fetchTool.annotations).toMatchObject({ title: "Fetch a URL as clean text", readOnlyHint: true, openWorldHint: true });
+  });
+
+  it("tells the model the limits it will actually meet", () => {
+    // The declarations are all a model reads before calling: a budget or a
+    // clamp that only the code knows about reads as a hang, or as ignored input.
+    const tool = (name: string) => adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === name)!;
+    expect(tool("webindex_search").description).toMatch(/45 s/);
+    expect(tool("webindex_search").description).toMatch(/rungs:/);
+    expect(tool("webindex_fetch").inputSchema.properties.timeoutMs!.description).toMatch(/300000/);
+    expect(tool("webindex_crawl").description).toMatch(/pending/);
+    expect(tool("webindex_crawl").inputSchema.properties.max!.description).toMatch(/1 MB/);
   });
 
   it("does not promise a single network request for package metadata", () => {
@@ -777,6 +816,135 @@ describe("the MCP tools", () => {
 
   it("reports an unknown tool as a tool error", async () => {
     await expect(adapter.callTool("webindex_nope", {})).rejects.toBeInstanceOf(ToolError);
+  });
+
+  describe("the operator's walls", () => {
+    // Opt-in hardening for a server others can reach: fetch only public
+    // addresses, read files from one directory or none.
+    it("refuses a private or metadata address before asking anything, when public-only", async () => {
+      const spy = installFetchMock(() => ({ body: "<p>secret</p>", contentType: "text/html" }));
+      const guarded = webindexAdapter({ publicOnly: true });
+      for (const [tool, args] of [
+        ["webindex_fetch", { url: "http://169.254.169.254/latest/meta-data/" }],
+        ["webindex_meta", { url: "http://127.0.0.1:8080/admin" }],
+        ["webindex_tables", { url: "http://[::1]/" }],
+        ["webindex_feed", { url: "http://10.0.0.1/feed" }],
+        ["webindex_robots", { url: "http://192.168.1.1/" }],
+        ["webindex_sitemap", { url: "http://localhost/" }],
+        ["webindex_crawl", { url: "http://172.16.0.1/", max: 2 }],
+      ] as const) {
+        await expect(guarded.callTool(tool, { ...args }), tool).rejects.toThrow(/not a public address|public addresses only/);
+      }
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("refuses a redirect into a private address, at the hop", async () => {
+      // A public page that answers 302 → the metadata endpoint is the classic
+      // way round a check made only on the URL a caller sent.
+      installFetchMock((url) =>
+        url.startsWith("http://93.184.216.34/")
+          ? { status: 302, body: "", headers: { location: "http://169.254.169.254/latest/meta-data/iam/" } }
+          : { body: "<p>credentials</p>", contentType: "text/html" },
+      );
+      const guarded = webindexAdapter({ publicOnly: true });
+      await expect(guarded.callTool("webindex_fetch", { url: "http://93.184.216.34/go" })).rejects.toThrow(/not authorized: http:\/\/169\.254\.169\.254/);
+      await expect(guarded.callTool("webindex_meta", { url: "http://93.184.216.34/go" })).rejects.toThrow(/not authorized/);
+      await expect(guarded.callTool("webindex_tables", { url: "http://93.184.216.34/go" })).rejects.toThrow(/not authorized/);
+    });
+
+    it("refuses a self-hosted forge on a private address, unless the operator declared it", async () => {
+      const guarded = webindexAdapter({ publicOnly: true });
+      await expect(guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/group/project", forge: "gitlab" })).rejects.toThrow(/not a public address/);
+      process.env[envName("FORGE_HOSTS")] = "10.1.2.3=gitlab";
+      installFetchMock(() => ({ status: 404, body: "{}", contentType: "application/json" }));
+      await expect(guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/group/project" })).rejects.not.toThrow(/not a public address/);
+    });
+
+    it("reads files only under --extract-root, relative paths against it, symlinks checked", async () => {
+      const root = join(dir, "served");
+      mkdirSync(root);
+      writeFileSync(join(root, "note.md"), "inside the root");
+      writeFileSync(join(dir, "secret.md"), "outside the root");
+      const confined = webindexAdapter({ extractRoot: root });
+      expect((await confined.callTool("webindex_extract", { path: "note.md" })).text).toContain("inside the root");
+      expect((await confined.callTool("webindex_extract", { path: join(root, "note.md") })).text).toContain("inside the root");
+      await expect(confined.callTool("webindex_extract", { path: join(dir, "secret.md") })).rejects.toThrow(/outside/);
+      await expect(confined.callTool("webindex_extract", { path: "../secret.md" })).rejects.toThrow(/outside/);
+      const decl = confined.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_extract")!;
+      expect(decl.inputSchema.properties.path!.description).toContain(root);
+    });
+
+    it("offers no file tool at all when local files are off, and reads no local checkout", async () => {
+      const closed = webindexAdapter({ noLocalFiles: true });
+      expect(closed.listTools(LATEST_PROTOCOL).map((t) => t.name)).not.toContain("webindex_extract");
+      await expect(closed.callTool("webindex_extract", { path: join(dir, "x.md") })).rejects.toThrow(/local files/);
+      await expect(closed.callTool("webindex_repo", { repo: dir })).rejects.toThrow(/local/);
+    });
+
+    it("confines a local checkout named to the forge tools as it confines files", async () => {
+      const root = join(dir, "served");
+      mkdirSync(root);
+      await expect(webindexAdapter({ extractRoot: root }).callTool("webindex_repo", { repo: dir })).rejects.toThrow(/outside/);
+    });
+  });
+
+  describe("cancellation and progress", () => {
+    // The server hands every call a signal its client's cancel aborts; a tool
+    // that does not pass it on keeps fetching for nobody.
+    const ctx = (signal: AbortSignal, onProgress: (p: number, total?: number, message?: string) => void = () => {}) => ({
+      signal,
+      progress: onProgress,
+    });
+    const site = () =>
+      installFetchMock((url) => {
+        if (url.includes("robots.txt")) return { status: 404, body: "", contentType: "text/plain" };
+        if (url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+        if (url === "https://cx.test/") return { body: '<html><body><p>root</p><a href="/a">a</a><a href="/b">b</a></body></html>', contentType: "text/html" };
+        return { body: "<html><body><p>leaf</p></body></html>", contentType: "text/html" };
+      });
+
+    it("webindex_crawl reports each page it read, and stops when cancelled", async () => {
+      process.env[envName("POLITE_DELAY_MS")] = "0";
+      const spy = site();
+      const ctrl = new AbortController();
+      const seen: [number, number | undefined, string | undefined][] = [];
+      const r = await adapter.callTool(
+        "webindex_crawl",
+        { url: "https://cx.test/", max: 5, depth: 1 },
+        ctx(ctrl.signal, (p, total, message) => {
+          seen.push([p, total, message]);
+          ctrl.abort();
+        }),
+      );
+      expect(seen).toEqual([[1, 5, "https://cx.test/"]]);
+      const pages = spy.mock.calls.map((c) => String(c[0])).filter((u) => !/robots|sitemap/.test(u));
+      expect(pages).toEqual(["https://cx.test/"]);
+      expect(JSON.parse(r.text).notes.join(" ")).toMatch(/cancelled/);
+    });
+
+    it("webindex_fetch abandons its request", async () => {
+      const spy = vi.fn(
+        (_input: unknown, init?: RequestInit) =>
+          new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })))),
+      );
+      vi.stubGlobal("fetch", spy);
+      try {
+        const ctrl = new AbortController();
+        setTimeout(() => ctrl.abort(), 10);
+        await expect(adapter.callTool("webindex_fetch", { url: "https://hang.test/p" }, ctx(ctrl.signal))).rejects.toThrow(/cancelled/);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("webindex_search, webindex_sitemap and webindex_tables ask nothing once cancelled", async () => {
+      const spy = installFetchMock(() => ({ body: "<table><tr><td>1</td></tr></table>", contentType: "text/html" }));
+      const done = AbortSignal.abort();
+      await expect(adapter.callTool("webindex_tables", { url: "https://t.test/" }, ctx(done))).rejects.toThrow(/cancelled/);
+      await expect(adapter.callTool("webindex_sitemap", { url: "https://t.test/" }, ctx(done))).rejects.toBeInstanceOf(ToolError);
+      await expect(adapter.callTool("webindex_search", { query: "q", engine: "ddg" }, ctx(done))).rejects.toThrow(/cancelled/);
+      expect(spy.mock.calls.map((c) => String(c[0])).filter((u) => !u.includes("robots.txt"))).toEqual([]);
+    });
   });
 
   it("carries narrowing advice for both tools", () => {
