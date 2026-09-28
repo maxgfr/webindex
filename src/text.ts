@@ -235,22 +235,55 @@ function extraStopwordSet(extra: readonly string[]): Set<string> {
   return set;
 }
 
-// One question token: a run of letters, digits and underscores. Splitting on
-// everything else took the subject out of "C++", "C#", ".NET" and "HTTP/2",
-// so a run keeps a trailing `+`/`#` pair (C++, C#, F#, C++20), a `/2` or
-// `/1.1` version, and .NET its leading dot.
-const TOKEN_RE = /(?<![\p{L}\p{N}_])\.net(?![\p{L}\p{N}_])|[\p{L}\p{N}_]+(?:[+#]{1,2}\d*(?![\p{L}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{N}_./]))?/giu;
+// One question token: a run of letters, combining marks, digits and
+// underscores. Splitting on everything else took the subject out of "C++",
+// "C#", ".NET" and "HTTP/2", so a run keeps a trailing `+`/`#` pair (C++, C#,
+// F#, C++20), a `/2` or `/1.1` version, and .NET its leading dot. The marks are
+// part of the word, as bm25Tokenize has them: Devanagari, Thai and Tamil write
+// vowels as combining marks, and splitting at each one left fragments that
+// matched nothing.
+const TOKEN_RE =
+  /(?<![\p{L}\p{M}\p{N}_])\.net(?![\p{L}\p{M}\p{N}_])|[\p{L}\p{M}\p{N}_]+(?:[+#]{1,2}\d*(?![\p{L}\p{M}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{M}\p{N}_./]))?/giu;
+
+// Chinese and Japanese put no space between words, so a whole clause was one
+// keyword and no page ever matched it. bm25Tokenize reads them as overlapping
+// character bigrams, and so does this — the same rule, or the ranker and the
+// excerpt matcher disagree about what a term is (see rank.ts).
+const CJK_CHAR = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
+const CJK_RUNS = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
+
+/** A CJK run's overlapping bigrams; a lone ideograph is a word of its own. */
+function cjkBigrams(run: string): string[] {
+  const chars = Array.from(run);
+  if (chars.length === 1) return [run];
+  const out: string[] = [];
+  for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i]! + chars[i + 1]!);
+  return out;
+}
 
 export function keywords(question: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const [raw] of question.matchAll(TOKEN_RE)) {
+  const add = (raw: string, minLength: number): void => {
     const lower = raw.toLowerCase();
-    if (raw.length < 2) continue;
-    if (isStopword(lower)) continue;
-    if (seen.has(lower)) continue;
+    if (raw.length < minLength || isStopword(lower) || seen.has(lower)) return;
     seen.add(lower);
     out.push(raw);
+  };
+  // NFC, as bm25Tokenize reads it: "e" plus a combining acute is one letter,
+  // just as a precomposed "é" is.
+  const nonAscii = NON_ASCII.test(question);
+  for (const [raw] of (nonAscii ? question.normalize("NFC") : question).matchAll(TOKEN_RE)) {
+    if (!nonAscii || !CJK_CHAR.test(raw)) {
+      add(raw, 2);
+      continue;
+    }
+    // Captured, so the pieces alternate: Latin or digits, then a CJK run.
+    for (const piece of raw.split(CJK_RUNS)) {
+      if (!piece) continue;
+      if (!CJK_CHAR.test(piece)) add(piece, 2);
+      else for (const gram of cjkBigrams(piece)) add(gram, 1);
+    }
   }
   return out;
 }
@@ -333,7 +366,8 @@ export function subtokens(raw: string): string[] {
     .replace(/(\p{Lu}+)(\p{Lu}\p{Ll})/gu, "$1 $2")
     .replace(/(\p{L})(\p{N})/gu, "$1 $2")
     .replace(/(\p{N})(\p{L})/gu, "$1 $2");
-  const parts = spaced.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  // Marks stay inside their word here too, or a Hindi word "splits" at its vowels.
+  const parts = spaced.split(/[^\p{L}\p{M}\p{N}]+/u).filter(Boolean);
   if (parts.length < 2) return [];
   const out: string[] = [];
   for (const p of parts) {
@@ -440,15 +474,16 @@ export interface KeywordMatcher {
 
 // A keyword this short matches inside unrelated words — "go" in "algorithm"
 // and "Google", "js" in "json" — and every such line outscored the passage
-// that answered the question. So it must stand as a word: no letter or digit
-// before it, no letter after it but a plural "s" (a digit may follow: "go1.18",
-// "C++20").
+// that answered the question. So it must stand as a word: no letter, mark or
+// digit before it, no letter or mark after it but a plural "s" (a digit may
+// follow: "go1.18", "C++20"). Not a Chinese or Japanese bigram: those sit
+// between two letters by nature, since the script has no word boundary.
 const SHORT_VARIANT = 3;
 
 function lineRegex(source: string, text: string): RegExp {
-  if ([...text].length <= SHORT_VARIANT) {
+  if ([...text].length <= SHORT_VARIANT && !CJK_CHAR.test(text)) {
     try {
-      return new RegExp(`(?<![\\p{L}\\p{N}])(?:${source})s?(?!\\p{L})`, "iu");
+      return new RegExp(`(?<![\\p{L}\\p{M}\\p{N}])(?:${source})s?(?![\\p{L}\\p{M}])`, "iu");
     } catch {
       /* a caller's raw token that is no valid Unicode-mode pattern: match it as before */
     }
