@@ -120,6 +120,17 @@ describe("help and version", () => {
     expect(help).toMatch(/webindex --help/);
   });
 
+  it.each([
+    ["fetch", ["--full-page", "--format markdown"]],
+    ["extract", ["--full-page", "--format markdown"]],
+  ])("explains in `%s --help` what its own flags do, not only in another command's paragraph", async (cmd, flags) => {
+    // --full-page was explained only under extract ("For both, …"), so
+    // `fetch --help` listed it in the usage line and never said what it did.
+    expect(await run([cmd, "--help"])).toBe(0);
+    const described = stdout().split("\n\n")[2] ?? "";
+    for (const flag of flags) expect(described, flag).toContain(flag);
+  });
+
   it("gives every command a help of its own", async () => {
     for (const cmd of [...SERVICE_ROUTES, "search", "prs", "stack", "skill", "doctor", "hybrid"]) {
       out = [];
@@ -566,6 +577,132 @@ describe("fetch argument handling", () => {
   });
 });
 
+describe("fetch with several URLs", () => {
+  const page = (marker: string) => articlePage(`<p>Marker ${marker}.</p>`);
+  const letter = (url: string) => url.slice(-1);
+  /** A fetch that answers after `delay(url)` ms, counting how many are in flight at once. */
+  const timedFetch = (delay: (url: string) => number, status: (url: string) => number = () => 200) => {
+    const seen = { inFlight: 0, peak: 0 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        seen.peak = Math.max(seen.peak, ++seen.inFlight);
+        await new Promise((r) => setTimeout(r, delay(url)));
+        seen.inFlight--;
+        const code = status(url);
+        return new Response(code === 200 ? page(letter(url)) : "gone", { status: code, headers: { "content-type": "text/html" } });
+      }),
+    );
+    return seen;
+  };
+
+  it("prints each page under its own header, in the order given however they finish", async () => {
+    timedFetch((url) => (url.endsWith("/a") ? 40 : 0));
+    try {
+      expect(await run(["fetch", "https://x.test/a", "https://x.test/b", "https://x.test/c"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    const o = stdout();
+    expect(o.startsWith("==> https://x.test/a <==\n")).toBe(true);
+    const at = (s: string) => o.indexOf(s);
+    expect(at("Marker a")).toBeLessThan(at("\n\n==> https://x.test/b <==\n"));
+    expect(at("Marker b")).toBeLessThan(at("\n\n==> https://x.test/c <==\n"));
+    expect(o).toContain("Marker c");
+    expect(o.match(/^==> /gm)).toHaveLength(3);
+  });
+
+  it("answers --json with an array, one entry per URL in order, the failures included", async () => {
+    timedFetch(
+      () => 0,
+      (url) => (url.endsWith("/b") ? 404 : 200),
+    );
+    try {
+      expect(await run(["fetch", "https://x.test/a", "https://x.test/b", "--json", "--format", "markdown"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    const results = JSON.parse(stdout());
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({ url: "https://x.test/a", status: 200, fullPage: false });
+    expect(results[0].text).toContain("Marker a");
+    expect(results[1]).toMatchObject({ url: "https://x.test/b", status: 404, text: "", chars: 0 });
+    expect(results[1].note).toMatch(/Could not fetch/);
+  });
+
+  it("names each failure on stderr, and succeeds when any page was read", async () => {
+    timedFetch(
+      () => 0,
+      (url) => (url.endsWith("/b") ? 404 : 200),
+    );
+    try {
+      expect(await run(["fetch", "https://x.test/a", "https://x.test/b"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stdout()).toContain("Marker a");
+    expect(stdout()).not.toContain("https://x.test/b");
+    expect(stderr()).toMatch(/nothing readable at https:\/\/x\.test\/b — Could not fetch/);
+  });
+
+  it("fails when every URL failed, naming each", async () => {
+    timedFetch(
+      () => 0,
+      () => 404,
+    );
+    try {
+      expect(await run(["fetch", "https://x.test/a", "https://x.test/b"])).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stdout()).toBe("");
+    expect(stderr()).toMatch(/nothing readable at https:\/\/x\.test\/a/);
+    expect(stderr()).toMatch(/nothing readable at https:\/\/x\.test\/b/);
+    expect(stderr()).toMatch(/none of the 2 URLs/);
+  });
+
+  it.each([
+    [undefined, 4],
+    ["2", 2],
+  ])("keeps at most %s (default 4) in flight", async (width, peak) => {
+    if (width) process.env[envName("FETCH_CONCURRENCY")] = width;
+    const seen = timedFetch(() => 15);
+    try {
+      expect(await run(["fetch", ...["a", "b", "c", "d", "e", "f"].map((l) => `https://x.test/${l}`), "--json"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(seen.peak).toBe(peak);
+    expect(JSON.parse(stdout()).map((r: { url: string }) => r.url)).toEqual(["a", "b", "c", "d", "e", "f"].map((l) => `https://x.test/${l}`));
+  });
+
+  it("refuses the whole list, before fetching anything, when one is not an http(s) URL", async () => {
+    const seen = timedFetch(() => 0);
+    try {
+      expect(await run(["fetch", "https://x.test/a", "example.com"])).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stderr()).toMatch(/fetch needs an http\(s\) URL, got "example\.com"/);
+    expect(seen.peak).toBe(0);
+  });
+
+  it("prints a single page exactly as it always did: no header, an object for --json", async () => {
+    timedFetch(() => 0);
+    try {
+      expect(await run(["fetch", "https://x.test/a"])).toBe(0);
+      expect(stdout()).not.toContain("==>");
+      expect(stdout().startsWith("# Rate limiting\n")).toBe(true);
+      out = [];
+      expect(await run(["fetch", "https://x.test/a", "--json"])).toBe(0);
+      expect(Array.isArray(JSON.parse(stdout()))).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("doctor", () => {
   it("reports every optional helper without needing any of them", async () => {
     process.env.WEBINDEX_TEST_FIRECRAWL = "off";
@@ -724,7 +861,6 @@ describe("unknown input", () => {
   });
 
   it.each([
-    [["fetch", "https://a.test/", "https://b.test/"], /unexpected argument "https:\/\/b\.test\/"/],
     [["extract", "a.html", "b.html"], /unexpected argument "b\.html"/],
     [["tables", "https://a.test/", "https://b.test/"], /unexpected argument/],
     [["package", "hono", "express"], /unexpected argument "express"/],
@@ -733,9 +869,9 @@ describe("unknown input", () => {
     [["stack", "path", "extra"], /unexpected argument "extra"/],
     [["doctor", "now"], /unexpected argument "now"/],
   ])("refuses an argument it would otherwise drop or glue onto another: %j", async (argv, message) => {
-    // `fetch a b` fetched a and dropped b; `tables a b` fetched the URL
-    // "a b"; `rank rate limiting --query q` ranked against q and ignored the
-    // words that looked like the question.
+    // `fetch a b` fetched a and dropped b (it fetches both now); `tables a b`
+    // fetched the URL "a b"; `rank rate limiting --query q` ranked against q
+    // and ignored the words that looked like the question.
     expect(await run(argv)).toBe(2);
     expect(stderr()).toMatch(message);
   });

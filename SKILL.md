@@ -64,6 +64,7 @@ webindex search <query> [--engine ddg|ddglite|mojeek|off] [--limit n] [--lang ta
 webindex fetch <url> [--full-page]    # HTML main content, consent banners dropped; --full-page keeps all page text via the built-in reader
 webindex fetch <url> --format markdown # CommonMark: absolute links, fenced code, lists, tables — Firecrawl's shape, whichever extractor ran
 webindex fetch <url> --cache          # reuse a fresh copy for the TTL, revalidate a stale one (a 304 when unchanged); --refresh, --offline
+webindex fetch <url> <url> …         # several at once, each under a ==> <url> <== header (--json: an array); fails only if all did
 webindex extract <file|-> [--full-page] # the same on disk (- reads stdin); --full-page keeps navigation and consent banners too; --format markdown
 webindex rank --query <q> --docs <f> # BM25F + near-dup collapse + MMR; --dense adds the embedding lane
 webindex repo|issues|prs|releases|tags <ref> [--forge github|gitlab|gitea]  # a browser URL or a local checkout works
