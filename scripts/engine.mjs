@@ -387,9 +387,9 @@ function scanShape(t) {
   let nonSpace = 0;
   let run = 0;
   let runIsRule = true;
-  let longestRun = 0;
+  let longestRun2 = 0;
   const endRun = () => {
-    if (!runIsRule && run > longestRun) longestRun = run;
+    if (!runIsRule && run > longestRun2) longestRun2 = run;
     run = 0;
     runIsRule = true;
   };
@@ -416,7 +416,7 @@ function scanShape(t) {
     i += units - 1;
   }
   endRun();
-  return { control: control / t.length, replacement: replacement / t.length, longestRun, letterRatio: nonSpace ? letters / nonSpace : 0 };
+  return { control: control / t.length, replacement: replacement / t.length, longestRun: longestRun2, letterRatio: nonSpace ? letters / nonSpace : 0 };
 }
 var NO_TEXT_LAYER = "no text layer (scanned or image-only PDF?)";
 function assessPdfText(text) {
@@ -2331,17 +2331,36 @@ function extraStopwordSet(extra) {
   extraSets.set(extra, { length: extra.length, set });
   return set;
 }
-var TOKEN_RE = /(?<![\p{L}\p{N}_])\.net(?![\p{L}\p{N}_])|[\p{L}\p{N}_]+(?:[+#]{1,2}\d*(?![\p{L}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{N}_./]))?/giu;
+var TOKEN_RE = /(?<![\p{L}\p{M}\p{N}_])\.net(?![\p{L}\p{M}\p{N}_])|[\p{L}\p{M}\p{N}_]+(?:[+#]{1,2}\d*(?![\p{L}\p{M}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{M}\p{N}_./]))?/giu;
+var CJK_CHAR = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
+var CJK_RUNS = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
+function cjkBigrams(run) {
+  const chars = Array.from(run);
+  if (chars.length === 1) return [run];
+  const out = [];
+  for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1]);
+  return out;
+}
 function keywords(question) {
   const seen = /* @__PURE__ */ new Set();
   const out = [];
-  for (const [raw] of question.matchAll(TOKEN_RE)) {
+  const add = (raw, minLength) => {
     const lower = raw.toLowerCase();
-    if (raw.length < 2) continue;
-    if (isStopword(lower)) continue;
-    if (seen.has(lower)) continue;
+    if (raw.length < minLength || isStopword(lower) || seen.has(lower)) return;
     seen.add(lower);
     out.push(raw);
+  };
+  const nonAscii = NON_ASCII.test(question);
+  for (const [raw] of (nonAscii ? question.normalize("NFC") : question).matchAll(TOKEN_RE)) {
+    if (!nonAscii || !CJK_CHAR.test(raw)) {
+      add(raw, 2);
+      continue;
+    }
+    for (const piece of raw.split(CJK_RUNS)) {
+      if (!piece) continue;
+      if (!CJK_CHAR.test(piece)) add(piece, 2);
+      else for (const gram of cjkBigrams(piece)) add(gram, 1);
+    }
   }
   return out;
 }
@@ -2403,7 +2422,7 @@ function foldTerm(raw) {
 }
 function subtokens(raw) {
   const spaced = raw.replace(new RegExp("([\\p{Ll}\\p{N}])(\\p{Lu})", "gu"), "$1 $2").replace(new RegExp("(\\p{Lu}+)(\\p{Lu}\\p{Ll})", "gu"), "$1 $2").replace(new RegExp("(\\p{L})(\\p{N})", "gu"), "$1 $2").replace(new RegExp("(\\p{N})(\\p{L})", "gu"), "$1 $2");
-  const parts = spaced.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const parts = spaced.split(/[^\p{L}\p{M}\p{N}]+/u).filter(Boolean);
   if (parts.length < 2) return [];
   const out = [];
   for (const p of parts) {
@@ -2472,9 +2491,9 @@ function accentPattern(text) {
 }
 var SHORT_VARIANT = 3;
 function lineRegex(source, text) {
-  if ([...text].length <= SHORT_VARIANT) {
+  if ([...text].length <= SHORT_VARIANT && !CJK_CHAR.test(text)) {
     try {
-      return new RegExp(`(?<![\\p{L}\\p{N}])(?:${source})s?(?!\\p{L})`, "iu");
+      return new RegExp(`(?<![\\p{L}\\p{M}\\p{N}])(?:${source})s?(?![\\p{L}\\p{M}])`, "iu");
     } catch {
     }
   }
@@ -2558,6 +2577,648 @@ function slugify(input, opts = {}) {
   const tag = fnv1a64(normalized).toString(16).padStart(16, "0").slice(0, 8);
   const head = s.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");
   return head ? `${head}-${tag}` : tag;
+}
+
+// src/tables.ts
+function fragmentText(html) {
+  return decodeEntities(html.replace(TAG_RE, (tag) => INLINE_TAGS.has(tagName(tag)) ? "" : " ").replace(LOOSE_TAG_RE, " "));
+}
+var collapse = (s) => s.replace(/\s+/g, " ").trim();
+function spanAttr(attrs, name) {
+  const n = Number.parseInt(attrs.get(name) ?? "", 10);
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, 100) : 1;
+}
+var MAX_SLOTS = 1e6;
+function expand(rows) {
+  const grid = rows.map(() => []);
+  let slots = 0;
+  for (let r = 0; r < rows.length; r++) {
+    const out = grid[r];
+    let c = 0;
+    for (const cell2 of rows[r]) {
+      while (out[c] !== void 0) c++;
+      const down = Math.min(cell2.rowspan, rows.length - r);
+      slots += down * cell2.colspan;
+      if (slots > MAX_SLOTS) return void 0;
+      for (let j = 0; j < down; j++) for (let i = 0; i < cell2.colspan; i++) grid[r + j][c + i] = cell2.text;
+      c += cell2.colspan;
+    }
+  }
+  const width = grid.reduce((w, row) => Math.max(w, row.length), 0);
+  if (width * grid.length > MAX_SLOTS) return void 0;
+  return grid.map((row) => Array.from({ length: width }, (_, i) => row[i] ?? ""));
+}
+function extractTables(html) {
+  const src = dropElements(html, NOT_RENDERED, RAW_TEXT_ELEMENTS);
+  const tag = /<(\/?)(table|caption|thead|tbody|tfoot|tr|td|th)(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
+  const done = [];
+  const stack = [];
+  let order = 0;
+  let last = 0;
+  let buried = 0;
+  let m;
+  while (m = tag.exec(src)) {
+    const top = stack[stack.length - 1];
+    if (top) top.text(src.slice(last, m.index));
+    last = tag.lastIndex;
+    const closing = m[1] === "/";
+    const name = m[2].toLowerCase();
+    if (top && (buried || name === "table" && !closing && stack.length >= MAX_DEPTH)) {
+      if (name === "table") buried += closing ? -1 : 1;
+      top.text(" ");
+      continue;
+    }
+    if (name === "table") {
+      if (!closing) stack.push(new OpenTable(order++));
+      else if (top) closeTable(stack, done);
+      continue;
+    }
+    if (!top) continue;
+    if (name === "td" || name === "th") {
+      if (closing) top.endCell();
+      else top.startCell(name === "th", htmlAttributes(m[0]));
+    } else if (name === "tr") {
+      top.endRow();
+      if (!closing) top.startRow();
+    } else if (name === "caption") {
+      top.endRow();
+      top.inCaption = !closing;
+    } else {
+      top.endRow();
+      top.inHead = name === "thead" && !closing;
+    }
+  }
+  while (stack.length) closeTable(stack, done);
+  return done.sort((a, b) => a.order - b.order).map((d) => d.table);
+}
+var NOT_RENDERED = ["script", "style", "template", "svg", "select", "datalist"];
+var MAX_DEPTH = 8;
+var OpenTable = class {
+  constructor(order) {
+    this.order = order;
+  }
+  order;
+  rows = [];
+  caption = [];
+  inCaption = false;
+  inHead = false;
+  row;
+  cell;
+  /** Text between two table tags: it belongs to the open cell, else the caption. */
+  text(fragment) {
+    if (this.cell) this.cell.parts.push(fragmentText(fragment));
+    else if (this.inCaption) this.caption.push(fragmentText(fragment));
+  }
+  /** A nested table's text, already clean, joins the cell that holds it. */
+  nested(text) {
+    this.cell?.parts.push(` ${text} `);
+  }
+  startRow() {
+    this.inCaption = false;
+    this.row = { cells: [], head: this.inHead };
+  }
+  startCell(header2, attrs) {
+    this.endCell();
+    if (!this.row) this.startRow();
+    this.cell = { parts: [], header: header2, colspan: spanAttr(attrs, "colspan"), rowspan: spanAttr(attrs, "rowspan") };
+  }
+  endCell() {
+    if (!this.cell || !this.row) return;
+    const { parts, header: header2, colspan, rowspan } = this.cell;
+    this.row.cells.push({ text: collapse(parts.join("")), header: header2, colspan, rowspan });
+    this.cell = void 0;
+  }
+  endRow() {
+    this.endCell();
+    if (this.row?.cells.length) this.rows.push(this.row);
+    this.row = void 0;
+  }
+};
+function closeTable(stack, done) {
+  const t = stack.pop();
+  t.endRow();
+  const caption = collapse(t.caption.join(""));
+  const table = buildTable(t.rows, caption);
+  if (table) done.push({ order: t.order, table });
+  const flat = [caption, ...t.rows.flatMap((r) => r.cells.map((c) => c.text))].filter(Boolean).join(" ");
+  stack[stack.length - 1]?.nested(flat);
+}
+function buildTable(rows, caption) {
+  if (!rows.length) return void 0;
+  const grid = expand(rows.map((r) => r.cells));
+  if (!grid) return void 0;
+  let headers = [];
+  let body = grid;
+  if (rows.some((r) => r.head)) {
+    const head = grid.filter((_, i) => rows[i].head);
+    headers = head[0].map((_, c) => [...new Set(head.map((r) => r[c]).filter(Boolean))].join(" "));
+    body = grid.filter((_, i) => !rows[i].head);
+  } else if (isHeaderRow(rows[0].cells)) {
+    headers = grid[0];
+    body = grid.slice(1);
+  }
+  if (!body.length) return void 0;
+  return { ...caption ? { caption } : {}, headers, rows: body };
+}
+function isHeaderRow(cells) {
+  return cells.some((c) => c.header) && cells.every((c) => c.header || !c.text);
+}
+function tableToMarkdown(table) {
+  const width = table.rows.reduce((w, r) => Math.max(w, r.length), Math.max(table.headers.length, 1));
+  const esc = (s) => s.replace(/\|/g, "\\|");
+  const line = (cells) => `| ${Array.from({ length: width }, (_, i) => esc(cells[i] ?? "")).join(" | ")} |`;
+  const out = [];
+  if (table.caption) out.push(`**${table.caption}**`, "");
+  out.push(line(table.headers.length ? table.headers : Array.from({ length: width }, () => "")));
+  out.push(`|${" --- |".repeat(width)}`);
+  for (const row of table.rows) out.push(line(row));
+  return out.join("\n");
+}
+
+// src/markdown.ts
+function htmlToMarkdown(html, opts = {}) {
+  const src = html.includes(NUL) ? html.split(NUL).join("\uFFFD") : html;
+  const base = documentBaseUrl(src, opts.baseUrl);
+  const hidden = opts.fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
+  let s = dropElements(src, hidden, RAW_TEXT_ELEMENTS);
+  if (!opts.fullPage) s = dropLandmarks(s, CHROME_ROLES);
+  const tables = /* @__PURE__ */ new Map();
+  if (TABLE_OPEN.test(s)) for (const r of balancedRegions(s, "table", () => true)) tables.set(r.from, r);
+  const w = new Writer();
+  const tag = new RegExp(TAG_RE.source, "g");
+  const headingEdge = new RegExp(HEADING_EDGE.source, "gi");
+  let preUnclosed = false;
+  let headingEnd = -1;
+  const divs = [];
+  let divOverflow = 0;
+  let prevEnd = -1;
+  let prevClosed = false;
+  let last = 0;
+  let m;
+  while (m = tag.exec(s)) {
+    if (m.index > last) w.text(s.slice(last, m.index));
+    last = tag.lastIndex;
+    const t = m[0];
+    const closing = t[1] === "/";
+    const adjacent = m.index === prevEnd && prevClosed && !closing;
+    prevEnd = tag.lastIndex;
+    prevClosed = closing;
+    const name = tagName(t);
+    if (!name) continue;
+    if (name === "div") {
+      if (closing) {
+        if (divOverflow) divOverflow--;
+        else divs.pop();
+      } else if (divs.length < MAX_BLOCK_DEPTH * 4) divs.push(t);
+      else divOverflow++;
+    }
+    const heading = /^h[1-6]$/.test(name) ? Number(name[1]) : 0;
+    if (w.heading) {
+      if (heading) {
+        w.flush();
+        headingEnd = -1;
+        if (closing) continue;
+      } else if (BLOCK_TAGS.has(name) || name === "br" || name === "hr") {
+        if (headingEnd >= 0 && m.index < headingEnd) {
+          w.space();
+          continue;
+        }
+        w.flush();
+        headingEnd = -1;
+      }
+    }
+    if (heading) {
+      w.flush();
+      if (closing) continue;
+      w.heading = heading;
+      headingEdge.lastIndex = tag.lastIndex;
+      const edge = headingEdge.exec(s);
+      headingEnd = edge && edge[0][1] === "/" ? edge.index : -1;
+      continue;
+    }
+    if (name === "pre" && !closing && !preUnclosed) {
+      const close = closeTagRe("pre");
+      close.lastIndex = tag.lastIndex;
+      const c = close.exec(s);
+      if (c) {
+        w.flush();
+        w.codeBlock(s.slice(tag.lastIndex, c.index), codeLanguage(t, s.slice(tag.lastIndex, c.index), divs));
+        last = tag.lastIndex = prevEnd = c.index + c[0].length;
+        prevClosed = true;
+        continue;
+      }
+      preUnclosed = true;
+    }
+    if (name === "table" && !closing) {
+      const region = tables.get(m.index);
+      const table = region && !isLayoutTable(t, s, region) ? extractTables(s.slice(region.from, region.to))[0] : void 0;
+      if (region && table) {
+        w.flush();
+        const escaped = {
+          ...table.caption ? { caption: escapeText(table.caption) } : {},
+          headers: table.headers.map(escapeText),
+          rows: table.rows.map((row) => row.map(escapeText))
+        };
+        w.block(tableToMarkdown(escaped).split("\n"));
+        last = tag.lastIndex = prevEnd = region.to;
+        prevClosed = true;
+        continue;
+      }
+    }
+    switch (name) {
+      case "ul":
+      case "ol":
+        w.flush();
+        if (closing) w.closeList();
+        else w.openList(name === "ol", listStart(t));
+        continue;
+      case "li":
+        w.flush();
+        if (closing) w.closeItem();
+        else w.openItem();
+        continue;
+      case "blockquote":
+        w.flush();
+        if (closing) w.closeQuote();
+        else w.openQuote();
+        continue;
+      case "hr":
+        w.flush();
+        w.rule();
+        continue;
+      case "br":
+        w.hardBreak();
+        continue;
+      case "img":
+        w.image(htmlAttributes(t), base);
+        continue;
+    }
+    const kind = INLINE_KIND[name];
+    if (kind) {
+      if (closing) {
+        w.close(kind);
+        continue;
+      }
+      if (adjacent) w.space();
+      if (kind === "a") {
+        w.close("a");
+        const href = htmlAttributes(t).get("href");
+        w.open("a", linkTarget(href, base), href?.trimStart().startsWith("#"));
+      } else w.open(kind);
+      continue;
+    }
+    if (BLOCK_TAGS.has(name)) w.flush();
+    else if (INLINE_TAGS.has(name)) {
+      if (adjacent) w.space();
+    } else w.space();
+  }
+  if (last < s.length) w.text(s.slice(last));
+  return w.finish();
+}
+var NUL = "\0";
+var TABLE_OPEN = /<table[\s/>]/i;
+var HEADING_EDGE = /<\/h[1-6]\s*>|<h[1-6](?=[\s/>])/;
+var MAX_BLOCK_DEPTH = 24;
+var MAX_INLINE_DEPTH = 16;
+var INLINE_KIND = {
+  a: "a",
+  em: "em",
+  i: "em",
+  strong: "strong",
+  b: "strong",
+  code: "code",
+  kbd: "code",
+  samp: "code",
+  tt: "code"
+};
+var Writer = class {
+  heading = 0;
+  lines = [];
+  blocks = [];
+  blockOverflow = 0;
+  parts = [];
+  frames = [];
+  pendingSpace = false;
+  needBlank = false;
+  text(raw) {
+    const decoded = decodeEntities(raw.includes("<") ? raw.replace(LOOSE_TAG_RE, " ") : raw).replace(HTML_SPACE, " ");
+    if (!decoded) return;
+    const core = decoded.trim();
+    if (decoded[0] === " ") this.space();
+    if (core) this.push(this.inCode() ? core : escapeText(core));
+    if (core && decoded[decoded.length - 1] === " ") this.space();
+  }
+  space() {
+    if (this.parts.length) this.pendingSpace = true;
+  }
+  hardBreak() {
+    if (this.heading || this.inCode()) this.space();
+    else if (this.parts.length) {
+      this.parts.push("\n");
+      this.pendingSpace = false;
+    }
+  }
+  open(kind, href, self) {
+    if (this.frames.length >= MAX_INLINE_DEPTH) return;
+    const inert = kind === "a" && href === void 0 || this.inCode() || kind !== "a" && this.frames.some((f) => f.kind === kind);
+    this.frames.push({ kind, start: this.parts.length, ...href !== void 0 ? { href } : {}, ...self ? { self } : {}, ...inert ? { inert } : {} });
+  }
+  /** Close the innermost open `kind`, and whatever opened inside it and never closed. */
+  close(kind) {
+    let i = this.frames.length - 1;
+    while (i >= 0 && this.frames[i].kind !== kind) i--;
+    if (i < 0) return;
+    while (this.frames.length > i) this.wrap(this.frames.pop());
+  }
+  image(attrs, base) {
+    const candidates = [attrs.get("src"), attrs.get("data-src"), attrs.get("data-original"), attrs.get("srcset")?.trim().split(/\s+/)[0]];
+    const src = candidates.map((c) => linkTarget(c, base)).find((u) => u !== void 0);
+    const pixel = ["width", "height"].some((d) => /^[01]$/.test(attrs.get(d)?.trim() ?? ""));
+    if (!src || pixel || this.inCode()) {
+      this.space();
+      return;
+    }
+    const alt = decodeEntities(attrs.get("alt") ?? "").replace(HTML_SPACE, " ").trim();
+    this.push(`![${escapeText(alt)}](${destination(src)})`);
+  }
+  codeBlock(inner, lang) {
+    const body = decodeEntities(inner.replace(/<br\s*\/?>/gi, "\n").replace(LOOSE_TAG_RE, "")).replace(/\r\n?/g, "\n").replace(/^\n/, "").trimEnd();
+    if (!body.trim()) return;
+    const fence = "`".repeat(Math.max(3, longestRun(body, "`") + 1));
+    this.block([fence + lang, ...body.split("\n"), fence]);
+  }
+  rule() {
+    this.needBlank = true;
+    this.block(["---"]);
+  }
+  openList(ordered, start) {
+    const top = this.blocks[this.blocks.length - 1];
+    if (top?.kind === "list" && top.items && this.blocks.length + 1 < MAX_BLOCK_DEPTH) this.blocks.push({ kind: "item", marker: top.last, first: false });
+    if (!this.room()) return;
+    if (this.blocks[this.blocks.length - 1]?.kind === "item") this.needBlank = false;
+    this.blocks.push({ kind: "list", ordered, next: start, items: 0, last: "" });
+  }
+  closeList() {
+    if (this.blockOverflow) {
+      this.blockOverflow--;
+      return;
+    }
+    const i = this.nearest("list");
+    if (i < 0) return;
+    this.blocks.length = i;
+    this.needBlank = true;
+  }
+  openItem() {
+    if (this.blockOverflow) {
+      this.blockOverflow++;
+      return;
+    }
+    let list = this.nearest("list");
+    if (list >= 0) this.blocks.length = list + 1;
+    else {
+      if (!this.room()) return;
+      this.blocks.push({ kind: "list", ordered: false, next: 1, items: 0, last: "" });
+      list = this.blocks.length - 1;
+    }
+    if (!this.room()) return;
+    const owner = this.blocks[list];
+    const marker = owner.ordered ? `${owner.next++}. ` : "- ";
+    owner.last = marker;
+    this.blocks.push({ kind: "item", marker, first: true });
+    if (owner.items++) this.needBlank = false;
+  }
+  closeItem() {
+    if (this.blockOverflow) {
+      this.blockOverflow--;
+      return;
+    }
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      const kind = this.blocks[i].kind;
+      if (kind === "list") return;
+      if (kind === "item") {
+        this.blocks.length = i;
+        return;
+      }
+    }
+  }
+  openQuote() {
+    if (this.room()) this.blocks.push({ kind: "quote", first: true });
+  }
+  closeQuote() {
+    if (this.blockOverflow) {
+      this.blockOverflow--;
+      return;
+    }
+    const i = this.nearest("quote");
+    if (i < 0) return;
+    this.blocks.length = i;
+    this.needBlank = true;
+  }
+  /**
+   * End the paragraph or heading in progress and write it out. The inline
+   * elements still open close over the text so far and reopen for what
+   * follows, so a link wrapped round a heading and a paragraph — a card —
+   * links both.
+   */
+  flush() {
+    const open = this.frames.map((f) => ({ ...f }));
+    while (this.frames.length) this.wrap(this.frames.pop());
+    const text = this.parts.join("");
+    this.parts = [];
+    this.pendingSpace = false;
+    this.frames = open.map((f) => ({ ...f, start: 0 }));
+    const level = this.heading;
+    this.heading = 0;
+    if (level) {
+      const title = text.replace(/\s+/g, " ").trim();
+      if (title) this.block([`${"#".repeat(level)} ${title.replace(/(\s)(#+)$/, "$1\\$2")}`]);
+      return;
+    }
+    let para = [];
+    for (const raw of `${text}
+
+`.split("\n")) {
+      const line = raw.trim();
+      if (line) {
+        para.push(escapeLineStart(line));
+        continue;
+      }
+      if (!para.length) continue;
+      this.block(para.map((l, i) => i < para.length - 1 ? `${l}  ` : l));
+      para = [];
+    }
+  }
+  /** Write finished lines under the open blocks' prefixes, a blank line before them where one is due. */
+  block(content) {
+    if (!content.length) return;
+    if (this.needBlank && this.lines.length) this.lines.push(this.prefix(false).trimEnd());
+    for (const line of content) {
+      const prefix = this.prefix(true);
+      this.lines.push(line ? prefix + line : prefix.trimEnd());
+    }
+    this.needBlank = true;
+  }
+  finish() {
+    this.flush();
+    return this.lines.join("\n").trimEnd();
+  }
+  push(markdown) {
+    if (this.pendingSpace) this.parts.push(" ");
+    this.pendingSpace = false;
+    this.parts.push(markdown);
+  }
+  inCode() {
+    return this.frames.some((f) => f.kind === "code");
+  }
+  /** Replace an element's text with its Markdown, its outer whitespace kept outside it. */
+  wrap(f) {
+    if (f.inert) return;
+    const trailing = this.pendingSpace;
+    this.pendingSpace = false;
+    const content = this.parts.splice(f.start).join("");
+    const core = content.trim();
+    const lead = content.slice(0, content.length - content.trimStart().length);
+    const trail = content.slice(content.trimEnd().length);
+    this.whitespace(lead);
+    if (core) {
+      const markdown = wrapInline(f, core, this.heading > 0);
+      const last = this.parts.length - 1;
+      if (f.kind === "a" && markdown && !this.pendingSpace && this.parts[last]?.endsWith("!")) this.parts[last] = `${this.parts[last].slice(0, -1)}\\!`;
+      this.push(markdown);
+    }
+    this.whitespace(trail);
+    if (trailing) this.space();
+  }
+  whitespace(ws) {
+    if (ws.includes("\n")) {
+      if (this.parts.length) this.parts.push("\n");
+      this.pendingSpace = false;
+    } else if (ws) this.space();
+  }
+  prefix(consume) {
+    let p = "";
+    for (const b of this.blocks) {
+      if (b.kind === "quote") {
+        if (consume || !b.first) p += "> ";
+        if (consume) b.first = false;
+      } else if (b.kind === "item") {
+        p += b.first && consume ? b.marker : " ".repeat(b.marker.length);
+        if (consume) b.first = false;
+      }
+    }
+    return p;
+  }
+  nearest(kind) {
+    for (let i = this.blocks.length - 1; i >= 0; i--) if (this.blocks[i].kind === kind) return i;
+    return -1;
+  }
+  /** Whether one more block may nest; past the bound it is counted instead, and its close uncounted. */
+  room() {
+    if (this.blocks.length < MAX_BLOCK_DEPTH) return true;
+    this.blockOverflow++;
+    return false;
+  }
+};
+var PERMALINK_TEXT = /^(?:¶|#|§|🔗)$/u;
+function wrapInline(f, core, inHeading) {
+  switch (f.kind) {
+    case "em":
+      return `*${core}*`;
+    case "strong":
+      return `**${core}**`;
+    case "code": {
+      const code = core.replace(/\s+/g, " ");
+      const ticks = "`".repeat(longestRun(code, "`") + 1);
+      const pad2 = code[0] === "`" || code[code.length - 1] === "`" ? " " : "";
+      return `${ticks}${pad2}${code}${pad2}${ticks}`;
+    }
+    default:
+      if (inHeading && PERMALINK_TEXT.test(core)) return "";
+      if (inHeading && f.self) return core;
+      return `[${core.replace(/\n{2,}/g, "\n")}](${destination(f.href)})`;
+  }
+}
+var HTML_SPACE = /[ \t\n\r\f]+/g;
+var ALWAYS_SYNTAX = /[\\`*[\]]/g;
+var EDGE_UNDERSCORE = /(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])/gu;
+var HTML_LIKE = /<(?=[a-zA-Z/!?])/g;
+var ENTITY_LIKE = /&(?=#?[a-zA-Z0-9]+;)/g;
+var STRIKE = /~(?=~)|(?<=~)~/g;
+function escapeText(s) {
+  return s.replace(ALWAYS_SYNTAX, "\\$&").replace(EDGE_UNDERSCORE, "\\_").replace(HTML_LIKE, "\\<").replace(ENTITY_LIKE, "\\&").replace(STRIKE, "\\~");
+}
+function escapeLineStart(line) {
+  const c = line[0];
+  if (c === "#") return /^#{1,6}(?:\s|$)/.test(line) ? `\\${line}` : line;
+  if (c === ">") return `\\${line}`;
+  if (c === "-" || c === "+" || c === "=") return /^[-+=](?:\s|$)/.test(line) || /^(?:[-=]\s*)+$/.test(line) ? `\\${line}` : line;
+  const ordered = /^(\d{1,9})[.)](?=\s|$)/.exec(line);
+  return ordered ? `${ordered[1]}\\${line.slice(ordered[1].length)}` : line;
+}
+function longestRun(s, ch) {
+  let best = 0;
+  let run = 0;
+  for (let i = 0; i < s.length; i++) {
+    run = s[i] === ch ? run + 1 : 0;
+    if (run > best) best = run;
+  }
+  return best;
+}
+function linkTarget(raw, base) {
+  const href = raw === void 0 ? "" : decodeEntities(raw).replace(/[\t\n\r]/g, "").trim();
+  if (!href || /^(?:javascript|vbscript|data):/i.test(href)) return void 0;
+  try {
+    return new URL(href, base).href;
+  } catch {
+    return base === void 0 ? href : void 0;
+  }
+}
+function destination(url) {
+  const d = url.replace(/[ <>]/g, (c) => encodeURIComponent(c));
+  let depth = 0;
+  for (const c of d) {
+    if (c === "(") depth++;
+    else if (c === ")" && --depth < 0) break;
+  }
+  return depth === 0 ? d : d.replace(/[()]/g, "\\$&");
+}
+var BASE_TAG = /<base(?=[\s/>])[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/gi;
+function documentBaseUrl(html, pageUrl) {
+  if (!/<base[\s/>]/i.test(html)) return pageUrl;
+  for (const m of dropElements(html, ["script", "style", "template"], RAW_TEXT_ELEMENTS).matchAll(BASE_TAG)) {
+    const href = htmlAttributes(m[0]).get("href");
+    if (href === void 0) continue;
+    try {
+      const base = new URL(decodeEntities(href).trim(), pageUrl);
+      return base.protocol === "data:" || base.protocol === "javascript:" ? pageUrl : base.href;
+    } catch {
+      return pageUrl;
+    }
+  }
+  return pageUrl;
+}
+var LANGUAGE_CLASS = /(?:^|\s)(?:(?:language|lang|highlight(?:-source)?)-|brush:\s*)([\w+#.-]+)/i;
+var NO_LANGUAGE = /* @__PURE__ */ new Set(["none", "nohighlight", "plaintext"]);
+function codeLanguage(pre, inner, divs) {
+  const code = /^\s*(<code(?=[\s/>])[^<>]*>)/i.exec(inner)?.[1];
+  for (const t of [pre, code, divs[divs.length - 1], divs[divs.length - 2]]) {
+    if (!t) continue;
+    const lang = LANGUAGE_CLASS.exec(htmlAttributes(t).get("class") ?? "")?.[1]?.toLowerCase();
+    if (lang && !NO_LANGUAGE.has(lang)) return lang;
+  }
+  return "";
+}
+function isLayoutTable(open, html, region) {
+  if (/^(?:presentation|none)$/i.test(htmlAttributes(open).get("role")?.trim() ?? "")) return true;
+  const inner = new RegExp(LAYOUT_INSIDE.source, "gi");
+  inner.lastIndex = region.start;
+  const next = inner.exec(html);
+  return next !== null && next.index < region.end;
+}
+var LAYOUT_INSIDE = /<(?:table|pre)[\s/>]/;
+function listStart(open) {
+  const n = Number.parseInt(htmlAttributes(open).get("start") ?? "", 10);
+  return Number.isFinite(n) && n >= 0 && n < 1e9 ? n : 1;
 }
 
 // src/locale.ts
@@ -3213,12 +3874,12 @@ function cleanInline(s) {
     return markup ? "" : tag;
   }).replace(/\s+/g, " ").trim();
 }
-var NUL = "\0";
+var NUL2 = "\0";
 var PRE_SLOT = (i) => `
-${NUL}${i}${NUL}
+${NUL2}${i}${NUL2}
 `;
 function preSlotIndex(line) {
-  if (line.length < 3 || line[0] !== NUL || line[line.length - 1] !== NUL) return void 0;
+  if (line.length < 3 || line[0] !== NUL2 || line[line.length - 1] !== NUL2) return void 0;
   const i = Number(line.slice(1, -1));
   return Number.isInteger(i) ? i : void 0;
 }
@@ -3263,7 +3924,7 @@ ${"#".repeat(Number(m[1]))} ${text}
 }
 function htmlToText(html, opts = {}) {
   const hidden = opts.fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
-  let s = dropElements(html.includes(NUL) ? html.split(NUL).join("\uFFFD") : html, hidden, RAW_TEXT_ELEMENTS);
+  let s = dropElements(html.includes(NUL2) ? html.split(NUL2).join("\uFFFD") : html, hidden, RAW_TEXT_ELEMENTS);
   if (!opts.fullPage) s = dropLandmarks(s, CHROME_ROLES);
   const pre = [];
   s = flattenHeadings(setAsidePre(s, pre));
@@ -3546,8 +4207,10 @@ async function fetchAndExtract(url, opts = {}) {
   }
   const body = !res.body && res.bytes ? decodeBody(res.bytes, res.contentType) : res.body;
   const isHtml = HTML_TYPE_RE.test(mime) || ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(body);
-  const stripped = isHtml ? htmlToText(opts.fullPage ? body : extractMainHtml(body), opts) : body;
-  const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped) : { text: stripped, dropped: 0 };
+  const markdown = opts.format === "markdown";
+  const main = isHtml ? opts.fullPage ? body : extractMainHtml(body) : body;
+  const stripped = !isHtml ? body : markdown ? htmlToMarkdown(main, { baseUrl: documentBaseUrl(body, res.url), fullPage: opts.fullPage }) : htmlToText(main, opts);
+  const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped, { markdown }) : { text: stripped, dropped: 0 };
   const title = isHtml ? pageTitle(body) : void 0;
   const canonical = isHtml ? absoluteCanonical(htmlCanonicalUrl(body), res.url) : void 0;
   const metaDescription = isHtml ? metaDescriptionOf(body) : void 0;
@@ -3640,15 +4303,49 @@ var BANNER_VOICE = /\b(?:we|us|our)\b[^.]{0,60}?\b(?:cookies?|partners|consent|t
 var BUTTON_LABEL = /^(?:tout (?:accepter|refuser)|(?:accepter|refuser) tout|accepter et (?:fermer|continuer)|continuer sans accepter|(?:param[ée]trer|g[ée]rer|personnaliser|accepter|refuser) (?:les|mes) cookies|alle (?:cookies )?(?:akzeptieren|ablehnen)|nur (?:notwendige|essenzielle)(?: cookies)?|cookie-einstellungen|einstellungen verwalten|akzeptieren und schlie(?:ß|ss)en)$/i;
 var BUTTON_LENGTH = 40;
 var NOTICE_LENGTH = 400;
-function stripConsentBoilerplate(text) {
+function stripConsentBoilerplate(text, opts = {}) {
+  if (opts.markdown) return stripConsentMarkdown(text);
   let dropped = 0;
   const kept = text.split("\n").filter((line) => {
-    const t = line.trim();
-    const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(t) ? 1 : 0), 0);
-    const isBanner = BUTTON_LABEL.test(t) || hits >= 1 && t.length <= BUTTON_LENGTH && (hits >= 2 || CONSENT_ACTIONS.some((re) => re.test(t))) || hits >= 1 && t.length < NOTICE_LENGTH && BANNER_VOICE.test(t);
+    const isBanner = isConsentLine(line.trim());
     if (isBanner) dropped++;
     return !isBanner;
   });
+  return { text: kept.join("\n"), dropped };
+}
+function isConsentLine(t) {
+  const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(t) ? 1 : 0), 0);
+  return BUTTON_LABEL.test(t) || hits >= 1 && t.length <= BUTTON_LENGTH && (hits >= 2 || CONSENT_ACTIONS.some((re) => re.test(t))) || hits >= 1 && t.length < NOTICE_LENGTH && BANNER_VOICE.test(t);
+}
+var MD_FENCE = /^[\s>]*(`{3,}|~{3,})(.*)$/;
+var MD_LINE_START = /^[\s>]*(?:(?:[-+*]|\d{1,9}[.)])\s+)?(?:#{1,6}\s+)?/;
+var MD_DESTINATION = /\]\((?:[^()\s\\]|\\.|\([^()\s]*\))*\)/g;
+var MD_MARKUP = /\\(?=[!-/:-@[-`{-~])|!?\[|\]|\*+|`+/g;
+function visibleText(line) {
+  return line.replace(MD_LINE_START, "").replace(MD_DESTINATION, "]").replace(MD_MARKUP, "").trim();
+}
+function stripConsentMarkdown(text) {
+  let dropped = 0;
+  let fence = "";
+  const kept = [];
+  for (const line of text.split("\n")) {
+    const f = MD_FENCE.exec(line);
+    if (fence) {
+      if (f && f[1][0] === fence[0] && f[1].length >= fence.length && !f[2].trim()) fence = "";
+      kept.push(line);
+      continue;
+    }
+    if (f) fence = f[1];
+    else if (!line.trim()) {
+      if (kept.length && kept[kept.length - 1].trim()) kept.push(line);
+      continue;
+    } else if (!/^[\s>]*\|/.test(line) && isConsentLine(visibleText(line))) {
+      dropped++;
+      continue;
+    }
+    kept.push(line);
+  }
+  while (kept.length && !kept[kept.length - 1].trim()) kept.pop();
   return { text: kept.join("\n"), dropped };
 }
 function metaDescriptionOf(html) {
@@ -3787,8 +4484,8 @@ function bm25Tokenize(text, opts = {}) {
 }
 var WORD_SPLIT = /[^\p{L}\p{M}\p{N}_]+/u;
 var NON_ASCII2 = /[^\p{ASCII}]/u;
-var CJK_CHAR = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
-var CJK_RUNS = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
+var CJK_CHAR2 = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
+var CJK_RUNS2 = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
 var IDENT_BOUNDARY = new RegExp("_|[\\p{Ll}\\p{N}]\\p{Lu}|\\p{Lu}\\p{Lu}\\p{Ll}|\\p{L}\\p{N}|\\p{N}\\p{L}", "u");
 var MAX_IDENT = 64;
 function tokenize(text, expand2) {
@@ -3797,10 +4494,10 @@ function tokenize(text, expand2) {
   const nonAscii = NON_ASCII2.test(text);
   for (const raw of (nonAscii ? text.normalize("NFC") : text).split(WORD_SPLIT)) {
     if (!raw) continue;
-    if (nonAscii && CJK_CHAR.test(raw)) {
-      for (const piece of raw.split(CJK_RUNS)) {
+    if (nonAscii && CJK_CHAR2.test(raw)) {
+      for (const piece of raw.split(CJK_RUNS2)) {
         if (!piece) continue;
-        if (CJK_CHAR.test(piece)) pushBigrams(piece, out);
+        if (CJK_CHAR2.test(piece)) pushBigrams(piece, out);
         else pushTerm(piece, out, expand2);
       }
     } else pushTerm(raw, out, expand2);
@@ -5721,15 +6418,15 @@ function xmlText(raw) {
   }
   return out + decodeEntities(raw.slice(pos));
 }
-function fragmentText(html) {
+function fragmentText2(html) {
   const stripped = dropElements(html, ["script", "style"], RAW_TEXT_ELEMENTS).replace(TAG_RE, (tag) => INLINE_TAGS.has(tagName(tag)) ? "" : " ").replace(LOOSE_TAG_RE, " ");
   return decodeEntities(stripped).replace(/\s+/g, " ").trim();
 }
-var collapse = (s) => s.replace(/\s+/g, " ").trim();
+var collapse2 = (s) => s.replace(/\s+/g, " ").trim();
 function tagText(block, ...names) {
   for (const name of names) {
     const el = elements(block, name, 1)[0];
-    const text = el && collapse(xmlText(el.inner));
+    const text = el && collapse2(xmlText(el.inner));
     if (text) return text;
   }
   return void 0;
@@ -5739,7 +6436,7 @@ function proseText(block, atom, ...names) {
     const el = elements(block, name, 1)[0];
     if (!el) continue;
     const type = htmlAttributes(el.attrs).get("type")?.toLowerCase() ?? (atom ? "text" : "html");
-    const text = type === "xhtml" ? fragmentText(el.inner) : type === "text" || type === "text/plain" ? collapse(xmlText(el.inner)) : fragmentText(xmlText(el.inner));
+    const text = type === "xhtml" ? fragmentText2(el.inner) : type === "text" || type === "text/plain" ? collapse2(xmlText(el.inner)) : fragmentText2(xmlText(el.inner));
     if (text) return text;
   }
   return void 0;
@@ -5798,7 +6495,7 @@ function itemUrl(block, base) {
   if (text) return resolveUrl2(text, base);
   const guid = elements(block, "guid", 1)[0];
   if (!guid || htmlAttributes(guid.attrs).get("ispermalink")?.toLowerCase() === "false") return void 0;
-  const value = collapse(xmlText(guid.inner));
+  const value = collapse2(xmlText(guid.inner));
   return /^https?:\/\//i.test(value) ? value : void 0;
 }
 function xmlBase(attrs, above) {
@@ -5866,7 +6563,7 @@ function parseJsonFeed(text, baseUrl) {
     const published = str3(entry.date_published) ?? str3(entry.date_modified);
     if (published) it.published = published;
     const html = str3(entry.content_html);
-    const summary = str3(entry.summary) ?? clip2(str3(entry.content_text) ?? (html ? fragmentText(html) : void 0));
+    const summary = str3(entry.summary) ?? clip2(str3(entry.content_text) ?? (html ? fragmentText2(html) : void 0));
     if (summary) it.summary = summary;
     if (it.title || it.url) items.push(it);
   }
@@ -6572,11 +7269,15 @@ function cachePath(url, acceptLanguage = "", extractor = "native", variant = "")
   const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
   return join3(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
 }
-var VARIANTS = ["", "consent", "full"];
+var TEXT_VARIANTS = ["", "consent", "full"];
+var MARKDOWN_VARIANTS = ["md", "consent-md", "full-md"];
 var PLAIN = [""];
 function variantOf(opts) {
-  return opts.fullPage ? "full" : opts.stripConsent ? "consent" : "";
+  const read2 = opts.fullPage ? "full" : opts.stripConsent ? "consent" : "";
+  if (opts.format !== "markdown") return read2;
+  return read2 ? `${read2}-md` : "md";
 }
+var sameFormat = (variant) => MARKDOWN_VARIANTS.includes(variant) ? MARKDOWN_VARIANTS : TEXT_VARIANTS;
 var PDF_CACHE_NS = "pdf";
 var DOC_CACHE_NS = "doc";
 async function currentExtractor(opts, url) {
@@ -6602,7 +7303,7 @@ function readAnyNamespace(url, acceptLanguage, namespaces = WRITTEN_NAMESPACES, 
   return best;
 }
 function readAnyCopy(url, acceptLanguage, variant) {
-  return readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, [variant]) ?? readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, VARIANTS);
+  return readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, [variant]) ?? readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, sameFormat(variant));
 }
 function ttlMs() {
   const fallback = brand().cacheTtlMs ?? DEFAULT_TTL_MS;
@@ -7400,162 +8101,6 @@ async function hasChanged(url, previous, opts = {}) {
     return { changed: previous.lastModified !== observed.lastModified, via: "last-modified", fingerprint: observed };
   }
   return { via: "unknown", fingerprint: observed, note: "nothing comparable between the two observations \u2014 store contentHash to make this answerable." };
-}
-
-// src/tables.ts
-function fragmentText2(html) {
-  return decodeEntities(html.replace(TAG_RE, (tag) => INLINE_TAGS.has(tagName(tag)) ? "" : " ").replace(LOOSE_TAG_RE, " "));
-}
-var collapse2 = (s) => s.replace(/\s+/g, " ").trim();
-function spanAttr(attrs, name) {
-  const n = Number.parseInt(attrs.get(name) ?? "", 10);
-  return Number.isFinite(n) && n >= 1 ? Math.min(n, 100) : 1;
-}
-var MAX_SLOTS = 1e6;
-function expand(rows) {
-  const grid = rows.map(() => []);
-  let slots = 0;
-  for (let r = 0; r < rows.length; r++) {
-    const out = grid[r];
-    let c = 0;
-    for (const cell2 of rows[r]) {
-      while (out[c] !== void 0) c++;
-      const down = Math.min(cell2.rowspan, rows.length - r);
-      slots += down * cell2.colspan;
-      if (slots > MAX_SLOTS) return void 0;
-      for (let j = 0; j < down; j++) for (let i = 0; i < cell2.colspan; i++) grid[r + j][c + i] = cell2.text;
-      c += cell2.colspan;
-    }
-  }
-  const width = grid.reduce((w, row) => Math.max(w, row.length), 0);
-  if (width * grid.length > MAX_SLOTS) return void 0;
-  return grid.map((row) => Array.from({ length: width }, (_, i) => row[i] ?? ""));
-}
-function extractTables(html) {
-  const src = dropElements(html, NOT_RENDERED, RAW_TEXT_ELEMENTS);
-  const tag = /<(\/?)(table|caption|thead|tbody|tfoot|tr|td|th)(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
-  const done = [];
-  const stack = [];
-  let order = 0;
-  let last = 0;
-  let buried = 0;
-  let m;
-  while (m = tag.exec(src)) {
-    const top = stack[stack.length - 1];
-    if (top) top.text(src.slice(last, m.index));
-    last = tag.lastIndex;
-    const closing = m[1] === "/";
-    const name = m[2].toLowerCase();
-    if (top && (buried || name === "table" && !closing && stack.length >= MAX_DEPTH)) {
-      if (name === "table") buried += closing ? -1 : 1;
-      top.text(" ");
-      continue;
-    }
-    if (name === "table") {
-      if (!closing) stack.push(new OpenTable(order++));
-      else if (top) closeTable(stack, done);
-      continue;
-    }
-    if (!top) continue;
-    if (name === "td" || name === "th") {
-      if (closing) top.endCell();
-      else top.startCell(name === "th", htmlAttributes(m[0]));
-    } else if (name === "tr") {
-      top.endRow();
-      if (!closing) top.startRow();
-    } else if (name === "caption") {
-      top.endRow();
-      top.inCaption = !closing;
-    } else {
-      top.endRow();
-      top.inHead = name === "thead" && !closing;
-    }
-  }
-  while (stack.length) closeTable(stack, done);
-  return done.sort((a, b) => a.order - b.order).map((d) => d.table);
-}
-var NOT_RENDERED = ["script", "style", "template", "svg", "select", "datalist"];
-var MAX_DEPTH = 8;
-var OpenTable = class {
-  constructor(order) {
-    this.order = order;
-  }
-  order;
-  rows = [];
-  caption = [];
-  inCaption = false;
-  inHead = false;
-  row;
-  cell;
-  /** Text between two table tags: it belongs to the open cell, else the caption. */
-  text(fragment) {
-    if (this.cell) this.cell.parts.push(fragmentText2(fragment));
-    else if (this.inCaption) this.caption.push(fragmentText2(fragment));
-  }
-  /** A nested table's text, already clean, joins the cell that holds it. */
-  nested(text) {
-    this.cell?.parts.push(` ${text} `);
-  }
-  startRow() {
-    this.inCaption = false;
-    this.row = { cells: [], head: this.inHead };
-  }
-  startCell(header2, attrs) {
-    this.endCell();
-    if (!this.row) this.startRow();
-    this.cell = { parts: [], header: header2, colspan: spanAttr(attrs, "colspan"), rowspan: spanAttr(attrs, "rowspan") };
-  }
-  endCell() {
-    if (!this.cell || !this.row) return;
-    const { parts, header: header2, colspan, rowspan } = this.cell;
-    this.row.cells.push({ text: collapse2(parts.join("")), header: header2, colspan, rowspan });
-    this.cell = void 0;
-  }
-  endRow() {
-    this.endCell();
-    if (this.row?.cells.length) this.rows.push(this.row);
-    this.row = void 0;
-  }
-};
-function closeTable(stack, done) {
-  const t = stack.pop();
-  t.endRow();
-  const caption = collapse2(t.caption.join(""));
-  const table = buildTable(t.rows, caption);
-  if (table) done.push({ order: t.order, table });
-  const flat = [caption, ...t.rows.flatMap((r) => r.cells.map((c) => c.text))].filter(Boolean).join(" ");
-  stack[stack.length - 1]?.nested(flat);
-}
-function buildTable(rows, caption) {
-  if (!rows.length) return void 0;
-  const grid = expand(rows.map((r) => r.cells));
-  if (!grid) return void 0;
-  let headers = [];
-  let body = grid;
-  if (rows.some((r) => r.head)) {
-    const head = grid.filter((_, i) => rows[i].head);
-    headers = head[0].map((_, c) => [...new Set(head.map((r) => r[c]).filter(Boolean))].join(" "));
-    body = grid.filter((_, i) => !rows[i].head);
-  } else if (isHeaderRow(rows[0].cells)) {
-    headers = grid[0];
-    body = grid.slice(1);
-  }
-  if (!body.length) return void 0;
-  return { ...caption ? { caption } : {}, headers, rows: body };
-}
-function isHeaderRow(cells) {
-  return cells.some((c) => c.header) && cells.every((c) => c.header || !c.text);
-}
-function tableToMarkdown(table) {
-  const width = table.rows.reduce((w, r) => Math.max(w, r.length), Math.max(table.headers.length, 1));
-  const esc = (s) => s.replace(/\|/g, "\\|");
-  const line = (cells) => `| ${Array.from({ length: width }, (_, i) => esc(cells[i] ?? "")).join(" | ")} |`;
-  const out = [];
-  if (table.caption) out.push(`**${table.caption}**`, "");
-  out.push(line(table.headers.length ? table.headers : Array.from({ length: width }, () => "")));
-  out.push(`|${" --- |".repeat(width)}`);
-  for (const row of table.rows) out.push(line(row));
-  return out.join("\n");
 }
 
 // src/crawl.ts
@@ -9658,6 +10203,7 @@ export {
   hostDelayMs,
   htmlCanonicalUrl,
   htmlTitle,
+  htmlToMarkdown,
   htmlToText,
   httpGet,
   httpJson,
