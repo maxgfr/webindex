@@ -43,6 +43,11 @@ export { ANYDOC_SPEC, PDF_INSPECTOR_SPEC, runWithInput } from "./pdf/exec.js";
 // rescueViaWayback available separately for explicit dead-link recovery.
 export * from "./fetch.js";
 
+// HTML → CommonMark: links and images absolute, code fenced, lists nested,
+// tables as GFM. The built-in reader's answer to Firecrawl's Markdown, so a
+// `format: "markdown"` fetch has one shape whichever extractor ran.
+export { htmlToMarkdown, type MarkdownOptions } from "./markdown.js";
+
 // The Firecrawl CLIENT — probe, scrape, search. The discovery *backend* built
 // on top of it stays with the consumer until the discovery layer moves.
 export {

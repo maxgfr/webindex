@@ -1,0 +1,250 @@
+import { describe, expect, it } from "vitest";
+import { htmlToMarkdown } from "../src/markdown.js";
+
+const md = (html: string, baseUrl?: string) => htmlToMarkdown(html, baseUrl ? { baseUrl } : {});
+
+describe("htmlToMarkdown: blocks", () => {
+  it("writes headings and paragraphs, a blank line between blocks", () => {
+    expect(md("<h1>Title</h1><p>First paragraph.</p><h2>Section</h2><p>Second  one,\n  wrapped.</p>")).toBe(
+      "# Title\n\nFirst paragraph.\n\n## Section\n\nSecond one, wrapped.",
+    );
+  });
+
+  it("keeps a pretty-printed heading on one line and drops its permalink glyph", () => {
+    expect(md('<h2>\n  Rate <em>limits</em>\n  <a class="headerlink" href="#rate">¶</a>\n</h2><p>x</p>', "https://d.test/")).toBe("## Rate *limits*\n\nx");
+  });
+
+  it("ends a heading that never closes at the next block, not at the end of the page", () => {
+    expect(md("<h2>Setup<p>Install it first.</p><p>Then run it.</p>")).toBe("## Setup\n\nInstall it first.\n\nThen run it.");
+  });
+
+  it("writes unordered, ordered and nested lists, honouring start and optional </li>", () => {
+    const html = '<ul><li>One<li>Two<ul><li>Two a</li><li>Two b</li></ul></li><li>Three</li></ul><ol start="4"><li>Four</li><li>Five</li></ol><p>After.</p>';
+    expect(md(html)).toBe("- One\n- Two\n  - Two a\n  - Two b\n- Three\n\n4. Four\n5. Five\n\nAfter.");
+  });
+
+  it("indents an item's further paragraphs and blocks under its marker", () => {
+    const html = "<ol><li><p>Configure.</p><p>Then:</p><pre>make</pre></li><li>Done.</li></ol>";
+    expect(md(html)).toBe("1. Configure.\n\n   Then:\n\n   ```\n   make\n   ```\n2. Done.");
+  });
+
+  it("prefixes every line of a blockquote, nested ones included", () => {
+    expect(md("<blockquote><p>Quoted.</p><p>Still quoted.</p><blockquote>Deeper.</blockquote></blockquote><p>Not quoted.</p>")).toBe(
+      "> Quoted.\n>\n> Still quoted.\n>\n> > Deeper.\n\nNot quoted.",
+    );
+  });
+
+  it("writes a rule, never straight under a line of text", () => {
+    expect(md("<p>Above</p><hr><p>Below</p>")).toBe("Above\n\n---\n\nBelow");
+    expect(md("Above<hr>Below")).toBe("Above\n\n---\n\nBelow");
+  });
+
+  it("turns <br> into a hard break, and two of them into a new paragraph", () => {
+    expect(md("<p>12 Main St<br>Springfield<br><br>Open daily<br></p>")).toBe("12 Main St  \nSpringfield\n\nOpen daily");
+  });
+});
+
+describe("htmlToMarkdown: inline", () => {
+  it("writes emphasis and strong, keeping their outer whitespace outside the markers", () => {
+    expect(md("<p>A <em>very</em> <strong>big </strong>deal, <b><i>really</i></b>.</p>")).toBe("A *very* **big** deal, ***really***.");
+  });
+
+  it("adds no markers for an emphasis nested in its own kind", () => {
+    expect(md("<p><b>bold <strong>still</strong> bold</b></p>")).toBe("**bold still bold**");
+  });
+
+  it("writes inline code verbatim, fenced past any backtick it holds", () => {
+    expect(md("<p>Run <code>npm  i</code>, not <code>a `b` c</code> or <kbd>`</kbd>.</p>")).toBe("Run `npm i`, not ``a `b` c`` or `` ` ``.");
+    // Text inside code is not escaped: `*` and `_` mean nothing there.
+    expect(md("<p><code>a*b_c</code></p>")).toBe("`a*b_c`");
+  });
+
+  it("writes links with absolute targets, resolved against the base URL", () => {
+    expect(md('<p>See <a href="/docs/start">the guide</a> and <a href="https://x.test/">x</a>.</p>', "https://d.test/a/b")).toBe(
+      "See [the guide](https://d.test/docs/start) and [x](https://x.test/).",
+    );
+  });
+
+  it("resolves against the page's own <base href>, itself resolved against the base URL", () => {
+    const html = '<html><head><base href="/v2/"></head><body><p><a href="guide">Guide</a></p></body></html>';
+    expect(md(html, "https://d.test/v1/page")).toBe("[Guide](https://d.test/v2/guide)");
+  });
+
+  it("keeps a relative link as written when there is nothing to resolve it against", () => {
+    expect(md('<p><a href="guide.html">Guide</a></p>')).toBe("[Guide](guide.html)");
+  });
+
+  it("drops a link that goes nowhere, keeping its text", () => {
+    expect(md('<p><a href="javascript:void(0)">Menu</a> <a name="top">Top</a> <a href="/x"></a>end</p>', "https://d.test/")).toBe("Menu Top end");
+  });
+
+  it("escapes parentheses only when they do not balance, and encodes spaces", () => {
+    expect(md('<p><a href="https://en.wikipedia.org/wiki/Mercury_(planet)">M</a></p>')).toBe("[M](https://en.wikipedia.org/wiki/Mercury_(planet))");
+    expect(md('<p><a href="notes (draft">N</a></p>')).toBe("[N](notes%20\\(draft)");
+  });
+
+  it("links every block of a link wrapped round a card", () => {
+    const html = '<a href="/post/1"><h3>Post title</h3><p>The excerpt.</p></a>';
+    expect(md(html, "https://blog.test/")).toBe("### [Post title](https://blog.test/post/1)\n\n[The excerpt.](https://blog.test/post/1)");
+  });
+
+  it("writes images with absolute sources and their alt text", () => {
+    expect(md('<p><img src="/a.png" alt="A [chart]"> <img src="data:image/gif;base64,R0lG" data-src="b.png" alt="lazy"></p>', "https://d.test/x/")).toBe(
+      "![A \\[chart\\]](https://d.test/a.png) ![lazy](https://d.test/x/b.png)",
+    );
+  });
+
+  it("drops a tracking pixel and an image with nowhere to point", () => {
+    expect(md('<p>Hi<img src="/px.gif" width="1" height="1"><img alt="nothing"></p>', "https://d.test/")).toBe("Hi");
+  });
+
+  it("wraps an image in its link", () => {
+    expect(md('<a href="/full.png"><img src="/thumb.png" alt="Diagram"></a>', "https://d.test/")).toBe(
+      "[![Diagram](https://d.test/thumb.png)](https://d.test/full.png)",
+    );
+  });
+
+  it("keeps a space between two inline elements set side by side, as htmlToText does", () => {
+    expect(md('<p><a href="/a">One</a><a href="/b">Two</a></p>', "https://d.test/")).toBe("[One](https://d.test/a) [Two](https://d.test/b)");
+  });
+});
+
+describe("htmlToMarkdown: code blocks", () => {
+  it("keeps a <pre> verbatim: indentation, blank lines and markup-free text", () => {
+    const html = '<pre>def f():\n    return 1\n\n<span class="k">print</span>(f() &lt; 2)</pre>';
+    expect(md(html)).toBe("```\ndef f():\n    return 1\n\nprint(f() < 2)\n```");
+  });
+
+  it.each([
+    ['<pre><code class="language-ts">let a = 1</code></pre>', "ts"],
+    ['<pre class="prettyprint lang-js">x()</pre>', "js"],
+    ['<div class="highlight-python notranslate"><div class="highlight"><pre>x = 1</pre></div></div>', "python"],
+    ['<div class="highlight highlight-source-rust notranslate"><pre>fn main() {}</pre></div>', "rust"],
+    ['<pre><code class="hljs language-c++">int x;</code></pre>', "c++"],
+    ['<pre><code class="language-none">plain</code></pre>', ""],
+  ])("names the language a highlighter class gives: %s", (html, lang) => {
+    expect(md(html).split("\n")[0]).toBe("```" + lang);
+  });
+
+  it("fences past any run of backticks the code holds", () => {
+    expect(md("<pre>```\nnested\n```</pre>")).toBe("````\n```\nnested\n```\n````");
+  });
+
+  it("reads an unclosed <pre> as text rather than losing the rest of the page", () => {
+    expect(md("<p>Intro</p><pre>code line\n<p>After</p>")).toContain("After");
+  });
+});
+
+describe("htmlToMarkdown: tables", () => {
+  it("writes a data table as a GFM table", () => {
+    const html =
+      "<p>Plans:</p><table><tr><th>Plan</th><th>Price</th></tr><tr><td>Free</td><td>$0</td></tr><tr><td>Pro | Team</td><td>$9</td></tr></table><p>End.</p>";
+    expect(md(html)).toBe("Plans:\n\n| Plan | Price |\n| --- | --- |\n| Free | $0 |\n| Pro \\| Team | $9 |\n\nEnd.");
+  });
+
+  it("writes a layout table's cells as blocks, not as one enormous row", () => {
+    const html = '<table role="presentation"><tr><td><h1>Site</h1></td></tr><tr><td><p>Article text.</p><ul><li>point</li></ul></td></tr></table>';
+    expect(md(html)).toBe("# Site\n\nArticle text.\n\n- point");
+    const nested = "<table><tr><td><table><tr><th>K</th></tr><tr><td>V</td></tr></table></td><td><p>Side</p></td></tr></table>";
+    expect(md(nested)).toBe("| K |\n| --- |\n| V |\n\nSide");
+  });
+
+  it("escapes a cell's own syntax, as it does a paragraph's", () => {
+    const html = "<table><caption>Engines [1]</caption><tr><th>*API*</th></tr><tr><td>Accepts &lt;length&gt; | a\\b</td></tr></table>";
+    expect(md(html)).toBe("**Engines \\[1\\]**\n\n| \\*API\\* |\n| --- |\n| Accepts \\<length> \\| a\\\\b |");
+  });
+
+  it("puts a table inside a list item under the item's indentation", () => {
+    expect(md("<ul><li>Limits:<table><tr><th>A</th></tr><tr><td>1</td></tr></table></li></ul>")).toBe("- Limits:\n\n  | A |\n  | --- |\n  | 1 |");
+  });
+});
+
+describe("htmlToMarkdown: what is not the page", () => {
+  it("drops scripts, styles, templates and comments", () => {
+    expect(md("<p>Kept</p><script>var x = '<p>no</p>';</script><style>p{}</style><template><p>no</p></template><!-- <p>no</p> -->")).toBe("Kept");
+  });
+
+  it("drops navigation, footers and chrome landmarks unless fullPage", () => {
+    const html = '<nav><a href="/">Home</a></nav><div role="navigation">Crumbs</div><p>Body</p><footer>Legal</footer>';
+    expect(md(html)).toBe("Body");
+    const full = htmlToMarkdown(html, { fullPage: true, baseUrl: "https://d.test/" });
+    expect(full).toContain("[Home](https://d.test/)");
+    expect(full).toContain("Crumbs");
+    expect(full).toContain("Legal");
+  });
+});
+
+describe("htmlToMarkdown: escaping", () => {
+  it("escapes the text's own syntax so it reads back as the same text", () => {
+    expect(md("<p>5 * 3 = 15, see [1], a `tick`, a \\ and &lt;b&gt;bold&lt;/b&gt; &amp;copy;</p>")).toBe(
+      "5 \\* 3 = 15, see \\[1\\], a \\`tick\\`, a \\\\ and \\<b>bold\\</b> \\&copy;",
+    );
+  });
+
+  it("leaves an underscore inside a word alone, and escapes one at a word's edge", () => {
+    expect(md("<p>Set rate_limit_ms, not _private or __init__.</p>")).toBe("Set rate_limit_ms, not \\_private or \\_\\_init\\_\\_.");
+  });
+
+  it("escapes a line start that would read as a block marker", () => {
+    const html =
+      "<p># not a heading</p><p>1986. A good year</p><p>- not a bullet</p><p>&gt; not a quote</p><p>+ plus</p><p>===</p><p>C# is fine</p><p>+1 too</p>";
+    expect(md(html).split("\n\n")).toEqual([
+      "\\# not a heading",
+      "1986\\. A good year",
+      "\\- not a bullet",
+      "\\> not a quote",
+      "\\+ plus",
+      "\\===",
+      "C# is fine",
+      "+1 too",
+    ]);
+  });
+
+  it("escapes a heading's trailing hashes, which would read as its closing sequence", () => {
+    expect(md("<h2>Section #</h2>")).toBe("## Section \\#");
+  });
+
+  it("escapes a doubled tilde, which GFM reads as strikethrough", () => {
+    expect(md("<p>~~gone~~ ~5 minutes</p>")).toBe("\\~\\~gone\\~\\~ ~5 minutes");
+  });
+});
+
+describe("htmlToMarkdown stays linear on hostile markup", () => {
+  // The shapes that made htmlToText quadratic, plus the ones peculiar to a
+  // writer with stacks: closes that search for an opener, prefixes that grow
+  // with depth, wrappers that copy what they wrap. Linear work here is tens of
+  // milliseconds; the bound is generous so that only a superlinear pass fails
+  // it on a slow shared runner.
+  const within = (ms: number, fn: () => unknown) => {
+    const started = performance.now();
+    fn();
+    expect(performance.now() - started).toBeLessThan(ms);
+  };
+
+  it.each([
+    ["a '<' in prose with no '>' after it", "<p>" + "if a<b then ".repeat(80_000)],
+    ["unclosed comment openers", "<!-- x ".repeat(150_000)],
+    ["an unterminated attribute quote per tag", '<a title="x '.repeat(80_000)],
+    ["unclosed <h2> openers", "<h2>x ".repeat(150_000)],
+    ["headings closed only at the very end", `${"<h2>x ".repeat(150_000)}</h2>`],
+    ["unclosed <pre> openers", "<pre>x ".repeat(150_000)],
+    ["unclosed links", '<a href="/x">x '.repeat(100_000)],
+    ["unclosed emphasis", "<b>x <i>y ".repeat(100_000)],
+    ["closes with no opener", "</b></a></code></li></ul></blockquote>x".repeat(50_000)],
+    ["unclosed lists", "<ul><li>x".repeat(60_000)],
+    ["unclosed blockquotes", "<blockquote>x ".repeat(100_000)],
+    ["deep blockquotes, then their closes", `${"<blockquote><p>x</p>".repeat(30_000)}${"</blockquote>".repeat(30_000)}`],
+    ["a list above a pile of blockquotes, then stray </li>s", `<ul>${"<blockquote>".repeat(30_000)}${"</li>".repeat(30_000)}`],
+    ["one emphasis holding thousands of breaks", `<b>${"<br>".repeat(150_000)}x</b>`],
+    ["a code span of backticks", `<code>${"`".repeat(300_000)}</code>`],
+    ["a pre of whitespace", `<pre>${" ".repeat(300_000)}x${" \n".repeat(100_000)}</pre>`],
+    ["unclosed tables", "<table><tr><td>x".repeat(40_000)],
+    ["nested tables", `${"<table><tr><td>x".repeat(10_000)}${"</td></tr></table>".repeat(10_000)}`],
+    ["many small tables", "<table><tr><th>a</th></tr><tr><td>b</td></tr></table>".repeat(20_000)],
+    ["unclosed divs round a pre", `${'<div class="highlight-x">'.repeat(50_000)}<pre>x</pre>`],
+    ["a link wrapped round thousands of blocks", `<a href="/x">${"<p>word</p>".repeat(60_000)}</a>`],
+    ["underscores and tildes", "<p>" + "_~".repeat(200_000)],
+  ])("%s", (_label, html) => {
+    within(10_000, () => htmlToMarkdown(html, { baseUrl: "https://d.test/" }));
+  });
+});
