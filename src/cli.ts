@@ -32,6 +32,7 @@ import { hybridSearch, probeQdrant, qdrantBase } from "./vector.js";
 import { embed } from "./embed.js";
 import { crawlSite } from "./crawl.js";
 import { extractTables, tableToMarkdown } from "./tables.js";
+import { documentBaseUrl, htmlToMarkdown } from "./markdown.js";
 import { fingerprint, hasChanged } from "./changed.js";
 import {
   auditEngineUsage,
@@ -88,9 +89,10 @@ USAGE
                           [--region <cc>|wt] [--engine ddg|ddglite|mojeek|off]
                           [--searxng <base>|off] [--firecrawl <base>|off]
                           [--timeout <ms>]
-  webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>] [--full-page]
-                       [--cache] [--refresh] [--offline] [--timeout <ms>]
-  webindex extract <file|-> [--json] [--full-page]
+  webindex fetch <url> [--json] [--format text|markdown] [--firecrawl <base>|off]
+                       [--lang <tag>] [--full-page] [--cache] [--refresh] [--offline]
+                       [--timeout <ms>]
+  webindex extract <file|-> [--json] [--format text|markdown] [--full-page]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--dense] [--json]
   webindex repo <ref> [--forge github|gitlab|gitea] [--json]
   webindex issues <ref> [--terms "<words>"] [--limit <n>] [--forge <kind>] [--json]
@@ -150,7 +152,11 @@ COMMANDS
   extract    Same extraction, on a file already on disk (- reads stdin),
              recognised by its bytes when its name says otherwise. For both,
              --full-page keeps the whole HTML page through the built-in reader:
-             navigation, footer and consent banners included.
+             navigation, footer and consent banners included; --format markdown
+             writes an HTML page as CommonMark — links and images absolute,
+             code fenced, lists and tables kept — the shape Firecrawl returns
+             (the default, text, flattens all but the headings). PDFs, office
+             documents and plain text keep their text either way.
   rank       Order candidate documents against a question — BM25F, then a
              near-duplicate collapse, then MMR so the top says several
              different things. Reads a JSON array of {url,title,text} from
@@ -361,6 +367,7 @@ export const VALUE_FLAGS = [
   "forge",
   "prefix",
   "extract-root",
+  "format",
 ];
 export const BOOL_FLAGS = [
   "json",
@@ -431,6 +438,13 @@ function fail(msg: string): never {
 function usage(msg: string): never {
   process.stderr.write(`webindex: ${msg}\n`);
   process.exit(EXIT_USAGE);
+}
+
+/** `--format text|markdown`: the shape of an HTML page's text, text by default. */
+function argFormat(args: CommandArgs): "text" | "markdown" {
+  const format = argValue(args, "format") ?? "text";
+  if (format !== "text" && format !== "markdown") throw new UsageError(`--format expects text or markdown, got "${format}"`);
+  return format;
 }
 
 /** `--timeout <ms>`: a positive whole number of milliseconds, or absent for the default. */
@@ -506,6 +520,14 @@ const FORGE_ARG: JsonSchemaProp = {
   enum: [...FORGE_KINDS],
 };
 
+// The optional `format` argument webindex_fetch and webindex_extract share.
+const FORMAT_ARG: JsonSchemaProp = {
+  type: "string",
+  description:
+    "The shape of an HTML page's text: text (default; headings kept as #, the rest flattened) or markdown (CommonMark with absolute links, fenced code, lists and tables — the shape Firecrawl returns). PDFs and office documents keep their text either way.",
+  enum: ["text", "markdown"],
+};
+
 /** Why an httpGet failed: the status a server gave, or — when none answered — what went wrong instead. */
 const fetchFailure = (r: { status: number; error?: string }): string => (r.status ? `status ${r.status}` : (r.error ?? "no answer"));
 
@@ -524,6 +546,7 @@ async function extractLocal(
   path: string,
   fullPage = false,
   given?: Buffer,
+  format: "text" | "markdown" = "text",
 ): Promise<{ text: string; extractor: string; reason?: string; consentDropped: number }> {
   let bytes: Buffer;
   try {
@@ -558,8 +581,12 @@ async function extractLocal(
   // an image, an archive — always has one early. Never print its bytes.
   if (raw.slice(0, 1024).includes("\u0000")) return { text: "", extractor: "none", reason: "binary data, not a text document", consentDropped: 0 };
   const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
-  const text = looksHtml ? htmlToText(fullPage ? raw : extractMainHtml(raw), { fullPage }) : raw;
-  const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text) : { text, dropped: 0 };
+  const markdown = format === "markdown";
+  const main = looksHtml && !fullPage ? extractMainHtml(raw) : raw;
+  // A file has no address of its own to resolve against — only the <base href>
+  // a saved page may carry, and only when that one is absolute.
+  const text = !looksHtml ? raw : markdown ? htmlToMarkdown(main, { fullPage, baseUrl: documentBaseUrl(raw) }) : htmlToText(main, { fullPage });
+  const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text, { markdown }) : { text, dropped: 0 };
   return { text: consent.text, extractor: looksHtml ? "native" : "plain", consentDropped: consent.dropped };
 }
 
@@ -952,6 +979,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
               url: { type: "string", description: "The http(s) URL to fetch." },
               lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." },
               fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
+              format: FORMAT_ARG,
               timeoutMs: {
                 type: "number",
                 description: "Give up on a silent host after this many ms (default 20000, at most 300000). A timed-out request is not retried.",
@@ -973,6 +1001,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
             properties: {
               path: { type: "string", description: "Absolute path to the file." },
               fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
+              format: FORMAT_ARG,
             },
             required: ["path"],
           },
@@ -1210,6 +1239,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
           acceptLanguage: args.lang ? String(args.lang) : undefined,
           fullPage,
           stripConsent: !fullPage,
+          format: args.format === "markdown" ? ("markdown" as const) : ("text" as const),
           timeoutMs: toolTimeoutMs(args.timeoutMs),
           signal,
         };
@@ -1265,7 +1295,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
         return { text: trailer.length ? `${body}\n\n---\n${trailer.join("\n")}` : body };
       }
       if (name === "webindex_extract") {
-        const r = await extractLocal(localPath(String(args.path ?? "")), args.fullPage === true);
+        const r = await extractLocal(localPath(String(args.path ?? "")), args.fullPage === true, undefined, args.format === "markdown" ? "markdown" : "text");
         if (!r.text) throw new ToolError(`Nothing readable in that file${r.reason ? ` — ${r.reason}` : ""}.`);
         return { text: `${r.text}\n\n---\nextractor: ${r.extractor}` };
       }
@@ -1555,6 +1585,7 @@ async function dispatch(argv: string[]): Promise<void> {
     if (!url) usage("usage: webindex fetch <url>");
     if (!/^https?:\/\//i.test(url)) fail(`fetch needs an http(s) URL${existsSync(url) ? ` — for a file on disk, \`webindex extract ${url}\`` : ""}`);
     const fullPage = argBool(args, "full-page");
+    const format = argFormat(args);
     const refresh = argBool(args, "refresh");
     const offline = argBool(args, "offline");
     if (refresh && offline) usage("--refresh and --offline contradict each other: one always fetches, the other never does");
@@ -1568,6 +1599,7 @@ async function dispatch(argv: string[]): Promise<void> {
         firecrawl: argValue(args, "firecrawl"),
         fullPage,
         stripConsent: !fullPage,
+        format,
         timeoutMs: argTimeout(args),
       },
       argBool(args, "cache") || refresh,
@@ -1608,13 +1640,14 @@ async function dispatch(argv: string[]): Promise<void> {
   }
 
   if (cmd === "extract") {
-    const EXTRACT_USAGE = "usage: webindex extract <file|-> [--full-page] [--json]";
+    const EXTRACT_USAGE = "usage: webindex extract <file|-> [--format text|markdown] [--full-page] [--json]";
     const path = args.positional[0];
     if (!path) usage(EXTRACT_USAGE);
     const fullPage = argBool(args, "full-page");
+    const format = argFormat(args);
     // `-` reads stdin, so another tool's output can be extracted without a
     // temp file; its bytes are routed by what they are, having no name.
-    const r = await extractLocal(path, fullPage, path === "-" ? readStdin(EXTRACT_USAGE) : undefined);
+    const r = await extractLocal(path, fullPage, path === "-" ? readStdin(EXTRACT_USAGE) : undefined, format);
     if (argBool(args, "json")) {
       process.stdout.write(
         JSON.stringify(

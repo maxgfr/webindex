@@ -204,6 +204,51 @@ describe("cachedFetchAndExtract (--cache)", () => {
     expect(cachePath(URL, "", "native")).toBe(cachePath(URL));
   });
 
+  it("keys Markdown and text reads apart, each consent or full-page variant too", async () => {
+    const body = `<html><body><article><h1>Rate limiting</h1><p>${"Token buckets smooth <em>bursts</em>. ".repeat(20)}</p><p>Accept all cookies</p></article><nav>Home About</nav></body></html>`;
+    const spy = installFetchMock(() => ({ body }));
+    const reads = [{}, { stripConsent: true }, { fullPage: true }] as const;
+    const texts = [];
+    for (const [i, opts] of reads.entries()) {
+      const text = await cachedFetchAndExtract(URL, opts, true, 1000 + i);
+      const markdown = await cachedFetchAndExtract(URL, { ...opts, format: "markdown" }, true, 1100 + i);
+      expect(markdown.cached).toBeUndefined();
+      expect(markdown.text).toContain("*bursts*");
+      expect(text.text).not.toContain("*bursts*");
+      texts.push(text.text, markdown.text);
+    }
+    expect(spy).toHaveBeenCalledTimes(6);
+    for (const [i, opts] of reads.entries()) {
+      expect(await cachedFetchAndExtract(URL, opts, true, 1300)).toMatchObject({ cached: true, text: texts[2 * i] });
+      expect(await cachedFetchAndExtract(URL, { ...opts, format: "markdown" }, true, 1300)).toMatchObject({ cached: true, text: texts[2 * i + 1] });
+    }
+    expect(spy).toHaveBeenCalledTimes(6);
+    // A text read keeps the key it always had.
+    expect(cachePath(URL, "", "native", "")).toBe(cachePath(URL));
+  });
+
+  it("never serves one format for the other, offline or when the origin fails", async () => {
+    const body = `<html><body><article><p>${"Token buckets smooth <em>bursts</em>. ".repeat(20)}</p></article></body></html>`;
+    let up = true;
+    installFetchMock(() => (up ? { body } : { status: 503, body: "" }));
+    await cachedFetchAndExtract(URL, { stripConsent: true }, true, 1000);
+    setCacheMode({ offline: true });
+    const offline = await cachedFetchAndExtract(URL, { stripConsent: true, format: "markdown" }, true, 1100);
+    expect(offline).toMatchObject({ text: "" });
+    expect(offline.note).toMatch(/not in the cache/);
+    // Any read of the page in the requested format still beats a hole.
+    resetCacheMode();
+    await cachedFetchAndExtract(URL, { format: "markdown" }, true, 1300);
+    setCacheMode({ offline: true });
+    expect((await cachedFetchAndExtract(URL, { stripConsent: true, format: "markdown" }, true, 1400)).text).toContain("*bursts*");
+    resetCacheMode();
+    up = false;
+    process.env[envName("CACHE_TTL_MS")] = "0";
+    const stale = await cachedFetchAndExtract(URL, { fullPage: true, format: "markdown" }, true, 1500);
+    expect(stale.text).toContain("*bursts*");
+    expect(stale.note).toMatch(/served the cached copy/);
+  });
+
   it("marks a disk hit as cached so a run can report its freshness", async () => {
     installFetchMock(() => PAGE);
     const miss = await cachedFetchAndExtract(URL, {}, true, 1000);

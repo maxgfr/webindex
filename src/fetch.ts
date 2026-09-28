@@ -21,6 +21,7 @@ import {
 // `nearestHeading` moved to text.ts — it is a fact about markdown, not about
 // HTTP — and is still exported from the package root, so no consumer sees it move.
 import { buildMatcher, nearestHeading } from "./text.js";
+import { documentBaseUrl, htmlToMarkdown } from "./markdown.js";
 import { extractPdf } from "./pdf.js";
 import { extractDocument, docFormatForUrl, docFormatForContentType, sniffDocument, type DocFormat } from "./doc.js";
 // Cyclic by design: firecrawl.ts is a CLIENT of this HTTP layer, and this layer
@@ -1133,6 +1134,15 @@ export async function fetchAndExtract(
     /** Keep all page text through the built-in reader, bypassing isolation and consent filtering. */
     fullPage?: boolean;
     /**
+     * The shape of an HTML page's text. "text" (the default) is htmlToText's:
+     * headings kept as `#` lines, everything else flattened. "markdown" is
+     * htmlToMarkdown's CommonMark, links and images absolute — the shape
+     * Firecrawl returns, so the answer no longer depends on whether Firecrawl
+     * ran. Firecrawl's own Markdown is used as it comes either way; PDFs and
+     * office documents keep their extractors' text.
+     */
+    format?: "text" | "markdown";
+    /**
      * Carry the raw HTML up in `html`. For a caller that follows links out of
      * the page it just read; see ExtractResult.html for why it is opt-in.
      */
@@ -1327,8 +1337,16 @@ export async function fetchAndExtract(
   // A document URL's fetch asked for bytes and got a web page instead.
   const body = !res.body && res.bytes ? decodeBody(res.bytes, res.contentType) : res.body;
   const isHtml = HTML_TYPE_RE.test(mime) || (ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(body));
-  const stripped = isHtml ? htmlToText(opts.fullPage ? body : extractMainHtml(body), opts) : body;
-  const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped) : { text: stripped, dropped: 0 };
+  const markdown = opts.format === "markdown";
+  const main = isHtml ? (opts.fullPage ? body : extractMainHtml(body)) : body;
+  // The base is read off the whole page: its <base href> sits in the <head>
+  // that main-content isolation has just cut away.
+  const stripped = !isHtml
+    ? body
+    : markdown
+      ? htmlToMarkdown(main, { baseUrl: documentBaseUrl(body, res.url), fullPage: opts.fullPage })
+      : htmlToText(main, opts);
+  const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped, { markdown }) : { text: stripped, dropped: 0 };
   const title = isHtml ? pageTitle(body) : undefined;
   const canonical = isHtml ? absoluteCanonical(htmlCanonicalUrl(body), res.url) : undefined;
   const metaDescription = isHtml ? metaDescriptionOf(body) : undefined;
@@ -1504,19 +1522,70 @@ const NOTICE_LENGTH = 400;
  * Counting topic words alone is not enough on a longer line: an article about
  * the GDPR names two of them per sentence, and a recipe says "allow the cookies
  * to cool".
+ *
+ * `markdown` reads htmlToMarkdown's output: each line is judged by the text a
+ * reader sees — a banner's "Accept all cookies" button is a link whose URL
+ * would otherwise push it past button length — and fenced code and table rows
+ * are never touched, since dropping a table's header row breaks the table.
  */
-export function stripConsentBoilerplate(text: string): { text: string; dropped: number } {
+export function stripConsentBoilerplate(text: string, opts: { markdown?: boolean } = {}): { text: string; dropped: number } {
+  if (opts.markdown) return stripConsentMarkdown(text);
   let dropped = 0;
   const kept = text.split("\n").filter((line) => {
-    const t = line.trim();
-    const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(t) ? 1 : 0), 0);
-    const isBanner =
-      BUTTON_LABEL.test(t) ||
-      (hits >= 1 && t.length <= BUTTON_LENGTH && (hits >= 2 || CONSENT_ACTIONS.some((re) => re.test(t)))) ||
-      (hits >= 1 && t.length < NOTICE_LENGTH && BANNER_VOICE.test(t));
+    const isBanner = isConsentLine(line.trim());
     if (isBanner) dropped++;
     return !isBanner;
   });
+  return { text: kept.join("\n"), dropped };
+}
+
+function isConsentLine(t: string): boolean {
+  const hits = CONSENT_PATTERNS.reduce((n, re) => n + (re.test(t) ? 1 : 0), 0);
+  return (
+    BUTTON_LABEL.test(t) ||
+    (hits >= 1 && t.length <= BUTTON_LENGTH && (hits >= 2 || CONSENT_ACTIONS.some((re) => re.test(t)))) ||
+    (hits >= 1 && t.length < NOTICE_LENGTH && BANNER_VOICE.test(t))
+  );
+}
+
+// A code fence, under any quote or list indentation: its run, then the rest.
+const MD_FENCE = /^[\s>]*(`{3,}|~{3,})(.*)$/;
+// A line's block markers: quotes, a list marker, a heading's hashes.
+const MD_LINE_START = /^[\s>]*(?:(?:[-+*]|\d{1,9}[.)])\s+)?(?:#{1,6}\s+)?/;
+// A link's or an image's destination, balanced parentheses included.
+const MD_DESTINATION = /\]\((?:[^()\s\\]|\\.|\([^()\s]*\))*\)/g;
+// What is left of Markdown's syntax once destinations are gone.
+const MD_MARKUP = /\\(?=[!-/:-@[-`{-~])|!?\[|\]|\*+|`+/g;
+
+/** A Markdown line as a reader sees it. */
+function visibleText(line: string): string {
+  return line.replace(MD_LINE_START, "").replace(MD_DESTINATION, "]").replace(MD_MARKUP, "").trim();
+}
+
+function stripConsentMarkdown(text: string): { text: string; dropped: number } {
+  let dropped = 0;
+  let fence = "";
+  const kept: string[] = [];
+  for (const line of text.split("\n")) {
+    const f = MD_FENCE.exec(line);
+    if (fence) {
+      // Only a bare run of the same mark, at least as long, closes a fence.
+      if (f && f[1]![0] === fence[0] && f[1]!.length >= fence.length && !f[2]!.trim()) fence = "";
+      kept.push(line);
+      continue;
+    }
+    if (f) fence = f[1]!;
+    else if (!line.trim()) {
+      // A dropped paragraph leaves its blank lines behind: keep one.
+      if (kept.length && kept[kept.length - 1]!.trim()) kept.push(line);
+      continue;
+    } else if (!/^[\s>]*\|/.test(line) && isConsentLine(visibleText(line))) {
+      dropped++;
+      continue;
+    }
+    kept.push(line);
+  }
+  while (kept.length && !kept[kept.length - 1]!.trim()) kept.pop();
   return { text: kept.join("\n"), dropped };
 }
 

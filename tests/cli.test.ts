@@ -288,6 +288,37 @@ describe("extract", () => {
     expect(result).toMatchObject({ fullPage, consentDropped: fullPage ? 0 : 2 });
   });
 
+  it("writes Markdown with --format markdown, isolated and consent-filtered like text", async () => {
+    const f = join(dir, "page.html");
+    const extra = '<p>See <a href="https://x.test/ref">the reference</a> and run <code>npm i</code>.</p><p>Accept all cookies</p>';
+    writeFileSync(f, `<html><head><base href="https://docs.test/v1/"></head><body>${articlePage(extra)}<p><a href="guide">Guide</a></p></body></html>`);
+    expect(await run(["extract", f, "--format", "markdown", "--json"])).toBe(0);
+    const result = JSON.parse(stdout());
+    expect(result.text).toContain("# Rate limiting");
+    expect(result.text).toContain("See [the reference](https://x.test/ref) and run `npm i`.");
+    expect(result.text).not.toMatch(/Home|About|Accept all cookies/);
+    expect(result.consentDropped).toBe(1);
+    out = [];
+    // A saved page's own <base href> is the one address it can resolve against.
+    expect(await run(["extract", f, "--format", "markdown", "--full-page"])).toBe(0);
+    expect(stdout()).toContain("[Home](https://docs.test/)");
+    expect(stdout()).toContain("[Guide](https://docs.test/v1/guide)");
+  });
+
+  it("keeps plain text and documents as they are under --format markdown", async () => {
+    const f = join(dir, "notes.txt");
+    writeFileSync(f, "a *literal* note");
+    expect(await run(["extract", f, "--format", "markdown"])).toBe(0);
+    expect(stdout()).toBe("a *literal* note\n");
+  });
+
+  it("refuses a --format it does not know", async () => {
+    const f = join(dir, "page.html");
+    writeFileSync(f, articlePage());
+    expect(await run(["extract", f, "--format", "html"])).toBe(2);
+    expect(stderr()).toMatch(/--format expects text or markdown, got "html"/);
+  });
+
   it("isolates main HTML content and reports extraction options in JSON", async () => {
     const f = join(dir, "page.html");
     writeFileSync(f, articlePage());
@@ -467,6 +498,41 @@ describe("fetch argument handling", () => {
     try {
       expect(await run(["fetch", "https://x.test/start", "--json"])).toBe(0);
       expect(JSON.parse(stdout())).toMatchObject({ url: "https://x.test/start", finalUrl: "https://x.test/final", canonical: "https://x.test/canonical" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("prints Markdown with --format markdown, links absolute against the page's address", async () => {
+    const body = articlePage('<p>Read <a href="/docs/limits">the limits</a>.</p>');
+    installFetchMock(() => ({ body, contentType: "text/html", url: "https://x.test/blog/post" }));
+    try {
+      expect(await run(["fetch", "https://x.test/start", "--format", "markdown"])).toBe(0);
+      expect(stdout()).toContain("# Rate limiting");
+      expect(stdout()).toContain("Read [the limits](https://x.test/docs/limits).");
+      out = [];
+      expect(await run(["fetch", "https://x.test/start", "--format", "text"])).toBe(0);
+      expect(stdout()).toContain("Read the limits.");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(await run(["fetch", "https://x.test/start", "--format", "md"])).toBe(2);
+    expect(stderr()).toMatch(/--format expects text or markdown, got "md"/);
+  });
+
+  it("caches a Markdown read apart from a text one", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "cache");
+    const spy = installFetchMock(routes([["x.test/page", { body: articlePage("<p>A <em>point</em>.</p>"), contentType: "text/html" }]]));
+    try {
+      expect(await run(["fetch", "https://x.test/page", "--cache"])).toBe(0);
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--cache", "--format", "markdown", "--json"])).toBe(0);
+      expect(JSON.parse(stdout())).toMatchObject({ cached: false });
+      expect(JSON.parse(stdout()).text).toContain("A *point*.");
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--offline", "--format", "markdown"])).toBe(0);
+      expect(stdout()).toContain("A *point*.");
+      expect(spy).toHaveBeenCalledTimes(2);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -708,6 +774,29 @@ describe("the MCP tools", () => {
       expect(full.text).toContain("About");
       expect(full.text).toContain("Related reading");
       expect(full.text).toContain("Accept all cookies");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(["webindex_fetch", "webindex_extract"])("%s declares an optional format, text or markdown", (name) => {
+    const tool = adapter.listTools(LATEST_PROTOCOL).find((tool) => tool.name === name)!;
+    expect(tool.inputSchema.properties.format).toMatchObject({ type: "string", enum: ["text", "markdown"] });
+    expect(tool.inputSchema.required).not.toContain("format");
+  });
+
+  it.each(["webindex_fetch", "webindex_extract"])("%s answers in Markdown when asked", async (name) => {
+    const path = join(dir, "page.html");
+    const body = articlePage('<p>See <a href="https://x.test/ref">the reference</a>.</p>');
+    writeFileSync(path, body);
+    installFetchMock(routes([["x.test/page", { body, contentType: "text/html" }]]));
+    try {
+      const args = name === "webindex_fetch" ? { url: "https://x.test/page" } : { path };
+      const markdown = await webindexAdapter().callTool(name, { ...args, format: "markdown" });
+      expect(markdown.text).toContain("See [the reference](https://x.test/ref).");
+      const text = await webindexAdapter().callTool(name, { ...args, format: "text" });
+      expect(text.text).toContain("See the reference.");
+      expect(text).toEqual(await webindexAdapter().callTool(name, args));
     } finally {
       vi.unstubAllGlobals();
     }

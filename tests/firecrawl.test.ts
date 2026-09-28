@@ -301,6 +301,29 @@ describe("fetchAndExtract — the extraction seam", () => {
     expect(r.status).toBe(200);
   });
 
+  it("hands back Firecrawl's Markdown as it came in Markdown mode too", async () => {
+    const base = nextBase();
+    installFetchMock((url) => {
+      if (url.includes("/scrape")) return { body: JSON.stringify(SCRAPE_FIXTURE), contentType: "application/json" };
+      return { body: PAGE };
+    });
+    const text = await fetchAndExtract("https://expressjs.com/en/guide/migrating-5.html", { firecrawl: base });
+    const markdown = await fetchAndExtract("https://expressjs.com/en/guide/migrating-5.html", { firecrawl: base, format: "markdown" });
+    expect(markdown).toEqual(text);
+    expect(markdown.extractor).toBe("firecrawl");
+  });
+
+  it("falls back to the built-in Markdown when Firecrawl is down in Markdown mode", async () => {
+    const base = nextBase();
+    installFetchMock((url) => {
+      if (url === `${base}/`) throw new Error("ECONNREFUSED");
+      return { body: PAGE.replace("token buckets", "<em>token buckets</em>") };
+    });
+    const r = await fetchAndExtract("https://ex.test/page", { firecrawl: base, format: "markdown" });
+    expect(r.extractor).toBeUndefined();
+    expect(r.text).toContain("*token buckets*");
+  });
+
   it("falls back to the built-in reader when Firecrawl is down — same result as before", async () => {
     const base = nextBase();
     installFetchMock((url) => {

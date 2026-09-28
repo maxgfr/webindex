@@ -50,6 +50,10 @@ discovery provider in the caller's records. Fetch the selected URL:
 {"name":"webindex_fetch","arguments":{"url":"https://nodejs.org/api/globals.html"}}
 ```
 
+Add `"format":"markdown"` to read the page as CommonMark instead — its links
+absolute, its code fenced, its tables kept as tables — when the answer lives in
+a code sample or a table, or when the text will be shown rather than scored.
+
 For multiple sources, pass their actual extracted text to the rank tool. The
 following shows the input shape; replace the placeholder with the fetched text:
 
