@@ -532,7 +532,7 @@ function binaryName(name) {
   return process.platform === "win32" && name === "npx" ? "npx.cmd" : name;
 }
 function runWithInput(cmd, args, input, timeoutMs, opts = {}) {
-  return new Promise((resolve5) => {
+  return new Promise((resolve6) => {
     let child;
     try {
       const bin = binaryName(cmd);
@@ -544,7 +544,7 @@ function runWithInput(cmd, args, input, timeoutMs, opts = {}) {
         ...opts.env ? { env: opts.env } : {}
       });
     } catch (e) {
-      resolve5({ ok: false, stdout: "", error: e.message });
+      resolve6({ ok: false, stdout: "", error: e.message });
       return;
     }
     const chunks = [];
@@ -563,7 +563,7 @@ ${stderrTail}` : stderrHead + stderrTail).trim();
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve5(r);
+      resolve6(r);
     };
     const timer = setTimeout(() => {
       killTree(child);
@@ -3035,8 +3035,12 @@ async function httpGet(url, opts = {}) {
   const attempts = attemptsFor(opts.retries);
   let last = { ok: false, status: 0, body: "", contentType: "", url };
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
+  const cancelled = () => ({ ok: false, status: 0, body: "", contentType: "", url, error: "cancelled" });
   for (let attempt = 0; attempt < attempts; attempt++) {
+    if (opts.signal?.aborted) return cancelled();
     const ctrl = new AbortController();
+    const onCancel = () => ctrl.abort();
+    opts.signal?.addEventListener("abort", onCancel, { once: true });
     let t;
     let remainingMs = timeoutMs;
     let startedAt = 0;
@@ -3125,11 +3129,13 @@ async function httpGet(url, opts = {}) {
       }
       return result;
     } catch (e) {
+      if (!timedOut && opts.signal?.aborted) return cancelled();
       last = { ok: false, status: 0, body: "", contentType: "", url, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
       if (timedOut || isPermanentFailure(e)) break;
       if (attempt < attempts - 1) await sleep(defaultRetryMs());
     } finally {
       clearTimeout(t);
+      opts.signal?.removeEventListener("abort", onCancel);
     }
   }
   return last;
@@ -3421,6 +3427,8 @@ function looksLikePdfUrl(url) {
 var PDF_FETCH_OPTS = { accept: "application/pdf,*/*", binary: true, maxBytes: 16 * 1024 * 1024 };
 var DOC_FETCH_OPTS = { accept: "*/*", binary: true, maxBytes: 16 * 1024 * 1024 };
 async function fetchAndExtract(url, opts = {}) {
+  const cancelled = () => ({ text: "", finalUrl: url, status: 0, note: `Fetching ${url} was cancelled.` });
+  if (opts.signal?.aborted) return cancelled();
   const wantsPdf = looksLikePdfUrl(url);
   const wantsDoc = wantsPdf ? void 0 : docFormatForUrl(url);
   let firecrawlNote;
@@ -3444,9 +3452,12 @@ async function fetchAndExtract(url, opts = {}) {
     headers: opts.headers,
     authorizeUrl: opts.authorizeUrl,
     timeoutMs: opts.timeoutMs,
-    onBackOff: opts.onBackOff
+    onBackOff: opts.onBackOff,
+    signal: opts.signal
   };
+  if (opts.signal?.aborted) return cancelled();
   let res = await httpGet(url, fetchOpts);
+  if (opts.signal?.aborted) return cancelled();
   const toldToWait = (res.retryAfterMs ?? 0) > RETRY_AFTER_CAP_MS;
   if (!res.ok && !toldToWait && brand().defaultUa === "contact" && (res.status === 403 || res.status === 429)) {
     res = await httpGet(url, { ...fetchOpts, userAgent: browserUa(), acceptLanguage: opts.acceptLanguage ?? "en-US,en;q=0.9" });
@@ -3480,7 +3491,7 @@ async function fetchAndExtract(url, opts = {}) {
   const answeredHtml = !sniffed && (claimsPdf || claimsDoc !== void 0) && HTML_TYPE_RE.test(mime);
   const route2 = sniffed ?? (answeredHtml ? void 0 : claimsPdf ? "pdf" : claimsDoc);
   if (route2 === "pdf") {
-    const bytes = res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
+    const bytes = res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs, signal: opts.signal })).bytes;
     const got = bytes ? await extractPdf(bytes, {
       firecrawl: async () => {
         if (opts.authorizeUrl) return void 0;
@@ -3502,7 +3513,7 @@ async function fetchAndExtract(url, opts = {}) {
   }
   if (route2) {
     const docFmt = route2;
-    const bytes = res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
+    const bytes = res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs, signal: opts.signal })).bytes;
     const got = bytes ? await extractDocument(bytes, docFmt, {
       firecrawl: async () => {
         if (opts.authorizeUrl) return void 0;
@@ -4322,14 +4333,14 @@ function sh(cmd, args, opts = {}) {
 }
 function shAsync(cmd, args, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs2();
-  return new Promise((resolve5) => {
+  return new Promise((resolve6) => {
     let settled = false;
     let timer;
     const done = (r) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve5(r);
+      resolve6(r);
     };
     let child;
     try {
@@ -5907,7 +5918,7 @@ function parseSitemap(xml) {
 }
 var SITEMAP_MAX_BYTES = 50 * 1024 * 1024;
 var gunzipAsync = promisify(gunzip);
-async function readSitemapDocument(url, authorize) {
+async function readSitemapDocument(url, authorize, signal) {
   let refused = false;
   const authorizeUrl = authorize && (async (u) => {
     const ok = await authorize(u);
@@ -5919,9 +5930,11 @@ async function readSitemapDocument(url, authorize) {
     timeoutMs: 1e4,
     binary: true,
     maxBytes: SITEMAP_MAX_BYTES,
-    authorizeUrl
+    authorizeUrl,
+    signal
   });
   if (!r.ok) {
+    if (r.error === "cancelled") return {};
     if (r.truncated) return { note: `${url} is larger than the 50 MB a sitemap may be; not read.` };
     if (refused || r.status === 404 || r.status === 410) return {};
     return { note: `could not read ${url} (${r.status ? `status ${r.status}` : r.error ?? "no answer"}).` };
@@ -5965,11 +5978,22 @@ async function fetchSitemap(url, opts = {}) {
       queue.push(fallback);
     }
     if (!queue.length || fetched >= max) break;
+    if (opts.signal?.aborted) {
+      notes.push(`cancelled after ${fetched} sitemap document(s).`);
+      break;
+    }
     const next = queue.shift();
     if (seen.has(next)) continue;
     seen.add(next);
     fetched++;
-    const doc = await readSitemapDocument(next, opts.authorizeUrl);
+    const doc = await readSitemapDocument(next, opts.authorizeUrl, opts.signal);
+    if (opts.signal?.aborted) {
+      queue.unshift(next);
+      seen.delete(next);
+      notes.push(`cancelled after ${fetched - 1} sitemap document(s).`);
+      break;
+    }
+    opts.onDocument?.(next, fetched);
     if (doc.note) notes.push(doc.note);
     if (!doc.text?.trim()) continue;
     const parsed = parseSitemap(doc.text);
@@ -5985,8 +6009,13 @@ async function fetchSitemap(url, opts = {}) {
   if (notes.length) out.notes = notes;
   return out;
 }
-async function fetchFeed(url) {
-  const r = await httpGet(url, { accept: "application/atom+xml,application/rss+xml,application/feed+json,application/xml,*/*", timeoutMs: 1e4 });
+async function fetchFeed(url, opts = {}) {
+  const r = await httpGet(url, {
+    accept: "application/atom+xml,application/rss+xml,application/feed+json,application/xml,*/*",
+    timeoutMs: 1e4,
+    authorizeUrl: opts.authorizeUrl,
+    signal: opts.signal
+  });
   if (!r.ok || !r.body.trim()) return void 0;
   return parseFeed(r.body, r.url);
 }
@@ -6194,7 +6223,8 @@ async function searchViaKeyless(engine, query, opts = {}) {
       accept: "text/html",
       acceptLanguage,
       timeoutMs: Math.max(1, Math.min(opts.timeoutMs ?? 12e3, deadline - Date.now())),
-      retries: 0
+      retries: 0,
+      signal: opts.signal
     });
     if (!r.ok || !r.body.trim()) {
       if (p > 0) break;
@@ -6296,7 +6326,8 @@ async function searchViaSearxng(query, opts = {}) {
       acceptLanguage,
       timeoutMs: Math.max(1, Math.min(QUERY_TIMEOUT_MS, deadline - Date.now())),
       // No retry: the cascade's next rung is the retry.
-      retries: 0
+      retries: 0,
+      signal: opts.signal
     });
     if (!r.ok) {
       if (p === 0) {
@@ -6472,9 +6503,328 @@ function closingNote(rungs) {
 
 // src/stack.ts
 import { spawnSync as spawnSync3 } from "child_process";
-import { existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "fs";
+import { existsSync as existsSync4, lstatSync, mkdirSync as mkdirSync4, readFileSync as readFileSync4, statSync as statSync3, writeFileSync as writeFileSync3 } from "fs";
+import { dirname, join as join4, resolve as resolve3 } from "path";
+
+// src/cache.ts
+import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync3, readdirSync as readdirSync3, rmSync as rmSync3, statSync as statSync2 } from "fs";
+import { join as join3 } from "path";
 import { tmpdir as tmpdir3 } from "os";
-import { dirname, join as join3 } from "path";
+
+// src/no-write.ts
+import { mkdirSync as mkdirSync2, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
+var flagged = false;
+function setNoWrite(on) {
+  flagged = on;
+}
+function isNoWrite() {
+  return flagged || envFlag("NO_WRITE");
+}
+var collected = [];
+function ensureDir(dir) {
+  if (isNoWrite()) return;
+  mkdirSync2(dir, { recursive: true });
+}
+function writeArtifact(path, content) {
+  if (isNoWrite()) {
+    const at = collected.findIndex((a) => a.path === path);
+    if (at !== -1) collected[at] = { path, content };
+    else collected.push({ path, content });
+    return path;
+  }
+  writeFileAtomic(path, content);
+  return path;
+}
+var tmpCounter = 0;
+function writeFileAtomic(path, content) {
+  const tmp = `${path}.${process.pid}.${tmpCounter++}.tmp`;
+  try {
+    writeFileSync2(tmp, content);
+    renameSync2(tmp, path);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+    }
+    throw e;
+  }
+}
+function takeArtifacts() {
+  return collected.splice(0, collected.length);
+}
+function resetNoWrite() {
+  flagged = false;
+  collected.length = 0;
+}
+
+// src/cache.ts
+var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
+function cacheDir() {
+  return env("CACHE_DIR") ?? brand().cacheDir ?? join3(tmpdir3(), userScoped(brand().name), "cache");
+}
+function userScoped(name) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
+  return uid === void 0 ? name : `${name}-${uid}`;
+}
+function cachePath(url, acceptLanguage = "", extractor = "native", variant = "") {
+  const canon = canonicalizeUrl(url);
+  const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
+  const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
+  return join3(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
+}
+var VARIANTS = ["", "consent", "full"];
+var PLAIN = [""];
+function variantOf(opts) {
+  return opts.fullPage ? "full" : opts.stripConsent ? "consent" : "";
+}
+var PDF_CACHE_NS = "pdf";
+var DOC_CACHE_NS = "doc";
+async function currentExtractor(opts, url) {
+  if (looksLikePdfUrl(url)) return PDF_CACHE_NS;
+  if (docFormatForUrl(url)) return DOC_CACHE_NS;
+  if (opts.fullPage) return "native";
+  const base = firecrawlBase(opts);
+  return base && await probeFirecrawl(base, firecrawlIsExplicit(opts)) ? "firecrawl" : "native";
+}
+var DOCUMENT_NAMESPACES = [PDF_CACHE_NS, DOC_CACHE_NS, "pdf-inspector", "pdftotext", "anydoc", "ocr"];
+var WRITTEN_NAMESPACES = ["native", "firecrawl", ...DOCUMENT_NAMESPACES];
+function namespaceFor(result, predicted) {
+  return result.documentType ?? (predicted === PDF_CACHE_NS || predicted === DOC_CACHE_NS ? predicted : result.extractor ?? "native");
+}
+function readAnyNamespace(url, acceptLanguage, namespaces = WRITTEN_NAMESPACES, variants = PLAIN) {
+  let best;
+  for (const ns of namespaces) {
+    for (const variant of ns === "native" ? variants : PLAIN) {
+      const hit = readCache(url, acceptLanguage, ns, variant);
+      if (hit && (!best || hit.cachedAt > best.cachedAt)) best = hit;
+    }
+  }
+  return best;
+}
+function readAnyCopy(url, acceptLanguage, variant) {
+  return readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, [variant]) ?? readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, VARIANTS);
+}
+function ttlMs() {
+  const fallback = brand().cacheTtlMs ?? DEFAULT_TTL_MS;
+  const hours = env("CACHE_TTL_HOURS");
+  if (hours !== void 0) {
+    const h = Number(hours);
+    return Number.isFinite(h) ? Math.round(Math.max(0, h) * 36e5) : fallback;
+  }
+  return envInt("CACHE_TTL_MS", fallback);
+}
+var mode = { refresh: false, offline: false };
+function setCacheMode(next) {
+  mode = { ...mode, ...next };
+}
+function cacheMode() {
+  return { ...mode };
+}
+function resetCacheMode() {
+  mode = { refresh: false, offline: false };
+}
+function isCacheFresh(entry, now = Date.now()) {
+  return typeof entry.cachedAt === "number" && now - entry.cachedAt < ttlMs();
+}
+function revalidationHeaders(entry) {
+  const h = {};
+  if (entry.etag) h["if-none-match"] = entry.etag;
+  if (entry.lastModified) h["if-modified-since"] = entry.lastModified;
+  return h;
+}
+function entryPaths(url, acceptLanguage, extractor, variant) {
+  const meta = cachePath(url, acceptLanguage, extractor, extractor === "native" ? variant : "");
+  return { meta, body: meta.replace(/\.json$/, ".body") };
+}
+function readCache(url, acceptLanguage = "", extractor = "native", variant = "") {
+  const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
+  if (!existsSync3(meta)) return void 0;
+  try {
+    const entry = JSON.parse(readFileSync3(meta, "utf8"));
+    if (typeof entry.cachedAt !== "number") return void 0;
+    const text = existsSync3(body) ? readFileSync3(body, "utf8") : entry.text;
+    if (!text?.trim()) return void 0;
+    return { ...entry, text };
+  } catch {
+    return void 0;
+  }
+}
+function writeCache(url, res, now, acceptLanguage = "", extractor = "native", variant = "") {
+  if (isNoWrite()) return;
+  const dir = cacheDir();
+  const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
+  const { text, note: _note, ...rest } = res;
+  const write = () => {
+    ensureDir2(dir);
+    writeFileAtomic(body, text ?? "");
+    writeFileAtomic(meta, JSON.stringify({ ...rest, cachedAt: now }));
+  };
+  try {
+    write();
+  } catch {
+    ensured.delete(dir);
+    try {
+      write();
+    } catch {
+    }
+  }
+}
+var ensured = /* @__PURE__ */ new Set();
+function ensureDir2(dir) {
+  if (ensured.has(dir)) return;
+  mkdirSync3(dir, { recursive: true });
+  ensured.add(dir);
+}
+function touchCache(url, entry, now, acceptLanguage = "", extractor = "native", variant = "") {
+  writeCache(url, entry, now, acceptLanguage, extractor, variant);
+}
+async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date.now()) {
+  const { refresh, offline } = mode;
+  if (!enabled && !offline) return fetchAndExtract(url, opts);
+  const lang = opts.acceptLanguage ?? "";
+  const variant = variantOf(opts);
+  const served = (entry, note) => {
+    countFetch(Buffer.byteLength(entry.text), true);
+    const { note: _stored, ...rest } = entry;
+    const about = note ?? (entry.truncated ? `The cached text of ${url} is a prefix: the page overran the response size cap.` : void 0);
+    return { ...rest, cached: true, ...about ? { note: about } : {} };
+  };
+  if (offline) {
+    const stored = readAnyCopy(url, lang, variant);
+    if (stored) return served(stored);
+    return { text: "", finalUrl: url, status: 0, note: `Offline: ${url} is not in the cache (drop --offline, or warm it with a normal run).` };
+  }
+  const ns = await currentExtractor(opts, url);
+  const store = (result) => {
+    const target = namespaceFor(result, ns);
+    const entry = ns === "firecrawl" && target === "native" ? { ...result, fallbackFrom: "firecrawl" } : result;
+    writeCache(url, entry, now, lang, target, variant);
+  };
+  const hit = refresh ? void 0 : lookup(url, lang, ns, variant);
+  if (hit && isCacheFresh(hit, now)) return served(hit);
+  let res;
+  const revalidate = hit ? revalidationHeaders(hit) : {};
+  if (hit && Object.keys(revalidate).length) {
+    const probe = await fetchAndExtract(url, { ...opts, headers: revalidate });
+    if (probe.status === 304) {
+      const renewed = { ...hit, etag: probe.etag ?? hit.etag, lastModified: probe.lastModified ?? hit.lastModified };
+      touchCache(url, renewed, now, lang, namespaceFor(hit, ns), variant);
+      return served(renewed);
+    }
+    if (probe.text?.trim()) {
+      store(probe);
+      return probe;
+    }
+    if (probe.status !== 412 && !(probe.status >= 200 && probe.status < 300)) res = probe;
+  }
+  res ??= await fetchAndExtract(url, opts);
+  if (res.text?.trim()) {
+    store(res);
+    return res;
+  }
+  const stale = hit ?? readAnyCopy(url, lang, variant);
+  if (stale) return served(stale, `${url} returned ${res.status || "no response"}; served the cached copy from ${new Date(stale.cachedAt).toISOString()}.`);
+  return res;
+}
+function lookup(url, acceptLanguage, ns, variant) {
+  const best = readAnyNamespace(url, acceptLanguage, [.../* @__PURE__ */ new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
+  if (ns !== "firecrawl") return best;
+  const fallback = readCache(url, acceptLanguage, "native", variant);
+  return fallback?.fallbackFrom === "firecrawl" && (!best || fallback.cachedAt > best.cachedAt) ? fallback : best;
+}
+var WRITER_TMP = /\.\d+\.\d+\.tmp$/;
+function ownFile(name) {
+  const tmp = WRITER_TMP.exec(name);
+  const base = tmp ? name.slice(0, tmp.index) : name;
+  const ext = base.endsWith(".json") ? "json" : base.endsWith(".body") ? "body" : void 0;
+  if (!ext) return void 0;
+  const stem = base.slice(0, -5);
+  const dash = stem.lastIndexOf("-");
+  if (dash < 1 || !/^[0-9a-f]{1,16}$/.test(stem.slice(dash + 1)) || !/^[\w.-]+$/.test(stem.slice(0, dash))) return void 0;
+  return { kind: tmp ? "tmp" : ext, stem };
+}
+function readEntryMeta(abs) {
+  try {
+    const entry = JSON.parse(readFileSync3(abs, "utf8"));
+    return entry && typeof entry.cachedAt === "number" && typeof entry.finalUrl === "string" ? entry : void 0;
+  } catch {
+    return void 0;
+  }
+}
+var ORPHAN_GRACE_MS = 10 * 60 * 1e3;
+function sizeOf(abs) {
+  try {
+    return statSync2(abs).size;
+  } catch {
+    return 0;
+  }
+}
+function cacheStats(now = Date.now()) {
+  const dir = cacheDir();
+  const out = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
+  if (!existsSync3(dir)) return out;
+  let oldest = Number.POSITIVE_INFINITY;
+  let newest = 0;
+  for (const name of readdirSync3(dir)) {
+    const own = ownFile(name);
+    if (!own) continue;
+    const abs = join3(dir, name);
+    if (own.kind !== "json") {
+      out.bytes += sizeOf(abs);
+      continue;
+    }
+    const entry = readEntryMeta(abs);
+    if (!entry) continue;
+    out.bytes += sizeOf(abs);
+    out.entries++;
+    if (isCacheFresh(entry, now)) out.fresh++;
+    else out.stale++;
+    if (entry.cachedAt < oldest) oldest = entry.cachedAt;
+    if (entry.cachedAt > newest) newest = entry.cachedAt;
+  }
+  if (out.entries) {
+    out.oldest = new Date(oldest).toISOString();
+    out.newest = new Date(newest).toISOString();
+  }
+  return out;
+}
+function cacheClean(all = false, now = Date.now()) {
+  const dir = cacheDir();
+  if (!existsSync3(dir) || isNoWrite()) return 0;
+  const names = readdirSync3(dir);
+  const present = new Set(names);
+  const remove = (name) => {
+    try {
+      rmSync3(join3(dir, name), { force: true });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const abandoned = (name) => {
+    try {
+      return all || now - statSync2(join3(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
+    } catch {
+      return false;
+    }
+  };
+  let removed = 0;
+  for (const name of names) {
+    const own = ownFile(name);
+    if (!own) continue;
+    if (own.kind === "json") {
+      const entry = readEntryMeta(join3(dir, name));
+      if (!entry || !all && isCacheFresh(entry, now) || !remove(name)) continue;
+      remove(`${own.stem}.body`);
+      removed++;
+    } else if (own.kind === "body" ? !present.has(`${own.stem}.json`) && abandoned(name) : abandoned(name)) {
+      remove(name);
+    }
+  }
+  return removed;
+}
+
+// src/stack.ts
 var COMPOSE_YAML = `# Optional, fully-local, no-API-key stack for a semantic mode, web
 # search and content extraction. Start it with \`{{CLI}} semantic up\` (or
 # \`docker compose --profile all up -d\`). The published bundle stays
@@ -6734,24 +7084,54 @@ LOGGING_LEVEL=info
 function renderAsset(template) {
   return template.replaceAll("{{CLI}}", brand().cli);
 }
-function cacheRoot() {
-  return env("CACHE_DIR") ?? brand().cacheDir ?? join3(tmpdir3(), brand().name);
+function composeAssets() {
+  const base = join4(cacheDir(), "compose");
+  return [
+    { path: join4(base, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
+    { path: join4(base, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
+    { path: join4(base, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
+  ];
 }
 function ensureComposeMaterialized() {
-  const base = join3(cacheRoot(), "compose");
-  const composePath = join3(base, "docker-compose.yml");
-  const settingsPath = join3(base, "docker", "searxng", "settings.yml");
-  const firecrawlEnvPath = join3(base, "docker", "firecrawl", "firecrawl.env");
-  writeIfChanged(composePath, renderAsset(COMPOSE_YAML));
-  writeIfChanged(settingsPath, renderAsset(SEARXNG_SETTINGS_YAML));
-  writeIfChanged(firecrawlEnvPath, renderAsset(FIRECRAWL_ENV));
-  return composePath;
+  const assets = composeAssets();
+  for (const a of assets) writeIfChanged(a.path, a.content);
+  return assets[0].path;
+}
+function untrustedStack() {
+  const assets = composeAssets();
+  for (const a of assets) {
+    let body;
+    try {
+      body = readFileSync4(a.path, "utf8");
+    } catch {
+    }
+    if (body !== a.content) return `${a.path} does not hold the stack this binary ships, and could not be rewritten`;
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
+  if (uid === void 0) return void 0;
+  const root = resolve3(cacheDir());
+  const top = env("CACHE_DIR") ?? brand().cacheDir ? root : dirname(root);
+  const paths = /* @__PURE__ */ new Set();
+  for (const a of assets) {
+    for (let p = resolve3(a.path); p !== top && p !== dirname(p); p = dirname(p)) paths.add(p);
+  }
+  for (const p of [top, ...paths]) {
+    try {
+      const st = p === top ? statSync3(p) : lstatSync(p);
+      if (st.isSymbolicLink()) return `${p} is a symbolic link`;
+      if (st.uid !== uid) return `${p} belongs to another user`;
+      if (st.mode & 2 && !(st.isDirectory() && st.mode & 512)) return `${p} is writable by anyone`;
+    } catch (e) {
+      return `${p} cannot be inspected (${e.message})`;
+    }
+  }
+  return void 0;
 }
 function writeIfChanged(path, content) {
   try {
-    if (existsSync3(path) && readFileSync3(path, "utf8") === content) return;
-    mkdirSync2(dirname(path), { recursive: true });
-    writeFileSync2(path, content);
+    if (existsSync4(path) && readFileSync4(path, "utf8") === content) return;
+    mkdirSync4(dirname(path), { recursive: true });
+    writeFileSync3(path, content);
   } catch {
   }
 }
@@ -6760,6 +7140,7 @@ var UP_TIMEOUT_MS = 3e5;
 var DOWN_TIMEOUT_MS = 12e4;
 var PS_TIMEOUT_MS = 3e4;
 var MODEL_PULL_TIMEOUT_MS = 6e5;
+var DAEMON_PROBE_TIMEOUT_MS = 15e3;
 function pullTimeoutMs() {
   return envInt("DOCKER_PULL_TIMEOUT_MS", DEFAULT_PULL_TIMEOUT_MS);
 }
@@ -6773,12 +7154,13 @@ function defaultRun(cmd, args, opts) {
     maxBuffer: 64 * 1024 * 1024,
     stdio: opts.capture ? "pipe" : "inherit"
   });
-  const missing = !!res.error && res.error.code === "ENOENT";
+  const code = res.error?.code;
   return {
     ok: !res.error && res.status === 0,
     stdout: res.stdout ?? "",
     stderr: res.stderr ?? (res.error ? String(res.error.message) : ""),
-    missing
+    missing: code === "ENOENT",
+    ...code === "ETIMEDOUT" ? { timedOut: true } : {}
   };
 }
 function defaultHas(cmd) {
@@ -6843,6 +7225,22 @@ function stackControl(service, action, deps = {}) {
     return { message: `${tag}: docker not found on PATH. The stack is optional \u2014 everything it provides degrades to a note.`, code: 1 };
   }
   const file = ensureComposeMaterialized();
+  const distrust = untrustedStack();
+  if (distrust) {
+    return {
+      message: `${tag}: refusing to run docker against the stack in ${dirname(file)} \u2014 ${distrust}. Set ${envName("CACHE_DIR")} to a directory only you can write.`,
+      code: 1
+    };
+  }
+  const daemon = run("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: DAEMON_PROBE_TIMEOUT_MS, capture: true });
+  if (!daemon.ok) {
+    const why = daemon.stderr.trim().split("\n")[0];
+    return {
+      message: `${tag}: docker is installed but its daemon is not answering \u2014 start Docker (Docker Desktop, colima, or \`systemctl start docker\`) and retry.${why ? `
+${why}` : ""}`,
+      code: 1
+    };
+  }
   const profiles = spec.profiles.flatMap((p) => ["--profile", p]);
   if (action === "down") {
     const r = run("docker", ["compose", "-f", file, ...profiles, "down"], { timeoutMs: DOWN_TIMEOUT_MS, capture: true });
@@ -6852,19 +7250,20 @@ ${r.stderr}`, code: r.ok ? 0 : 1 };
   if (action === "status") {
     const r = run("docker", ["compose", "-f", file, ...profiles, "ps"], { timeoutMs: PS_TIMEOUT_MS, capture: true });
     return { message: r.ok ? r.stdout.trim() || `${tag}: no services running.` : `${tag}: status failed.
-${r.stderr}`, code: 0 };
+${r.stderr}`, code: r.ok ? 0 : 1 };
   }
   const pulled = run("docker", ["compose", "-f", file, ...profiles, "pull"], { timeoutMs: pullTimeoutMs() });
   if (!pulled.ok) {
-    return {
-      message: `${tag}: pulling the images failed (they are large \u2014 raise ${envName("DOCKER_PULL_TIMEOUT_MS")}, currently ${pullTimeoutMs()}ms).` + (pulled.stderr ? `
-${pulled.stderr}` : ""),
-      code: 1
-    };
+    const why = pulled.timedOut ? ` after ${pullTimeoutMs()}ms (the images are large \u2014 raise ${envName("DOCKER_PULL_TIMEOUT_MS")})` : " \u2014 docker's output above says why";
+    return { message: `${tag}: pulling the images failed${why}.${pulled.stderr ? `
+${pulled.stderr}` : ""}`, code: 1 };
   }
   const up = run("docker", ["compose", "-f", file, ...profiles, "up", "-d", "--wait"], { timeoutMs: UP_TIMEOUT_MS });
-  if (!up.ok) return { message: `${tag}: up failed.${up.stderr ? `
+  if (!up.ok) {
+    const why = up.timedOut ? ` \u2014 the services were not healthy within ${UP_TIMEOUT_MS / 1e3}s` : "";
+    return { message: `${tag}: up failed${why}.${up.stderr ? `
 ${up.stderr}` : ""}`, code: 1 };
+  }
   return { message: [`${tag}: ${spec.summary}`, ...spec.postUp?.(file, run) ?? []].join("\n"), code: 0 };
 }
 
@@ -6912,324 +7311,6 @@ function resetRunLocks() {
   chains.clear();
 }
 
-// src/cache.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync4, readdirSync as readdirSync3, rmSync as rmSync3, statSync as statSync2 } from "fs";
-import { join as join4 } from "path";
-import { tmpdir as tmpdir4 } from "os";
-
-// src/no-write.ts
-import { mkdirSync as mkdirSync3, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync3 } from "fs";
-var flagged = false;
-function setNoWrite(on) {
-  flagged = on;
-}
-function isNoWrite() {
-  return flagged || envFlag("NO_WRITE");
-}
-var collected = [];
-function ensureDir(dir) {
-  if (isNoWrite()) return;
-  mkdirSync3(dir, { recursive: true });
-}
-function writeArtifact(path, content) {
-  if (isNoWrite()) {
-    const at = collected.findIndex((a) => a.path === path);
-    if (at !== -1) collected[at] = { path, content };
-    else collected.push({ path, content });
-    return path;
-  }
-  writeFileAtomic(path, content);
-  return path;
-}
-var tmpCounter = 0;
-function writeFileAtomic(path, content) {
-  const tmp = `${path}.${process.pid}.${tmpCounter++}.tmp`;
-  try {
-    writeFileSync3(tmp, content);
-    renameSync2(tmp, path);
-  } catch (e) {
-    try {
-      unlinkSync(tmp);
-    } catch {
-    }
-    throw e;
-  }
-}
-function takeArtifacts() {
-  return collected.splice(0, collected.length);
-}
-function resetNoWrite() {
-  flagged = false;
-  collected.length = 0;
-}
-
-// src/cache.ts
-var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
-function cacheDir() {
-  return env("CACHE_DIR") ?? brand().cacheDir ?? join4(tmpdir4(), userScoped(brand().name), "cache");
-}
-function userScoped(name) {
-  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
-  return uid === void 0 ? name : `${name}-${uid}`;
-}
-function cachePath(url, acceptLanguage = "", extractor = "native", variant = "") {
-  const canon = canonicalizeUrl(url);
-  const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
-  const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
-  return join4(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
-}
-var VARIANTS = ["", "consent", "full"];
-var PLAIN = [""];
-function variantOf(opts) {
-  return opts.fullPage ? "full" : opts.stripConsent ? "consent" : "";
-}
-var PDF_CACHE_NS = "pdf";
-var DOC_CACHE_NS = "doc";
-async function currentExtractor(opts, url) {
-  if (looksLikePdfUrl(url)) return PDF_CACHE_NS;
-  if (docFormatForUrl(url)) return DOC_CACHE_NS;
-  if (opts.fullPage) return "native";
-  const base = firecrawlBase(opts);
-  return base && await probeFirecrawl(base, firecrawlIsExplicit(opts)) ? "firecrawl" : "native";
-}
-var DOCUMENT_NAMESPACES = [PDF_CACHE_NS, DOC_CACHE_NS, "pdf-inspector", "pdftotext", "anydoc", "ocr"];
-var WRITTEN_NAMESPACES = ["native", "firecrawl", ...DOCUMENT_NAMESPACES];
-function namespaceFor(result, predicted) {
-  return result.documentType ?? (predicted === PDF_CACHE_NS || predicted === DOC_CACHE_NS ? predicted : result.extractor ?? "native");
-}
-function readAnyNamespace(url, acceptLanguage, namespaces = WRITTEN_NAMESPACES, variants = PLAIN) {
-  let best;
-  for (const ns of namespaces) {
-    for (const variant of ns === "native" ? variants : PLAIN) {
-      const hit = readCache(url, acceptLanguage, ns, variant);
-      if (hit && (!best || hit.cachedAt > best.cachedAt)) best = hit;
-    }
-  }
-  return best;
-}
-function readAnyCopy(url, acceptLanguage, variant) {
-  return readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, [variant]) ?? readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, VARIANTS);
-}
-function ttlMs() {
-  const fallback = brand().cacheTtlMs ?? DEFAULT_TTL_MS;
-  const hours = env("CACHE_TTL_HOURS");
-  if (hours !== void 0) {
-    const h = Number(hours);
-    return Number.isFinite(h) ? Math.round(Math.max(0, h) * 36e5) : fallback;
-  }
-  return envInt("CACHE_TTL_MS", fallback);
-}
-var mode = { refresh: false, offline: false };
-function setCacheMode(next) {
-  mode = { ...mode, ...next };
-}
-function cacheMode() {
-  return { ...mode };
-}
-function resetCacheMode() {
-  mode = { refresh: false, offline: false };
-}
-function isCacheFresh(entry, now = Date.now()) {
-  return typeof entry.cachedAt === "number" && now - entry.cachedAt < ttlMs();
-}
-function revalidationHeaders(entry) {
-  const h = {};
-  if (entry.etag) h["if-none-match"] = entry.etag;
-  if (entry.lastModified) h["if-modified-since"] = entry.lastModified;
-  return h;
-}
-function entryPaths(url, acceptLanguage, extractor, variant) {
-  const meta = cachePath(url, acceptLanguage, extractor, extractor === "native" ? variant : "");
-  return { meta, body: meta.replace(/\.json$/, ".body") };
-}
-function readCache(url, acceptLanguage = "", extractor = "native", variant = "") {
-  const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
-  if (!existsSync4(meta)) return void 0;
-  try {
-    const entry = JSON.parse(readFileSync4(meta, "utf8"));
-    if (typeof entry.cachedAt !== "number") return void 0;
-    const text = existsSync4(body) ? readFileSync4(body, "utf8") : entry.text;
-    if (!text?.trim()) return void 0;
-    return { ...entry, text };
-  } catch {
-    return void 0;
-  }
-}
-function writeCache(url, res, now, acceptLanguage = "", extractor = "native", variant = "") {
-  if (isNoWrite()) return;
-  const dir = cacheDir();
-  const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
-  const { text, note: _note, ...rest } = res;
-  const write = () => {
-    ensureDir2(dir);
-    writeFileAtomic(body, text ?? "");
-    writeFileAtomic(meta, JSON.stringify({ ...rest, cachedAt: now }));
-  };
-  try {
-    write();
-  } catch {
-    ensured.delete(dir);
-    try {
-      write();
-    } catch {
-    }
-  }
-}
-var ensured = /* @__PURE__ */ new Set();
-function ensureDir2(dir) {
-  if (ensured.has(dir)) return;
-  mkdirSync4(dir, { recursive: true });
-  ensured.add(dir);
-}
-function touchCache(url, entry, now, acceptLanguage = "", extractor = "native", variant = "") {
-  writeCache(url, entry, now, acceptLanguage, extractor, variant);
-}
-async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date.now()) {
-  const { refresh, offline } = mode;
-  if (!enabled && !offline) return fetchAndExtract(url, opts);
-  const lang = opts.acceptLanguage ?? "";
-  const variant = variantOf(opts);
-  const served = (entry, note) => {
-    countFetch(Buffer.byteLength(entry.text), true);
-    const { note: _stored, ...rest } = entry;
-    const about = note ?? (entry.truncated ? `The cached text of ${url} is a prefix: the page overran the response size cap.` : void 0);
-    return { ...rest, cached: true, ...about ? { note: about } : {} };
-  };
-  if (offline) {
-    const stored = readAnyCopy(url, lang, variant);
-    if (stored) return served(stored);
-    return { text: "", finalUrl: url, status: 0, note: `Offline: ${url} is not in the cache (drop --offline, or warm it with a normal run).` };
-  }
-  const ns = await currentExtractor(opts, url);
-  const store = (result) => {
-    const target = namespaceFor(result, ns);
-    const entry = ns === "firecrawl" && target === "native" ? { ...result, fallbackFrom: "firecrawl" } : result;
-    writeCache(url, entry, now, lang, target, variant);
-  };
-  const hit = refresh ? void 0 : lookup(url, lang, ns, variant);
-  if (hit && isCacheFresh(hit, now)) return served(hit);
-  let res;
-  const revalidate = hit ? revalidationHeaders(hit) : {};
-  if (hit && Object.keys(revalidate).length) {
-    const probe = await fetchAndExtract(url, { ...opts, headers: revalidate });
-    if (probe.status === 304) {
-      const renewed = { ...hit, etag: probe.etag ?? hit.etag, lastModified: probe.lastModified ?? hit.lastModified };
-      touchCache(url, renewed, now, lang, namespaceFor(hit, ns), variant);
-      return served(renewed);
-    }
-    if (probe.text?.trim()) {
-      store(probe);
-      return probe;
-    }
-    if (probe.status !== 412 && !(probe.status >= 200 && probe.status < 300)) res = probe;
-  }
-  res ??= await fetchAndExtract(url, opts);
-  if (res.text?.trim()) {
-    store(res);
-    return res;
-  }
-  const stale = hit ?? readAnyCopy(url, lang, variant);
-  if (stale) return served(stale, `${url} returned ${res.status || "no response"}; served the cached copy from ${new Date(stale.cachedAt).toISOString()}.`);
-  return res;
-}
-function lookup(url, acceptLanguage, ns, variant) {
-  const best = readAnyNamespace(url, acceptLanguage, [.../* @__PURE__ */ new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
-  if (ns !== "firecrawl") return best;
-  const fallback = readCache(url, acceptLanguage, "native", variant);
-  return fallback?.fallbackFrom === "firecrawl" && (!best || fallback.cachedAt > best.cachedAt) ? fallback : best;
-}
-var WRITER_TMP = /\.\d+\.\d+\.tmp$/;
-function ownFile(name) {
-  const tmp = WRITER_TMP.exec(name);
-  const base = tmp ? name.slice(0, tmp.index) : name;
-  const ext = base.endsWith(".json") ? "json" : base.endsWith(".body") ? "body" : void 0;
-  if (!ext) return void 0;
-  const stem = base.slice(0, -5);
-  const dash = stem.lastIndexOf("-");
-  if (dash < 1 || !/^[0-9a-f]{1,16}$/.test(stem.slice(dash + 1)) || !/^[\w.-]+$/.test(stem.slice(0, dash))) return void 0;
-  return { kind: tmp ? "tmp" : ext, stem };
-}
-function readEntryMeta(abs) {
-  try {
-    const entry = JSON.parse(readFileSync4(abs, "utf8"));
-    return entry && typeof entry.cachedAt === "number" && typeof entry.finalUrl === "string" ? entry : void 0;
-  } catch {
-    return void 0;
-  }
-}
-var ORPHAN_GRACE_MS = 10 * 60 * 1e3;
-function sizeOf(abs) {
-  try {
-    return statSync2(abs).size;
-  } catch {
-    return 0;
-  }
-}
-function cacheStats(now = Date.now()) {
-  const dir = cacheDir();
-  const out = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
-  if (!existsSync4(dir)) return out;
-  let oldest = Number.POSITIVE_INFINITY;
-  let newest = 0;
-  for (const name of readdirSync3(dir)) {
-    const own = ownFile(name);
-    if (!own) continue;
-    const abs = join4(dir, name);
-    if (own.kind !== "json") {
-      out.bytes += sizeOf(abs);
-      continue;
-    }
-    const entry = readEntryMeta(abs);
-    if (!entry) continue;
-    out.bytes += sizeOf(abs);
-    out.entries++;
-    if (isCacheFresh(entry, now)) out.fresh++;
-    else out.stale++;
-    if (entry.cachedAt < oldest) oldest = entry.cachedAt;
-    if (entry.cachedAt > newest) newest = entry.cachedAt;
-  }
-  if (out.entries) {
-    out.oldest = new Date(oldest).toISOString();
-    out.newest = new Date(newest).toISOString();
-  }
-  return out;
-}
-function cacheClean(all = false, now = Date.now()) {
-  const dir = cacheDir();
-  if (!existsSync4(dir) || isNoWrite()) return 0;
-  const names = readdirSync3(dir);
-  const present = new Set(names);
-  const remove = (name) => {
-    try {
-      rmSync3(join4(dir, name), { force: true });
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  const abandoned = (name) => {
-    try {
-      return all || now - statSync2(join4(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
-    } catch {
-      return false;
-    }
-  };
-  let removed = 0;
-  for (const name of names) {
-    const own = ownFile(name);
-    if (!own) continue;
-    if (own.kind === "json") {
-      const entry = readEntryMeta(join4(dir, name));
-      if (!entry || !all && isCacheFresh(entry, now) || !remove(name)) continue;
-      remove(`${own.stem}.body`);
-      removed++;
-    } else if (own.kind === "body" ? !present.has(`${own.stem}.json`) && abandoned(name) : abandoned(name)) {
-      remove(name);
-    }
-  }
-  return removed;
-}
-
 // src/run.ts
 import { join as join5 } from "path";
 import { readFileSync as readFileSync5 } from "fs";
@@ -7240,7 +7321,7 @@ function runId(d = /* @__PURE__ */ new Date()) {
   return `run-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 function shq(s) {
-  return `'${s.replace(/\r?\n/g, " ").replaceAll("'", `'"'"'`)}'`;
+  return `'${s.replace(/\r\n?|\n/g, " ").replaceAll("'", `'"'"'`)}'`;
 }
 function readJsonSafe(path) {
   try {
@@ -7627,6 +7708,11 @@ async function crawlSite(seed, opts = {}) {
   let origin = seedOrigin;
   let section = sectionOf(seed);
   const inScope = (url) => opts.crossOrigin === true || sameOrigin(url, origin);
+  const permitted = async (url) => {
+    if (!opts.authorizeUrl || await opts.authorizeUrl(url)) return true;
+    notes.push(`${url}: refused by the caller's policy.`);
+    return false;
+  };
   const NONE = { rules: [], sitemaps: [], absent: true };
   const robotsPolicy = /* @__PURE__ */ new Map();
   const robotsFor = (url) => {
@@ -7635,6 +7721,7 @@ async function crawlSite(seed, opts = {}) {
     let authorize = robotsPolicy.get(home);
     if (!authorize) {
       authorize = async (target) => {
+        if (!await permitted(target)) return false;
         if (sameSite(target, home) || inScope(target)) return true;
         notes.push(`${target}: destination is outside the crawl origin.`);
         return false;
@@ -7662,6 +7749,7 @@ async function crawlSite(seed, opts = {}) {
   if (!opts.ignoreRobots && robots.unreachable) return { pages, pending: [seed], disallowed, notes: [...notes, unreachable2(seedOrigin, robots)] };
   if (refusesDelay(seed, robots)) return { pages, pending: [seed], disallowed, notes };
   const authorizeHop = async (url, seedHop) => {
+    if (!await permitted(url)) return false;
     if (!seedHop && !inScope(url)) {
       notes.push(`${url}: destination is outside the crawl origin.`);
       return false;
@@ -7678,8 +7766,8 @@ async function crawlSite(seed, opts = {}) {
   const authorizeUrl = (url) => authorizeHop(url, false);
   const authorizeSeed = (url) => authorizeHop(url, true);
   let settleSeed;
-  const seedSettled = new Promise((resolve5) => {
-    settleSeed = resolve5;
+  const seedSettled = new Promise((resolve6) => {
+    settleSeed = resolve6;
   });
   const authorizeSitemap = async (url) => {
     if (!sameOrigin(url, seedOrigin)) await seedSettled;
@@ -7716,7 +7804,7 @@ async function crawlSite(seed, opts = {}) {
     return true;
   };
   const wantSitemap = opts.useSitemap !== false && maxDepth > 0 && maxPages > 1;
-  let sitemap = wantSitemap ? fetchSitemap(seed, { sitemaps: robots.sitemaps, authorizeUrl: authorizeSitemap }) : void 0;
+  let sitemap = wantSitemap ? fetchSitemap(seed, { sitemaps: robots.sitemaps, authorizeUrl: authorizeSitemap, signal: opts.signal }) : void 0;
   let sitemapAgain = false;
   let requests = 0;
   let failed2 = 0;
@@ -7742,7 +7830,7 @@ async function crawlSite(seed, opts = {}) {
     if (!added && rerooted && !sitemapAgain) {
       sitemapAgain = true;
       const home = origin;
-      sitemap = robotsFor(home).then((r) => fetchSitemap(home, { sitemaps: r.sitemaps, authorizeUrl }));
+      sitemap = robotsFor(home).then((r) => fetchSitemap(home, { sitemaps: r.sitemaps, authorizeUrl, signal: opts.signal }));
     }
   };
   const seedItem = { url: seed, depth: 0 };
@@ -7753,10 +7841,12 @@ async function crawlSite(seed, opts = {}) {
       authorizeUrl: isSeed ? authorizeSeed : authorizeUrl,
       // A short Retry-After is waited out and retried inside httpGet; the rest
       // of this host's queue must wait with it, not go out meanwhile.
-      onBackOff: (url, ms) => backOffHost(url, ms)
+      onBackOff: (url, ms) => backOffHost(url, ms),
+      signal: opts.signal
     });
     if (got.retryAfterMs) backOffHost(got.finalUrl, Math.min(got.retryAfterMs, 6e4));
     if (isSeed) settle(got);
+    if (!got.text && opts.signal?.aborted) return { cancelled: true };
     if (!got.text) return { note: `${item.url}: ${got.note ?? "nothing readable"}` };
     return {
       page: {
@@ -7773,6 +7863,10 @@ async function crawlSite(seed, opts = {}) {
   for (; ; ) {
     if (!wave.length && sitemap) await takeSitemap(wave);
     if (!wave.length || pages.length >= maxPages || requests >= maxRequests) break;
+    if (opts.signal?.aborted) {
+      notes.push(`cancelled after ${requests} page request(s).`);
+      break;
+    }
     const room = Math.min(maxPages - pages.length, maxRequests - requests);
     const batch = [];
     let cursor = 0;
@@ -7810,7 +7904,13 @@ async function crawlSite(seed, opts = {}) {
     });
     settleSeed();
     const parents = [];
-    for (const r of settled) {
+    const unread = [];
+    for (const [i, r] of settled.entries()) {
+      if ("cancelled" in r) {
+        unread.push(batch[i]);
+        requests--;
+        continue;
+      }
       if ("note" in r) {
         notes.push(r.note);
         if (!r.duplicate) failed2++;
@@ -7824,13 +7924,14 @@ async function crawlSite(seed, opts = {}) {
     if (sitemap && rootSeed) await takeSitemap(next);
     for (const page of parents) for (const link of page.links) admit(link, page.depth + 1, next);
     if (sitemap && !rootSeed) await takeSitemap(next);
-    wave = [...leftover, ...next];
+    wave = [...unread, ...leftover, ...next];
   }
   const pending = wave.map((q) => q.url);
   const queued = pending.length ? ` with ${pending.length} URL(s) still queued` : "";
-  if (pages.length < maxPages && requests >= maxRequests)
+  const budgetStopped = !opts.signal?.aborted;
+  if (budgetStopped && pages.length < maxPages && requests >= maxRequests)
     notes.push(`stopped after ${requests} page requests, ${failed2} of them failed \u2014 the ceiling for a ${maxPages}-page budget${queued}.`);
-  else if (pending.length) notes.push(`stopped at the ${maxPages}-page budget${queued}.`);
+  else if (budgetStopped && pending.length) notes.push(`stopped at the ${maxPages}-page budget${queued}.`);
   if (skippedFiles) notes.push(`skipped ${skippedFiles} link(s) to images, media, fonts or archives without fetching them.`);
   const policy = [];
   if (opts.ignoreRobots) policy.push("robots.txt was not consulted (ignoreRobots) \u2014 only correct on a site you own.");
@@ -8333,7 +8434,7 @@ function extractNumerals(text, max = 8) {
 
 // src/orchestrate.ts
 import { existsSync as existsSync5 } from "fs";
-import { join as join7, resolve as resolve3 } from "path";
+import { join as join7, resolve as resolve4 } from "path";
 
 // src/orchestrate/templates.ts
 import { join as join6 } from "path";
@@ -8349,6 +8450,11 @@ One sanctioned exception: ${opts.sanctioned}` : ""}
 
 Exception for oversized prose: if a note is too large to return, write ONLY to \`${join6(runAbs, "orchestration", "out")}/<role>-<batch>.md\` \u2014 a file namespaced to you alone \u2014 and return its path.
 `;
+}
+var SMALL_WORKLIST = 3;
+function phaseBatches(phase, emission, smallWorklist) {
+  const floor = emission.collapseFloor ? emission.collapseFloor(smallWorklist) : smallWorklist;
+  return phase.items <= floor ? [phase.ids] : toBatches(phase.ids, emission.batchSize);
 }
 function toBatches(ids, batchSize) {
   const width = Math.max(1, Math.floor(batchSize));
@@ -8369,8 +8475,7 @@ function emitWorkflowScript(phase, emission, runAbs, engineAbs, smallWorklist, c
   const cli = brand().cli;
   const scriptPath = join6(runAbs, "orchestration", `${phase.name}.workflow.mjs`);
   const meta = { name: `${cli}-${phase.name}`, description: emission.description(phase.items), phases: [{ title: emission.title }] };
-  const floor = emission.collapseFloor ? emission.collapseFloor(smallWorklist) : smallWorklist;
-  const batches = phase.items <= floor ? [phase.ids] : toBatches(phase.ids, emission.batchSize);
+  const batches = phaseBatches(phase, emission, smallWorklist);
   const hint = emission.applyHint(runAbs, engineAbs, phase);
   const script = [
     `export const meta = ${JSON.stringify(meta)}`,
@@ -8423,7 +8528,7 @@ function emitWorkflowScript(phase, emission, runAbs, engineAbs, smallWorklist, c
   assertWorkflowSafe(script, phase.name);
   return script;
 }
-function runbookMd(phases, defs, runAbs, engineAbs, cli, preamble = []) {
+function runbookMd(phases, defs, runAbs, engineAbs, cli, preamble = [], smallWorklist = SMALL_WORKLIST) {
   const lines = [`# ${cli} \u2014 orchestration runbook`, ``, `Run: \`${runAbs}\``, ``];
   if (preamble.length) lines.push(...preamble, ``);
   lines.push(
@@ -8445,7 +8550,7 @@ function runbookMd(phases, defs, runAbs, engineAbs, cli, preamble = []) {
       return;
     }
     if (emission) {
-      const batches = toBatches(ph.ids, emission.batchSize);
+      const batches = phaseBatches(ph, emission, smallWorklist);
       lines.push(
         `Fan out: \`Workflow({ scriptPath: "${join6(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
         `(${batches.length} agent(s) of at most ${emission.batchSize} item(s), contract \`agents/${emission.role}.md\`).`,
@@ -8464,10 +8569,9 @@ function runbookMd(phases, defs, runAbs, engineAbs, cli, preamble = []) {
 }
 
 // src/orchestrate.ts
-var SMALL_WORKLIST = 3;
 var BATCH_SIZE = 8;
 function listPhases(runDir, engineAbs, defs) {
-  const run = resolve3(runDir);
+  const run = resolve4(runDir);
   return defs.map((def) => {
     const worklist = join7(run, def.worklist);
     const parsed = readJsonSafe(worklist);
@@ -8485,7 +8589,7 @@ function listPhases(runDir, engineAbs, defs) {
   });
 }
 function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
-  const run = resolve3(runDir);
+  const run = resolve4(runDir);
   if (!existsSync5(run)) {
     return { exitCode: 2, written: [], notices: [], errors: [`run dir not found: ${run}`], phases: [] };
   }
@@ -8539,7 +8643,7 @@ function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
       written.push(writeArtifact(join7(orchDir, `${ph.name}.workflow.mjs`), emitWorkflowScript(ph, def, run, engineAbs, small, opts.constants)));
     }
   }
-  written.push(writeArtifact(join7(orchDir, "RUNBOOK.md"), runbookMd(phases, defs, run, engineAbs, brand().cli, opts.runbookPreamble)));
+  written.push(writeArtifact(join7(orchDir, "RUNBOOK.md"), runbookMd(phases, defs, run, engineAbs, brand().cli, opts.runbookPreamble, small)));
   return { exitCode: 0, written, notices, errors: [], phases };
 }
 
@@ -8556,7 +8660,7 @@ function parseArgs(argv, spec) {
   const valueFlags = new Set(spec.valueFlags);
   const boolFlags = new Set(spec.boolFlags);
   if (argv.length === 0) return { kind: "help" };
-  if (isHelpWord(argv[0])) return { kind: "help" };
+  if (isHelpWord(argv[0])) return argv[1] !== void 0 && commands.has(argv[1]) ? { kind: "help", command: argv[1] } : { kind: "help" };
   if (isVersionWord(argv[0])) return { kind: "version" };
   const command = argv[0];
   if (!commands.has(command)) {
@@ -8578,7 +8682,7 @@ function parseArgs(argv, spec) {
     const eq = arg.indexOf("=");
     const key = eq !== -1 ? arg.slice(2, eq) : arg.slice(2);
     if (!boolFlags.has(key) && !valueFlags.has(key)) {
-      if (isHelpWord(arg)) return { kind: "help" };
+      if (isHelpWord(arg)) return { kind: "help", command };
       if (isVersionWord(arg)) return { kind: "version" };
     }
     if (boolFlags.has(key)) {
@@ -8614,12 +8718,17 @@ function argValue(p, name) {
 function argBool(p, name) {
   return p.bools.has(name);
 }
-function argInt(p, name) {
+function argInt(p, name, range = {}) {
   const raw = p.values[name];
   if (raw === void 0) return void 0;
-  const n = Number(raw);
+  const n = raw.trim() ? Number(raw) : Number.NaN;
   if (!Number.isFinite(n) || !Number.isInteger(n)) {
     throw new UsageError(`--${name} expects a whole number, got "${raw}"`);
+  }
+  const { min, max } = range;
+  if (min !== void 0 && n < min || max !== void 0 && n > max) {
+    const bound = min !== void 0 && max !== void 0 ? `from ${min} to ${max}` : min !== void 0 ? `of at least ${min}` : `of at most ${max}`;
+    throw new UsageError(`--${name} expects a whole number ${bound}, got "${raw}"`);
   }
   return n;
 }
@@ -8673,6 +8782,15 @@ var LATEST_PROTOCOL = PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1];
 var ASSUMED_HTTP_PROTOCOL = "2025-03-26";
 var ANNOTATIONS_SINCE = "2025-03-26";
 var RICH_TOOLS_SINCE = "2025-06-18";
+var PROGRESS_MESSAGE_SINCE = "2025-03-26";
+var BATCHES_REMOVED_IN = "2025-06-18";
+function batchRefusal(batch, negotiated) {
+  if (batch.length === 0) return "invalid request: an empty batch";
+  if (negotiated !== void 0 && negotiated >= BATCHES_REMOVED_IN) {
+    return `invalid request: JSON-RPC batches are not part of MCP ${negotiated} (removed in ${BATCHES_REMOVED_IN}) \u2014 send one message at a time`;
+  }
+  return void 0;
+}
 var DEFAULT_MAX_RESPONSE_BYTES2 = 1e6;
 function isProtocolVersion(v) {
   return typeof v === "string" && PROTOCOL_VERSIONS.includes(v);
@@ -8752,15 +8870,15 @@ function isOriginAllowed(origin, allowed = []) {
 }
 
 // src/mcp/resources.ts
-import { existsSync as existsSync6, readdirSync as readdirSync4, readFileSync as readFileSync6, realpathSync, statSync as statSync3 } from "fs";
-import { basename as basename3, dirname as dirname2, join as join8, resolve as resolve4, sep } from "path";
+import { existsSync as existsSync6, readdirSync as readdirSync4, readFileSync as readFileSync6, realpathSync, statSync as statSync4 } from "fs";
+import { basename as basename3, dirname as dirname2, join as join8, relative, resolve as resolve5, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
 function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname2(fileURLToPath(import.meta.url));
   const name = brand().name;
-  const candidates = [resolve4(here, ".."), resolve4(here, "..", "skills", name), resolve4(here, "..", "..", "skills", name)];
+  const candidates = [resolve5(here, ".."), resolve5(here, "..", "skills", name), resolve5(here, "..", "..", "skills", name)];
   return candidates.find((dir) => existsSync6(join8(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
@@ -8783,7 +8901,7 @@ function readResource(uri, moduleDir) {
   if (!root) throw new ResourceError("no skill payload found next to this build \u2014 nothing to read");
   const rel = uri.slice(URI_SCHEME.length);
   if (!rel) throw new ResourceError("empty resource path");
-  const target = resolve4(root, rel);
+  const target = resolve5(root, rel);
   const rootReal = realpathSync(root);
   let targetReal;
   try {
@@ -8794,7 +8912,11 @@ function readResource(uri, moduleDir) {
   if (targetReal !== rootReal && !targetReal.startsWith(rootReal + sep)) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
-  if (!statSync3(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
+  if (!statSync4(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
+  const served = relative(root, target).split(sep).join("/");
+  if (served !== "SKILL.md" && !/^references\/[^/]+\.md$/.test(served)) {
+    throw new ResourceError(`not a resource this server serves: ${uri} (resources/list names them)`);
+  }
   return { uri, mimeType: "text/markdown", text: readFileSync6(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
@@ -8843,31 +8965,63 @@ function createServer(adapter, opts = {}) {
   const maxBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES2;
   let protocol = LATEST_PROTOCOL;
   const active = /* @__PURE__ */ new Map();
-  const listTools = () => adapter.listTools(protocol);
+  const listTools = () => adapter.listTools(protocol).map((decl) => forRevision(decl, protocol));
   const prompts = () => adapter.prompts ?? [];
-  async function handle(msg, send) {
+  async function handle(msg, send, handleOpts = {}) {
     if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
       send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: expected a JSON-RPC object" } });
+      return;
+    }
+    if (msg.method === void 0 && ("result" in msg || "error" in msg)) return;
+    if (msg.id !== void 0 && msg.id !== null && typeof msg.id !== "string" && typeof msg.id !== "number") {
+      send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: `id` must be a string or a number" } });
       return;
     }
     if (msg.id === void 0 || msg.id === null) {
       if (msg.method === "notifications/cancelled") {
         const target = msg.params?.requestId;
-        if (typeof target === "string" || typeof target === "number") {
-          const request2 = active.get(target);
-          if (request2) request2.cancelled = true;
-        }
+        if (typeof target === "string" || typeof target === "number") active.get(target)?.cancel();
       }
       return;
     }
     const id = msg.id;
-    const request = { cancelled: false };
+    const controller = new AbortController();
+    const request = {
+      cancelled: false,
+      answered: false,
+      cancel() {
+        request.cancelled = true;
+        controller.abort();
+      }
+    };
     active.set(id, request);
+    const lost = handleOpts.signal;
+    const onLost = () => request.cancel();
+    if (lost?.aborted) request.cancel();
+    else lost?.addEventListener("abort", onLost, { once: true });
     const reply = (out) => {
       if (request.cancelled) return;
+      request.answered = true;
       send({ jsonrpc: "2.0", id, ...out });
     };
+    const token = msg.params?._meta?.progressToken;
+    const notify = handleOpts.notify ?? send;
+    let last = Number.NEGATIVE_INFINITY;
+    const progress = (value, total, message) => {
+      if (typeof token !== "string" && typeof token !== "number" || request.cancelled || request.answered) return;
+      if (!Number.isFinite(value) || value <= last) return;
+      last = value;
+      const params = { progressToken: token, progress: value };
+      if (total !== void 0 && Number.isFinite(total)) params.total = total;
+      if (message && protocol >= PROGRESS_MESSAGE_SINCE) params.message = message;
+      notify({ jsonrpc: "2.0", method: "notifications/progress", params });
+    };
+    const context = { signal: controller.signal, progress };
     try {
+      if (typeof msg.method !== "string") {
+        reply({ error: { code: ERR_INVALID_REQUEST, message: "invalid request: no `method`" } });
+        return;
+      }
       switch (msg.method) {
         case "initialize": {
           protocol = negotiateProtocol(msg.params?.protocolVersion);
@@ -8895,10 +9049,15 @@ function createServer(adapter, opts = {}) {
           reply({ result: { tools: listTools() } });
           return;
         case "tools/call":
-          await handleToolCall(msg, reply);
+          await handleToolCall(msg, reply, context);
           return;
         case "resources/list":
           reply({ result: { resources: listResources(opts.skillDir) } });
+          return;
+        // Part of the resources capability declared above; every resource is
+        // a fixed document, so there are no templates to offer.
+        case "resources/templates/list":
+          reply({ result: { resourceTemplates: [] } });
           return;
         case "resources/read": {
           const uri = typeof msg.params?.uri === "string" ? msg.params.uri : "";
@@ -8937,12 +9096,18 @@ function createServer(adapter, opts = {}) {
       reply({ error: { code: ERR_INTERNAL, message: errMessage(e) } });
     } finally {
       if (active.get(id) === request) active.delete(id);
+      lost?.removeEventListener("abort", onLost);
     }
   }
-  async function handleToolCall(msg, reply) {
+  async function handleToolCall(msg, reply, context) {
     const params = msg.params ?? {};
     const name = typeof params.name === "string" ? params.name : "";
-    const args = params.arguments ?? {};
+    const rawArgs = params.arguments ?? {};
+    if (rawArgs === null || typeof rawArgs !== "object" || Array.isArray(rawArgs)) {
+      reply({ error: { code: ERR_INVALID_PARAMS, message: "`arguments` must be an object" } });
+      return;
+    }
+    const args = rawArgs;
     const decl = listTools().find((t) => t.name === name);
     if (!decl) {
       reply({ error: { code: ERR_INVALID_PARAMS, message: `unknown tool: ${name || "(none given)"}` } });
@@ -8960,7 +9125,7 @@ function createServer(adapter, opts = {}) {
           decl.inputSchema.properties[key]?.type === "number" && typeof value === "string" ? Number(value) : value
         ])
       );
-      const { text: raw, artifact } = await adapter.callTool(name, normalized);
+      const { text: raw, artifact } = await adapter.callTool(name, normalized, context);
       const text = capResponse(raw, name, maxBytes, artifact, adapter.capAdvice);
       const capped = text !== raw;
       const structured = protocol >= RICH_TOOLS_SINCE ? structuredContentFor(text, capped, decl.outputSchema !== void 0) : void 0;
@@ -8985,6 +9150,18 @@ function createServer(adapter, opts = {}) {
     },
     tools: listTools
   };
+}
+function forRevision(decl, protocol) {
+  const { title, outputSchema, annotations, ...base } = decl;
+  const out = { ...base };
+  if (protocol >= RICH_TOOLS_SINCE) {
+    if (title !== void 0) out.title = title;
+    if (outputSchema !== void 0) out.outputSchema = outputSchema;
+  }
+  if (protocol >= ANNOTATIONS_SINCE && annotations) {
+    out.annotations = title !== void 0 && annotations.title === void 0 ? { title, ...annotations } : annotations;
+  }
+  return out;
 }
 function errMessage(e) {
   return e instanceof Error ? e.message : String(e);
@@ -9015,20 +9192,45 @@ async function runStdioServer(adapter, opts = {}) {
     void p.finally(() => inFlight.delete(p));
     return p;
   };
-  const drainToLimit = async () => {
-    while (inFlight.size >= MAX_IN_FLIGHT) await Promise.race(inFlight);
-  };
   let active = 0;
   const waiting = [];
-  const runHandler = async (msg, send2) => {
-    while (active >= MAX_IN_FLIGHT) await new Promise((resolve5) => waiting.push(resolve5));
+  const queued = /* @__PURE__ */ new Map();
+  let negotiated;
+  const handleOpts = { notify: send };
+  const runToolCall = async (msg, id, reply) => {
+    const ticket = { cancelled: false };
+    queued.set(id, ticket);
+    try {
+      while (active >= MAX_IN_FLIGHT) await new Promise((resolve6) => waiting.push(resolve6));
+    } finally {
+      if (queued.get(id) === ticket) queued.delete(id);
+    }
+    if (ticket.cancelled) {
+      waiting.shift()?.();
+      return;
+    }
     active++;
     try {
-      await server.handle(msg, send2);
+      await server.handle(msg, reply, handleOpts);
     } finally {
       active--;
       waiting.shift()?.();
     }
+  };
+  const dispatch = async (msg, reply) => {
+    if (msg !== null && typeof msg === "object" && !Array.isArray(msg)) {
+      if (msg.method === "notifications/cancelled") {
+        const target = msg.params?.requestId;
+        const ticket = typeof target === "string" || typeof target === "number" ? queued.get(target) : void 0;
+        if (ticket) ticket.cancelled = true;
+      }
+      if (msg.method === "tools/call" && (typeof msg.id === "string" || typeof msg.id === "number")) {
+        await runToolCall(msg, msg.id, reply);
+        return;
+      }
+    }
+    await server.handle(msg, reply, handleOpts);
+    if (msg?.method === "initialize") negotiated = server.protocolVersion();
   };
   const rl = createInterface({ input, terminal: false });
   try {
@@ -9042,12 +9244,17 @@ async function runStdioServer(adapter, opts = {}) {
         send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
         continue;
       }
-      await drainToLimit();
       if (Array.isArray(parsed)) {
+        const refusal = batchRefusal(parsed, negotiated);
+        if (refusal) {
+          send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: refusal } });
+          continue;
+        }
+        const batch = parsed;
         track(
           (async () => {
             const out = [];
-            await mapLimit(parsed, MAX_IN_FLIGHT, (m) => runHandler(m, (r) => void out.push(r)));
+            await Promise.all(batch.map((m) => dispatch(m, (r) => void out.push(r))));
             if (out.length) emit(JSON.stringify(out) + "\n");
           })().catch(reportInternal(send))
         );
@@ -9057,7 +9264,7 @@ async function runStdioServer(adapter, opts = {}) {
         send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: expected a JSON-RPC object" } });
         continue;
       }
-      track(runHandler(parsed, send).catch(reportInternal(send)));
+      track(dispatch(parsed, send).catch(reportInternal(send)));
     }
     await Promise.all(inFlight);
   } finally {
@@ -9072,20 +9279,20 @@ function reportInternal(send) {
 }
 
 // src/mcp/http.ts
-import { createServer as createHttpServer } from "http";
+import { createHash as createHash3, timingSafeEqual } from "crypto";
 var MCP_PATH = "/mcp";
 var MAX_BODY_BYTES2 = 4 * 1024 * 1024;
+var REQUEST_TIMEOUT_MS = 6e4;
 var CORS_HEADERS = "content-type, accept, mcp-protocol-version, mcp-session-id, authorization, last-event-id";
 var LOOPBACK_BIND = /* @__PURE__ */ new Set(["127.0.0.1", "::1", "localhost"]);
-function startHttpServer(adapter, opts = {}) {
+async function startHttpServer(adapter, opts = {}) {
   const bind = opts.bind ?? "127.0.0.1";
   if (!LOOPBACK_BIND.has(bind) && !opts.allowRemote) {
-    return Promise.reject(
-      new Error(
-        `refusing to bind ${bind}: ${brand().name}'s MCP server fetches arbitrary URLs and reads local files. Pass --allow-remote if that is really what you want.`
-      )
+    throw new Error(
+      `refusing to bind ${bind}: ${brand().name}'s MCP server fetches arbitrary URLs and reads local files. Pass --allow-remote if that is really what you want.`
     );
   }
+  const { createServer: createHttpServer } = await import("http");
   const server = createHttpServer((req, res) => {
     void route(req, res, adapter, opts).catch((e) => {
       if (res.headersSent) {
@@ -9095,17 +9302,17 @@ function startHttpServer(adapter, opts = {}) {
       sendJson(res, 500, { jsonrpc: "2.0", id: null, error: { code: -32603, message: e instanceof Error ? e.message : String(e) } });
     });
   });
-  server.requestTimeout = 0;
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
   server.headersTimeout = 6e4;
   server.keepAliveTimeout = 12e4;
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     server.once("error", reject);
     server.listen(opts.port ?? 0, bind, () => {
       server.removeListener("error", reject);
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : opts.port ?? 0;
       const host = bind.includes(":") ? `[${bind}]` : bind;
-      resolve5({
+      resolve6({
         server,
         port,
         url: `http://${host}:${port}${MCP_PATH}`,
@@ -9134,18 +9341,21 @@ async function route(req, res, adapter, opts) {
     res.end();
     return;
   }
+  if (opts.bearerToken !== void 0 && !bearerMatches(header(req, "authorization"), opts.bearerToken)) {
+    sendJson(res, 401, { error: "this server needs `Authorization: Bearer <token>`" }, origin, { "www-authenticate": 'Bearer realm="mcp"' });
+    return;
+  }
   if (path !== MCP_PATH) {
     sendJson(res, 404, { error: `not found: ${path} (the MCP endpoint is ${MCP_PATH})` }, origin);
     return;
   }
   if (req.method === "GET" || req.method === "DELETE") {
-    res.writeHead(405, { allow: "POST, OPTIONS", ...corsHeaders(origin) });
-    res.end(JSON.stringify({ error: `${req.method} is not supported: this server is stateless and offers no server-initiated stream` }));
+    const why = `${req.method} is not supported: this server is stateless and offers no server-initiated stream`;
+    sendJson(res, 405, { error: why }, origin, { allow: "POST, OPTIONS" });
     return;
   }
   if (req.method !== "POST") {
-    res.writeHead(405, { allow: "POST, OPTIONS", ...corsHeaders(origin) });
-    res.end(JSON.stringify({ error: `${req.method} is not supported` }));
+    sendJson(res, 405, { error: `${req.method} is not supported` }, origin, { allow: "POST, OPTIONS" });
     return;
   }
   const contentType = (header(req, "content-type") ?? "").split(";")[0].trim().toLowerCase();
@@ -9182,18 +9392,51 @@ async function route(req, res, adapter, opts) {
     sendJson(res, 200, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }, origin);
     return;
   }
+  if (Array.isArray(parsed)) {
+    const refusal = batchRefusal(parsed, declared);
+    if (refusal) {
+      sendJson(res, 400, { jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: refusal } }, origin);
+      return;
+    }
+  }
   const mcp = createServer(adapter, opts);
   mcp.setProtocolVersion(protocol);
+  const lost = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) lost.abort();
+  });
+  const single = Array.isArray(parsed) ? void 0 : parsed;
+  const token = single?.params?._meta;
+  const asked = typeof single?.id === "string" || typeof single?.id === "number";
+  if (asked && token?.progressToken !== void 0 && accept.includes("text/event-stream")) {
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", ...corsHeaders(origin) });
+    const event = (m) => {
+      if (!res.writableEnded && !res.destroyed) res.write(`event: message
+data: ${JSON.stringify(m)}
+
+`);
+    };
+    await mcp.handle(single, event, { signal: lost.signal, notify: event });
+    res.end();
+    return;
+  }
   const out = [];
   const collect = (m) => void out.push(m);
   const messages = Array.isArray(parsed) ? parsed : [parsed];
-  for (const m of messages) await mcp.handle(m, collect);
+  for (const m of messages) await mcp.handle(m, collect, { signal: lost.signal, notify: () => {
+  } });
   if (out.length === 0) {
     res.writeHead(202, corsHeaders(origin));
     res.end();
     return;
   }
   sendJson(res, 200, Array.isArray(parsed) ? out : out[0], origin);
+}
+function bearerMatches(sent, token) {
+  const m = /^Bearer[ \t]+(\S+)[ \t]*$/i.exec(sent ?? "");
+  if (!m) return false;
+  const digest = (s) => createHash3("sha256").update(s).digest();
+  return timingSafeEqual(digest(m[1]), digest(token));
 }
 function header(req, name) {
   const v = req.headers[name];
@@ -9214,7 +9457,7 @@ function sendJson(res, status, body, origin, extra = {}) {
 }
 var DRAIN_LIMIT = MAX_BODY_BYTES2 * 8;
 function readBody(req) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const chunks = [];
     let size = 0;
     let over = false;
@@ -9238,7 +9481,7 @@ function readBody(req) {
     });
     req.on("end", () => {
       if (over) reject(new Error("too large"));
-      else resolve5(Buffer.concat(chunks).toString("utf8"));
+      else resolve6(Buffer.concat(chunks).toString("utf8"));
     });
     req.on("error", reject);
     req.on("aborted", () => reject(new Error("client aborted the request")));
@@ -9248,6 +9491,7 @@ export {
   ANNOTATIONS_SINCE,
   ANYDOC_SPEC,
   ASSUMED_HTTP_PROTOCOL,
+  BATCHES_REMOVED_IN,
   BATCH_SIZE,
   COMPOSE_YAML,
   CP1252_C1,
@@ -9267,12 +9511,14 @@ export {
   FILE_LINE_TOKEN,
   FIRECRAWL_DEFAULT_BASE,
   FIRECRAWL_ENV,
+  InvalidParamsError,
   KEYLESS_ENGINES,
   LATEST_PROTOCOL,
   LOCAL_FILE_DOMAIN,
   PDF_EXTRACTORS,
   PDF_INSPECTOR_SPEC,
   PDF_URL_RE,
+  PROGRESS_MESSAGE_SINCE,
   PROTOCOL_VERSIONS,
   PromptError,
   RICH_TOOLS_SINCE,
@@ -9305,6 +9551,7 @@ export {
   awaitHostSlot,
   backOffHost,
   baseLang,
+  batchRefusal,
   bestExcerpt,
   bm25MatchedTerms,
   bm25Score,

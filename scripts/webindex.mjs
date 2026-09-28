@@ -33,9 +33,12 @@ function preserves(before, after, policy, key = "") {
   }
   return Object.is(before, after);
 }
-function checkArtifactRecall(root, ref = "HEAD") {
+function recallPolicy(root) {
   const config = JSON.parse(readFileSync(join(root, "skill.json"), "utf8"));
-  const policy = config.repin?.recall;
+  return config.repin?.recall;
+}
+function checkArtifactRecall(root, ref = "HEAD") {
+  const policy = recallPolicy(root);
   if (!policy) return [];
   const git = (args) => execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   const files = git(["ls-tree", "-r", "--name-only", ref, "--", ...policy.paths]).trim().split("\n").filter(Boolean);
@@ -87,7 +90,7 @@ async function finishRepin(root) {
       const previous = new Set(existing.map((r) => r.databaseId));
       gh(["workflow", "run", workflow, "--ref", "main"]);
       for (let attempt = 0; attempt < 30 && !run; attempt++) {
-        await new Promise((resolve6) => setTimeout(resolve6, 2e3));
+        await new Promise((resolve8) => setTimeout(resolve8, 2e3));
         existing = runs();
         run = existing.find((r) => !previous.has(r.databaseId) && r.event === "workflow_dispatch");
       }
@@ -436,9 +439,9 @@ async function repinSkill(root, config) {
 }
 
 // src/cli.ts
-import { existsSync as existsSync7, readFileSync as readFileSync13 } from "fs";
-import { basename as basename4, extname, join as join15, relative as relative2, resolve as resolve5 } from "path";
-import { pathToFileURL } from "url";
+import { existsSync as existsSync7, readFileSync as readFileSync13, realpathSync as realpathSync3, statSync as statSync6 } from "fs";
+import { basename as basename4, extname, join as join15, relative as relative4, resolve as resolve7 } from "path";
+import { fileURLToPath as fileURLToPath2, pathToFileURL } from "url";
 
 // src/charset.ts
 function bomEncoding(bytes) {
@@ -740,7 +743,7 @@ function binaryName(name) {
   return process.platform === "win32" && name === "npx" ? "npx.cmd" : name;
 }
 function runWithInput(cmd, args, input, timeoutMs, opts = {}) {
-  return new Promise((resolve6) => {
+  return new Promise((resolve8) => {
     let child;
     try {
       const bin = binaryName(cmd);
@@ -752,7 +755,7 @@ function runWithInput(cmd, args, input, timeoutMs, opts = {}) {
         ...opts.env ? { env: opts.env } : {}
       });
     } catch (e) {
-      resolve6({ ok: false, stdout: "", error: e.message });
+      resolve8({ ok: false, stdout: "", error: e.message });
       return;
     }
     const chunks = [];
@@ -771,7 +774,7 @@ ${stderrTail}` : stderrHead + stderrTail).trim();
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve6(r);
+      resolve8(r);
     };
     const timer = setTimeout(() => {
       killTree(child);
@@ -2271,14 +2274,14 @@ function sh(cmd, args, opts = {}) {
 }
 function shAsync(cmd, args, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
-  return new Promise((resolve6) => {
+  return new Promise((resolve8) => {
     let settled = false;
     let timer;
     const done = (r) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve6(r);
+      resolve8(r);
     };
     let child;
     try {
@@ -3334,8 +3337,12 @@ async function httpGet(url, opts = {}) {
   const attempts = attemptsFor(opts.retries);
   let last = { ok: false, status: 0, body: "", contentType: "", url };
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs2();
+  const cancelled = () => ({ ok: false, status: 0, body: "", contentType: "", url, error: "cancelled" });
   for (let attempt = 0; attempt < attempts; attempt++) {
+    if (opts.signal?.aborted) return cancelled();
     const ctrl = new AbortController();
+    const onCancel = () => ctrl.abort();
+    opts.signal?.addEventListener("abort", onCancel, { once: true });
     let t;
     let remainingMs = timeoutMs;
     let startedAt = 0;
@@ -3424,11 +3431,13 @@ async function httpGet(url, opts = {}) {
       }
       return result;
     } catch (e) {
+      if (!timedOut && opts.signal?.aborted) return cancelled();
       last = { ok: false, status: 0, body: "", contentType: "", url, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
       if (timedOut || isPermanentFailure(e)) break;
       if (attempt < attempts - 1) await sleep(defaultRetryMs());
     } finally {
       clearTimeout(t);
+      opts.signal?.removeEventListener("abort", onCancel);
     }
   }
   return last;
@@ -3720,6 +3729,8 @@ function looksLikePdfUrl(url) {
 var PDF_FETCH_OPTS = { accept: "application/pdf,*/*", binary: true, maxBytes: 16 * 1024 * 1024 };
 var DOC_FETCH_OPTS = { accept: "*/*", binary: true, maxBytes: 16 * 1024 * 1024 };
 async function fetchAndExtract(url, opts = {}) {
+  const cancelled = () => ({ text: "", finalUrl: url, status: 0, note: `Fetching ${url} was cancelled.` });
+  if (opts.signal?.aborted) return cancelled();
   const wantsPdf = looksLikePdfUrl(url);
   const wantsDoc = wantsPdf ? void 0 : docFormatForUrl(url);
   let firecrawlNote;
@@ -3743,9 +3754,12 @@ async function fetchAndExtract(url, opts = {}) {
     headers: opts.headers,
     authorizeUrl: opts.authorizeUrl,
     timeoutMs: opts.timeoutMs,
-    onBackOff: opts.onBackOff
+    onBackOff: opts.onBackOff,
+    signal: opts.signal
   };
+  if (opts.signal?.aborted) return cancelled();
   let res = await httpGet(url, fetchOpts);
+  if (opts.signal?.aborted) return cancelled();
   const toldToWait = (res.retryAfterMs ?? 0) > RETRY_AFTER_CAP_MS;
   if (!res.ok && !toldToWait && brand().defaultUa === "contact" && (res.status === 403 || res.status === 429)) {
     res = await httpGet(url, { ...fetchOpts, userAgent: browserUa(), acceptLanguage: opts.acceptLanguage ?? "en-US,en;q=0.9" });
@@ -3779,7 +3793,7 @@ async function fetchAndExtract(url, opts = {}) {
   const answeredHtml = !sniffed && (claimsPdf || claimsDoc !== void 0) && HTML_TYPE_RE.test(mime);
   const route2 = sniffed ?? (answeredHtml ? void 0 : claimsPdf ? "pdf" : claimsDoc);
   if (route2 === "pdf") {
-    const bytes = res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
+    const bytes = res.bytes ?? (await httpGet(url, { ...PDF_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs, signal: opts.signal })).bytes;
     const got = bytes ? await extractPdf(bytes, {
       firecrawl: async () => {
         if (opts.authorizeUrl) return void 0;
@@ -3801,7 +3815,7 @@ async function fetchAndExtract(url, opts = {}) {
   }
   if (route2) {
     const docFmt = route2;
-    const bytes = res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs })).bytes;
+    const bytes = res.bytes ?? (await httpGet(url, { ...DOC_FETCH_OPTS, headers: opts.headers, authorizeUrl: opts.authorizeUrl, timeoutMs: opts.timeoutMs, signal: opts.signal })).bytes;
     const got = bytes ? await extractDocument(bytes, docFmt, {
       firecrawl: async () => {
         if (opts.authorizeUrl) return void 0;
@@ -3910,9 +3924,274 @@ function metaDescriptionOf(html) {
 
 // src/stack.ts
 import { spawnSync as spawnSync3 } from "child_process";
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync8, writeFileSync as writeFileSync4 } from "fs";
+import { existsSync as existsSync3, lstatSync, mkdirSync as mkdirSync3, readFileSync as readFileSync9, statSync as statSync2, writeFileSync as writeFileSync4 } from "fs";
+import { dirname, join as join9, resolve } from "path";
+
+// src/cache.ts
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync8, readdirSync as readdirSync2, rmSync as rmSync2, statSync } from "fs";
+import { join as join8 } from "path";
 import { tmpdir as tmpdir2 } from "os";
-import { dirname, join as join8 } from "path";
+var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
+function cacheDir() {
+  return env("CACHE_DIR") ?? brand().cacheDir ?? join8(tmpdir2(), userScoped(brand().name), "cache");
+}
+function userScoped(name) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
+  return uid === void 0 ? name : `${name}-${uid}`;
+}
+function cachePath(url, acceptLanguage = "", extractor = "native", variant = "") {
+  const canon = canonicalizeUrl(url);
+  const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
+  const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
+  return join8(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
+}
+var VARIANTS = ["", "consent", "full"];
+var PLAIN = [""];
+function variantOf(opts) {
+  return opts.fullPage ? "full" : opts.stripConsent ? "consent" : "";
+}
+var PDF_CACHE_NS = "pdf";
+var DOC_CACHE_NS = "doc";
+async function currentExtractor(opts, url) {
+  if (looksLikePdfUrl(url)) return PDF_CACHE_NS;
+  if (docFormatForUrl(url)) return DOC_CACHE_NS;
+  if (opts.fullPage) return "native";
+  const base = firecrawlBase(opts);
+  return base && await probeFirecrawl(base, firecrawlIsExplicit(opts)) ? "firecrawl" : "native";
+}
+var DOCUMENT_NAMESPACES = [PDF_CACHE_NS, DOC_CACHE_NS, "pdf-inspector", "pdftotext", "anydoc", "ocr"];
+var WRITTEN_NAMESPACES = ["native", "firecrawl", ...DOCUMENT_NAMESPACES];
+function namespaceFor(result, predicted) {
+  return result.documentType ?? (predicted === PDF_CACHE_NS || predicted === DOC_CACHE_NS ? predicted : result.extractor ?? "native");
+}
+function readAnyNamespace(url, acceptLanguage, namespaces = WRITTEN_NAMESPACES, variants = PLAIN) {
+  let best;
+  for (const ns of namespaces) {
+    for (const variant of ns === "native" ? variants : PLAIN) {
+      const hit = readCache(url, acceptLanguage, ns, variant);
+      if (hit && (!best || hit.cachedAt > best.cachedAt)) best = hit;
+    }
+  }
+  return best;
+}
+function readAnyCopy(url, acceptLanguage, variant) {
+  return readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, [variant]) ?? readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, VARIANTS);
+}
+function ttlMs() {
+  const fallback = brand().cacheTtlMs ?? DEFAULT_TTL_MS;
+  const hours = env("CACHE_TTL_HOURS");
+  if (hours !== void 0) {
+    const h = Number(hours);
+    return Number.isFinite(h) ? Math.round(Math.max(0, h) * 36e5) : fallback;
+  }
+  return envInt("CACHE_TTL_MS", fallback);
+}
+var mode = { refresh: false, offline: false };
+function setCacheMode(next) {
+  mode = { ...mode, ...next };
+}
+function isCacheFresh(entry, now = Date.now()) {
+  return typeof entry.cachedAt === "number" && now - entry.cachedAt < ttlMs();
+}
+function revalidationHeaders(entry) {
+  const h = {};
+  if (entry.etag) h["if-none-match"] = entry.etag;
+  if (entry.lastModified) h["if-modified-since"] = entry.lastModified;
+  return h;
+}
+function entryPaths(url, acceptLanguage, extractor, variant) {
+  const meta = cachePath(url, acceptLanguage, extractor, extractor === "native" ? variant : "");
+  return { meta, body: meta.replace(/\.json$/, ".body") };
+}
+function readCache(url, acceptLanguage = "", extractor = "native", variant = "") {
+  const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
+  if (!existsSync2(meta)) return void 0;
+  try {
+    const entry = JSON.parse(readFileSync8(meta, "utf8"));
+    if (typeof entry.cachedAt !== "number") return void 0;
+    const text = existsSync2(body) ? readFileSync8(body, "utf8") : entry.text;
+    if (!text?.trim()) return void 0;
+    return { ...entry, text };
+  } catch {
+    return void 0;
+  }
+}
+function writeCache(url, res, now, acceptLanguage = "", extractor = "native", variant = "") {
+  if (isNoWrite()) return;
+  const dir = cacheDir();
+  const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
+  const { text, note: _note, ...rest } = res;
+  const write = () => {
+    ensureDir2(dir);
+    writeFileAtomic(body, text ?? "");
+    writeFileAtomic(meta, JSON.stringify({ ...rest, cachedAt: now }));
+  };
+  try {
+    write();
+  } catch {
+    ensured.delete(dir);
+    try {
+      write();
+    } catch {
+    }
+  }
+}
+var ensured = /* @__PURE__ */ new Set();
+function ensureDir2(dir) {
+  if (ensured.has(dir)) return;
+  mkdirSync2(dir, { recursive: true });
+  ensured.add(dir);
+}
+function touchCache(url, entry, now, acceptLanguage = "", extractor = "native", variant = "") {
+  writeCache(url, entry, now, acceptLanguage, extractor, variant);
+}
+async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date.now()) {
+  const { refresh, offline } = mode;
+  if (!enabled && !offline) return fetchAndExtract(url, opts);
+  const lang = opts.acceptLanguage ?? "";
+  const variant = variantOf(opts);
+  const served = (entry, note) => {
+    countFetch(Buffer.byteLength(entry.text), true);
+    const { note: _stored, ...rest } = entry;
+    const about = note ?? (entry.truncated ? `The cached text of ${url} is a prefix: the page overran the response size cap.` : void 0);
+    return { ...rest, cached: true, ...about ? { note: about } : {} };
+  };
+  if (offline) {
+    const stored = readAnyCopy(url, lang, variant);
+    if (stored) return served(stored);
+    return { text: "", finalUrl: url, status: 0, note: `Offline: ${url} is not in the cache (drop --offline, or warm it with a normal run).` };
+  }
+  const ns = await currentExtractor(opts, url);
+  const store = (result) => {
+    const target = namespaceFor(result, ns);
+    const entry = ns === "firecrawl" && target === "native" ? { ...result, fallbackFrom: "firecrawl" } : result;
+    writeCache(url, entry, now, lang, target, variant);
+  };
+  const hit = refresh ? void 0 : lookup(url, lang, ns, variant);
+  if (hit && isCacheFresh(hit, now)) return served(hit);
+  let res;
+  const revalidate = hit ? revalidationHeaders(hit) : {};
+  if (hit && Object.keys(revalidate).length) {
+    const probe = await fetchAndExtract(url, { ...opts, headers: revalidate });
+    if (probe.status === 304) {
+      const renewed = { ...hit, etag: probe.etag ?? hit.etag, lastModified: probe.lastModified ?? hit.lastModified };
+      touchCache(url, renewed, now, lang, namespaceFor(hit, ns), variant);
+      return served(renewed);
+    }
+    if (probe.text?.trim()) {
+      store(probe);
+      return probe;
+    }
+    if (probe.status !== 412 && !(probe.status >= 200 && probe.status < 300)) res = probe;
+  }
+  res ??= await fetchAndExtract(url, opts);
+  if (res.text?.trim()) {
+    store(res);
+    return res;
+  }
+  const stale = hit ?? readAnyCopy(url, lang, variant);
+  if (stale) return served(stale, `${url} returned ${res.status || "no response"}; served the cached copy from ${new Date(stale.cachedAt).toISOString()}.`);
+  return res;
+}
+function lookup(url, acceptLanguage, ns, variant) {
+  const best = readAnyNamespace(url, acceptLanguage, [.../* @__PURE__ */ new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
+  if (ns !== "firecrawl") return best;
+  const fallback = readCache(url, acceptLanguage, "native", variant);
+  return fallback?.fallbackFrom === "firecrawl" && (!best || fallback.cachedAt > best.cachedAt) ? fallback : best;
+}
+var WRITER_TMP = /\.\d+\.\d+\.tmp$/;
+function ownFile(name) {
+  const tmp = WRITER_TMP.exec(name);
+  const base = tmp ? name.slice(0, tmp.index) : name;
+  const ext = base.endsWith(".json") ? "json" : base.endsWith(".body") ? "body" : void 0;
+  if (!ext) return void 0;
+  const stem = base.slice(0, -5);
+  const dash = stem.lastIndexOf("-");
+  if (dash < 1 || !/^[0-9a-f]{1,16}$/.test(stem.slice(dash + 1)) || !/^[\w.-]+$/.test(stem.slice(0, dash))) return void 0;
+  return { kind: tmp ? "tmp" : ext, stem };
+}
+function readEntryMeta(abs) {
+  try {
+    const entry = JSON.parse(readFileSync8(abs, "utf8"));
+    return entry && typeof entry.cachedAt === "number" && typeof entry.finalUrl === "string" ? entry : void 0;
+  } catch {
+    return void 0;
+  }
+}
+var ORPHAN_GRACE_MS = 10 * 60 * 1e3;
+function sizeOf(abs) {
+  try {
+    return statSync(abs).size;
+  } catch {
+    return 0;
+  }
+}
+function cacheStats(now = Date.now()) {
+  const dir = cacheDir();
+  const out = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
+  if (!existsSync2(dir)) return out;
+  let oldest = Number.POSITIVE_INFINITY;
+  let newest = 0;
+  for (const name of readdirSync2(dir)) {
+    const own = ownFile(name);
+    if (!own) continue;
+    const abs = join8(dir, name);
+    if (own.kind !== "json") {
+      out.bytes += sizeOf(abs);
+      continue;
+    }
+    const entry = readEntryMeta(abs);
+    if (!entry) continue;
+    out.bytes += sizeOf(abs);
+    out.entries++;
+    if (isCacheFresh(entry, now)) out.fresh++;
+    else out.stale++;
+    if (entry.cachedAt < oldest) oldest = entry.cachedAt;
+    if (entry.cachedAt > newest) newest = entry.cachedAt;
+  }
+  if (out.entries) {
+    out.oldest = new Date(oldest).toISOString();
+    out.newest = new Date(newest).toISOString();
+  }
+  return out;
+}
+function cacheClean(all = false, now = Date.now()) {
+  const dir = cacheDir();
+  if (!existsSync2(dir) || isNoWrite()) return 0;
+  const names = readdirSync2(dir);
+  const present = new Set(names);
+  const remove = (name) => {
+    try {
+      rmSync2(join8(dir, name), { force: true });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const abandoned = (name) => {
+    try {
+      return all || now - statSync(join8(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
+    } catch {
+      return false;
+    }
+  };
+  let removed = 0;
+  for (const name of names) {
+    const own = ownFile(name);
+    if (!own) continue;
+    if (own.kind === "json") {
+      const entry = readEntryMeta(join8(dir, name));
+      if (!entry || !all && isCacheFresh(entry, now) || !remove(name)) continue;
+      remove(`${own.stem}.body`);
+      removed++;
+    } else if (own.kind === "body" ? !present.has(`${own.stem}.json`) && abandoned(name) : abandoned(name)) {
+      remove(name);
+    }
+  }
+  return removed;
+}
+
+// src/stack.ts
 var COMPOSE_YAML = `# Optional, fully-local, no-API-key stack for a semantic mode, web
 # search and content extraction. Start it with \`{{CLI}} semantic up\` (or
 # \`docker compose --profile all up -d\`). The published bundle stays
@@ -4172,23 +4451,53 @@ LOGGING_LEVEL=info
 function renderAsset(template) {
   return template.replaceAll("{{CLI}}", brand().cli);
 }
-function cacheRoot() {
-  return env("CACHE_DIR") ?? brand().cacheDir ?? join8(tmpdir2(), brand().name);
+function composeAssets() {
+  const base = join9(cacheDir(), "compose");
+  return [
+    { path: join9(base, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
+    { path: join9(base, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
+    { path: join9(base, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
+  ];
 }
 function ensureComposeMaterialized() {
-  const base = join8(cacheRoot(), "compose");
-  const composePath = join8(base, "docker-compose.yml");
-  const settingsPath = join8(base, "docker", "searxng", "settings.yml");
-  const firecrawlEnvPath = join8(base, "docker", "firecrawl", "firecrawl.env");
-  writeIfChanged(composePath, renderAsset(COMPOSE_YAML));
-  writeIfChanged(settingsPath, renderAsset(SEARXNG_SETTINGS_YAML));
-  writeIfChanged(firecrawlEnvPath, renderAsset(FIRECRAWL_ENV));
-  return composePath;
+  const assets = composeAssets();
+  for (const a of assets) writeIfChanged(a.path, a.content);
+  return assets[0].path;
+}
+function untrustedStack() {
+  const assets = composeAssets();
+  for (const a of assets) {
+    let body;
+    try {
+      body = readFileSync9(a.path, "utf8");
+    } catch {
+    }
+    if (body !== a.content) return `${a.path} does not hold the stack this binary ships, and could not be rewritten`;
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
+  if (uid === void 0) return void 0;
+  const root = resolve(cacheDir());
+  const top = env("CACHE_DIR") ?? brand().cacheDir ? root : dirname(root);
+  const paths = /* @__PURE__ */ new Set();
+  for (const a of assets) {
+    for (let p = resolve(a.path); p !== top && p !== dirname(p); p = dirname(p)) paths.add(p);
+  }
+  for (const p of [top, ...paths]) {
+    try {
+      const st = p === top ? statSync2(p) : lstatSync(p);
+      if (st.isSymbolicLink()) return `${p} is a symbolic link`;
+      if (st.uid !== uid) return `${p} belongs to another user`;
+      if (st.mode & 2 && !(st.isDirectory() && st.mode & 512)) return `${p} is writable by anyone`;
+    } catch (e) {
+      return `${p} cannot be inspected (${e.message})`;
+    }
+  }
+  return void 0;
 }
 function writeIfChanged(path, content) {
   try {
-    if (existsSync2(path) && readFileSync8(path, "utf8") === content) return;
-    mkdirSync2(dirname(path), { recursive: true });
+    if (existsSync3(path) && readFileSync9(path, "utf8") === content) return;
+    mkdirSync3(dirname(path), { recursive: true });
     writeFileSync4(path, content);
   } catch {
   }
@@ -4198,6 +4507,7 @@ var UP_TIMEOUT_MS = 3e5;
 var DOWN_TIMEOUT_MS = 12e4;
 var PS_TIMEOUT_MS = 3e4;
 var MODEL_PULL_TIMEOUT_MS = 6e5;
+var DAEMON_PROBE_TIMEOUT_MS = 15e3;
 function pullTimeoutMs() {
   return envInt("DOCKER_PULL_TIMEOUT_MS", DEFAULT_PULL_TIMEOUT_MS);
 }
@@ -4211,12 +4521,13 @@ function defaultRun(cmd, args, opts) {
     maxBuffer: 64 * 1024 * 1024,
     stdio: opts.capture ? "pipe" : "inherit"
   });
-  const missing = !!res.error && res.error.code === "ENOENT";
+  const code = res.error?.code;
   return {
     ok: !res.error && res.status === 0,
     stdout: res.stdout ?? "",
     stderr: res.stderr ?? (res.error ? String(res.error.message) : ""),
-    missing
+    missing: code === "ENOENT",
+    ...code === "ETIMEDOUT" ? { timedOut: true } : {}
   };
 }
 function defaultHas(cmd) {
@@ -4281,6 +4592,22 @@ function stackControl(service, action, deps = {}) {
     return { message: `${tag}: docker not found on PATH. The stack is optional \u2014 everything it provides degrades to a note.`, code: 1 };
   }
   const file = ensureComposeMaterialized();
+  const distrust = untrustedStack();
+  if (distrust) {
+    return {
+      message: `${tag}: refusing to run docker against the stack in ${dirname(file)} \u2014 ${distrust}. Set ${envName("CACHE_DIR")} to a directory only you can write.`,
+      code: 1
+    };
+  }
+  const daemon = run("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: DAEMON_PROBE_TIMEOUT_MS, capture: true });
+  if (!daemon.ok) {
+    const why = daemon.stderr.trim().split("\n")[0];
+    return {
+      message: `${tag}: docker is installed but its daemon is not answering \u2014 start Docker (Docker Desktop, colima, or \`systemctl start docker\`) and retry.${why ? `
+${why}` : ""}`,
+      code: 1
+    };
+  }
   const profiles = spec.profiles.flatMap((p) => ["--profile", p]);
   if (action === "down") {
     const r = run("docker", ["compose", "-f", file, ...profiles, "down"], { timeoutMs: DOWN_TIMEOUT_MS, capture: true });
@@ -4290,19 +4617,20 @@ ${r.stderr}`, code: r.ok ? 0 : 1 };
   if (action === "status") {
     const r = run("docker", ["compose", "-f", file, ...profiles, "ps"], { timeoutMs: PS_TIMEOUT_MS, capture: true });
     return { message: r.ok ? r.stdout.trim() || `${tag}: no services running.` : `${tag}: status failed.
-${r.stderr}`, code: 0 };
+${r.stderr}`, code: r.ok ? 0 : 1 };
   }
   const pulled = run("docker", ["compose", "-f", file, ...profiles, "pull"], { timeoutMs: pullTimeoutMs() });
   if (!pulled.ok) {
-    return {
-      message: `${tag}: pulling the images failed (they are large \u2014 raise ${envName("DOCKER_PULL_TIMEOUT_MS")}, currently ${pullTimeoutMs()}ms).` + (pulled.stderr ? `
-${pulled.stderr}` : ""),
-      code: 1
-    };
+    const why = pulled.timedOut ? ` after ${pullTimeoutMs()}ms (the images are large \u2014 raise ${envName("DOCKER_PULL_TIMEOUT_MS")})` : " \u2014 docker's output above says why";
+    return { message: `${tag}: pulling the images failed${why}.${pulled.stderr ? `
+${pulled.stderr}` : ""}`, code: 1 };
   }
   const up = run("docker", ["compose", "-f", file, ...profiles, "up", "-d", "--wait"], { timeoutMs: UP_TIMEOUT_MS });
-  if (!up.ok) return { message: `${tag}: up failed.${up.stderr ? `
+  if (!up.ok) {
+    const why = up.timedOut ? ` \u2014 the services were not healthy within ${UP_TIMEOUT_MS / 1e3}s` : "";
+    return { message: `${tag}: up failed${why}.${up.stderr ? `
 ${up.stderr}` : ""}`, code: 1 };
+  }
   return { message: [`${tag}: ${spec.summary}`, ...spec.postUp?.(file, run) ?? []].join("\n"), code: 0 };
 }
 
@@ -5086,7 +5414,7 @@ function parseSitemap(xml) {
 }
 var SITEMAP_MAX_BYTES = 50 * 1024 * 1024;
 var gunzipAsync = promisify(gunzip);
-async function readSitemapDocument(url, authorize) {
+async function readSitemapDocument(url, authorize, signal) {
   let refused = false;
   const authorizeUrl = authorize && (async (u) => {
     const ok = await authorize(u);
@@ -5098,9 +5426,11 @@ async function readSitemapDocument(url, authorize) {
     timeoutMs: 1e4,
     binary: true,
     maxBytes: SITEMAP_MAX_BYTES,
-    authorizeUrl
+    authorizeUrl,
+    signal
   });
   if (!r.ok) {
+    if (r.error === "cancelled") return {};
     if (r.truncated) return { note: `${url} is larger than the 50 MB a sitemap may be; not read.` };
     if (refused || r.status === 404 || r.status === 410) return {};
     return { note: `could not read ${url} (${r.status ? `status ${r.status}` : r.error ?? "no answer"}).` };
@@ -5144,11 +5474,22 @@ async function fetchSitemap(url, opts = {}) {
       queue.push(fallback);
     }
     if (!queue.length || fetched >= max) break;
+    if (opts.signal?.aborted) {
+      notes.push(`cancelled after ${fetched} sitemap document(s).`);
+      break;
+    }
     const next = queue.shift();
     if (seen.has(next)) continue;
     seen.add(next);
     fetched++;
-    const doc = await readSitemapDocument(next, opts.authorizeUrl);
+    const doc = await readSitemapDocument(next, opts.authorizeUrl, opts.signal);
+    if (opts.signal?.aborted) {
+      queue.unshift(next);
+      seen.delete(next);
+      notes.push(`cancelled after ${fetched - 1} sitemap document(s).`);
+      break;
+    }
+    opts.onDocument?.(next, fetched);
     if (doc.note) notes.push(doc.note);
     if (!doc.text?.trim()) continue;
     const parsed = parseSitemap(doc.text);
@@ -5164,8 +5505,13 @@ async function fetchSitemap(url, opts = {}) {
   if (notes.length) out.notes = notes;
   return out;
 }
-async function fetchFeed(url) {
-  const r = await httpGet(url, { accept: "application/atom+xml,application/rss+xml,application/feed+json,application/xml,*/*", timeoutMs: 1e4 });
+async function fetchFeed(url, opts = {}) {
+  const r = await httpGet(url, {
+    accept: "application/atom+xml,application/rss+xml,application/feed+json,application/xml,*/*",
+    timeoutMs: 1e4,
+    authorizeUrl: opts.authorizeUrl,
+    signal: opts.signal
+  });
   if (!r.ok || !r.body.trim()) return void 0;
   return parseFeed(r.body, r.url);
 }
@@ -5185,10 +5531,10 @@ function parseRobots(body, userAgent) {
   for (const raw of body.split(/\r\n|\r|\n/)) {
     const line = raw.replace(/#.*$/, "").trim();
     if (!line) continue;
-    const sep2 = line.indexOf(":");
-    if (sep2 === -1) continue;
-    const field = line.slice(0, sep2).trim().toLowerCase();
-    const value = line.slice(sep2 + 1).trim();
+    const sep3 = line.indexOf(":");
+    if (sep3 === -1) continue;
+    const field = line.slice(0, sep3).trim().toLowerCase();
+    const value = line.slice(sep3 + 1).trim();
     if (field === "sitemap") {
       if (value) sitemaps.push(value);
       continue;
@@ -5476,6 +5822,11 @@ async function crawlSite(seed, opts = {}) {
   let origin = seedOrigin;
   let section = sectionOf(seed);
   const inScope = (url) => opts.crossOrigin === true || sameOrigin(url, origin);
+  const permitted = async (url) => {
+    if (!opts.authorizeUrl || await opts.authorizeUrl(url)) return true;
+    notes.push(`${url}: refused by the caller's policy.`);
+    return false;
+  };
   const NONE = { rules: [], sitemaps: [], absent: true };
   const robotsPolicy = /* @__PURE__ */ new Map();
   const robotsFor = (url) => {
@@ -5484,6 +5835,7 @@ async function crawlSite(seed, opts = {}) {
     let authorize = robotsPolicy.get(home);
     if (!authorize) {
       authorize = async (target) => {
+        if (!await permitted(target)) return false;
         if (sameSite(target, home) || inScope(target)) return true;
         notes.push(`${target}: destination is outside the crawl origin.`);
         return false;
@@ -5511,6 +5863,7 @@ async function crawlSite(seed, opts = {}) {
   if (!opts.ignoreRobots && robots.unreachable) return { pages, pending: [seed], disallowed, notes: [...notes, unreachable(seedOrigin, robots)] };
   if (refusesDelay(seed, robots)) return { pages, pending: [seed], disallowed, notes };
   const authorizeHop = async (url, seedHop) => {
+    if (!await permitted(url)) return false;
     if (!seedHop && !inScope(url)) {
       notes.push(`${url}: destination is outside the crawl origin.`);
       return false;
@@ -5527,8 +5880,8 @@ async function crawlSite(seed, opts = {}) {
   const authorizeUrl = (url) => authorizeHop(url, false);
   const authorizeSeed = (url) => authorizeHop(url, true);
   let settleSeed;
-  const seedSettled = new Promise((resolve6) => {
-    settleSeed = resolve6;
+  const seedSettled = new Promise((resolve8) => {
+    settleSeed = resolve8;
   });
   const authorizeSitemap = async (url) => {
     if (!sameOrigin(url, seedOrigin)) await seedSettled;
@@ -5565,7 +5918,7 @@ async function crawlSite(seed, opts = {}) {
     return true;
   };
   const wantSitemap = opts.useSitemap !== false && maxDepth > 0 && maxPages > 1;
-  let sitemap = wantSitemap ? fetchSitemap(seed, { sitemaps: robots.sitemaps, authorizeUrl: authorizeSitemap }) : void 0;
+  let sitemap = wantSitemap ? fetchSitemap(seed, { sitemaps: robots.sitemaps, authorizeUrl: authorizeSitemap, signal: opts.signal }) : void 0;
   let sitemapAgain = false;
   let requests = 0;
   let failed2 = 0;
@@ -5591,7 +5944,7 @@ async function crawlSite(seed, opts = {}) {
     if (!added && rerooted && !sitemapAgain) {
       sitemapAgain = true;
       const home = origin;
-      sitemap = robotsFor(home).then((r) => fetchSitemap(home, { sitemaps: r.sitemaps, authorizeUrl }));
+      sitemap = robotsFor(home).then((r) => fetchSitemap(home, { sitemaps: r.sitemaps, authorizeUrl, signal: opts.signal }));
     }
   };
   const seedItem = { url: seed, depth: 0 };
@@ -5602,10 +5955,12 @@ async function crawlSite(seed, opts = {}) {
       authorizeUrl: isSeed ? authorizeSeed : authorizeUrl,
       // A short Retry-After is waited out and retried inside httpGet; the rest
       // of this host's queue must wait with it, not go out meanwhile.
-      onBackOff: (url, ms) => backOffHost(url, ms)
+      onBackOff: (url, ms) => backOffHost(url, ms),
+      signal: opts.signal
     });
     if (got.retryAfterMs) backOffHost(got.finalUrl, Math.min(got.retryAfterMs, 6e4));
     if (isSeed) settle(got);
+    if (!got.text && opts.signal?.aborted) return { cancelled: true };
     if (!got.text) return { note: `${item.url}: ${got.note ?? "nothing readable"}` };
     return {
       page: {
@@ -5622,6 +5977,10 @@ async function crawlSite(seed, opts = {}) {
   for (; ; ) {
     if (!wave.length && sitemap) await takeSitemap(wave);
     if (!wave.length || pages.length >= maxPages || requests >= maxRequests) break;
+    if (opts.signal?.aborted) {
+      notes.push(`cancelled after ${requests} page request(s).`);
+      break;
+    }
     const room = Math.min(maxPages - pages.length, maxRequests - requests);
     const batch = [];
     let cursor = 0;
@@ -5659,7 +6018,13 @@ async function crawlSite(seed, opts = {}) {
     });
     settleSeed();
     const parents = [];
-    for (const r of settled) {
+    const unread = [];
+    for (const [i, r] of settled.entries()) {
+      if ("cancelled" in r) {
+        unread.push(batch[i]);
+        requests--;
+        continue;
+      }
       if ("note" in r) {
         notes.push(r.note);
         if (!r.duplicate) failed2++;
@@ -5673,13 +6038,14 @@ async function crawlSite(seed, opts = {}) {
     if (sitemap && rootSeed) await takeSitemap(next);
     for (const page of parents) for (const link of page.links) admit(link, page.depth + 1, next);
     if (sitemap && !rootSeed) await takeSitemap(next);
-    wave = [...leftover, ...next];
+    wave = [...unread, ...leftover, ...next];
   }
   const pending = wave.map((q) => q.url);
   const queued = pending.length ? ` with ${pending.length} URL(s) still queued` : "";
-  if (pages.length < maxPages && requests >= maxRequests)
+  const budgetStopped = !opts.signal?.aborted;
+  if (budgetStopped && pages.length < maxPages && requests >= maxRequests)
     notes.push(`stopped after ${requests} page requests, ${failed2} of them failed \u2014 the ceiling for a ${maxPages}-page budget${queued}.`);
-  else if (pending.length) notes.push(`stopped at the ${maxPages}-page budget${queued}.`);
+  else if (budgetStopped && pending.length) notes.push(`stopped at the ${maxPages}-page budget${queued}.`);
   if (skippedFiles) notes.push(`skipped ${skippedFiles} link(s) to images, media, fonts or archives without fetching them.`);
   const policy = [];
   if (opts.ignoreRobots) policy.push("robots.txt was not consulted (ignoreRobots) \u2014 only correct on a site you own.");
@@ -5915,8 +6281,8 @@ async function hasChanged(url, previous, opts = {}) {
 }
 
 // src/skillkit/usage.ts
-import { readdirSync as readdirSync2, readFileSync as readFileSync9, statSync } from "fs";
-import { dirname as dirname2, join as join9, relative, resolve } from "path";
+import { readdirSync as readdirSync3, readFileSync as readFileSync10, statSync as statSync3 } from "fs";
+import { dirname as dirname2, join as join10, relative, resolve as resolve2 } from "path";
 var DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|enum)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm;
 var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']((?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs))["']/g;
 function engineExports(dts) {
@@ -5931,13 +6297,13 @@ function engineExports(dts) {
 function walkSources(dir, skip = "vendor", out = []) {
   let entries;
   try {
-    entries = readdirSync2(dir);
+    entries = readdirSync3(dir);
   } catch {
     return out;
   }
   for (const e of entries) {
-    const p = join9(dir, e);
-    if (statSync(p).isDirectory()) {
+    const p = join10(dir, e);
+    if (statSync3(p).isDirectory()) {
       if (e !== skip) walkSources(p, skip, out);
     } else if (e.endsWith(".ts")) out.push(p);
   }
@@ -5945,13 +6311,13 @@ function walkSources(dir, skip = "vendor", out = []) {
 }
 function auditEngineUsage(root, config, dts, engineName) {
   const surface = engineExports(dts);
-  const files = walkSources(join9(root, "src"));
+  const files = walkSources(join10(root, "src"));
   const forks = new Map(Object.entries(config.forks));
   const collisions = [];
   const tolerated = [];
   const imported = /* @__PURE__ */ new Set();
   for (const file of files) {
-    const src = readFileSync9(file, "utf8");
+    const src = readFileSync10(file, "utf8");
     const rel = relative(root, file);
     for (const m of src.matchAll(DECL)) {
       const name = m[1] ?? m[2];
@@ -5968,7 +6334,7 @@ function auditEngineUsage(root, config, dts, engineName) {
         } else {
           let shim = "";
           try {
-            shim = readFileSync9(resolve(dirname2(file), spec.replace(/\.js$/, ".ts")), "utf8");
+            shim = readFileSync10(resolve2(dirname2(file), spec.replace(/\.js$/, ".ts")), "utf8");
           } catch {
             continue;
           }
@@ -5987,11 +6353,12 @@ function auditEngineUsage(root, config, dts, engineName) {
 }
 
 // src/skillkit/bundle.ts
-import { existsSync as existsSync3, readdirSync as readdirSync3, readFileSync as readFileSync10 } from "fs";
-import { join as join10 } from "path";
+import { existsSync as existsSync4, readdirSync as readdirSync4, readFileSync as readFileSync11 } from "fs";
+import { join as join11 } from "path";
 
 // src/cli-kit.ts
 import { basename } from "path";
+var EXIT_OK = 0;
 var EXIT_FAILURE = 1;
 var EXIT_USAGE = 2;
 var UsageError = class extends Error {
@@ -6002,7 +6369,7 @@ function parseArgs(argv, spec) {
   const valueFlags = new Set(spec.valueFlags);
   const boolFlags = new Set(spec.boolFlags);
   if (argv.length === 0) return { kind: "help" };
-  if (isHelpWord(argv[0])) return { kind: "help" };
+  if (isHelpWord(argv[0])) return argv[1] !== void 0 && commands.has(argv[1]) ? { kind: "help", command: argv[1] } : { kind: "help" };
   if (isVersionWord(argv[0])) return { kind: "version" };
   const command = argv[0];
   if (!commands.has(command)) {
@@ -6024,7 +6391,7 @@ function parseArgs(argv, spec) {
     const eq = arg.indexOf("=");
     const key = eq !== -1 ? arg.slice(2, eq) : arg.slice(2);
     if (!boolFlags.has(key) && !valueFlags.has(key)) {
-      if (isHelpWord(arg)) return { kind: "help" };
+      if (isHelpWord(arg)) return { kind: "help", command };
       if (isVersionWord(arg)) return { kind: "version" };
     }
     if (boolFlags.has(key)) {
@@ -6060,12 +6427,17 @@ function argValue(p, name) {
 function argBool(p, name) {
   return p.bools.has(name);
 }
-function argInt(p, name) {
+function argInt(p, name, range = {}) {
   const raw = p.values[name];
   if (raw === void 0) return void 0;
-  const n = Number(raw);
+  const n = raw.trim() ? Number(raw) : Number.NaN;
   if (!Number.isFinite(n) || !Number.isInteger(n)) {
     throw new UsageError(`--${name} expects a whole number, got "${raw}"`);
+  }
+  const { min, max } = range;
+  if (min !== void 0 && n < min || max !== void 0 && n > max) {
+    const bound = min !== void 0 && max !== void 0 ? `from ${min} to ${max}` : min !== void 0 ? `of at least ${min}` : `of at most ${max}`;
+    throw new UsageError(`--${name} expects a whole number ${bound}, got "${raw}"`);
   }
   return n;
 }
@@ -6098,17 +6470,17 @@ function auditSkillBundle(root, config, cli) {
   const out = [];
   const check = (ok, message) => out.push({ ok, message });
   const name = config.name;
-  const skillDir = join10(root, "skills", name);
+  const skillDir = join11(root, "skills", name);
   check(
-    !existsSync3(join10(root, "SKILL.md")),
-    existsSync3(join10(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name}/SKILL.md` : "no root SKILL.md"
+    !existsSync4(join11(root, "SKILL.md")),
+    existsSync4(join11(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name}/SKILL.md` : "no root SKILL.md"
   );
-  const skillMd = join10(skillDir, "SKILL.md");
-  if (!existsSync3(skillMd)) {
+  const skillMd = join11(skillDir, "SKILL.md");
+  if (!existsSync4(skillMd)) {
     check(false, `missing skills/${name}/SKILL.md \u2014 the skill package has no SKILL.md`);
     return out;
   }
-  const raw = readFileSync10(skillMd, "utf8");
+  const raw = readFileSync11(skillMd, "utf8");
   const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
   if (!fm) {
     check(false, `skills/${name}/SKILL.md has no frontmatter block`);
@@ -6131,13 +6503,13 @@ function auditSkillBundle(root, config, cli) {
       len <= DESC_MAX ? `description ${len} chars (<= ${DESC_MAX})` : `description ${len} chars exceeds the ${DESC_MAX}-char headroom cap`
     );
   }
-  const refsDir = join10(skillDir, "references");
-  if (existsSync3(refsDir)) {
-    const files = readdirSync3(refsDir).filter((f) => f.endsWith(".md"));
+  const refsDir = join11(skillDir, "references");
+  if (existsSync4(refsDir)) {
+    const files = readdirSync4(refsDir).filter((f) => f.endsWith(".md"));
     for (const m of new Set(raw.match(/references\/[\w.-]+\.md/g) ?? [])) {
       check(
-        existsSync3(join10(skillDir, m)),
-        existsSync3(join10(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
+        existsSync4(join11(skillDir, m)),
+        existsSync4(join11(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
       );
     }
     for (const f of files) {
@@ -6148,12 +6520,12 @@ function auditSkillBundle(root, config, cli) {
     }
   }
   const bundleRel = `scripts/${name}.mjs`;
-  const rootBundle = join10(root, bundleRel);
-  const pkgBundle = join10(skillDir, bundleRel);
-  if (!existsSync3(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
-  else if (!existsSync3(pkgBundle)) check(false, `missing skills/${name}/${bundleRel} \u2014 run \`skill copy\``);
+  const rootBundle = join11(root, bundleRel);
+  const pkgBundle = join11(skillDir, bundleRel);
+  if (!existsSync4(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
+  else if (!existsSync4(pkgBundle)) check(false, `missing skills/${name}/${bundleRel} \u2014 run \`skill copy\``);
   else {
-    const same = readFileSync10(rootBundle).equals(readFileSync10(pkgBundle));
+    const same = readFileSync11(rootBundle).equals(readFileSync11(pkgBundle));
     check(
       same,
       same ? `embedded engine is byte-identical to ${bundleRel}` : `skills/${name}/${bundleRel} differs from ${bundleRel} \u2014 run \`skill copy\` and commit`
@@ -6162,8 +6534,8 @@ function auditSkillBundle(root, config, cli) {
   if (!cli) return out;
   const universe = /* @__PURE__ */ new Set([...cli.valueFlags, ...cli.boolFlags, "help", "version", ...config.allowedForeignFlags]);
   const docs = [["SKILL.md", raw]];
-  if (existsSync3(refsDir)) {
-    for (const f of readdirSync3(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync10(join10(refsDir, f), "utf8")]);
+  if (existsSync4(refsDir)) {
+    for (const f of readdirSync4(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync11(join11(refsDir, f), "utf8")]);
   }
   let unknown = 0;
   for (const [file, text] of docs) {
@@ -6184,7 +6556,7 @@ function auditSkillBundle(root, config, cli) {
 }
 
 // src/skillkit/scaffold.ts
-import { join as join11 } from "path";
+import { join as join12 } from "path";
 var enginesJson = (engine, repo, minRef) => JSON.stringify(
   {
     _comment: "The packaging contract for this skill, read by `skill vendor|check|bundle`. `forks` is a ratchet: entries may leave, never arrive \u2014 so the next declaration shadowing an engine export is an argued decision rather than a quiet copy. `usageFloor` goes up when a layer lands and never down to make a red run pass.",
@@ -6246,6 +6618,11 @@ jobs:
   # a pin nine releases stale, a re-forked engine layer running beside the
   # vendored one, and a SKILL.md at the repo root that would have installed
   # alone without its engine.
+  #
+  # The CLI is this repo's @maxgfr/webindex devDependency \u2014 the GitHub release
+  # archive \`webindex skill repin\` keeps current \u2014 run with \`pnpm exec\`, which
+  # fails when it is missing. Never \`npx webindex\`: that name on npm is
+  # somebody else's package, and npx would download and run it.
   packaging:
     runs-on: ubuntu-latest
     steps:
@@ -6257,25 +6634,29 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
-      - run: npx webindex skill check
-      - run: npx webindex skill bundle
-      - run: npx webindex skill vendor --check
+      - run: pnpm exec webindex skill check
+      - run: pnpm exec webindex skill bundle
+      - run: pnpm exec webindex skill vendor --check
 `;
 var gitignore = `node_modules/
 coverage/
 *.tsbuildinfo
 `;
+function skillNameProblem(name) {
+  return /^[a-z][a-z0-9-]*$/.test(name) ? void 0 : `"${name}" is not a usable skill name \u2014 lower-case letters, digits and hyphens, starting with a letter.`;
+}
 function scaffoldSkill(root, name, opts = {}) {
   const errors = [];
-  if (!/^[a-z][a-z0-9-]*$/.test(name)) {
-    return { written: [], errors: [`"${name}" is not a usable skill name \u2014 lower-case letters, digits and hyphens, starting with a letter.`] };
-  }
+  const badName = skillNameProblem(name);
+  if (badName) return { written: [], errors: [badName] };
   const prefix = name.toUpperCase().replace(/-/g, "_");
   const files = {
-    [SKILL_CONFIG]: `${enginesJson(name, opts.engineRepo ?? "maxgfr/webindex", opts.minRef ?? "v1.15.0")}
+    // A skill started now is written against the engine release doing the
+    // scaffolding; any older floor lets the staleness gate pass a pin that old.
+    [SKILL_CONFIG]: `${enginesJson(name, opts.engineRepo ?? "maxgfr/webindex", opts.minRef ?? `v${ENGINE_VERSION}`)}
 `,
-    [join11("src", "engine.ts")]: engineShim(name, prefix),
-    [join11("skills", name, "SKILL.md")]: `---
+    [join12("src", "engine.ts")]: engineShim(name, prefix),
+    [join12("skills", name, "SKILL.md")]: `---
 name: ${name}
 description: TODO \u2014 one sentence saying WHEN to use this skill, under 1000 characters.
 ---
@@ -6284,18 +6665,18 @@ description: TODO \u2014 one sentence saying WHEN to use this skill, under 1000 
 
 TODO
 `,
-    [join11(".github", "workflows", "ci.yml")]: ci(),
+    [join12(".github", "workflows", "ci.yml")]: ci(),
     ".gitignore": gitignore
   };
   const written = [];
   const exists = opts.exists;
   for (const [rel, content] of Object.entries(files)) {
-    const path = join11(root, rel);
+    const path = join12(root, rel);
     if (exists?.(path)) {
       errors.push(`${rel} already exists \u2014 left alone.`);
       continue;
     }
-    ensureDir(join11(path, ".."));
+    ensureDir(join12(path, ".."));
     written.push(writeArtifact(path, content));
   }
   return { written, errors };
@@ -6504,7 +6885,8 @@ async function searchViaKeyless(engine, query, opts = {}) {
       accept: "text/html",
       acceptLanguage,
       timeoutMs: Math.max(1, Math.min(opts.timeoutMs ?? 12e3, deadline - Date.now())),
-      retries: 0
+      retries: 0,
+      signal: opts.signal
     });
     if (!r.ok || !r.body.trim()) {
       if (p > 0) break;
@@ -6603,7 +6985,8 @@ async function searchViaSearxng(query, opts = {}) {
       acceptLanguage,
       timeoutMs: Math.max(1, Math.min(QUERY_TIMEOUT_MS, deadline - Date.now())),
       // No retry: the cascade's next rung is the retry.
-      retries: 0
+      retries: 0,
+      signal: opts.signal
     });
     if (!r.ok) {
       if (p === 0) {
@@ -6775,270 +7158,6 @@ function closingNote(rungs) {
     return `Every keyless engine blocked this client (${keyless.map((r) => r.rung).join(", ")}) \u2014 nothing was searched, which is not the same as nothing being there. Try again later, or run \`${cli} stack up\` for a local SearXNG.`;
   }
   return `No engine answered (${rungs.filter((r) => r.outcome !== "disabled").map((r) => `${r.rung} ${r.outcome}`).join(", ")}) \u2014 nothing was searched, which is not the same as nothing being there. Try again later, or run \`${cli} stack up\` for a local SearXNG.`;
-}
-
-// src/cache.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync11, readdirSync as readdirSync4, rmSync as rmSync2, statSync as statSync2 } from "fs";
-import { join as join12 } from "path";
-import { tmpdir as tmpdir3 } from "os";
-var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
-function cacheDir() {
-  return env("CACHE_DIR") ?? brand().cacheDir ?? join12(tmpdir3(), userScoped(brand().name), "cache");
-}
-function userScoped(name) {
-  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
-  return uid === void 0 ? name : `${name}-${uid}`;
-}
-function cachePath(url, acceptLanguage = "", extractor = "native", variant = "") {
-  const canon = canonicalizeUrl(url);
-  const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
-  const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
-  return join12(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
-}
-var VARIANTS = ["", "consent", "full"];
-var PLAIN = [""];
-function variantOf(opts) {
-  return opts.fullPage ? "full" : opts.stripConsent ? "consent" : "";
-}
-var PDF_CACHE_NS = "pdf";
-var DOC_CACHE_NS = "doc";
-async function currentExtractor(opts, url) {
-  if (looksLikePdfUrl(url)) return PDF_CACHE_NS;
-  if (docFormatForUrl(url)) return DOC_CACHE_NS;
-  if (opts.fullPage) return "native";
-  const base = firecrawlBase(opts);
-  return base && await probeFirecrawl(base, firecrawlIsExplicit(opts)) ? "firecrawl" : "native";
-}
-var DOCUMENT_NAMESPACES = [PDF_CACHE_NS, DOC_CACHE_NS, "pdf-inspector", "pdftotext", "anydoc", "ocr"];
-var WRITTEN_NAMESPACES = ["native", "firecrawl", ...DOCUMENT_NAMESPACES];
-function namespaceFor(result, predicted) {
-  return result.documentType ?? (predicted === PDF_CACHE_NS || predicted === DOC_CACHE_NS ? predicted : result.extractor ?? "native");
-}
-function readAnyNamespace(url, acceptLanguage, namespaces = WRITTEN_NAMESPACES, variants = PLAIN) {
-  let best;
-  for (const ns of namespaces) {
-    for (const variant of ns === "native" ? variants : PLAIN) {
-      const hit = readCache(url, acceptLanguage, ns, variant);
-      if (hit && (!best || hit.cachedAt > best.cachedAt)) best = hit;
-    }
-  }
-  return best;
-}
-function readAnyCopy(url, acceptLanguage, variant) {
-  return readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, [variant]) ?? readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, VARIANTS);
-}
-function ttlMs() {
-  const fallback = brand().cacheTtlMs ?? DEFAULT_TTL_MS;
-  const hours = env("CACHE_TTL_HOURS");
-  if (hours !== void 0) {
-    const h = Number(hours);
-    return Number.isFinite(h) ? Math.round(Math.max(0, h) * 36e5) : fallback;
-  }
-  return envInt("CACHE_TTL_MS", fallback);
-}
-var mode = { refresh: false, offline: false };
-function setCacheMode(next) {
-  mode = { ...mode, ...next };
-}
-function isCacheFresh(entry, now = Date.now()) {
-  return typeof entry.cachedAt === "number" && now - entry.cachedAt < ttlMs();
-}
-function revalidationHeaders(entry) {
-  const h = {};
-  if (entry.etag) h["if-none-match"] = entry.etag;
-  if (entry.lastModified) h["if-modified-since"] = entry.lastModified;
-  return h;
-}
-function entryPaths(url, acceptLanguage, extractor, variant) {
-  const meta = cachePath(url, acceptLanguage, extractor, extractor === "native" ? variant : "");
-  return { meta, body: meta.replace(/\.json$/, ".body") };
-}
-function readCache(url, acceptLanguage = "", extractor = "native", variant = "") {
-  const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
-  if (!existsSync4(meta)) return void 0;
-  try {
-    const entry = JSON.parse(readFileSync11(meta, "utf8"));
-    if (typeof entry.cachedAt !== "number") return void 0;
-    const text = existsSync4(body) ? readFileSync11(body, "utf8") : entry.text;
-    if (!text?.trim()) return void 0;
-    return { ...entry, text };
-  } catch {
-    return void 0;
-  }
-}
-function writeCache(url, res, now, acceptLanguage = "", extractor = "native", variant = "") {
-  if (isNoWrite()) return;
-  const dir = cacheDir();
-  const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
-  const { text, note: _note, ...rest } = res;
-  const write = () => {
-    ensureDir2(dir);
-    writeFileAtomic(body, text ?? "");
-    writeFileAtomic(meta, JSON.stringify({ ...rest, cachedAt: now }));
-  };
-  try {
-    write();
-  } catch {
-    ensured.delete(dir);
-    try {
-      write();
-    } catch {
-    }
-  }
-}
-var ensured = /* @__PURE__ */ new Set();
-function ensureDir2(dir) {
-  if (ensured.has(dir)) return;
-  mkdirSync3(dir, { recursive: true });
-  ensured.add(dir);
-}
-function touchCache(url, entry, now, acceptLanguage = "", extractor = "native", variant = "") {
-  writeCache(url, entry, now, acceptLanguage, extractor, variant);
-}
-async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date.now()) {
-  const { refresh, offline } = mode;
-  if (!enabled && !offline) return fetchAndExtract(url, opts);
-  const lang = opts.acceptLanguage ?? "";
-  const variant = variantOf(opts);
-  const served = (entry, note) => {
-    countFetch(Buffer.byteLength(entry.text), true);
-    const { note: _stored, ...rest } = entry;
-    const about = note ?? (entry.truncated ? `The cached text of ${url} is a prefix: the page overran the response size cap.` : void 0);
-    return { ...rest, cached: true, ...about ? { note: about } : {} };
-  };
-  if (offline) {
-    const stored = readAnyCopy(url, lang, variant);
-    if (stored) return served(stored);
-    return { text: "", finalUrl: url, status: 0, note: `Offline: ${url} is not in the cache (drop --offline, or warm it with a normal run).` };
-  }
-  const ns = await currentExtractor(opts, url);
-  const store = (result) => {
-    const target = namespaceFor(result, ns);
-    const entry = ns === "firecrawl" && target === "native" ? { ...result, fallbackFrom: "firecrawl" } : result;
-    writeCache(url, entry, now, lang, target, variant);
-  };
-  const hit = refresh ? void 0 : lookup(url, lang, ns, variant);
-  if (hit && isCacheFresh(hit, now)) return served(hit);
-  let res;
-  const revalidate = hit ? revalidationHeaders(hit) : {};
-  if (hit && Object.keys(revalidate).length) {
-    const probe = await fetchAndExtract(url, { ...opts, headers: revalidate });
-    if (probe.status === 304) {
-      const renewed = { ...hit, etag: probe.etag ?? hit.etag, lastModified: probe.lastModified ?? hit.lastModified };
-      touchCache(url, renewed, now, lang, namespaceFor(hit, ns), variant);
-      return served(renewed);
-    }
-    if (probe.text?.trim()) {
-      store(probe);
-      return probe;
-    }
-    if (probe.status !== 412 && !(probe.status >= 200 && probe.status < 300)) res = probe;
-  }
-  res ??= await fetchAndExtract(url, opts);
-  if (res.text?.trim()) {
-    store(res);
-    return res;
-  }
-  const stale = hit ?? readAnyCopy(url, lang, variant);
-  if (stale) return served(stale, `${url} returned ${res.status || "no response"}; served the cached copy from ${new Date(stale.cachedAt).toISOString()}.`);
-  return res;
-}
-function lookup(url, acceptLanguage, ns, variant) {
-  const best = readAnyNamespace(url, acceptLanguage, [.../* @__PURE__ */ new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
-  if (ns !== "firecrawl") return best;
-  const fallback = readCache(url, acceptLanguage, "native", variant);
-  return fallback?.fallbackFrom === "firecrawl" && (!best || fallback.cachedAt > best.cachedAt) ? fallback : best;
-}
-var WRITER_TMP = /\.\d+\.\d+\.tmp$/;
-function ownFile(name) {
-  const tmp = WRITER_TMP.exec(name);
-  const base = tmp ? name.slice(0, tmp.index) : name;
-  const ext = base.endsWith(".json") ? "json" : base.endsWith(".body") ? "body" : void 0;
-  if (!ext) return void 0;
-  const stem = base.slice(0, -5);
-  const dash = stem.lastIndexOf("-");
-  if (dash < 1 || !/^[0-9a-f]{1,16}$/.test(stem.slice(dash + 1)) || !/^[\w.-]+$/.test(stem.slice(0, dash))) return void 0;
-  return { kind: tmp ? "tmp" : ext, stem };
-}
-function readEntryMeta(abs) {
-  try {
-    const entry = JSON.parse(readFileSync11(abs, "utf8"));
-    return entry && typeof entry.cachedAt === "number" && typeof entry.finalUrl === "string" ? entry : void 0;
-  } catch {
-    return void 0;
-  }
-}
-var ORPHAN_GRACE_MS = 10 * 60 * 1e3;
-function sizeOf(abs) {
-  try {
-    return statSync2(abs).size;
-  } catch {
-    return 0;
-  }
-}
-function cacheStats(now = Date.now()) {
-  const dir = cacheDir();
-  const out = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
-  if (!existsSync4(dir)) return out;
-  let oldest = Number.POSITIVE_INFINITY;
-  let newest = 0;
-  for (const name of readdirSync4(dir)) {
-    const own = ownFile(name);
-    if (!own) continue;
-    const abs = join12(dir, name);
-    if (own.kind !== "json") {
-      out.bytes += sizeOf(abs);
-      continue;
-    }
-    const entry = readEntryMeta(abs);
-    if (!entry) continue;
-    out.bytes += sizeOf(abs);
-    out.entries++;
-    if (isCacheFresh(entry, now)) out.fresh++;
-    else out.stale++;
-    if (entry.cachedAt < oldest) oldest = entry.cachedAt;
-    if (entry.cachedAt > newest) newest = entry.cachedAt;
-  }
-  if (out.entries) {
-    out.oldest = new Date(oldest).toISOString();
-    out.newest = new Date(newest).toISOString();
-  }
-  return out;
-}
-function cacheClean(all = false, now = Date.now()) {
-  const dir = cacheDir();
-  if (!existsSync4(dir) || isNoWrite()) return 0;
-  const names = readdirSync4(dir);
-  const present = new Set(names);
-  const remove = (name) => {
-    try {
-      rmSync2(join12(dir, name), { force: true });
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  const abandoned = (name) => {
-    try {
-      return all || now - statSync2(join12(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
-    } catch {
-      return false;
-    }
-  };
-  let removed = 0;
-  for (const name of names) {
-    const own = ownFile(name);
-    if (!own) continue;
-    if (own.kind === "json") {
-      const entry = readEntryMeta(join12(dir, name));
-      if (!entry || !all && isCacheFresh(entry, now) || !remove(name)) continue;
-      remove(`${own.stem}.body`);
-      removed++;
-    } else if (own.kind === "body" ? !present.has(`${own.stem}.json`) && abandoned(name) : abandoned(name)) {
-      remove(name);
-    }
-  }
-  return removed;
 }
 
 // src/structured.ts
@@ -7226,9 +7345,9 @@ function resolveUrl2(url, base) {
 
 // src/repo.ts
 import { createHash as createHash3, randomBytes } from "crypto";
-import { existsSync as existsSync5, mkdirSync as mkdirSync4, readdirSync as readdirSync5, renameSync as renameSync2, rmSync as rmSync3, statSync as statSync3 } from "fs";
-import { tmpdir as tmpdir4 } from "os";
-import { basename as basename2, join as join13, resolve as resolve2 } from "path";
+import { existsSync as existsSync5, mkdirSync as mkdirSync4, readdirSync as readdirSync5, renameSync as renameSync2, rmSync as rmSync3, statSync as statSync4 } from "fs";
+import { tmpdir as tmpdir3 } from "os";
+import { basename as basename2, join as join13, resolve as resolve3 } from "path";
 
 // src/forge-host.ts
 var KINDS = /* @__PURE__ */ new Set(["github", "gitlab", "gitea"]);
@@ -7259,8 +7378,8 @@ function hostForgeKind(host) {
 function resolveRepo(raw, opts = {}) {
   const trimmed = raw.trim();
   if (trimmed) {
-    const asPath = resolve2(trimmed);
-    if (existsSync5(asPath) && statSync3(asPath).isDirectory()) {
+    const asPath = resolve3(trimmed);
+    if (existsSync5(asPath) && statSync4(asPath).isDirectory()) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename2(asPath)}-${asPath}`)}` };
     }
   }
@@ -7352,13 +7471,13 @@ function originUrl(dir) {
 }
 
 // src/forge.ts
-import { resolve as resolve3 } from "path";
+import { resolve as resolve4 } from "path";
 function forgeKind(host, opts = {}) {
   return opts.kind ?? hostForgeKind(host);
 }
 function forgeRef(ref, opts = {}) {
   if (!ref.isLocal) return ref;
-  const origin = originUrl(resolve3(ref.raw));
+  const origin = originUrl(resolve4(ref.raw));
   if (!origin) return ref;
   const remote = resolveRepo(origin.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]*@/i, "$1"), opts);
   return remote.host === "generic" || remote.isLocal ? ref : remote;
@@ -7993,7 +8112,17 @@ async function resolvePackageResult(name, opts = {}) {
 var PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
 var LATEST_PROTOCOL = PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1];
 var ASSUMED_HTTP_PROTOCOL = "2025-03-26";
+var ANNOTATIONS_SINCE = "2025-03-26";
 var RICH_TOOLS_SINCE = "2025-06-18";
+var PROGRESS_MESSAGE_SINCE = "2025-03-26";
+var BATCHES_REMOVED_IN = "2025-06-18";
+function batchRefusal(batch, negotiated) {
+  if (batch.length === 0) return "invalid request: an empty batch";
+  if (negotiated !== void 0 && negotiated >= BATCHES_REMOVED_IN) {
+    return `invalid request: JSON-RPC batches are not part of MCP ${negotiated} (removed in ${BATCHES_REMOVED_IN}) \u2014 send one message at a time`;
+  }
+  return void 0;
+}
 var DEFAULT_MAX_RESPONSE_BYTES2 = 1e6;
 function isProtocolVersion(v) {
   return typeof v === "string" && PROTOCOL_VERSIONS.includes(v);
@@ -8073,15 +8202,15 @@ function isOriginAllowed(origin, allowed = []) {
 }
 
 // src/mcp/resources.ts
-import { existsSync as existsSync6, readdirSync as readdirSync6, readFileSync as readFileSync12, realpathSync, statSync as statSync4 } from "fs";
-import { basename as basename3, dirname as dirname3, join as join14, resolve as resolve4, sep } from "path";
+import { existsSync as existsSync6, readdirSync as readdirSync6, readFileSync as readFileSync12, realpathSync, statSync as statSync5 } from "fs";
+import { basename as basename3, dirname as dirname3, join as join14, relative as relative2, resolve as resolve5, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
 function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname3(fileURLToPath(import.meta.url));
   const name = brand().name;
-  const candidates = [resolve4(here, ".."), resolve4(here, "..", "skills", name), resolve4(here, "..", "..", "skills", name)];
+  const candidates = [resolve5(here, ".."), resolve5(here, "..", "skills", name), resolve5(here, "..", "..", "skills", name)];
   return candidates.find((dir) => existsSync6(join14(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
@@ -8104,7 +8233,7 @@ function readResource(uri, moduleDir) {
   if (!root) throw new ResourceError("no skill payload found next to this build \u2014 nothing to read");
   const rel = uri.slice(URI_SCHEME.length);
   if (!rel) throw new ResourceError("empty resource path");
-  const target = resolve4(root, rel);
+  const target = resolve5(root, rel);
   const rootReal = realpathSync(root);
   let targetReal;
   try {
@@ -8115,7 +8244,11 @@ function readResource(uri, moduleDir) {
   if (targetReal !== rootReal && !targetReal.startsWith(rootReal + sep)) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
-  if (!statSync4(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
+  if (!statSync5(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
+  const served = relative2(root, target).split(sep).join("/");
+  if (served !== "SKILL.md" && !/^references\/[^/]+\.md$/.test(served)) {
+    throw new ResourceError(`not a resource this server serves: ${uri} (resources/list names them)`);
+  }
   return { uri, mimeType: "text/markdown", text: readFileSync12(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
@@ -8164,31 +8297,63 @@ function createServer(adapter, opts = {}) {
   const maxBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES2;
   let protocol = LATEST_PROTOCOL;
   const active = /* @__PURE__ */ new Map();
-  const listTools = () => adapter.listTools(protocol);
+  const listTools = () => adapter.listTools(protocol).map((decl) => forRevision(decl, protocol));
   const prompts = () => adapter.prompts ?? [];
-  async function handle(msg, send) {
+  async function handle(msg, send, handleOpts = {}) {
     if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
       send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: expected a JSON-RPC object" } });
+      return;
+    }
+    if (msg.method === void 0 && ("result" in msg || "error" in msg)) return;
+    if (msg.id !== void 0 && msg.id !== null && typeof msg.id !== "string" && typeof msg.id !== "number") {
+      send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: `id` must be a string or a number" } });
       return;
     }
     if (msg.id === void 0 || msg.id === null) {
       if (msg.method === "notifications/cancelled") {
         const target = msg.params?.requestId;
-        if (typeof target === "string" || typeof target === "number") {
-          const request2 = active.get(target);
-          if (request2) request2.cancelled = true;
-        }
+        if (typeof target === "string" || typeof target === "number") active.get(target)?.cancel();
       }
       return;
     }
     const id = msg.id;
-    const request = { cancelled: false };
+    const controller = new AbortController();
+    const request = {
+      cancelled: false,
+      answered: false,
+      cancel() {
+        request.cancelled = true;
+        controller.abort();
+      }
+    };
     active.set(id, request);
+    const lost = handleOpts.signal;
+    const onLost = () => request.cancel();
+    if (lost?.aborted) request.cancel();
+    else lost?.addEventListener("abort", onLost, { once: true });
     const reply = (out) => {
       if (request.cancelled) return;
+      request.answered = true;
       send({ jsonrpc: "2.0", id, ...out });
     };
+    const token = msg.params?._meta?.progressToken;
+    const notify = handleOpts.notify ?? send;
+    let last = Number.NEGATIVE_INFINITY;
+    const progress = (value, total, message) => {
+      if (typeof token !== "string" && typeof token !== "number" || request.cancelled || request.answered) return;
+      if (!Number.isFinite(value) || value <= last) return;
+      last = value;
+      const params = { progressToken: token, progress: value };
+      if (total !== void 0 && Number.isFinite(total)) params.total = total;
+      if (message && protocol >= PROGRESS_MESSAGE_SINCE) params.message = message;
+      notify({ jsonrpc: "2.0", method: "notifications/progress", params });
+    };
+    const context = { signal: controller.signal, progress };
     try {
+      if (typeof msg.method !== "string") {
+        reply({ error: { code: ERR_INVALID_REQUEST, message: "invalid request: no `method`" } });
+        return;
+      }
       switch (msg.method) {
         case "initialize": {
           protocol = negotiateProtocol(msg.params?.protocolVersion);
@@ -8216,10 +8381,15 @@ function createServer(adapter, opts = {}) {
           reply({ result: { tools: listTools() } });
           return;
         case "tools/call":
-          await handleToolCall(msg, reply);
+          await handleToolCall(msg, reply, context);
           return;
         case "resources/list":
           reply({ result: { resources: listResources(opts.skillDir) } });
+          return;
+        // Part of the resources capability declared above; every resource is
+        // a fixed document, so there are no templates to offer.
+        case "resources/templates/list":
+          reply({ result: { resourceTemplates: [] } });
           return;
         case "resources/read": {
           const uri = typeof msg.params?.uri === "string" ? msg.params.uri : "";
@@ -8258,12 +8428,18 @@ function createServer(adapter, opts = {}) {
       reply({ error: { code: ERR_INTERNAL, message: errMessage(e) } });
     } finally {
       if (active.get(id) === request) active.delete(id);
+      lost?.removeEventListener("abort", onLost);
     }
   }
-  async function handleToolCall(msg, reply) {
+  async function handleToolCall(msg, reply, context) {
     const params = msg.params ?? {};
     const name = typeof params.name === "string" ? params.name : "";
-    const args = params.arguments ?? {};
+    const rawArgs = params.arguments ?? {};
+    if (rawArgs === null || typeof rawArgs !== "object" || Array.isArray(rawArgs)) {
+      reply({ error: { code: ERR_INVALID_PARAMS, message: "`arguments` must be an object" } });
+      return;
+    }
+    const args = rawArgs;
     const decl = listTools().find((t) => t.name === name);
     if (!decl) {
       reply({ error: { code: ERR_INVALID_PARAMS, message: `unknown tool: ${name || "(none given)"}` } });
@@ -8281,7 +8457,7 @@ function createServer(adapter, opts = {}) {
           decl.inputSchema.properties[key]?.type === "number" && typeof value === "string" ? Number(value) : value
         ])
       );
-      const { text: raw, artifact } = await adapter.callTool(name, normalized);
+      const { text: raw, artifact } = await adapter.callTool(name, normalized, context);
       const text = capResponse(raw, name, maxBytes, artifact, adapter.capAdvice);
       const capped = text !== raw;
       const structured = protocol >= RICH_TOOLS_SINCE ? structuredContentFor(text, capped, decl.outputSchema !== void 0) : void 0;
@@ -8306,6 +8482,18 @@ function createServer(adapter, opts = {}) {
     },
     tools: listTools
   };
+}
+function forRevision(decl, protocol) {
+  const { title, outputSchema, annotations, ...base } = decl;
+  const out = { ...base };
+  if (protocol >= RICH_TOOLS_SINCE) {
+    if (title !== void 0) out.title = title;
+    if (outputSchema !== void 0) out.outputSchema = outputSchema;
+  }
+  if (protocol >= ANNOTATIONS_SINCE && annotations) {
+    out.annotations = title !== void 0 && annotations.title === void 0 ? { title, ...annotations } : annotations;
+  }
+  return out;
 }
 function errMessage(e) {
   return e instanceof Error ? e.message : String(e);
@@ -8336,20 +8524,45 @@ async function runStdioServer(adapter, opts = {}) {
     void p.finally(() => inFlight.delete(p));
     return p;
   };
-  const drainToLimit = async () => {
-    while (inFlight.size >= MAX_IN_FLIGHT) await Promise.race(inFlight);
-  };
   let active = 0;
   const waiting = [];
-  const runHandler = async (msg, send2) => {
-    while (active >= MAX_IN_FLIGHT) await new Promise((resolve6) => waiting.push(resolve6));
+  const queued = /* @__PURE__ */ new Map();
+  let negotiated;
+  const handleOpts = { notify: send };
+  const runToolCall = async (msg, id, reply) => {
+    const ticket = { cancelled: false };
+    queued.set(id, ticket);
+    try {
+      while (active >= MAX_IN_FLIGHT) await new Promise((resolve8) => waiting.push(resolve8));
+    } finally {
+      if (queued.get(id) === ticket) queued.delete(id);
+    }
+    if (ticket.cancelled) {
+      waiting.shift()?.();
+      return;
+    }
     active++;
     try {
-      await server.handle(msg, send2);
+      await server.handle(msg, reply, handleOpts);
     } finally {
       active--;
       waiting.shift()?.();
     }
+  };
+  const dispatch2 = async (msg, reply) => {
+    if (msg !== null && typeof msg === "object" && !Array.isArray(msg)) {
+      if (msg.method === "notifications/cancelled") {
+        const target = msg.params?.requestId;
+        const ticket = typeof target === "string" || typeof target === "number" ? queued.get(target) : void 0;
+        if (ticket) ticket.cancelled = true;
+      }
+      if (msg.method === "tools/call" && (typeof msg.id === "string" || typeof msg.id === "number")) {
+        await runToolCall(msg, msg.id, reply);
+        return;
+      }
+    }
+    await server.handle(msg, reply, handleOpts);
+    if (msg?.method === "initialize") negotiated = server.protocolVersion();
   };
   const rl = createInterface({ input, terminal: false });
   try {
@@ -8363,12 +8576,17 @@ async function runStdioServer(adapter, opts = {}) {
         send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
         continue;
       }
-      await drainToLimit();
       if (Array.isArray(parsed)) {
+        const refusal = batchRefusal(parsed, negotiated);
+        if (refusal) {
+          send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: refusal } });
+          continue;
+        }
+        const batch = parsed;
         track(
           (async () => {
             const out = [];
-            await mapLimit(parsed, MAX_IN_FLIGHT, (m) => runHandler(m, (r) => void out.push(r)));
+            await Promise.all(batch.map((m) => dispatch2(m, (r) => void out.push(r))));
             if (out.length) emit(JSON.stringify(out) + "\n");
           })().catch(reportInternal(send))
         );
@@ -8378,7 +8596,7 @@ async function runStdioServer(adapter, opts = {}) {
         send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: expected a JSON-RPC object" } });
         continue;
       }
-      track(runHandler(parsed, send).catch(reportInternal(send)));
+      track(dispatch2(parsed, send).catch(reportInternal(send)));
     }
     await Promise.all(inFlight);
   } finally {
@@ -8393,20 +8611,20 @@ function reportInternal(send) {
 }
 
 // src/mcp/http.ts
-import { createServer as createHttpServer } from "http";
+import { createHash as createHash4, timingSafeEqual } from "crypto";
 var MCP_PATH = "/mcp";
 var MAX_BODY_BYTES2 = 4 * 1024 * 1024;
+var REQUEST_TIMEOUT_MS = 6e4;
 var CORS_HEADERS = "content-type, accept, mcp-protocol-version, mcp-session-id, authorization, last-event-id";
 var LOOPBACK_BIND = /* @__PURE__ */ new Set(["127.0.0.1", "::1", "localhost"]);
-function startHttpServer(adapter, opts = {}) {
+async function startHttpServer(adapter, opts = {}) {
   const bind = opts.bind ?? "127.0.0.1";
   if (!LOOPBACK_BIND.has(bind) && !opts.allowRemote) {
-    return Promise.reject(
-      new Error(
-        `refusing to bind ${bind}: ${brand().name}'s MCP server fetches arbitrary URLs and reads local files. Pass --allow-remote if that is really what you want.`
-      )
+    throw new Error(
+      `refusing to bind ${bind}: ${brand().name}'s MCP server fetches arbitrary URLs and reads local files. Pass --allow-remote if that is really what you want.`
     );
   }
+  const { createServer: createHttpServer } = await import("http");
   const server = createHttpServer((req, res) => {
     void route(req, res, adapter, opts).catch((e) => {
       if (res.headersSent) {
@@ -8416,17 +8634,17 @@ function startHttpServer(adapter, opts = {}) {
       sendJson(res, 500, { jsonrpc: "2.0", id: null, error: { code: -32603, message: e instanceof Error ? e.message : String(e) } });
     });
   });
-  server.requestTimeout = 0;
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
   server.headersTimeout = 6e4;
   server.keepAliveTimeout = 12e4;
-  return new Promise((resolve6, reject) => {
+  return new Promise((resolve8, reject) => {
     server.once("error", reject);
     server.listen(opts.port ?? 0, bind, () => {
       server.removeListener("error", reject);
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : opts.port ?? 0;
       const host = bind.includes(":") ? `[${bind}]` : bind;
-      resolve6({
+      resolve8({
         server,
         port,
         url: `http://${host}:${port}${MCP_PATH}`,
@@ -8455,18 +8673,21 @@ async function route(req, res, adapter, opts) {
     res.end();
     return;
   }
+  if (opts.bearerToken !== void 0 && !bearerMatches(header(req, "authorization"), opts.bearerToken)) {
+    sendJson(res, 401, { error: "this server needs `Authorization: Bearer <token>`" }, origin, { "www-authenticate": 'Bearer realm="mcp"' });
+    return;
+  }
   if (path !== MCP_PATH) {
     sendJson(res, 404, { error: `not found: ${path} (the MCP endpoint is ${MCP_PATH})` }, origin);
     return;
   }
   if (req.method === "GET" || req.method === "DELETE") {
-    res.writeHead(405, { allow: "POST, OPTIONS", ...corsHeaders(origin) });
-    res.end(JSON.stringify({ error: `${req.method} is not supported: this server is stateless and offers no server-initiated stream` }));
+    const why = `${req.method} is not supported: this server is stateless and offers no server-initiated stream`;
+    sendJson(res, 405, { error: why }, origin, { allow: "POST, OPTIONS" });
     return;
   }
   if (req.method !== "POST") {
-    res.writeHead(405, { allow: "POST, OPTIONS", ...corsHeaders(origin) });
-    res.end(JSON.stringify({ error: `${req.method} is not supported` }));
+    sendJson(res, 405, { error: `${req.method} is not supported` }, origin, { allow: "POST, OPTIONS" });
     return;
   }
   const contentType = (header(req, "content-type") ?? "").split(";")[0].trim().toLowerCase();
@@ -8503,18 +8724,51 @@ async function route(req, res, adapter, opts) {
     sendJson(res, 200, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }, origin);
     return;
   }
+  if (Array.isArray(parsed)) {
+    const refusal = batchRefusal(parsed, declared);
+    if (refusal) {
+      sendJson(res, 400, { jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: refusal } }, origin);
+      return;
+    }
+  }
   const mcp = createServer(adapter, opts);
   mcp.setProtocolVersion(protocol);
+  const lost = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) lost.abort();
+  });
+  const single = Array.isArray(parsed) ? void 0 : parsed;
+  const token = single?.params?._meta;
+  const asked = typeof single?.id === "string" || typeof single?.id === "number";
+  if (asked && token?.progressToken !== void 0 && accept.includes("text/event-stream")) {
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", ...corsHeaders(origin) });
+    const event = (m) => {
+      if (!res.writableEnded && !res.destroyed) res.write(`event: message
+data: ${JSON.stringify(m)}
+
+`);
+    };
+    await mcp.handle(single, event, { signal: lost.signal, notify: event });
+    res.end();
+    return;
+  }
   const out = [];
   const collect = (m) => void out.push(m);
   const messages = Array.isArray(parsed) ? parsed : [parsed];
-  for (const m of messages) await mcp.handle(m, collect);
+  for (const m of messages) await mcp.handle(m, collect, { signal: lost.signal, notify: () => {
+  } });
   if (out.length === 0) {
     res.writeHead(202, corsHeaders(origin));
     res.end();
     return;
   }
   sendJson(res, 200, Array.isArray(parsed) ? out : out[0], origin);
+}
+function bearerMatches(sent, token) {
+  const m = /^Bearer[ \t]+(\S+)[ \t]*$/i.exec(sent ?? "");
+  if (!m) return false;
+  const digest = (s) => createHash4("sha256").update(s).digest();
+  return timingSafeEqual(digest(m[1]), digest(token));
 }
 function header(req, name) {
   const v = req.headers[name];
@@ -8535,7 +8789,7 @@ function sendJson(res, status, body, origin, extra = {}) {
 }
 var DRAIN_LIMIT = MAX_BODY_BYTES2 * 8;
 function readBody(req) {
-  return new Promise((resolve6, reject) => {
+  return new Promise((resolve8, reject) => {
     const chunks = [];
     let size = 0;
     let over = false;
@@ -8559,11 +8813,129 @@ function readBody(req) {
     });
     req.on("end", () => {
       if (over) reject(new Error("too large"));
-      else resolve6(Buffer.concat(chunks).toString("utf8"));
+      else resolve8(Buffer.concat(chunks).toString("utf8"));
     });
     req.on("error", reject);
     req.on("aborted", () => reject(new Error("client aborted the request")));
   });
+}
+
+// src/mcp/policy.ts
+import { lookup as dnsLookup } from "dns/promises";
+import { realpathSync as realpathSync2 } from "fs";
+import { isIP } from "net";
+import { isAbsolute as isAbsolute2, relative as relative3, resolve as resolve6, sep as sep2 } from "path";
+var V4_NON_PUBLIC = [
+  ["0.0.0.0", 8],
+  // "this network" — 0.0.0.0 itself reaches the local host
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  // carrier-grade NAT, and Alibaba Cloud's metadata endpoint
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  // link-local: AWS, GCP, Azure and OpenStack metadata
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
+  ["192.88.99.0", 24],
+  ["192.168.0.0", 16],
+  ["198.18.0.0", 15],
+  ["198.51.100.0", 24],
+  ["203.0.113.0", 24],
+  ["224.0.0.0", 4],
+  // multicast
+  ["240.0.0.0", 4]
+  // reserved, and the broadcast address
+];
+var v4Number = (ip) => ip.split(".").reduce((n, octet) => n * 256 + Number(octet), 0);
+function v4Public(n) {
+  return !V4_NON_PUBLIC.some(([base, bits]) => Math.floor(n / 2 ** (32 - bits)) === Math.floor(v4Number(base) / 2 ** (32 - bits)));
+}
+function v6Groups(ip) {
+  let s = ip.toLowerCase();
+  const zone = s.indexOf("%");
+  if (zone !== -1) s = s.slice(0, zone);
+  const lastColon = s.lastIndexOf(":");
+  const quad = s.slice(lastColon + 1);
+  if (quad.includes(".")) {
+    if (isIP(quad) !== 4) return void 0;
+    const n = v4Number(quad);
+    s = `${s.slice(0, lastColon + 1)}${Math.floor(n / 65536).toString(16)}:${(n % 65536).toString(16)}`;
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return void 0;
+  const parse = (part) => part ? part.split(":").map((h) => /^[0-9a-f]{1,4}$/.test(h) ? Number.parseInt(h, 16) : Number.NaN) : [];
+  const head = parse(halves[0]);
+  const tail = halves.length === 2 ? parse(halves[1]) : [];
+  const fill = 8 - head.length - tail.length;
+  if (halves.length === 2 ? fill < 0 : fill !== 0) return void 0;
+  const groups = [...head, ...new Array(fill).fill(0), ...tail];
+  return groups.every((g) => Number.isInteger(g)) ? groups : void 0;
+}
+function embeddedV4(g) {
+  const tail = g[6] * 65536 + g[7];
+  if (g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0) {
+    if (g[4] === 0 && (g[5] === 0 || g[5] === 65535)) return tail;
+    if (g[4] === 65535 && g[5] === 0) return tail;
+  }
+  if (g[0] === 100 && g[1] === 65435 && g[2] === 0 && g[3] === 0 && g[4] === 0 && g[5] === 0) return tail;
+  if (g[0] === 8194) return g[1] * 65536 + g[2];
+  return void 0;
+}
+function isPublicAddress(ip) {
+  const kind = isIP(ip);
+  if (kind === 4) return v4Public(v4Number(ip));
+  if (kind !== 6) return false;
+  const g = v6Groups(ip);
+  if (!g) return false;
+  const v4 = embeddedV4(g);
+  if (v4 !== void 0) return v4Public(v4);
+  if ((g[0] & 57344) !== 8192) return false;
+  if (g[0] === 8193 && (g[1] === 0 || g[1] === 3512 || g[1] === 2 && g[2] === 0)) return false;
+  if ((g[0] & 65520) === 16368) return false;
+  return true;
+}
+var systemLookup = (host) => dnsLookup(host, { all: true, verbatim: true });
+async function publicUrlRefusal(url, lookup2 = systemLookup) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return `not a URL: ${url}`;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return `${parsed.protocol} is not http(s)`;
+  const host = parsed.hostname.startsWith("[") ? parsed.hostname.slice(1, -1) : parsed.hostname;
+  if (isIP(host)) return isPublicAddress(host) ? void 0 : `${host} is not a public address`;
+  let addresses;
+  try {
+    addresses = await lookup2(host);
+  } catch (e) {
+    return `${host} did not resolve (${e.code ?? e.message})`;
+  }
+  if (!addresses.length) return `${host} did not resolve`;
+  const inside = addresses.find((a) => !isPublicAddress(a.address));
+  return inside ? `${host} resolves to ${inside.address}, which is not a public address` : void 0;
+}
+function publicUrlsOnly(lookup2) {
+  return async (url) => await publicUrlRefusal(url, lookup2) === void 0;
+}
+function confinePath(root, requested) {
+  const rootReal = realpathSync2(root);
+  const inside = (p) => {
+    const rel = relative3(rootReal, p);
+    return !isAbsolute2(rel) && rel !== ".." && !rel.startsWith(`..${sep2}`);
+  };
+  const outside = new Error(`${requested} is outside ${rootReal}, the only directory this server reads files from`);
+  const target = resolve6(rootReal, requested);
+  if (!inside(target)) throw outside;
+  let real;
+  try {
+    real = realpathSync2(target);
+  } catch {
+    throw new Error(`no such file under ${rootReal}: ${requested}`);
+  }
+  if (!inside(real)) throw outside;
+  return real;
 }
 
 // src/cli.ts
@@ -8580,7 +8952,7 @@ USAGE
                           [--timeout <ms>]
   webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>] [--full-page]
                        [--cache] [--refresh] [--offline] [--timeout <ms>]
-  webindex extract <file> [--json] [--full-page]
+  webindex extract <file|-> [--json] [--full-page]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--dense] [--json]
   webindex repo <ref> [--forge github|gitlab|gitea] [--json]
   webindex issues <ref> [--terms "<words>"] [--limit <n>] [--forge <kind>] [--json]
@@ -8588,11 +8960,12 @@ USAGE
   webindex releases <ref> [--limit <n>] [--forge <kind>] [--json]
   webindex tags <ref> [--limit <n>] [--forge <kind>] [--json]
   webindex package <name> [--registry npm|pypi|crates] [--version <semver>] [--json]
-  webindex meta <url> [--json]
+  webindex meta <url|file|-> [--json]
   webindex robots <url> [--json]
   webindex sitemap <url> [--max <n>] [--json]
   webindex feed <url> [--json]
   webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>] [--allow-remote]
+               [--public-only] [--allow-private] [--extract-root <dir>]
   webindex searxng   up|down|status
   webindex firecrawl up|down|status
   webindex semantic  up|down|status
@@ -8600,15 +8973,19 @@ USAGE
   webindex cache     status|clean [--all] [--json]
   webindex crawl <url> --max <n> [--depth <n>] [--prefix <path>] [--no-sitemap]
                        [--cross-origin] [--json]
-  webindex tables <url> [--markdown] [--json]
+  webindex tables <url|file|-> [--markdown] [--json]
   webindex embed <text> | --docs <file.json|-> [--lines] [--json]
   webindex hybrid --query <q> [--docs <file.json|->] [--limit <n>] [--json]
   webindex changed <url> [--etag <v>] [--last-modified <date>] [--hash <sha256>]
                          [--timeout <ms>] [--json]
-  webindex skill     check|bundle|copy|doctor [--root <dir>] [--json]
+  webindex skill     check [--engine <name>] [--root <dir>] [--json]
+  webindex skill     bundle|copy|doctor [--root <dir>] [--json]
   webindex skill     vendor [--engine <name>] --ref <tag> | --check
+  webindex skill     repin [--root <dir>] [--json]
+  webindex skill     finish [--root <dir>]
+  webindex skill     recall [--ref <baseline>] [--root <dir>]
   webindex skill     init <name> [--root <dir>]
-  webindex doctor
+  webindex doctor [--json]
   webindex version
 
 COMMANDS
@@ -8632,10 +9009,10 @@ COMMANDS
              304; --refresh re-fetches and rewrites the entry; --offline
              serves only what the cache holds. --json adds finalUrl (after
              redirects), canonical, documentType and cached.
-  extract    Same extraction, on a file already on disk, recognised by its bytes
-             when its name says otherwise. For both, --full-page keeps the
-             whole HTML page through the built-in reader: navigation, footer
-             and consent banners included.
+  extract    Same extraction, on a file already on disk (- reads stdin),
+             recognised by its bytes when its name says otherwise. For both,
+             --full-page keeps the whole HTML page through the built-in reader:
+             navigation, footer and consent banners included.
   rank       Order candidate documents against a question \u2014 BM25F, then a
              near-duplicate collapse, then MMR so the top says several
              different things. Reads a JSON array of {url,title,text} from
@@ -8657,7 +9034,8 @@ COMMANDS
   issues     Search a repository's issues on GitHub, GitLab or Gitea. Every
              term must match; when together they match nothing, it searches
              once more with the most distinctive ones and says so on stderr.
-  prs        The same, over pull or merge requests.
+  prs        Search a repository's pull or merge requests, as issues searches
+             its issues.
   releases   Its releases, newest first, with their notes.
   tags       Its tags \u2014 the versions of a project that tags without
              publishing releases.
@@ -8667,7 +9045,8 @@ COMMANDS
              at all. A registry that cannot be reached stops the search, so
              another ecosystem's namesake never answers in its place.
   meta       What a page says about itself: JSON-LD, OpenGraph and meta tags \u2014
-             author, dates, type, canonical URL.
+             author, dates, type, canonical URL. A saved page on disk (- reads
+             stdin) is decoded as extract decodes it.
   robots     Whether robots.txt permits fetching that URL. Exits non-zero when
              it does not, so it composes in a shell.
   sitemap    The URLs a site lists in its sitemap: the ones robots.txt names,
@@ -8677,7 +9056,17 @@ COMMANDS
              50 MB. The children --max did not reach are named on stderr.
   feed       A site's RSS, Atom or JSON Feed, or the feeds the page
              advertises. Relative entry links are resolved.
-  mcp        Serve fetch/extract to an agent over MCP (stdio by default).
+  mcp        Serve these commands to an agent as MCP tools \u2014 search, fetch,
+             extract, rank, the forge, registry and site lookups, tables,
+             embed and crawl (hybrid and skill stay here). stdio by default;
+             --transport http binds loopback unless --allow-remote.
+             --public-only refuses URLs that are, or resolve to, loopback,
+             private, link-local or metadata addresses, checked again at
+             every redirect; --extract-root <dir> confines webindex_extract
+             to one directory (symlinks resolved). --allow-remote turns both
+             walls on: no local file at all without --extract-root, and
+             --allow-private lifts the address one. With WEBINDEX_MCP_TOKEN
+             set, HTTP answers only requests carrying it as a bearer token.
   searxng    Bring the keyless SearXNG container up or down, or show it.
   firecrawl  Same for Firecrawl, which cleans a page with a real browser. It
              delegates its own search to SearXNG, so this starts both.
@@ -8702,7 +9091,8 @@ COMMANDS
              robots.txt that errors, or a Crawl-delay over 60 s, stops it.
   tables     The tables on a page as headers and rows, with colspan and rowspan
              resolved. Plain extraction flattens a table into prose in which
-             every figure has lost its row and column.
+             every figure has lost its row and column. A saved page on disk (-
+             reads stdin) is decoded as extract decodes it.
   embed      Vectors for a text, from the local Ollama. No key, and nothing
              leaves the machine. Needs \`webindex semantic up\`. --docs embeds a
              JSON array of strings (--lines: one text per non-empty line) in
@@ -8724,6 +9114,11 @@ COMMANDS
              the engine exports; 'bundle' proves \`skills add\` would install a
              working skill rather than a lone SKILL.md; 'copy' embeds the built
              engine in the package; 'init' scaffolds a new skill repository.
+             'repin', 'finish' and 'recall' are the steps of the reusable
+             .github/workflows/skill-repin.yml: move every pin to the newest
+             stable release, wait for CI and publication to complete, and check
+             that regenerated artifacts kept every identity of the --ref
+             baseline (HEAD by default).
              Dev-time only \u2014 it reads a repo, it never runs inside one.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
@@ -8732,7 +9127,11 @@ COMMANDS
              installed.
 
 ENVIRONMENT
+  WEBINDEX_SEARXNG       SearXNG base URL, or "off"   (default http://localhost:8888)
+  WEBINDEX_ENGINES       keyless engines to try: a comma list, or "off"  (default all)
   WEBINDEX_FIRECRAWL     Firecrawl base URL, or "off"  (default http://localhost:3002)
+  WEBINDEX_FIRECRAWL_KEY a bearer key, only for a hosted Firecrawl
+  WEBINDEX_PAGE_DELAY_MS pause between two result pages of one engine (default 350)
   WEBINDEX_PDF_ENGINE    the PDF rungs to run, in order: a comma list of
                          pdf-inspector|anydoc|firecrawl|pdftotext|native|ocr, or "none"
   WEBINDEX_DOC_ENGINE    the office rungs to run, in order: a comma list of
@@ -8742,7 +9141,8 @@ ENVIRONMENT
   WEBINDEX_NPX_TIMEOUT_MS  how long one npx rung may run, first download included
                          (default 90000)
   WEBINDEX_OCR_MAX       documents this process may OCR (default 3)
-  WEBINDEX_ENGINES       keyless engines to try: a comma list, or "off"  (default all)
+  WEBINDEX_OCR_LANG, WEBINDEX_OCR_TIMEOUT_MS
+                         tesseract's language (default eng), one document's budget (300000)
   WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
   WEBINDEX_QDRANT        vector store base URL, or "off"      (default http://localhost:6333)
   WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
@@ -8751,22 +9151,38 @@ ENVIRONMENT
                          document ("none" for none); default from the model \u2014 nomic's
                          "search_query: " / "search_document: ", mxbai's, e5's
   WEBINDEX_EMBED_MAX_CHARS  characters of each document hybrid embeds (default 8000, 0 = all)
+  WEBINDEX_EMBED_BATCH, WEBINDEX_EMBED_CONCURRENCY
+                         texts per embedding request (16), requests in flight (4)
   WEBINDEX_QDRANT_UPSERT_BATCH  points per upsert request (default 256)
+  WEBINDEX_RRF_K         the fusion constant rank and hybrid use (default 60)
   WEBINDEX_TIMEOUT_MS    how long a request may stay silent before it is abandoned,
                          not retried (default 20000; --timeout overrides it per call)
-  WEBINDEX_CACHE_DIR     where the fetch cache lives (default <tmp>/webindex-<uid>/cache)
+  WEBINDEX_MAX_ATTEMPTS, WEBINDEX_RETRY_MS
+                         attempts per request (default 2, at most 5), back-off before a retry (600)
+  WEBINDEX_CACHE_DIR     where the fetch cache lives, and the stack in compose/
+                         (default <tmp>/webindex-<uid>/cache)
   WEBINDEX_CACHE_TTL_HOURS  how long a cached page stays fresh (default 24; fractions allowed)
+  WEBINDEX_NO_WRITE      write nothing: no cache entry, no eviction
+  WEBINDEX_NO_ROBOTS     robots and crawl do not consult robots.txt \u2014 only on a site you own
+  WEBINDEX_ROBOTS_UA     the token robots.txt groups are matched against (default webindex)
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
   WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
   WEBINDEX_MAX_CRAWL_DELAY_MS the longest robots.txt Crawl-delay a crawl waits out, in ms
                               (default 60000); a site asking for more is not crawled
+  WEBINDEX_PUBLIC_ONLY   set to make every \`mcp\` run --public-only
+  WEBINDEX_EXTRACT_ROOT  the directory \`mcp\` confines webindex_extract to (--extract-root)
+  WEBINDEX_MCP_TOKEN     the bearer token \`mcp --transport http\` then requires
   WEBINDEX_UA            override the browser User-Agent
   GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, GITEA_TOKEN
-                         optional forge tokens; each goes only to github.com, gitlab.com,
-                         or a host listed in WEBINDEX_FORGE_HOSTS
+                         optional forge tokens (WEBINDEX_GITHUB_TOKEN and its kin win over
+                         them); each goes only to github.com, gitlab.com, or a host listed
+                         in WEBINDEX_FORGE_HOSTS
   WEBINDEX_FORGE_HOSTS   self-hosted forges, e.g. "salsa.debian.org=gitlab,git.corp=github":
                          each is queried as that forge and receives that forge's token
+  WEBINDEX_NO_GH         never reach for the gh CLI on github.com \u2014 plain HTTP only
+  WEBINDEX_DOCKER_PULL_TIMEOUT_MS  the image-pull budget of up (default 1200000)
 
+The README lists every variable, the library-only ones included.
 Every optional helper degrades to a note. Nothing here needs an API key.`;
 var VALUE_FLAGS = [
   "root",
@@ -8794,7 +9210,8 @@ var VALUE_FLAGS = [
   "max",
   "timeout",
   "forge",
-  "prefix"
+  "prefix",
+  "extract-root"
 ];
 var BOOL_FLAGS = [
   "json",
@@ -8809,7 +9226,9 @@ var BOOL_FLAGS = [
   "refresh",
   "offline",
   "dense",
-  "lines"
+  "lines",
+  "public-only",
+  "allow-private"
 ];
 var COMMANDS = [
   "search",
@@ -8839,6 +9258,7 @@ var COMMANDS = [
   "stack"
 ];
 var SPEC = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS };
+var SKILL_ACTIONS = ["check", "bundle", "vendor", "copy", "doctor", "init", "repin", "finish", "recall"];
 function fail(msg) {
   process.stderr.write(`webindex: ${msg}
 `);
@@ -8854,6 +9274,32 @@ function argTimeout(args) {
   if (ms !== void 0 && ms < 1) throw new UsageError(`--timeout expects a positive number of milliseconds, got "${ms}"`);
   return ms;
 }
+function mcpPolicy(args, allowRemote) {
+  const allowPrivate = argBool(args, "allow-private");
+  if (allowPrivate && argBool(args, "public-only")) usage("--public-only and --allow-private contradict each other");
+  const publicOnly = !allowPrivate && (argBool(args, "public-only") || envFlag("PUBLIC_ONLY") || allowRemote);
+  const rootArg = argValue(args, "extract-root") ?? env("EXTRACT_ROOT");
+  let extractRoot;
+  if (rootArg !== void 0) {
+    extractRoot = resolve7(rootArg);
+    let isDir = false;
+    try {
+      isDir = statSync6(extractRoot).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) usage(`--extract-root ${rootArg} is not a directory`);
+  }
+  return { publicOnly, ...extractRoot !== void 0 ? { extractRoot } : allowRemote ? { noLocalFiles: true } : {} };
+}
+function mcpPolicyNotice(policy, allowRemote, allowPrivate) {
+  const lines = [];
+  if (policy.publicOnly) lines.push(`fetches: public addresses only${allowRemote ? " (the --allow-remote default; --allow-private lifts it)" : ""}.`);
+  else if (allowRemote && allowPrivate) lines.push("fetches: any address, this machine's own network included (--allow-private).");
+  if (policy.extractRoot !== void 0) lines.push(`local files: only under ${policy.extractRoot}.`);
+  else if (policy.noLocalFiles) lines.push("local files: none, and webindex_extract is off (--extract-root <dir> offers one directory).");
+  return lines;
+}
 function toolTimeoutMs(value) {
   const n = typeof value === "string" ? Number(value) : value;
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(3e5, Math.max(1, Math.round(n))) : void 0;
@@ -8868,14 +9314,15 @@ var FORGE_ARG = {
   description: "Which forge a self-hosted host runs when its name does not say (salsa.debian.org is gitlab). Omit for github.com, gitlab.com, Codeberg.",
   enum: [...FORGE_KINDS]
 };
+var fetchFailure = (r) => r.status ? `status ${r.status}` : r.error ?? "no answer";
 function forgeTarget(raw, kind) {
   const opts = kind ? { kind } : {};
   return forgeRef(resolveRepo(raw, opts), opts);
 }
-async function extractLocal(path, fullPage = false) {
+async function extractLocal(path, fullPage = false, given) {
   let bytes;
   try {
-    bytes = readFileSync13(path);
+    bytes = given ?? readFileSync13(path);
   } catch (e) {
     throw new ToolError(`cannot read ${path}: ${e.message}`);
   }
@@ -8899,6 +9346,25 @@ async function extractLocal(path, fullPage = false) {
   const text = looksHtml ? htmlToText(fullPage ? raw : extractMainHtml(raw), { fullPage }) : raw;
   const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text) : { text, dropped: 0 };
   return { text: consent.text, extractor: looksHtml ? "native" : "plain", consentDropped: consent.dropped };
+}
+async function tagCommit(repo, tag) {
+  let viaGh;
+  if (have("gh")) {
+    try {
+      return releaseCommit(repo, tag);
+    } catch (e) {
+      viaGh = e.message.trim().split("\n")[0];
+    }
+  }
+  const r = await httpJson("GET", `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(tag)}`, void 0, {
+    accept: "application/vnd.github+json",
+    headers: forgeAuthHeaders("github", "api.github.com")
+  });
+  const sha = r.ok ? r.data?.sha : void 0;
+  if (typeof sha === "string" && /^[a-f0-9]{40}$/.test(sha)) return sha;
+  throw new ToolError(
+    `could not resolve ${repo}@${tag} to a commit \u2014 GitHub answered ${r.status ? `HTTP ${r.status}` : r.error ?? "nothing"}${viaGh ? `, and gh said: ${viaGh}` : ""}`
+  );
 }
 function competitionRanks(values) {
   const order = values.map((_, i) => i).sort((a, b) => values[b] - values[a]);
@@ -8985,6 +9451,33 @@ function readDocsInput(args, usageLine) {
     fail(`cannot read ${src === void 0 || src === "-" ? "stdin" : src}: ${e.message}`);
   }
 }
+function readStdin(usageLine) {
+  if (process.stdin.isTTY) usage(usageLine);
+  try {
+    return readFileSync13(0);
+  } catch (e) {
+    fail(`cannot read stdin: ${e.message}`);
+  }
+}
+async function readPage(target, accept, usageLine) {
+  if (/^https?:\/\//i.test(target)) {
+    const page = await httpGet(target, { accept });
+    if (!page.ok) fail(`could not fetch ${target} (status ${page.status})`);
+    return { body: page.body, url: page.url };
+  }
+  let bytes;
+  if (target === "-") bytes = readStdin(usageLine);
+  else {
+    try {
+      bytes = readFileSync13(target.startsWith("file:") ? fileURLToPath2(target) : target);
+    } catch (e) {
+      fail(`${target} is neither an http(s) URL nor a readable file (${e.code ?? e.message})`);
+    }
+  }
+  const body = decodeLocal(bytes, { sniffHtmlCharset: true });
+  if (body.slice(0, 1024).includes("\0")) fail(`${target === "-" ? "stdin" : target} is binary data, not an HTML page`);
+  return { body };
+}
 var RANK_DOCS_SHAPE = "pass a JSON array of {url, text} via --docs <file> or stdin";
 function parseRankDocs(value, where) {
   const arr = typeof value === "string" ? parseJsonInput(value, where, "pass a JSON array of {url, text}") : value;
@@ -9002,14 +9495,67 @@ function parseRankDocs(value, where) {
     return d;
   });
 }
-function webindexAdapter() {
+var CLOSED_WORLD_TOOLS = /* @__PURE__ */ new Set(["webindex_extract", "webindex_rank", "webindex_embed"]);
+function withHints(tools) {
+  return tools.map((t) => ({
+    ...t,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: !CLOSED_WORLD_TOOLS.has(t.name) }
+  }));
+}
+function withPolicy(policy, tools) {
+  const root = policy.extractRoot;
+  const offered = root === void 0 && policy.noLocalFiles ? tools.filter((t) => t.name !== "webindex_extract") : tools;
+  const withArg = (t, name, prop) => ({
+    ...t,
+    inputSchema: { ...t.inputSchema, properties: { ...t.inputSchema.properties, [name]: prop } }
+  });
+  return withHints(
+    offered.map((t) => {
+      if (t.name === "webindex_extract" && root !== void 0) {
+        return withArg(t, "path", {
+          type: "string",
+          description: `Path to the file, under ${root} \u2014 the only directory this server reads; a relative path is read from there.`
+        });
+      }
+      if (t.name === "webindex_fetch" && policy.publicOnly) {
+        return withArg(t, "cache", {
+          type: "boolean",
+          description: "Ignored here: this server fetches public addresses only, and never reads the on-disk cache, which unguarded runs share."
+        });
+      }
+      return t;
+    })
+  );
+}
+function webindexAdapter(policy = {}) {
+  const guard = policy.publicOnly ? publicUrlsOnly() : void 0;
+  const refuseUrl = async (url) => {
+    if (!guard) return;
+    const why = await publicUrlRefusal(url);
+    if (why) throw new ToolError(`Refused ${url}: ${why} \u2014 this server fetches public addresses only.`);
+  };
+  const root = policy.extractRoot;
+  const localFiles = root !== void 0 || !policy.noLocalFiles;
+  const localPath = (requested) => {
+    if (!localFiles) throw new ToolError(`${requested} is a path on this machine, and this server reads no local files.`);
+    if (root === void 0) return requested;
+    try {
+      return confinePath(root, requested);
+    } catch (e) {
+      throw new ToolError(e.message);
+    }
+  };
+  const refuseForgeHost = async (ref, kind) => {
+    if (!guard || configuredForgeHosts().has(normalizeForgeHost(ref.host))) return;
+    await refuseUrl(apiBase(ref, kind ? { kind } : {}));
+  };
   return {
     version: ENGINE_VERSION,
-    listTools: () => [
+    listTools: () => withPolicy(policy, [
       {
         name: "webindex_search",
         title: "Search for candidate URLs",
-        description: "Find candidate URLs: a locally-running SearXNG first, then the keyless engines (DuckDuckGo, DuckDuckGo Lite, Mojeek \u2014 no key, no container), then Firecrawl. Returns title, URL and snippet \u2014 not page text; follow up with webindex_fetch on the ones worth reading. When nothing answers it says which piece was missing rather than returning an empty result that reads like 'nothing exists'.",
+        description: `Find candidate URLs: a locally-running SearXNG first, then the keyless engines (DuckDuckGo, DuckDuckGo Lite, Mojeek \u2014 no key, no container), then Firecrawl. Returns title, URL and snippet \u2014 not page text; follow up with webindex_fetch on the ones worth reading. When nothing answers it says which piece was missing rather than returning an empty result that reads like 'nothing exists'. The whole cascade is bounded at ${SEARCH_TOOL_BUDGET_MS / 1e3} s; the last line names each rung's outcome (rungs: searxng=unreachable ddg=hits(8) \u2026).`,
         inputSchema: {
           type: "object",
           properties: {
@@ -9037,7 +9583,10 @@ function webindexAdapter() {
             url: { type: "string", description: "The http(s) URL to fetch." },
             lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." },
             fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
-            timeoutMs: { type: "number", description: "Give up on a silent host after this many ms (default 20000). A timed-out request is not retried." },
+            timeoutMs: {
+              type: "number",
+              description: "Give up on a silent host after this many ms (default 20000, at most 300000). A timed-out request is not retried."
+            },
             cache: {
               type: "boolean",
               description: "Use the on-disk cache: a fresh copy is reused for its TTL (24 h by default), a stale one revalidated with a conditional GET."
@@ -9208,14 +9757,14 @@ function webindexAdapter() {
       {
         name: "webindex_crawl",
         title: "Walk a site, within a budget",
-        description: "Follow links from a seed page, breadth-first, honouring robots.txt at EVERY hop and staying on the origin the seed lands on. `max` pages is required \u2014 enumerating someone else's site is the one operation here that can inconvenience them, so the budget is not optional. Returns each page's URL, title and text.",
+        description: "Follow links from a seed page, breadth-first, honouring robots.txt at EVERY hop and staying on the origin the seed lands on. `max` pages is required \u2014 enumerating someone else's site is the one operation here that can inconvenience them, so the budget is not optional. Returns each page's URL, title and text, the URLs robots.txt refused (`disallowed`), how many in-scope URLs the budget did not reach (`pending`), and `notes`.",
         inputSchema: {
           type: "object",
           properties: {
             url: { type: "string", description: "The seed page." },
             max: {
               type: "number",
-              description: "Pages to return. Required. A failed fetch costs no page, but the crawl makes at most 3 \xD7 `max` page requests in all."
+              description: "Pages to return. Required. A failed fetch costs no page, but the crawl makes at most 3 \xD7 `max` page requests in all. Every page's text comes back inline and an answer over 1 MB is withheld, so ask for the tens of pages you will read, not hundreds."
             },
             depth: { type: "number", description: "How many links deep to follow (default 2)." },
             prefix: { type: "string", description: "Only follow URLs whose path starts with this, e.g. `/docs/`." },
@@ -9227,7 +9776,7 @@ function webindexAdapter() {
           required: ["url", "max"]
         }
       }
-    ],
+    ]),
     capAdvice: {
       webindex_search: "lower `limit`",
       webindex_repo: "this repository's record is unusually large; ask for what you need instead",
@@ -9246,16 +9795,21 @@ function webindexAdapter() {
       webindex_embed: "send fewer `texts` \u2014 a vector per input is large, and they are rarely worth reading inline",
       webindex_crawl: "lower `max`, or `depth` \u2014 a crawl's whole output is the sum of its pages"
     },
-    async callTool(name, args) {
+    async callTool(name, args, ctx) {
+      const signal = ctx?.signal;
       if (name === "webindex_fetch") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
+        await refuseUrl(url);
         const fullPage = args.fullPage === true;
-        const r = await cachedFetchAndExtract(
-          url,
-          { acceptLanguage: args.lang ? String(args.lang) : void 0, fullPage, stripConsent: !fullPage, timeoutMs: toolTimeoutMs(args.timeoutMs) },
-          args.cache === true
-        );
+        const fetchOpts = {
+          acceptLanguage: args.lang ? String(args.lang) : void 0,
+          fullPage,
+          stripConsent: !fullPage,
+          timeoutMs: toolTimeoutMs(args.timeoutMs),
+          signal
+        };
+        const r = guard ? await fetchAndExtract(url, { ...fetchOpts, authorizeUrl: guard }) : await cachedFetchAndExtract(url, fetchOpts, args.cache === true);
         if (!r.text) throw new ToolError(`Nothing readable at ${url}${r.note ? ` \u2014 ${r.note}` : ""}.`);
         const trailer = [
           `url: ${r.finalUrl}`,
@@ -9289,6 +9843,7 @@ ${trailer.join("\n")}` };
           // timeouts would: better a partial answer that says where it
           // stopped than none at all.
           timeoutMs: SEARCH_TOOL_BUDGET_MS,
+          signal,
           ...engines ? { engines } : {}
         });
         const rungs = r.rungs?.length ? `rungs: ${r.rungs.map((x) => `${x.rung}=${x.outcome}${x.hits ? `(${x.hits})` : ""}`).join(" ")}` : "";
@@ -9303,7 +9858,7 @@ ${trailer.join("\n")}` };
 ${trailer.join("\n")}` : body };
       }
       if (name === "webindex_extract") {
-        const r = await extractLocal(String(args.path ?? ""), args.fullPage === true);
+        const r = await extractLocal(localPath(String(args.path ?? "")), args.fullPage === true);
         if (!r.text) throw new ToolError(`Nothing readable in that file${r.reason ? ` \u2014 ${r.reason}` : ""}.`);
         return { text: `${r.text}
 
@@ -9340,8 +9895,13 @@ extractor: ${r.extractor}` };
       if (name === "webindex_repo" || name === "webindex_issues" || name === "webindex_releases" || name === "webindex_tags") {
         const forge = args.forge === void 0 ? void 0 : String(args.forge);
         if (forge !== void 0 && !isForgeKind(forge)) throw new InvalidParamsError(`\`forge\` must be one of: ${FORGE_KINDS.join(", ")}`);
-        const ref = forgeTarget(String(args.repo ?? ""), forge);
-        if (ref.host === "generic") throw new ToolError(`"${String(args.repo ?? "")}" does not name a repository.`);
+        const raw = String(args.repo ?? "");
+        const kind = forge ? { kind: forge } : {};
+        const parsed = resolveRepo(raw, kind);
+        if (parsed.isLocal) localPath(resolve7(raw.trim()));
+        const ref = forgeRef(parsed, kind);
+        if (ref.host === "generic") throw new ToolError(`"${raw}" does not name a repository.`);
+        await refuseForgeHost(ref, forge);
         const limit = typeof args.limit === "number" ? args.limit : void 0;
         const opts = { ...limit ? { limit } : {}, ...forge ? { kind: forge } : {} };
         if (name === "webindex_repo") {
@@ -9365,18 +9925,27 @@ extractor: ${r.extractor}` };
       if (name === "webindex_meta" || name === "webindex_robots" || name === "webindex_sitemap" || name === "webindex_feed") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
+        await refuseUrl(url);
+        const robotsOpts = guard ? { authorizeUrl: guard } : {};
         if (name === "webindex_robots") {
-          const r = await fetchRobots(url);
+          const r = await fetchRobots(url, robotsOpts);
           return { text: JSON.stringify({ url, allowed: isAllowed(r, url), ...r }, null, 2) };
         }
         if (name === "webindex_sitemap") {
-          const robots = await fetchRobots(url);
-          const s = await fetchSitemap(url, { sitemaps: robots.sitemaps, max: typeof args.max === "number" ? args.max : void 0 });
+          const robots = await fetchRobots(url, robotsOpts);
+          const max = typeof args.max === "number" ? args.max : void 0;
+          const s = await fetchSitemap(url, {
+            sitemaps: robots.sitemaps,
+            max,
+            signal,
+            authorizeUrl: guard,
+            onDocument: (doc, fetched) => ctx?.progress(fetched, max ?? 3, doc)
+          });
           if (!s.urls.length && !s.sitemaps.length) throw new ToolError(`No sitemap found for ${url}.${s.notes?.length ? ` ${s.notes.join(" ")}` : ""}`);
           return { text: JSON.stringify(s, null, 2) };
         }
-        const page = await httpGet(url, { accept: "text/html,application/xml,application/feed+json,*/*" });
-        if (!page.ok) throw new ToolError(`Could not fetch ${url} (status ${page.status}).`);
+        const page = await httpGet(url, { accept: "text/html,application/xml,application/feed+json,*/*", signal, authorizeUrl: guard });
+        if (!page.ok) throw new ToolError(`Could not fetch ${url} (${fetchFailure(page)}).`);
         if (name === "webindex_meta") return { text: JSON.stringify(pageMetadata(page.body, { baseUrl: page.url }), null, 2) };
         const direct = parseFeed(page.body, page.url);
         const found = direct?.items.length ? [] : discoverFeeds(page.body, page.url);
@@ -9384,7 +9953,7 @@ extractor: ${r.extractor}` };
         if (!found.length) throw new ToolError(`${url} is not a feed and advertises none.`);
         const feeds = [];
         for (const f of found) {
-          const parsed = await fetchFeed(f);
+          const parsed = await fetchFeed(f, { signal, authorizeUrl: guard });
           if (parsed) feeds.push({ url: f, ...parsed });
         }
         if (!feeds.length) throw new ToolError(`${url} advertises ${found.length} feed(s), none of which parsed.`);
@@ -9393,8 +9962,9 @@ extractor: ${r.extractor}` };
       if (name === "webindex_tables") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
-        const page = await httpGet(url, { accept: "text/html,*/*" });
-        if (!page.ok) throw new ToolError(`could not fetch ${url} (status ${page.status})`);
+        await refuseUrl(url);
+        const page = await httpGet(url, { accept: "text/html,*/*", signal, authorizeUrl: guard });
+        if (!page.ok) throw new ToolError(`could not fetch ${url} (${fetchFailure(page)})`);
         const tables = extractTables(page.body);
         if (!tables.length) throw new ToolError(`${url} has no tables \u2014 use webindex_fetch for its text.`);
         return { text: args.markdown ? tables.map(tableToMarkdown).join("\n\n") : JSON.stringify(tables, null, 2) };
@@ -9412,8 +9982,13 @@ extractor: ${r.extractor}` };
         const max = Number(args.max);
         if (!Number.isInteger(max) || max < 1)
           throw new ToolError("`max` is required and must be a positive whole number \u2014 a crawl without a budget is not one.");
+        await refuseUrl(url);
+        let read2 = 0;
         const r = await crawlSite(url, {
           maxPages: max,
+          signal,
+          ...guard ? { authorizeUrl: guard } : {},
+          onPage: (page) => ctx?.progress(++read2, max, page.url),
           ...args.depth !== void 0 ? { maxDepth: Number(args.depth) } : {},
           ...typeof args.prefix === "string" && args.prefix ? { prefix: args.prefix } : {},
           ...args.sitemap === false ? { useSitemap: false } : {}
@@ -9446,10 +10021,50 @@ async function main(argv = process.argv.slice(2)) {
     process.exit(e instanceof UsageError ? EXIT_USAGE : EXIT_FAILURE);
   }
 }
+function commandHelp(cmd) {
+  const section = (title) => {
+    const lines = HELP.split("\n");
+    const start = lines.indexOf(title);
+    const end = lines.indexOf("", start);
+    return start === -1 ? [] : lines.slice(start + 1, end === -1 ? void 0 : end);
+  };
+  const entries = (lines, head) => {
+    const out = [];
+    for (const line of lines) {
+      const m = head.exec(line);
+      if (m) out.push({ name: m[1], lines: [line] });
+      else out.at(-1)?.lines.push(line);
+    }
+    return out.filter((e) => e.name === cmd).flatMap((e) => e.lines);
+  };
+  const usageLines = entries(section("USAGE"), /^ {2}webindex ([a-z-]+)/);
+  const described = entries(section("COMMANDS"), /^ {2}([a-z-]+) /);
+  if (!usageLines.length) return HELP;
+  return [
+    `webindex v${ENGINE_VERSION}`,
+    "",
+    "USAGE",
+    ...usageLines,
+    "",
+    ...described,
+    "",
+    "Run `webindex --help` for every command and the environment variables."
+  ].join("\n");
+}
+function positionalLimit(args) {
+  const cmd = args.command;
+  if (cmd === "search" || cmd === "embed") return { max: Number.POSITIVE_INFINITY };
+  if (cmd === "rank" || cmd === "hybrid") return { max: 0, hint: 'the question goes in --query "<q>"' };
+  if (cmd === "doctor" || cmd === "mcp") return { max: 0 };
+  if (cmd === "skill") return { max: args.positional[0] === "init" ? 2 : 1 };
+  if (cmd === "issues" || cmd === "prs") return { max: 1, hint: 'search words go in --terms "<words>"' };
+  if (cmd === "repo" || cmd === "releases" || cmd === "tags") return { max: 1, hint: "quote a path that contains spaces" };
+  return { max: 1 };
+}
 async function dispatch(argv) {
   const parsed = parseArgs(argv, SPEC);
   if (parsed.kind === "help") {
-    process.stdout.write(HELP + "\n");
+    process.stdout.write((parsed.command ? commandHelp(parsed.command) : HELP) + "\n");
     return;
   }
   if (parsed.kind === "version") {
@@ -9458,14 +10073,20 @@ async function dispatch(argv) {
   }
   const args = parsed;
   const cmd = args.command;
+  const arity = positionalLimit(args);
+  if (args.positional.length > arity.max) {
+    const extra = args.positional[arity.max];
+    const takes = arity.max === 0 ? "no arguments" : arity.max === 1 ? "one argument" : `${arity.max} arguments`;
+    usage(`unexpected argument "${extra}" \u2014 \`webindex ${cmd}\` takes ${takes}${arity.hint ? `; ${arity.hint}` : ""} (see \`webindex ${cmd} --help\`)`);
+  }
   if (cmd === "search") {
     const q = positionalText(args);
     if (!q) usage("usage: webindex search <query>");
     const engine = argValue(args, "engine");
-    if (engine && engine !== "off" && !isKeylessEngine(engine)) fail(`unknown --engine "${engine}" \u2014 expected one of ${KEYLESS_ENGINES.join(", ")}, or off`);
+    if (engine && engine !== "off" && !isKeylessEngine(engine)) usage(`unknown --engine "${engine}" \u2014 expected one of ${KEYLESS_ENGINES.join(", ")}, or off`);
     const r = await search(q, {
-      limit: argInt(args, "limit"),
-      pages: argInt(args, "pages"),
+      limit: argInt(args, "limit", { min: 1 }),
+      pages: argInt(args, "pages", { min: 1 }),
       lang: argValue(args, "lang"),
       region: argValue(args, "region"),
       searxng: argValue(args, "searxng"),
@@ -9493,7 +10114,7 @@ async function dispatch(argv) {
   if (cmd === "fetch") {
     const url = args.positional[0];
     if (!url) usage("usage: webindex fetch <url>");
-    if (!/^https?:\/\//i.test(url)) fail("fetch needs an http(s) URL");
+    if (!/^https?:\/\//i.test(url)) fail(`fetch needs an http(s) URL${existsSync7(url) ? ` \u2014 for a file on disk, \`webindex extract ${url}\`` : ""}`);
     const fullPage = argBool(args, "full-page");
     const refresh = argBool(args, "refresh");
     const offline = argBool(args, "offline");
@@ -9536,15 +10157,18 @@ async function dispatch(argv) {
       );
     } else if (r.text) {
       process.stdout.write(r.text + "\n");
+      if (r.note) process.stderr.write(`  ${r.note}
+`);
     }
     if (!r.text) fail(`nothing readable at ${url}${r.note ? ` \u2014 ${r.note}` : ""}`);
     return;
   }
   if (cmd === "extract") {
+    const EXTRACT_USAGE = "usage: webindex extract <file|-> [--full-page] [--json]";
     const path = args.positional[0];
-    if (!path) usage("usage: webindex extract <file>");
+    if (!path) usage(EXTRACT_USAGE);
     const fullPage = argBool(args, "full-page");
-    const r = await extractLocal(path, fullPage);
+    const r = await extractLocal(path, fullPage, path === "-" ? readStdin(EXTRACT_USAGE) : void 0);
     if (argBool(args, "json")) {
       process.stdout.write(
         JSON.stringify(
@@ -9561,22 +10185,41 @@ async function dispatch(argv) {
   }
   if (cmd === "mcp") {
     const transport = argValue(args, "transport") ?? "stdio";
+    const allowRemote = argBool(args, "allow-remote");
+    const policy = mcpPolicy(args, allowRemote);
+    const notice = mcpPolicyNotice(policy, allowRemote, argBool(args, "allow-private"));
     if (transport === "stdio") {
-      await runStdioServer(webindexAdapter());
+      for (const line of notice) process.stderr.write(`webindex: ${line}
+`);
+      await runStdioServer(webindexAdapter(policy));
       return;
     }
-    if (transport !== "http") fail(`unknown transport "${transport}" \u2014 expected stdio or http`);
-    const port = argInt(args, "port") ?? 7340;
-    if (!Number.isInteger(port) || port < 0 || port > 65535) fail("invalid --port");
+    if (transport !== "http") usage(`unknown transport "${transport}" \u2014 expected stdio or http`);
+    const port = argInt(args, "port", { min: 0, max: 65535 }) ?? 7340;
+    const token = env("MCP_TOKEN");
     let running;
     try {
-      running = await startHttpServer(webindexAdapter(), { port, bind: argValue(args, "bind"), allowRemote: argBool(args, "allow-remote") });
+      running = await startHttpServer(webindexAdapter(policy), {
+        port,
+        bind: argValue(args, "bind"),
+        allowRemote,
+        ...token ? { bearerToken: token } : {}
+      });
     } catch (e) {
       fail(e.message);
     }
     process.stderr.write(`webindex: MCP server listening on ${running.url}
 `);
-    process.stderr.write(`  client: claude mcp add --transport http webindex ${running.url}
+    const header2 = token ? ` --header "Authorization: Bearer $${envName("MCP_TOKEN")}"` : "";
+    process.stderr.write(`  client: claude mcp add --transport http webindex ${running.url}${header2}
+`);
+    if (allowRemote) {
+      process.stderr.write(
+        token ? "  exposed beyond this machine (--allow-remote); every request needs the bearer token.\n" : `  exposed beyond this machine (--allow-remote) with no authentication: anyone who can reach the port can use it. Set ${envName("MCP_TOKEN")} to require a bearer token.
+`
+      );
+    }
+    for (const line of notice) process.stderr.write(`  ${line}
 `);
     return;
   }
@@ -9597,6 +10240,7 @@ async function dispatch(argv) {
     const RANK_USAGE = "usage: webindex rank --query <question> --docs <file.json|-> [--limit <n>] [--dense] [--json]";
     const question = argValue(args, "query");
     if (!question) usage(RANK_USAGE);
+    const limit = argInt(args, "limit", { min: 1 });
     const input = readDocsInput(args, RANK_USAGE);
     let docs;
     try {
@@ -9604,7 +10248,6 @@ async function dispatch(argv) {
     } catch (e) {
       fail(e.message);
     }
-    const limit = argInt(args, "limit");
     const r = await rankDocuments(question, docs, { limit, dense: argBool(args, "dense") });
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));
@@ -9633,7 +10276,7 @@ async function dispatch(argv) {
     const target = positionalText(args);
     if (!target) usage(`usage: webindex ${cmd} <${cmd === "package" ? "name" : "repo"}> [--json]`);
     const asJson = argBool(args, "json");
-    const limit = argInt(args, "limit");
+    const limit = argInt(args, "limit", { min: 1 });
     const emit = (obj, human) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}
 `);
     if (cmd === "package") {
@@ -9692,8 +10335,9 @@ async function dispatch(argv) {
   }
   if (cmd === "meta" || cmd === "robots" || cmd === "sitemap" || cmd === "feed") {
     const target = positionalText(args);
-    if (!target) usage(`usage: webindex ${cmd} <url>`);
-    if (!/^https?:\/\//i.test(target)) fail("expected an http(s) URL");
+    const usageLine = `usage: webindex ${cmd} <url${cmd === "meta" ? "|file|-" : ""}>`;
+    if (!target) usage(usageLine);
+    if (cmd !== "meta" && !/^https?:\/\//i.test(target)) fail("expected an http(s) URL");
     const asJson = argBool(args, "json");
     const emit = (obj, human) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}
 `);
@@ -9711,7 +10355,7 @@ async function dispatch(argv) {
     }
     if (cmd === "sitemap") {
       const robots = await fetchRobots(target);
-      const s = await fetchSitemap(target, { sitemaps: robots.sitemaps, max: argInt(args, "max") });
+      const s = await fetchSitemap(target, { sitemaps: robots.sitemaps, max: argInt(args, "max", { min: 1 }) });
       if (!asJson) for (const n of s.notes ?? []) process.stderr.write(`${n}
 `);
       if (!s.urls.length && !s.sitemaps.length) fail(`no sitemap found for ${target}`);
@@ -9727,43 +10371,44 @@ async function dispatch(argv) {
       );
       return;
     }
+    if (cmd === "meta") {
+      const page2 = await readPage(target, "text/html,*/*", usageLine);
+      const m = pageMetadata(page2.body, page2.url ? { baseUrl: page2.url } : {});
+      emit(m, [
+        `  title      ${m.title ?? "\u2014"}`,
+        `  type       ${m.type ?? "\u2014"}`,
+        `  site       ${m.siteName ?? "\u2014"}`,
+        `  published  ${m.publishedAt ?? "\u2014"}`,
+        `  modified   ${m.modifiedAt ?? "\u2014"}`,
+        `  authors    ${m.authors.join(", ") || "\u2014"}`,
+        `  canonical  ${m.canonicalUrl ?? "\u2014"}`
+      ]);
+      return;
+    }
     const page = await httpGet(target, { accept: "text/html,application/xml,application/feed+json,*/*" });
     if (!page.ok) fail(`could not fetch ${target} (status ${page.status})`);
-    if (cmd === "feed") {
-      const direct = parseFeed(page.body, page.url);
-      const found = direct?.items.length ? [] : discoverFeeds(page.body, page.url);
-      if (direct && !found.length) {
-        emit(
-          direct,
-          direct.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}
-  ${i.url ?? ""}`)
-        );
-        return;
-      }
-      if (!found.length) fail(`${target} advertises no feed`);
-      const feeds = [];
-      for (const f of found) {
-        const parsed2 = await fetchFeed(f);
-        if (parsed2) feeds.push({ url: f, ...parsed2 });
-      }
-      if (!feeds.length) fail(`${target} advertises ${found.length} feed(s), none of which parsed`);
+    const direct = parseFeed(page.body, page.url);
+    const found = direct?.items.length ? [] : discoverFeeds(page.body, page.url);
+    if (direct && !found.length) {
       emit(
-        feeds,
-        feeds.flatMap((f) => [`# ${f.title ?? f.url}`, ...f.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}
-  ${i.url ?? ""}`)])
+        direct,
+        direct.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}
+  ${i.url ?? ""}`)
       );
       return;
     }
-    const m = pageMetadata(page.body, { baseUrl: page.url });
-    emit(m, [
-      `  title      ${m.title ?? "\u2014"}`,
-      `  type       ${m.type ?? "\u2014"}`,
-      `  site       ${m.siteName ?? "\u2014"}`,
-      `  published  ${m.publishedAt ?? "\u2014"}`,
-      `  modified   ${m.modifiedAt ?? "\u2014"}`,
-      `  authors    ${m.authors.join(", ") || "\u2014"}`,
-      `  canonical  ${m.canonicalUrl ?? "\u2014"}`
-    ]);
+    if (!found.length) fail(`${target} advertises no feed`);
+    const feeds = [];
+    for (const f of found) {
+      const parsed2 = await fetchFeed(f);
+      if (parsed2) feeds.push({ url: f, ...parsed2 });
+    }
+    if (!feeds.length) fail(`${target} advertises ${found.length} feed(s), none of which parsed`);
+    emit(
+      feeds,
+      feeds.flatMap((f) => [`# ${f.title ?? f.url}`, ...f.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}
+  ${i.url ?? ""}`)])
+    );
     return;
   }
   if (cmd === "cache") {
@@ -9771,13 +10416,12 @@ async function dispatch(argv) {
     if (action !== "status" && action !== "clean") usage("usage: webindex cache status|clean [--all]");
     if (action === "clean") {
       const all = argBool(args, "all");
-      if (isNoWrite()) {
-        process.stdout.write(`no-write mode: nothing removed from ${cacheDir()}
+      const noWrite = isNoWrite();
+      const removed = noWrite ? 0 : cacheClean(all);
+      if (argBool(args, "json")) process.stdout.write(jsonLine({ dir: cacheDir(), removed, all, noWrite }));
+      else if (noWrite) process.stdout.write(`no-write mode: nothing removed from ${cacheDir()}
 `);
-        return;
-      }
-      const removed = cacheClean(all);
-      process.stdout.write(`${removed} entr${removed === 1 ? "y" : "ies"} removed (${all ? "all" : "stale only"}) from ${cacheDir()}
+      else process.stdout.write(`${removed} entr${removed === 1 ? "y" : "ies"} removed (${all ? "all" : "stale only"}) from ${cacheDir()}
 `);
       return;
     }
@@ -9806,9 +10450,10 @@ async function dispatch(argv) {
     if (max === void 0) usage("crawl needs --max <n> \u2014 an unbounded walk of somebody else's site is not something to do by accident");
     if (max < 1) usage("--max must be a positive whole number \u2014 a crawl without a budget is not one");
     const prefix = argValue(args, "prefix");
+    const depth = argInt(args, "depth", { min: 0 });
     const r = await crawlSite(seed, {
       maxPages: max,
-      ...argInt(args, "depth") !== void 0 ? { maxDepth: argInt(args, "depth") } : {},
+      ...depth !== void 0 ? { maxDepth: depth } : {},
       crossOrigin: argBool(args, "cross-origin"),
       useSitemap: !argBool(args, "no-sitemap"),
       ...prefix ? { prefix } : {}
@@ -9828,11 +10473,10 @@ async function dispatch(argv) {
     return;
   }
   if (cmd === "tables") {
+    const TABLES_USAGE = "usage: webindex tables <url|file|-> [--json]";
     const url = positionalText(args);
-    if (!url) usage("usage: webindex tables <url>");
-    if (!/^https?:\/\//i.test(url)) fail("tables needs an http(s) URL");
-    const page = await httpGet(url, { accept: "text/html,*/*" });
-    if (!page.ok) fail(`could not fetch ${url} (status ${page.status})`);
+    if (!url) usage(TABLES_USAGE);
+    const page = await readPage(url, "text/html,*/*", TABLES_USAGE);
     const tables = extractTables(page.body);
     if (!tables.length) fail(`no tables on ${url}`);
     process.stdout.write(argBool(args, "json") ? jsonLine(tables) : `${tables.map(tableToMarkdown).join("\n\n")}
@@ -9879,6 +10523,7 @@ async function dispatch(argv) {
     const HYBRID_USAGE = "usage: webindex hybrid --query <question> --docs <file.json|->";
     const question = argValue(args, "query");
     if (!question) usage(HYBRID_USAGE);
+    const limit = argInt(args, "limit", { min: 1 });
     const input = readDocsInput(args, HYBRID_USAGE);
     let docs;
     try {
@@ -9889,7 +10534,7 @@ async function dispatch(argv) {
     const r = await hybridSearch(
       question,
       docs.map((d, i) => ({ id: d.url ?? String(i), title: d.title ?? "", headings: "", body: d.text ?? "" })),
-      { ...argInt(args, "limit") !== void 0 ? { limit: argInt(args, "limit") } : {} }
+      limit !== void 0 ? { limit } : {}
     );
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));
@@ -9940,15 +10585,19 @@ async function dispatch(argv) {
   }
   if (cmd === "skill") {
     const action = args.positional[0] ?? "";
-    const root = resolve5(argValue(args, "root") ?? process.cwd());
+    const root = resolve7(argValue(args, "root") ?? process.cwd());
     const asJson = argBool(args, "json");
+    if (!SKILL_ACTIONS.includes(action)) usage(`usage: webindex skill ${SKILL_ACTIONS.join("|")}`);
     if (action === "init") {
       const name = args.positional[1];
       if (!name) usage("usage: webindex skill init <name> [--root <dir>]");
+      const badName = skillNameProblem(name);
+      if (badName) usage(badName);
       const r = scaffoldSkill(root, name, { exists: existsSync7 });
       for (const e of r.errors) process.stderr.write(`  ${e}
 `);
-      process.stdout.write(asJson ? jsonLine(r) : `${r.written.map((p) => `  wrote ${relative2(root, p)}`).join("\n")}
+      if (asJson) process.stdout.write(jsonLine(r));
+      else if (r.written.length) process.stdout.write(`${r.written.map((p) => `  wrote ${relative4(root, p)}`).join("\n")}
 `);
       if (!r.written.length) process.exit(EXIT_FAILURE);
       return;
@@ -9960,10 +10609,17 @@ async function dispatch(argv) {
       process.exit(EXIT_FAILURE);
     }
     if (action === "recall") {
+      if (!recallPolicy(root)) {
+        process.stdout.write("No repin.recall policy in skill.json \u2014 no artifact was compared.\n");
+        return;
+      }
       const lost = checkArtifactRecall(root, argValue(args, "ref") ?? "HEAD");
       if (lost.length) fail(lost.join("\n"));
       process.stdout.write("Artifact identities and evidence preserved\n");
       return;
+    }
+    if ((action === "finish" || action === "repin") && !have("gh")) {
+      fail(`skill ${action} drives the GitHub CLI (gh), which is not installed \u2014 install it and authenticate (gh auth login, or GH_TOKEN in CI).`);
     }
     if (action === "finish") {
       await finishRepin(root);
@@ -9976,14 +10632,6 @@ async function dispatch(argv) {
       return;
     }
     if (action === "vendor") {
-      if (argBool(args, "list")) {
-        for (const [name, pin] of Object.entries(config.engines)) {
-          const meta = JSON.parse(readFileSync13(join15(root, config.vendorDir, pin.meta), "utf8"));
-          process.stdout.write(`${name} ${pin.repo} ${meta.tag}
-`);
-        }
-        return;
-      }
       if (argBool(args, "check")) {
         const statuses = checkPins(root, config);
         if (asJson) process.stdout.write(jsonLine(statuses));
@@ -9999,6 +10647,7 @@ async function dispatch(argv) {
       }
       const ref = argValue(args, "ref");
       if (!ref) usage("usage: webindex skill vendor [--engine <name>] --ref <tag>   |   webindex skill vendor --check");
+      if (!/^v\d+\.\d+\.\d+$/.test(ref)) usage(`--ref expects a stable release tag like v1.2.3, got "${ref}"`);
       const only = argValue(args, "engine");
       const names = only ? [only] : Object.keys(config.engines);
       const fetchFile = async (url) => {
@@ -10007,8 +10656,8 @@ async function dispatch(argv) {
       };
       for (const n of names) {
         const pin = config.engines[n];
-        const r = await vendorEngine(root, config, n, ref, fetchFile, pin ? releaseCommit(pin.repo, ref) : void 0);
-        for (const w of r.written) process.stdout.write(`  wrote ${relative2(root, w)}
+        const r = await vendorEngine(root, config, n, ref, fetchFile, pin ? await tagCommit(pin.repo, ref) : void 0);
+        for (const w of r.written) process.stdout.write(`  wrote ${relative4(root, w)}
 `);
         if (r.errors.length) {
           for (const e of r.errors) process.stderr.write(`webindex: ${e}
@@ -10081,7 +10730,7 @@ async function dispatch(argv) {
             surfaceProblem = "the built CLI exports no usable HELP/VALUE_FLAGS/BOOL_FLAGS \u2014 export them from the CLI entry so the docs\u2194CLI drift gate can read the real surface";
           }
         } catch (e) {
-          surfaceProblem = `could not import ${relative2(root, built)} for the drift gate: ${e.message}`;
+          surfaceProblem = `could not import ${relative4(root, built)} for the drift gate: ${e.message}`;
         }
       }
       const checks = auditSkillBundle(root, config, surface);
@@ -10103,11 +10752,11 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
     }
     if (action === "copy") {
       const from = join15(root, "scripts", `${config.name}.mjs`);
-      if (!existsSync7(from)) fail(`missing ${relative2(root, from)} \u2014 run the build first`);
+      if (!existsSync7(from)) fail(`missing ${relative4(root, from)} \u2014 run the build first`);
       const to = join15(root, "skills", config.name, "scripts", `${config.name}.mjs`);
       ensureDir(join15(to, ".."));
       writeArtifact(to, readFileSync13(from, "utf8"));
-      process.stdout.write(`  copied ${relative2(root, from)} -> ${relative2(root, to)}
+      process.stdout.write(`  copied ${relative4(root, from)} -> ${relative4(root, to)}
 `);
       return;
     }
@@ -10131,7 +10780,6 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
       }
       return;
     }
-    usage("usage: webindex skill check|bundle|vendor|copy|doctor|init");
   }
   if (cmd === "doctor") {
     const base = firecrawlBase();
@@ -10164,19 +10812,40 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
       if (id === "builtin") return "built-in (OOXML and OpenDocument)";
       return "built-in";
     };
-    const rungLines = (label, all, enabled, engineVar) => {
+    const rungRows = (all, enabled, engineVar) => {
       const why = env(engineVar)?.trim() ? `${envName(engineVar)}=${env(engineVar).trim()}` : envName("NO_NPX");
-      const rows = [...enabled.map((id) => [id, rungState(id)]), ...all.filter((id) => !enabled.includes(id)).map((id) => [id, `off (${why})`])];
-      return rows.map(([id, state], i) => `  ${(i ? "" : label).padEnd(12)}${id.padEnd(15)}${state}`);
+      return [
+        ...enabled.map((id) => ({ id, enabled: true, state: rungState(id) })),
+        ...all.filter((id) => !enabled.includes(id)).map((id) => ({ id, enabled: false, state: `off (${why})` }))
+      ];
     };
+    const pdf = rungRows(PDF_EXTRACTORS, pdfRungs, "PDF_ENGINE");
+    const doc = rungRows(DOC_EXTRACTORS, docRungs, "DOC_ENGINE");
+    if (argBool(args, "json")) {
+      const service = (base2, up, extra = {}) => base2 ? { state: up ? "answering" : "unreachable", base: base2, ...up ? extra : {} } : { state: "disabled" };
+      process.stdout.write(
+        jsonLine({
+          version: ENGINE_VERSION,
+          services: {
+            searxng: service(sx, sxUp),
+            firecrawl: service(base, fc),
+            ollama: service(off(ol) ? void 0 : ol, olUp, { model: embedModel() }),
+            qdrant: service(off(qd) ? void 0 : qd, qdUp)
+          },
+          rungs: { pdf, doc }
+        })
+      );
+      return;
+    }
+    const rungLines = (label, rows) => rows.map(({ id, state }, i) => `  ${(i ? "" : label).padEnd(12)}${id.padEnd(15)}${state}`);
     const lines = [
       `webindex ${ENGINE_VERSION}`,
       `  searxng     ${sx ? sxUp ? `answering at ${sx}` : `not reachable at ${sx} \u2014 \`webindex searxng up\` starts it` : "disabled"}`,
       `  firecrawl   ${base ? fc ? `answering at ${base}` : `not reachable at ${base} \u2014 the built-in extractor is used instead` : "disabled"}`,
       `  ollama      ${off(ol) ? "disabled" : olUp ? `answering at ${ol} (model ${embedModel()})` : `not reachable at ${ol} \u2014 \`webindex semantic up\` starts it`}`,
       `  qdrant      ${off(qd) ? "disabled" : qdUp ? `answering at ${qd}` : `not reachable at ${qd} \u2014 \`webindex semantic up\` starts it`}`,
-      ...rungLines("pdf rungs", PDF_EXTRACTORS, pdfRungs, "PDF_ENGINE"),
-      ...rungLines("doc rungs", DOC_EXTRACTORS, docRungs, "DOC_ENGINE"),
+      ...rungLines("pdf rungs", pdf),
+      ...rungLines("doc rungs", doc),
       "",
       "  Everything optional degrades to a note \u2014 nothing above is required, and none of it needs a key."
     ];
@@ -10185,7 +10854,20 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
   }
   fail(`unknown command "${cmd}" \u2014 run \`webindex --help\``);
 }
-if (isInvokedDirectly()) {
+function isStartedFile() {
+  try {
+    return !!process.argv[1] && pathToFileURL(realpathSync3(process.argv[1])).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+if (isInvokedDirectly() || isStartedFile()) {
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on("error", (e) => {
+      if (e.code === "EPIPE") process.exit(EXIT_OK);
+      throw e;
+    });
+  }
   main().catch((e) => {
     process.stderr.write(`webindex: ${e.message}
 `);

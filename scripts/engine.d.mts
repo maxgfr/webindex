@@ -112,9 +112,10 @@ declare function env(suffix: string): string | undefined;
  */
 declare function envFlag(suffix: string): boolean;
 /**
- * Read a numeric tunable, clamped into [min, max]. A missing, non-numeric or
- * negative-where-forbidden value falls back to `def` silently — these are
- * performance knobs, and a typo in one must never abort a run.
+ * Read a numeric tunable. A missing or non-numeric value falls back to `def`,
+ * and a number outside [min, max] — a negative one under the default min of 0
+ * included — is truncated and clamped to the nearer bound, never refused:
+ * these are performance knobs, and a typo in one must never abort a run.
  *
  * Replaces three separate copies of this helper that had drifted apart (one
  * clamped, one did not, one rejected zero).
@@ -467,6 +468,10 @@ declare function httpGet(url: string, opts?: {
      *  host (crawlSite) holds them for the same window instead of sending them
      *  into it while this one sleeps. */
     onBackOff?: (url: string, waitMs: number) => void;
+    /** Abandons the request: an attempt in flight is aborted and none starts
+     *  after. Reported as `error: "cancelled"`, never retried — the caller
+     *  that cancelled is not waiting for a second try. */
+    signal?: AbortSignal;
 }): Promise<HttpResult>;
 declare function httpJson(method: string, url: string, body?: unknown, opts?: {
     timeoutMs?: number;
@@ -589,6 +594,13 @@ declare function fetchAndExtract(url: string, opts?: {
     keepHtml?: boolean;
     /** Passed to httpGet: told before a transient answer is waited out and retried. */
     onBackOff?: (url: string, waitMs: number) => void;
+    /**
+     * Abandons the fetch: the built-in request is aborted, and no extraction
+     * ladder starts after it. A Firecrawl request already sent finishes — it is
+     * short, and an aborted one would read to the probe as a Firecrawl that is
+     * down, for every other caller too.
+     */
+    signal?: AbortSignal;
 }): Promise<ExtractResult>;
 declare const DEAD_LINK_STATUS: Set<number>;
 declare function rescueViaWayback(url: string, opts?: {
@@ -1822,9 +1834,22 @@ declare function fetchSitemap(url: string, opts?: {
     sitemaps?: string[];
     max?: number;
     authorizeUrl?: (url: string) => Promise<boolean>;
+    /** Stops the walk: the document in flight is abandoned and none is read after it. */
+    signal?: AbortSignal;
+    /** Told as each document has been read — the `fetched`-th of at most `max`. */
+    onDocument?: (url: string, fetched: number) => void;
 }): Promise<Sitemap>;
-/** Fetch and parse a feed URL, resolving its links against where it was served from. */
-declare function fetchFeed(url: string): Promise<Feed | undefined>;
+/**
+ * Fetch and parse a feed URL, resolving its links against where it was served from.
+ *
+ * `authorizeUrl` approves the URL and every redirect before it is requested —
+ * a page can advertise a feed anywhere, so a caller confining what it fetches
+ * needs it here too; `signal` abandons the request.
+ */
+declare function fetchFeed(url: string, opts?: {
+    authorizeUrl?: (url: string) => Promise<boolean>;
+    signal?: AbortSignal;
+}): Promise<Feed | undefined>;
 
 /** A keyless engine this module knows how to query. */
 type KeylessEngine = "ddg" | "ddglite" | "mojeek";
@@ -1984,8 +2009,10 @@ interface SearchOptions {
      */
     timeoutMs?: number;
     /**
-     * Abandons the search: checked before each rung and page. A request already
-     * in flight finishes first, within its own timeout.
+     * Abandons the search: checked before each rung and page, and a SearXNG or
+     * keyless-engine request in flight is aborted. A Firecrawl request already
+     * sent finishes within its own timeout — an aborted one would read to the
+     * shared availability probe as a Firecrawl that is down.
      */
     signal?: AbortSignal;
     /**
@@ -2103,6 +2130,12 @@ declare const FIRECRAWL_ENV = "# Tunables for the self-hosted Firecrawl stack (d
  * have. Substituted at CALL time, per the lazy rule in src/brand.ts.
  */
 declare function renderAsset(template: string): string;
+/**
+ * Write the stack out under the cache dir's `compose/` (rewriting only what
+ * changed, so an upgrade refreshes it) and return the compose file's path. The
+ * SearXNG settings and the Firecrawl env file sit at the `./docker/...` paths
+ * the compose file names relative to itself.
+ */
 declare function ensureComposeMaterialized(): string;
 /** What one `docker` invocation produced. Mirrors the shape a caller can act on. */
 interface StackRun {
@@ -2111,6 +2144,8 @@ interface StackRun {
     stderr: string;
     /** The binary was not on PATH — a different problem from a non-zero exit. */
     missing?: boolean;
+    /** It was killed at its budget — the one failure a longer budget fixes. */
+    timedOut?: boolean;
 }
 /**
  * The two host effects `stackControl` needs, injectable so its orchestration is
@@ -2224,6 +2259,7 @@ declare function cachedFetchAndExtract(url: string, opts?: {
     stripConsent?: boolean;
     fullPage?: boolean;
     timeoutMs?: number;
+    signal?: AbortSignal;
 }, enabled?: boolean, now?: number): Promise<Extract & {
     cached?: boolean;
 }>;
@@ -2318,7 +2354,8 @@ declare function runId(d?: Date): string;
  * single quote closes and reopens the quoting (' → '"'"'), which is the one
  * escape the form does not admit directly.
  *
- * Newlines collapse to spaces so an emitted command stays ONE line. A runbook
+ * Line breaks — LF, CRLF and a lone CR, which a terminal takes as Enter just
+ * the same — collapse to spaces so an emitted command stays ONE line. A runbook
  * is copy-pasted by a human or a subagent; a command that wraps across lines is
  * a command that gets pasted half-executed.
  */
@@ -2513,6 +2550,13 @@ interface CrawlOptions {
     prefix?: string;
     /** Ignore robots.txt. For a site you own, and named so it cannot happen by accident. */
     ignoreRobots?: boolean;
+    /**
+     * The caller's own policy, asked before every request the crawl makes —
+     * each page and each of its redirects, robots.txt, the sitemaps. A URL it
+     * refuses is not requested, and a note says so. How a server that refuses
+     * private addresses keeps a crawl from walking into them.
+     */
+    authorizeUrl?: (url: string) => Promise<boolean>;
     /** Per-host delay override. Otherwise robots' own Crawl-delay, else hostDelayMs(). */
     delayMs?: number;
     /**
@@ -2521,6 +2565,12 @@ interface CrawlOptions {
      * the fetches interleaved.
      */
     onPage?(page: CrawledPage): void;
+    /**
+     * Stops the walk: the page requests in flight are abandoned, none starts
+     * after, and what was still queued comes back in `pending` with a note. A
+     * caller that gave up must not leave a site still being walked for it.
+     */
+    signal?: AbortSignal;
 }
 interface CrawledPage {
     url: string;
@@ -3053,6 +3103,16 @@ declare function oneWriterFooter(runAbs: string, opts?: {
     sanctioned?: string;
     writingCommands?: readonly string[];
 }): string;
+/**
+ * Below this many items a fan-out does not pay for itself, and `orchestrate`
+ * says so rather than emitting a workflow nobody should launch.
+ *
+ * A default, not a rule: each phase overrides it through `collapseFloor`,
+ * because the units differ in weight. One heavy per-sub-question gather is
+ * worth its own agent at any count above one; one cheap claim↔source judgment
+ * is not.
+ */
+declare const SMALL_WORKLIST = 3;
 /** Chunk ids into batches, one subagent per batch. Order-preserving and deterministic. */
 declare function toBatches(ids: readonly string[], batchSize: number): string[][];
 /**
@@ -3071,18 +3131,8 @@ declare function emitWorkflowScript<T>(phase: PhaseInfo<T>, emission: PhaseEmiss
  * whether it is ready, and the exact command that makes it ready, so a reader
  * can walk the whole run by hand.
  */
-declare function runbookMd<T>(phases: readonly PhaseInfo<T>[], defs: readonly PhaseEmission[], runAbs: string, engineAbs: string, cli: string, preamble?: readonly string[]): string;
+declare function runbookMd<T>(phases: readonly PhaseInfo<T>[], defs: readonly PhaseEmission[], runAbs: string, engineAbs: string, cli: string, preamble?: readonly string[], smallWorklist?: number): string;
 
-/**
- * Below this many items a fan-out does not pay for itself, and `orchestrate`
- * says so rather than emitting a workflow nobody should launch.
- *
- * A default, not a rule: each phase overrides it through `collapseFloor`,
- * because the units differ in weight. One heavy per-sub-question gather is
- * worth its own agent at any count above one; one cheap claim↔source judgment
- * is not.
- */
-declare const SMALL_WORKLIST = 3;
 /** One agent per batch of at most this many items, unless a phase says otherwise. */
 declare const BATCH_SIZE = 8;
 /**
@@ -3216,9 +3266,13 @@ interface CommandArgs {
  * What an argv turned out to be. `--help` and `--version` are outcomes rather
  * than commands because every CLI answers them the same way and none of them
  * wants a case in its command switch for it.
+ *
+ * A help asked for mid-command (`search --help`) carries that `command`, so the
+ * answer can be the one command's usage rather than a wall of every command's.
  */
 type ParsedArgs = {
     kind: "help";
+    command?: string;
 } | {
     kind: "version";
 } | ({
@@ -3246,9 +3300,18 @@ declare function argBool(p: CommandArgs, name: string): boolean;
  * Throws UsageError on a value that is not one, rather than returning NaN. A
  * NaN budget propagates into a comparison that is false whichever way it is
  * written, so `--limit abc` would silently mean "no limit" — the opposite of
- * what was asked.
+ * what was asked. A blank value is not one either: `Number("")` is 0, so
+ * `--limit=` read as a budget of nothing.
+ *
+ * `range` bounds it, inclusively, and refuses what falls outside rather than
+ * clamping. Engine functions clamp — a limit of 0 becomes one result, a depth
+ * of -1 the seed alone — which is right for a library call and wrong at a
+ * command line, where the command then succeeds at a question nobody asked.
  */
-declare function argInt(p: CommandArgs, name: string): number | undefined;
+declare function argInt(p: CommandArgs, name: string, range?: {
+    min?: number;
+    max?: number;
+}): number | undefined;
 /** A comma-separated value flag as a trimmed, empty-free list. Absent → []. */
 declare function argList(p: CommandArgs, name: string): string[];
 /**
@@ -3320,6 +3383,17 @@ declare const LATEST_PROTOCOL: ProtocolVersion;
 declare const ASSUMED_HTTP_PROTOCOL: ProtocolVersion;
 declare const ANNOTATIONS_SINCE = "2025-03-26";
 declare const RICH_TOOLS_SINCE = "2025-06-18";
+declare const PROGRESS_MESSAGE_SINCE = "2025-03-26";
+declare const BATCHES_REMOVED_IN = "2025-06-18";
+/**
+ * Why a JSON-RPC batch cannot be served, or undefined when it can.
+ *
+ * `negotiated` is the revision the client agreed to, and undefined before it
+ * agreed to any: a batch is then read the way JSON-RPC reads one rather than
+ * refused over a revision nobody named. An empty array is invalid in every
+ * revision — JSON-RPC answers it with one error, not with silence.
+ */
+declare function batchRefusal(batch: readonly unknown[], negotiated: ProtocolVersion | undefined): string | undefined;
 declare const DEFAULT_MAX_RESPONSE_BYTES = 1000000;
 declare function isProtocolVersion(v: unknown): v is ProtocolVersion;
 declare function negotiateProtocol(requested: unknown): ProtocolVersion;
@@ -3358,13 +3432,30 @@ interface JsonRpcMessage {
     params?: Record<string, unknown>;
     [k: string]: unknown;
 }
+/**
+ * What a client may assume about a tool (MCP 2025-03-26 on). Hints, not
+ * guarantees — a client decides from them whether a call needs confirmation.
+ */
+interface ToolAnnotations {
+    /** A display name; the server fills it from ToolDecl.title when absent. */
+    title?: string;
+    /** Changes nothing in its environment. */
+    readOnlyHint?: boolean;
+    /** May destroy or overwrite something (meaningful only when not read-only). */
+    destructiveHint?: boolean;
+    /** Calling it again with the same arguments has no further effect. */
+    idempotentHint?: boolean;
+    /** Reaches an open world — the web, a remote API — rather than a closed one. */
+    openWorldHint?: boolean;
+    [hint: string]: boolean | string | undefined;
+}
 interface ToolDecl {
     name: string;
     description: string;
     inputSchema: JsonSchema;
     title?: string;
     outputSchema?: JsonSchema;
-    annotations?: Record<string, boolean>;
+    annotations?: ToolAnnotations;
 }
 interface PromptDecl {
     name: string;
@@ -3402,8 +3493,38 @@ interface ToolOutcome {
  */
 declare class ToolError extends Error {
 }
+/** Malformed domain arguments discovered by a tool handler. */
+declare class InvalidParamsError extends Error {
+}
 /** Thrown for an unknown prompt or a missing required argument. A client bug. */
 declare class PromptError extends Error {
+}
+/**
+ * What the server hands a tool call besides its arguments.
+ *
+ * Dropping a cancelled call's answer is not cancelling it: the fetch, the crawl
+ * or the search went on to its own budget for a client that had moved on. The
+ * signal is how the work itself stops — pass it to whatever takes one.
+ */
+interface ToolCallContext {
+    /** Aborted by the client's notifications/cancelled, or when the transport loses the request. */
+    signal: AbortSignal;
+    /**
+     * Report how far the call has got. A no-op unless the client asked with
+     * `_meta.progressToken`; a value that does not move forward is dropped, as
+     * the spec requires progress to increase.
+     */
+    progress(progress: number, total?: number, message?: string): void;
+}
+/** How a transport hands one message to the server, beyond the message itself. */
+interface HandleOptions {
+    /** The transport lost the request — an HTTP client hung up. Aborts the tool's signal. */
+    signal?: AbortSignal;
+    /**
+     * Where notifications about this request (progress) go. Defaults to `send`;
+     * a batch collects its replies in `send`, so it names the stream here.
+     */
+    notify?: (out: JsonRpcMessage) => void;
 }
 /**
  * The skill half of the server. Everything the engine cannot know.
@@ -3417,7 +3538,7 @@ interface McpAdapter {
     /** Version reported in `serverInfo`. The skill's, not the engine's. */
     version: string;
     listTools(protocol: ProtocolVersion): ToolDecl[];
-    callTool(name: string, args: Record<string, unknown>): Promise<ToolOutcome>;
+    callTool(name: string, args: Record<string, unknown>, context?: ToolCallContext): Promise<ToolOutcome>;
     /**
      * Per-tool advice for narrowing an oversized request. The engine detects the
      * overflow; only the skill knows which argument makes the result smaller.
@@ -3438,7 +3559,7 @@ declare const ERR_METHOD_NOT_FOUND = -32601;
 declare const ERR_INVALID_PARAMS = -32602;
 declare const ERR_INTERNAL = -32603;
 interface McpServer {
-    handle(msg: JsonRpcMessage, send: (out: JsonRpcMessage) => void): Promise<void>;
+    handle(msg: JsonRpcMessage, send: (out: JsonRpcMessage) => void, opts?: HandleOptions): Promise<void>;
     protocolVersion(): ProtocolVersion;
     setProtocolVersion(v: ProtocolVersion): void;
     tools(): ToolDecl[];
@@ -3457,6 +3578,12 @@ interface HttpOptions extends ServerOptions {
     bind?: string;
     allowOrigin?: string[];
     allowRemote?: boolean;
+    /**
+     * Answer only requests carrying `Authorization: Bearer <token>`; anything
+     * else gets a 401. The one wall that keeps a reachable port from being
+     * everyone's: the others limit what a caller can do, this limits who calls.
+     */
+    bearerToken?: string;
 }
 interface RunningHttpServer {
     server: Server;
@@ -3490,4 +3617,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, CP1252_C1, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ChangeVerdict, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type Fingerprint, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type FirecrawlSearchOptions, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROTOCOL_VERSIONS, type PackageFacts, type PackageLookup, type PackageResolution, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoFactsResult, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RungOutcome, type RungReport, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type SearchRung, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type Table, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, awaitHostSlot, backOffHost, baseLang, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, contentHash, cosine, crawlConcurrency, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, decodeLocal, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embedPrefixes, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, extractTables, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, fingerprint, firecrawlBase, firecrawlIsExplicit, fnv1a64, fnv1a64Words, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, forgeRef, hammingDistance, hasChanged, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, looksLikeChallenge, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, lookupPackageResult, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, maxCrawlDelayMs, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, officeToText, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, repoFactsResult, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOcrTools, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolvePackageResult, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, sniffDocument, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, tableToMarkdown, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, unknownEngines, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCHES_REMOVED_IN, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, CP1252_C1, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ChangeVerdict, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type Fingerprint, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type FirecrawlSearchOptions, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HandleOptions, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, InvalidParamsError, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROGRESS_MESSAGE_SINCE, PROTOCOL_VERSIONS, type PackageFacts, type PackageLookup, type PackageResolution, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoFactsResult, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RungOutcome, type RungReport, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type SearchRung, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type Table, type ToolAnnotations, type ToolCallContext, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, awaitHostSlot, backOffHost, baseLang, batchRefusal, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, contentHash, cosine, crawlConcurrency, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, decodeLocal, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embedPrefixes, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, extractTables, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, fingerprint, firecrawlBase, firecrawlIsExplicit, fnv1a64, fnv1a64Words, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, forgeRef, hammingDistance, hasChanged, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, looksLikeChallenge, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, lookupPackageResult, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, maxCrawlDelayMs, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, officeToText, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, repoFactsResult, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOcrTools, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolvePackageResult, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, sniffDocument, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, tableToMarkdown, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, unknownEngines, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };
