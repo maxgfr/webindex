@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BOOL_FLAGS, HELP, main, VALUE_FLAGS, webindexAdapter } from "../src/cli.js";
+import { BOOL_FLAGS, COMMANDS, HELP, main, VALUE_FLAGS, webindexAdapter } from "../src/cli.js";
 import { documentedFlags, missingFromHelp } from "../src/cli-kit.js";
 import { createServer, ToolError } from "../src/mcp/server.js";
 import { LATEST_PROTOCOL } from "../src/mcp/protocol.js";
@@ -107,6 +107,26 @@ describe("help and version", () => {
       shapes.push(stdout());
     }
     expect(new Set(shapes).size).toBe(1);
+  });
+
+  it("answers `<command> --help` with that command's usage and description", async () => {
+    expect(await run(["fetch", "--help"])).toBe(0);
+    const help = stdout();
+    expect(help).toMatch(/^\s+webindex fetch <url>/m);
+    expect(help).toMatch(/Fetch a URL and print the extracted text/);
+    // Not every other command's, and not the environment table.
+    expect(help).not.toMatch(/webindex search </);
+    expect(help).not.toMatch(/ENVIRONMENT/);
+    expect(help).toMatch(/webindex --help/);
+  });
+
+  it("gives every command a help of its own", async () => {
+    for (const cmd of [...SERVICE_ROUTES, "search", "prs", "stack", "skill", "doctor", "hybrid"]) {
+      out = [];
+      expect(await run([cmd, "--help"]), cmd).toBe(0);
+      expect(stdout(), cmd).toMatch(new RegExp(`^\\s+webindex ${cmd}\\b`, "m"));
+      expect(stdout().split("\n").length, cmd).toBeLessThan(40);
+    }
   });
 
   it("prints a bare semver for version", async () => {
@@ -375,6 +395,20 @@ describe("fetch argument handling", () => {
     }
   });
 
+  it("says on stderr what it had to say about the text it printed", async () => {
+    // The note reached --json and the MCP trailer, and was dropped here: a PDF
+    // link that served a login page printed that page's text as the document.
+    installFetchMock(routes([["x.test/paper.pdf", { body: articlePage(), contentType: "text/html" }]]));
+    try {
+      expect(await run(["fetch", "https://x.test/paper.pdf"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stdout()).toContain("Token buckets");
+    expect(stdout()).not.toMatch(/looked like a PDF/);
+    expect(stderr()).toMatch(/looked like a PDF but the server returned HTML/);
+  });
+
   it("gives up on a silent host after --timeout, and says so", async () => {
     vi.stubGlobal("fetch", hangingFetch());
     try {
@@ -448,6 +482,13 @@ describe("fetch argument handling", () => {
     expect(stderr()).toMatch(/http\(s\) URL/);
   });
 
+  it("points a file on disk at extract", async () => {
+    const path = join(dir, "page.html");
+    writeFileSync(path, "<p>hi</p>");
+    expect(await run(["fetch", path])).toBe(1);
+    expect(stderr()).toMatch(/`webindex extract/);
+  });
+
   it("needs a url", async () => {
     expect(await run(["fetch"])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex fetch/);
@@ -509,6 +550,23 @@ describe("doctor", () => {
     expect(stdout()).toMatch(/searxng {5}not reachable at http:\/\/localhost:8888/);
   });
 
+  it("answers as JSON on demand: each service and each rung, as data", async () => {
+    // --json was accepted and ignored; a script asking what this machine can
+    // do had to parse the aligned text.
+    process.env[envName("FIRECRAWL")] = "off";
+    process.env[envName("OLLAMA")] = "off";
+    process.env[envName("QDRANT")] = "off";
+    expect(await run(["doctor", "--json"])).toBe(0);
+    const j = JSON.parse(stdout());
+    expect(j.version).toMatch(/^\d+\.\d+\.\d+/);
+    expect(j.services.searxng).toEqual({ state: "disabled" });
+    expect(j.services.firecrawl).toEqual({ state: "disabled" });
+    expect(j.services.ollama).toEqual({ state: "disabled" });
+    expect(j.rungs.pdf).toContainEqual({ id: "native", enabled: true, state: "built-in" });
+    expect(j.rungs.pdf).toContainEqual({ id: "pdf-inspector", enabled: false, state: `off (${envName("PDF_ENGINE")}=native)` });
+    expect(j.rungs.doc.map((r: { id: string }) => r.id)).toEqual(["anydoc", "firecrawl", "builtin"]);
+  });
+
   it("lists a rung the environment switched off, and which variable did it", async () => {
     process.env[envName("FIRECRAWL")] = "off";
     process.env[envName("NO_NPX")] = "1";
@@ -563,14 +621,57 @@ describe("unknown input", () => {
     expect(await run(["robots", "https://r.test/public/x"])).toBe(0);
   });
 
+  // A value outside a flag's set is the same mistake as an unknown flag: the
+  // invocation is wrong, and nothing ran. These exited 1 — "ran, and the
+  // answer is a failure" — while --registry and --forge already exited 2.
   it("rejects an unknown mcp transport", async () => {
-    expect(await run(["mcp", "--transport", "carrier-pigeon"])).toBe(1);
+    expect(await run(["mcp", "--transport", "carrier-pigeon"])).toBe(2);
     expect(stderr()).toMatch(/unknown transport/);
   });
 
   it("rejects an out-of-range port", async () => {
-    expect(await run(["mcp", "--transport", "http", "--port", "99999"])).toBe(1);
-    expect(stderr()).toMatch(/invalid --port/);
+    expect(await run(["mcp", "--transport", "http", "--port", "99999"])).toBe(2);
+    expect(stderr()).toMatch(/--port expects a whole number from 0 to 65535/);
+  });
+
+  it("rejects an engine it does not know as a usage error", async () => {
+    expect(await run(["search", "q", "--engine", "altavista"])).toBe(2);
+    expect(stderr()).toMatch(/unknown --engine "altavista"/);
+  });
+
+  it.each([
+    [["search", "q", "--limit", "0"], /--limit expects a whole number of at least 1/],
+    [["search", "q", "--limit", "-1"], /--limit expects a whole number of at least 1/],
+    [["search", "q", "--pages", "0"], /--pages expects a whole number of at least 1/],
+    [["search", "q", "--limit="], /--limit expects a whole number, got ""/],
+    [["rank", "--query", "q", "--limit", "0"], /--limit expects a whole number of at least 1/],
+    [["hybrid", "--query", "q", "--limit", "-2"], /--limit expects a whole number of at least 1/],
+    [["releases", "o/r", "--limit", "0"], /--limit expects a whole number of at least 1/],
+    [["sitemap", "https://s.test/", "--max", "0"], /--max expects a whole number of at least 1/],
+    [["crawl", "https://c.test/", "--max", "5", "--depth", "-1"], /--depth expects a whole number of at least 0/],
+  ])("refuses a budget of nothing rather than quietly answering another question: %j", async (argv, message) => {
+    // The libraries clamp — `--limit 0` came back as one result, `--depth -1`
+    // as the seed alone, `--limit 0` on rank as every document — so each of
+    // these ran to success answering something other than what was asked.
+    expect(await run(argv)).toBe(2);
+    expect(stderr()).toMatch(message);
+  });
+
+  it.each([
+    [["fetch", "https://a.test/", "https://b.test/"], /unexpected argument "https:\/\/b\.test\/"/],
+    [["extract", "a.html", "b.html"], /unexpected argument "b\.html"/],
+    [["tables", "https://a.test/", "https://b.test/"], /unexpected argument/],
+    [["package", "hono", "express"], /unexpected argument "express"/],
+    [["issues", "o/r", "rate", "limit"], /--terms/],
+    [["rank", "rate", "limiting", "--query", "q"], /--query/],
+    [["stack", "path", "extra"], /unexpected argument "extra"/],
+    [["doctor", "now"], /unexpected argument "now"/],
+  ])("refuses an argument it would otherwise drop or glue onto another: %j", async (argv, message) => {
+    // `fetch a b` fetched a and dropped b; `tables a b` fetched the URL
+    // "a b"; `rank rate limiting --query q` ranked against q and ignored the
+    // words that looked like the question.
+    expect(await run(argv)).toBe(2);
+    expect(stderr()).toMatch(message);
   });
 
   it("refuses contradictory address policies, and a root that is not a directory", async () => {
@@ -1003,6 +1104,18 @@ describe("the fetch cache", () => {
     expect(stdout()).toMatch(/no-write mode: nothing removed/);
   });
 
+  it("reports an eviction as JSON on demand, as status does", async () => {
+    // --json was accepted and ignored: a script got the sentence.
+    process.env[envName("CACHE_DIR")] = join(dir, "empty-cache");
+    expect(await run(["cache", "clean", "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toEqual({ dir: join(dir, "empty-cache"), removed: 0, all: false, noWrite: false });
+
+    out = [];
+    process.env[envName("NO_WRITE")] = "1";
+    expect(await run(["cache", "clean", "--all", "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ removed: 0, all: true, noWrite: true });
+  });
+
   it("rejects an action it does not have", async () => {
     expect(await run(["cache", "purge"])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex cache status\|clean/);
@@ -1291,7 +1404,7 @@ describe("the forge, registry and page-metadata commands", () => {
   });
 
   it("refuses free text rather than inventing a repository", async () => {
-    expect(await run(["repo", "some", "words"])).toBe(1);
+    expect(await run(["repo", "some words"])).toBe(1);
     expect(stderr()).toMatch(/does not name a repository/);
   });
 
@@ -1467,11 +1580,28 @@ describe("the forge, registry and page-metadata commands", () => {
     expect(stderr()).toMatch(/advertises no feed/);
   });
 
-  it("insists on an http(s) URL for the page-level lookups", async () => {
-    for (const cmd of ["meta", "robots", "sitemap", "feed"]) {
+  it("insists on an http(s) URL for the site-level lookups", async () => {
+    for (const cmd of ["robots", "sitemap", "feed"]) {
       err = [];
       expect(await run([cmd, "not-a-url"]), cmd).toBe(1);
       expect(stderr(), cmd).toMatch(/expected an http\(s\) URL/);
+    }
+  });
+
+  it("reads what a page on disk says about itself", async () => {
+    // A saved page — or one only a logged-in browser could fetch — answered
+    // "expected an http(s) URL", though nothing here needs the network.
+    const path = join(dir, "saved.html");
+    writeFileSync(path, '<html><head><title>Saved</title><link rel="canonical" href="https://ex.test/saved"></head><body></body></html>');
+    expect(await run(["meta", path, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ title: "Saved", canonicalUrl: "https://ex.test/saved" });
+  });
+
+  it("says a target is neither a URL nor a file, rather than that it is not a URL", async () => {
+    for (const cmd of ["meta", "tables"]) {
+      err = [];
+      expect(await run([cmd, join(dir, "nowhere.html")]), cmd).toBe(1);
+      expect(stderr(), cmd).toMatch(/neither an http\(s\) URL nor a readable file/);
     }
   });
 });
@@ -1576,6 +1706,36 @@ describe("the docs↔CLI drift gate", () => {
     const universe = new Set([...VALUE_FLAGS, ...BOOL_FLAGS, "help", "version"]);
     expect(documentedFlags(HELP).filter((f) => !universe.has(f))).toEqual([]);
   });
+
+  it("counts its own surfaces correctly in the README, and tables every MCP tool", async () => {
+    // The README said 308 library exports while the bundle had 320, and its
+    // MCP table described four of sixteen tools.
+    const readme = readFileSync(join(import.meta.dirname, "..", "README.md"), "utf8");
+    const lib = await import("../src/index.js");
+    expect(readme).toContain(`**${Object.keys(lib).length} library exports**`);
+    expect(readme).toContain(`**${COMMANDS.length} CLI commands**`);
+    const tools = webindexAdapter().listTools(LATEST_PROTOCOL);
+    expect(readme).toContain(`**${tools.length} MCP\ntools**`);
+    for (const t of tools) expect(readme, t.name).toMatch(new RegExp(`^\\| \`${t.name}\` \\|`, "m"));
+    for (const cmd of COMMANDS) expect(readme, cmd).toMatch(new RegExp(`^\\| \`webindex (?:[a-z|\\\\]*\\|)?${cmd}\\b`, "m"));
+  });
+
+  it("documents every environment variable the engine reads, in the README", () => {
+    // HELP carries the ones a command-line user reaches for; the README has to
+    // carry all of them. WEBINDEX_SEARXNG — the first rung of every search —
+    // was named in neither.
+    const srcDir = join(import.meta.dirname, "..", "src");
+    const walk = (d: string): string[] =>
+      readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : e.name.endsWith(".ts") ? [join(d, e.name)] : []));
+    const read = new Set<string>();
+    for (const file of walk(srcDir)) {
+      for (const m of readFileSync(file, "utf8").matchAll(/\b(?:env|envInt|envFlag|envName|enginesFromEnv|fromEnv)\(\s*"([A-Z][A-Z0-9_]*)"/g)) read.add(m[1]!);
+    }
+    expect(read.size).toBeGreaterThan(30); // a negative control for the scan itself
+    const readme = readFileSync(join(srcDir, "..", "README.md"), "utf8");
+    expect([...read].filter((v) => !readme.includes(`WEBINDEX_${v}`)).sort()).toEqual([]);
+    for (const v of ["SEARXNG", "NO_ROBOTS", "FIRECRAWL_KEY", "DOCKER_PULL_TIMEOUT_MS", "OCR_LANG"]) expect(HELP, v).toContain(`WEBINDEX_${v}`);
+  });
 });
 
 // The `skill` command family, driven end to end through main(). The library
@@ -1619,6 +1779,46 @@ describe("webindex skill", () => {
   it("asks for a name rather than scaffolding an unnamed skill", async () => {
     expect(await run(["skill", "init", "--root", repo])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex skill init/);
+  });
+
+  it("refuses a name it cannot use as a usage error, and prints no empty report", async () => {
+    expect(await run(["skill", "init", "Bad_Name", "--root", repo])).toBe(2);
+    expect(stderr()).toMatch(/not a usable skill name/);
+    expect(stdout()).toBe("");
+  });
+
+  it("does not call artifacts preserved when no recall policy asked it to compare any", async () => {
+    // With no `repin.recall` in skill.json nothing was compared, and the gate
+    // still printed "Artifact identities and evidence preserved".
+    skillJson();
+    expect(await run(["skill", "recall", "--root", repo])).toBe(0);
+    expect(stdout()).toMatch(/No repin\.recall policy/);
+    expect(stdout()).not.toMatch(/preserved/);
+  });
+
+  it.each(["repin", "finish"])("says `skill %s` needs the GitHub CLI when it is not installed", async (action) => {
+    // It died on "spawnSync gh ENOENT".
+    skillJson();
+    vi.stubEnv("PATH", join(dir, "no-gh-here"));
+    resetHaveCache();
+    try {
+      expect(await run(["skill", action, "--root", repo])).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+      resetHaveCache();
+    }
+    expect(stderr()).toMatch(/drives the GitHub CLI \(gh\), which is not installed/);
+  });
+
+  it("names the actions it knows before looking for a skill.json", async () => {
+    // With no skill.json, `webindex skill` and `webindex skill frobnicate`
+    // answered "no readable skill.json" — the wrong problem, and exit 1.
+    for (const argv of [["skill"], ["skill", "frobnicate"]]) {
+      err = [];
+      expect(await run([...argv, "--root", repo]), argv.join(" ")).toBe(2);
+      expect(stderr()).toMatch(/usage: webindex skill /);
+      expect(stderr()).not.toMatch(/skill\.json/);
+    }
   });
 
   it("refuses to run any gate without a readable skill.json", async () => {
@@ -1691,6 +1891,60 @@ describe("webindex skill", () => {
     skillJson();
     expect(await run(["skill", "vendor", "--root", repo])).toBe(2);
     expect(stderr()).toMatch(/--ref <tag>/);
+  });
+
+  it("refuses a ref that is no release tag before asking GitHub anything", async () => {
+    skillJson();
+    const spy = installFetchMock(() => ({ status: 500, body: "" }));
+    try {
+      expect(await run(["skill", "vendor", "--ref", "1.20", "--root", repo])).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stderr()).toMatch(/--ref expects a stable release tag like v1\.2\.3, got "1\.20"/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("vendors by the tag's commit without the GitHub CLI, through the REST API", async () => {
+    // Resolving the tag went through `gh api` only, and a machine without gh
+    // got "spawnSync gh ENOENT" and nothing else.
+    skillJson();
+    const sha = "a".repeat(40);
+    const bundle = 'const ENGINE_VERSION = "1.0.0";\n';
+    installFetchMock((url) => {
+      if (url === "https://api.github.com/repos/maxgfr/webindex/commits/v1.0.0") return { body: JSON.stringify({ sha }), contentType: "application/json" };
+      if (url === `https://raw.githubusercontent.com/maxgfr/webindex/${sha}/scripts/engine.mjs`) return { body: bundle };
+      if (url === `https://raw.githubusercontent.com/maxgfr/webindex/${sha}/scripts/engine.d.mts`) return { body: "export {};\n" };
+      return undefined;
+    });
+    vi.stubEnv("PATH", join(dir, "no-gh-here"));
+    resetHaveCache();
+    try {
+      expect(await run(["skill", "vendor", "--ref", "v1.0.0", "--root", repo])).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+      resetHaveCache();
+    }
+    expect(stdout()).toMatch(/pinned webindex v1\.0\.0 \(1\.0\.0\)/);
+    expect(JSON.parse(readFileSync(join(repo, "src", "vendor", "webindex.meta.json"), "utf8"))).toMatchObject({ tag: "v1.0.0", commit: sha });
+    expect(readFileSync(join(repo, "src", "vendor", "webindex-engine.mjs"), "utf8")).toBe(bundle);
+  });
+
+  it("says why a tag could not be resolved, rather than failing on a missing binary", async () => {
+    skillJson();
+    installFetchMock(() => ({ status: 404, body: '{"message":"No commit found for SHA: v1.0.0"}', contentType: "application/json" }));
+    vi.stubEnv("PATH", join(dir, "no-gh-here"));
+    resetHaveCache();
+    try {
+      expect(await run(["skill", "vendor", "--ref", "v1.0.0", "--root", repo])).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+      resetHaveCache();
+    }
+    expect(stderr()).toMatch(/could not resolve maxgfr\/webindex@v1\.0\.0 to a commit/);
+    expect(stderr()).not.toMatch(/ENOENT/);
   });
 
   // A well-shaped package now includes EXPORTING the flag surface: without it
@@ -1770,6 +2024,29 @@ describe("the new commands", () => {
     out = [];
     await run(["tables", "https://t.test/"]);
     expect(stdout()).toContain("| --- | --- |");
+  });
+
+  it("reads the tables of a page on disk, decoded as extract decodes it", async () => {
+    // A Latin-1 page that declares its charset: read as UTF-8 it would turn
+    // every accented figure label into U+FFFD.
+    const path = join(dir, "latin1.html");
+    writeFileSync(
+      path,
+      Buffer.concat([
+        Buffer.from('<html><head><meta charset="iso-8859-1"></head><body><table><tr><th>Ann'),
+        Buffer.from([0xe9]),
+        Buffer.from("e</th><th>Total</th></tr><tr><td>2024</td><td>12</td></tr></table></body></html>"),
+      ]),
+    );
+    expect(await run(["tables", path, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())[0]).toEqual({ headers: ["Année", "Total"], rows: [["2024", "12"]] });
+  });
+
+  it("refuses a file on disk that is not a web page", async () => {
+    const path = join(dir, "blob.bin");
+    writeFileSync(path, Buffer.from([0x00, 0x01, 0x02, 0x03, 0x00]));
+    expect(await run(["tables", path])).toBe(1);
+    expect(stderr()).toMatch(/binary data, not an HTML page/);
   });
 
   it("says so when a page has no tables, rather than printing nothing", async () => {

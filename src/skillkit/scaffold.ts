@@ -13,6 +13,7 @@
 
 import { join } from "node:path";
 import { ensureDir, writeArtifact } from "../no-write.js";
+import { ENGINE_VERSION } from "../version.js";
 import { SKILL_CONFIG } from "./config.js";
 
 export interface ScaffoldResult {
@@ -85,6 +86,11 @@ jobs:
   # a pin nine releases stale, a re-forked engine layer running beside the
   # vendored one, and a SKILL.md at the repo root that would have installed
   # alone without its engine.
+  #
+  # The CLI is this repo's @maxgfr/webindex devDependency — the GitHub release
+  # archive \`webindex skill repin\` keeps current — run with \`pnpm exec\`, which
+  # fails when it is missing. Never \`npx webindex\`: that name on npm is
+  # somebody else's package, and npx would download and run it.
   packaging:
     runs-on: ubuntu-latest
     steps:
@@ -96,15 +102,20 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
-      - run: npx webindex skill check
-      - run: npx webindex skill bundle
-      - run: npx webindex skill vendor --check
+      - run: pnpm exec webindex skill check
+      - run: pnpm exec webindex skill bundle
+      - run: pnpm exec webindex skill vendor --check
 `;
 
 const gitignore = `node_modules/
 coverage/
 *.tsbuildinfo
 `;
+
+/** Why `name` cannot name a skill — it becomes a command, a directory and an env prefix — or undefined. */
+export function skillNameProblem(name: string): string | undefined {
+  return /^[a-z][a-z0-9-]*$/.test(name) ? undefined : `"${name}" is not a usable skill name — lower-case letters, digits and hyphens, starting with a letter.`;
+}
 
 /**
  * Write the shape a skill repository needs, into `root`.
@@ -120,13 +131,14 @@ export function scaffoldSkill(
   opts: { engineRepo?: string; minRef?: string; exists?: (path: string) => boolean } = {},
 ): ScaffoldResult {
   const errors: string[] = [];
-  if (!/^[a-z][a-z0-9-]*$/.test(name)) {
-    return { written: [], errors: [`"${name}" is not a usable skill name — lower-case letters, digits and hyphens, starting with a letter.`] };
-  }
+  const badName = skillNameProblem(name);
+  if (badName) return { written: [], errors: [badName] };
 
   const prefix = name.toUpperCase().replace(/-/g, "_");
   const files: Record<string, string> = {
-    [SKILL_CONFIG]: `${enginesJson(name, opts.engineRepo ?? "maxgfr/webindex", opts.minRef ?? "v1.15.0")}\n`,
+    // A skill started now is written against the engine release doing the
+    // scaffolding; any older floor lets the staleness gate pass a pin that old.
+    [SKILL_CONFIG]: `${enginesJson(name, opts.engineRepo ?? "maxgfr/webindex", opts.minRef ?? `v${ENGINE_VERSION}`)}\n`,
     [join("src", "engine.ts")]: engineShim(name, prefix),
     [join("skills", name, "SKILL.md")]:
       `---\nname: ${name}\ndescription: TODO — one sentence saying WHEN to use this skill, under 1000 characters.\n---\n\n# ${name}\n\nTODO\n`,

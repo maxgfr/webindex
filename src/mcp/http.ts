@@ -1,6 +1,6 @@
 import { brand } from "../brand.js";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer as createMcpServer, ERR_INVALID_REQUEST, type JsonRpcMessage, type McpAdapter, type ServerOptions } from "./server.js";
 import { ASSUMED_HTTP_PROTOCOL, batchRefusal, isOriginAllowed, isProtocolVersion, type ProtocolVersion } from "./protocol.js";
 
@@ -50,16 +50,19 @@ export interface RunningHttpServer {
 
 const LOOPBACK_BIND = new Set(["127.0.0.1", "::1", "localhost"]);
 
-export function startHttpServer(adapter: McpAdapter, opts: HttpOptions = {}): Promise<RunningHttpServer> {
+export async function startHttpServer(adapter: McpAdapter, opts: HttpOptions = {}): Promise<RunningHttpServer> {
   const bind = opts.bind ?? "127.0.0.1";
   if (!LOOPBACK_BIND.has(bind) && !opts.allowRemote) {
-    return Promise.reject(
-      new Error(
-        `refusing to bind ${bind}: ${brand().name}'s MCP server fetches arbitrary URLs and reads local files. Pass --allow-remote if that is really what you want.`,
-      ),
+    throw new Error(
+      `refusing to bind ${bind}: ${brand().name}'s MCP server fetches arbitrary URLs and reads local files. Pass --allow-remote if that is really what you want.`,
     );
   }
 
+  // Imported here, not at module scope. node:http is the costliest builtin to
+  // load — its ESM facade pulls in undici — and a static import made every
+  // command of every consumer pay ~40 ms at start-up for a transport only
+  // `mcp --transport http` uses.
+  const { createServer: createHttpServer } = await import("node:http");
   const server = createHttpServer((req, res) => {
     void route(req, res, adapter, opts).catch((e) => {
       // Only if nothing was written yet: a throw after the response started

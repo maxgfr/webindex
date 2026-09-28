@@ -198,9 +198,10 @@ export function envFlag(suffix: string): boolean {
 }
 
 /**
- * Read a numeric tunable, clamped into [min, max]. A missing, non-numeric or
- * negative-where-forbidden value falls back to `def` silently — these are
- * performance knobs, and a typo in one must never abort a run.
+ * Read a numeric tunable. A missing or non-numeric value falls back to `def`,
+ * and a number outside [min, max] — a negative one under the default min of 0
+ * included — is truncated and clamped to the nearer bound, never refused:
+ * these are performance knobs, and a typo in one must never abort a run.
  *
  * Replaces three separate copies of this helper that had drifted apart (one
  * clamped, one did not, one rejected zero).

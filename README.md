@@ -13,7 +13,7 @@ brew install maxgfr/tap/webindex
 
 ## Everything it does
 
-Three surfaces over one engine: **312 library exports**, **27 CLI commands**, **16 MCP
+Three surfaces over one engine: **327 library exports**, **27 CLI commands**, **16 MCP
 tools**. Nothing below needs an API key, and every optional helper degrades to a note
 rather than an error.
 
@@ -34,7 +34,7 @@ rather than an error.
 | **Change** | `fingerprint` and `hasChanged`: a 304 costs one round trip and no body, and the verdict says *how* it decided — etag and content-hash are different strengths of evidence, and once a body has been downloaded its hash (over the raw bytes, up to 64 MB) outranks the validators. "Could not tell" is never reported as "unchanged". `changed` |
 | **Tables** | `<table>` as headers and rows with `colspan`/`rowspan` resolved. Plain extraction flattens a table into prose in which every figure has lost its row and column — invisibly, because the result still reads well. `tables` · `webindex_tables` |
 | **The harness** | What every skill built on this engine was rewriting: the run directory, a validating CLI parser with a real exit-code taxonomy, the multi-agent **fan-out emitter**, and the mechanics of reading citations out of a report. |
-| **Skill packaging** | `webindex skill vendor\|check\|bundle\|copy\|doctor\|init` — the ~600 lines of packaging scripts each skill repo used to carry, driven by one `skill.json`. Dev-time, so it needs no vendoring and serves a repo that does not vendor this engine at all. |
+| **Skill packaging** | `webindex skill vendor\|check\|bundle\|copy\|doctor\|init\|repin\|finish\|recall` — the ~600 lines of packaging scripts each skill repo used to carry, driven by one `skill.json`. Dev-time, so it needs no vendoring and serves a repo that does not vendor this engine at all. |
 | **MCP** | The whole protocol: version negotiation, cancellation that stops the work (not only the answer), progress, schema validation, an error taxonomy, and both stdio and HTTP transports — with opt-in walls for a server others can reach: public addresses only, one directory, a bearer token. An oversized response is **withheld with advice**, never truncated. |
 
 ## The command line
@@ -44,8 +44,13 @@ rather than an error.
 | `webindex search <query>` | Candidate URLs, through a cascade: a local SearXNG, then the keyless engines (DuckDuckGo, DDG Lite, Mojeek — no key, no container), then Firecrawl. Prints title, URL and snippet; `--json` returns them structured with the notes, each rung's outcome (`rungs`: hits, empty, blocked, throttled, unreachable…) and `searched` — false when no rung answered, so an empty result there is not a finding. `--limit <n>`, `--pages <n>` walk further, `--lang fr-FR` sets the result language, `--region ca` the country (overriding the one the language implies; `wt` for none), `--engine ddg\|ddglite\|mojeek\|off` narrows the keyless rung to one engine or disables it. `--timeout <ms>` bounds the whole cascade — every rung and page — and names the rungs it never reached. Exits non-zero when it found nothing, and says on stderr which backend was missing. |
 | `webindex rank --query <q>` | Order candidate documents against a question — BM25F with title and heading weighting, a SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one — over the best max(5 × `--limit`, 100), the rest following by relevance. Reads a JSON array of `{url,title,text}` from `--docs <file>` or stdin; a document's own `score` (its search engine's relevance) is fused with BM25F by rank, but never lifts one that shares no term with the question. Warns when no document matched at all. Deterministic: no model, no network — unless `--dense` fuses in the local embedding lane first, which degrades to BM25F with a note when no embedding server answers. |
 | `webindex fetch <url>` | Fetch a URL and print its readable text. Routes PDFs and office documents to their ladders — by URL, content-type, download filename or the bytes themselves; images, media and archives get a note, never their bytes. HTML uses Firecrawl when available, then the built-in extractor, reducing the page to main content with consent banners dropped. `--full-page` keeps all page text through the built-in reader, including navigation and consent banners. `--json` adds `finalUrl` (where the text came from, after redirects), `canonical`, the title, status, extractor, `documentType`, `cached`, any note, `fullPage` and `consentDropped` (lines removed by the consent filter; 0 when skipped). Caching is opt-in: `--cache` reuses a fresh copy for the TTL (24 h) and revalidates a stale one with a conditional GET, so an unchanged page costs a 304; `--refresh` re-fetches and rewrites the entry; `--offline` serves only what the cache holds. `--lang fr-FR` sets Accept-Language, `--firecrawl <base>\|off` overrides the extractor. `--timeout <ms>` abandons a host that stays silent that long (default 20000, or `WEBINDEX_TIMEOUT_MS`); a timed-out request is not retried, so that is the real worst case. A failure names its cause — a refused connection, an unknown host, a redirect loop, a timeout — and one that cannot change on a second try is not retried. |
-| `webindex extract <file>` | The same extraction on a file already on disk — PDF, office document, HTML or plain text, recognised by its bytes when its name says otherwise; a CSV nothing can convert is read as its text, and a binary file is refused rather than printed. HTML is reduced to main content with consent banners dropped; `--full-page` keeps all page text, including navigation and consent banners. `--json` includes `fullPage` and `consentDropped` as above (0 for non-HTML). |
+| `webindex extract <file>` | The same extraction on a file already on disk (`-` reads stdin) — PDF, office document, HTML or plain text, recognised by its bytes when its name says otherwise; a CSV nothing can convert is read as its text, and a binary file is refused rather than printed. HTML is reduced to main content with consent banners dropped; `--full-page` keeps all page text, including navigation and consent banners. `--json` includes `fullPage` and `consentDropped` as above (0 for non-HTML). |
 | `webindex repo\|issues\|prs\|releases\|tags <ref>` | What GitHub, GitLab or Gitea records about a repository: its facts (stars, licence, last push, archived), an issue or PR search (`--terms`; relaxed once to the most distinctive terms, and said so, when all of them match nothing), releases, tags. `<ref>` is `owner/repo`, any repository URL — one copied from a browser works — `git@host:owner/repo`, or a local checkout, read as its origin. `--forge github\|gitlab\|gitea` names what a self-hosted host runs; `WEBINDEX_FORGE_HOSTS` declares it once, and is also what lets a token go there. A failure says which one it was. |
+| `webindex package <name>` | A library name resolved through npm, PyPI or crates.io to its repository, homepage, docs, current version, licence and deprecation. `--registry npm\|pypi\|crates` skips the guessing; `--version` answers for that version (or an npm dist-tag) or not at all. A registry that cannot be reached stops the search, so another ecosystem's namesake never answers in its place. |
+| `webindex meta <url\|file>` | What a page says about itself — JSON-LD, OpenGraph and meta tags: title, type, site, author, publication and modification dates, canonical URL. A saved page on disk (`-` reads stdin) is decoded the way `extract` decodes it. |
+| `webindex robots <url>` | Whether robots.txt lets that URL be fetched, any `Crawl-delay`, and the sitemaps it names. Exits 1 when it does not allow it, so `webindex robots <url> && …` composes; a robots.txt that errors is read as RFC 9309 says — nothing may be crawled. |
+| `webindex sitemap <url>` | The page URLs a site lists: the sitemaps robots.txt names (else `/sitemap.xml`), index children followed up to `--max` documents (default 3) — XML, gzipped or plain text — and the children it did not reach named on stderr (`unfetched` in `--json`). |
+| `webindex feed <url>` | A site's RSS, Atom or JSON Feed — or the feeds a page advertises, each parsed — with dated entries and absolute links. |
 | `webindex mcp` | Serve the tools below to an agent. `--transport stdio` (default) or `http` with `--port`, `--bind`, `--allow-remote`. `--public-only`, `--allow-private` and `--extract-root <dir>` set the walls an exposed server needs — see [Exposing it](#exposing-it). |
 | `webindex searxng up\|down\|status` | Drive the keyless SearXNG container. |
 | `webindex semantic up\|down\|status` | Drive Qdrant and Ollama, and pull the embedding model once they answer. |
@@ -53,23 +58,82 @@ rather than an error.
 | `webindex stack up\|down\|status\|path` | Everything at once. `path` prints where the compose file was written. |
 | `webindex cache status\|clean` | What the on-disk fetch cache holds — entries, size, how many are still fresh. `clean` drops the stale ones, `--all` drops every one, and either sweeps the cache's own orphaned bodies and temp files. Both count and remove only files the cache wrote, never anything else in the directory. The directory is `WEBINDEX_CACHE_DIR`, else per user under the temp dir (`webindex-<uid>/cache`); `WEBINDEX_CACHE_TTL_HOURS` (fractions allowed) sets how long an entry stays fresh. |
 | `webindex crawl <url> --max <n>` | Walk a site from a seed, breadth-first, consulting robots.txt at **every hop** (and per origin with `--cross-origin`). `--max` is required: following one citation needs no permission, enumerating a site does, and an unbounded walk is the one thing here that can inconvenience somebody else's server. `--max` counts pages returned: a failed fetch costs none, but a crawl makes at most **3 × `--max` page requests**, so a sitemap full of dead links cannot run it on. The walk stays on the origin the seed lands on — its own `http`→`https` or `www` redirect included — and seeds itself from the sitemap (`--no-sitemap` skips it; a seed below the root, `/docs/`, takes only its own section's entries, after its own links). `--prefix /docs/` keeps links and sitemap entries under a path; `--depth`, `--cross-origin`. Links to images, media, fonts and archives are not fetched, and a page reached through two redirects is read once. A robots.txt that answers 5xx or not at all stops the crawl (RFC 9309), as does a `Crawl-delay` over `WEBINDEX_MAX_CRAWL_DELAY_MS` (default 60 s). Each depth is fetched as one wave, `WEBINDEX_CRAWL_CONCURRENCY` pages in flight (default 4), while one host still departs single-file, and a `Retry-After` holds the whole host. |
-| `webindex tables <url>` | The page's tables as headers and rows, `colspan` and `rowspan` resolved. `--json` for the rows, otherwise markdown. |
+| `webindex tables <url\|file>` | The page's tables as headers and rows, `colspan` and `rowspan` resolved. `--json` for the rows, otherwise markdown. A saved page on disk (`-` reads stdin) is decoded the way `extract` decodes it. |
 | `webindex embed <text>` | A vector from the local Ollama — no key, nothing leaves the machine. Needs `webindex semantic up`. `--docs <file.json\|->` embeds a JSON array of strings (`--lines`: one text per line) in one run, in input order. |
 | `webindex hybrid --query <q>` | Rank documents with BM25F **and** a dense lane, fused by RRF. Each hit reports its rank in each lane. The dense lane sends the model its task prefixes — nomic's `search_query:` / `search_document:`, mxbai's, e5's; `WEBINDEX_EMBED_QUERY_PREFIX` / `WEBINDEX_EMBED_DOC_PREFIX` override them — and at most `WEBINDEX_EMBED_MAX_CHARS` (8000) of each document. Degrades to the lexical half, with a note on stderr, when no embedding server answers. |
 | `webindex changed <url>` | Fingerprint a URL, or — given `--etag` / `--last-modified` / `--hash` — say whether it changed and how it was decided. A baseline prints `etag`, `last-modified`, `hash` (SHA-256 of the raw bytes, what `sha256sum` of the download gives) and `status`, and exits non-zero instead of printing one it could not read. `--timeout <ms>` bounds the request. Exits non-zero on "could not tell", so a watcher never reads an error as "nothing to do". |
-| `webindex skill <action>` | Packaging gates for a repo built on this engine, driven by its `skill.json`: `vendor` (pin by tag + sha256, `--check` for the offline drift/staleness gate), `check` (no module may re-declare an engine export), `bundle` (`skills add` would install a working skill), `copy`, `doctor`, `init`. |
-| `webindex doctor` | Which optional helpers answer — SearXNG, Firecrawl, Ollama, Qdrant — and what each extraction rung will do on this machine: installed, downloads on first use, not installed, built-in, or switched off and by which variable. The npx rungs are checked against npm's cache, never installed. |
+| `webindex skill <action>` | Packaging gates for a repo built on this engine, driven by its `skill.json`: `vendor` (pin by tag + sha256, `--check` for the offline drift/staleness gate), `check` (no module may re-declare an engine export), `bundle` (`skills add` would install a working skill), `copy`, `doctor`, `init`, and the repin workflow's three steps — `repin`, `finish`, `recall` (see below). |
+| `webindex doctor` | Which optional helpers answer — SearXNG, Firecrawl, Ollama, Qdrant — and what each extraction rung will do on this machine: installed, downloads on first use, not installed, built-in, or switched off and by which variable. The npx rungs are checked against npm's cache, never installed. `--json` returns each service's state and each rung as data. |
 | `webindex version` | The engine version. |
 
 Nothing above needs an API key, and nothing is required: every optional helper
 degrades to a note rather than an error.
 
+Exit codes: `0` when the command did what was asked; `1` when it ran and the answer
+is a failure — nothing found, a page unreadable, robots.txt saying no, a gate
+refusing; `2` when the invocation itself was wrong — an unknown command or flag, a
+missing or out-of-range value, a stray argument. `webindex <command> --help` prints
+that command's usage alone.
+
+### Environment
+
+Every variable is read when it is used, never at start-up, and a consumer that
+vendors the engine reads the same ones under its own prefix (`READER_SEARXNG`, …).
+A blank value counts as unset; a number that does not parse falls back to the
+default, and one out of range is clamped to it.
+
+| Variable | What it sets |
+|---|---|
+| `WEBINDEX_SEARXNG` | SearXNG base URL, or `off` (default `http://localhost:8888`) |
+| `WEBINDEX_ENGINES` | the keyless engines to try: a comma list of `ddg`, `ddglite`, `mojeek`, or `off` (default all three) |
+| `WEBINDEX_FIRECRAWL` | Firecrawl base URL, or `off` (default `http://localhost:3002`) |
+| `WEBINDEX_FIRECRAWL_KEY` | a bearer key, only for a hosted Firecrawl — the local one is keyless |
+| `WEBINDEX_PAGE_DELAY_MS` | pause between two result pages of one engine (default 350) |
+| `WEBINDEX_TIMEOUT_MS` | how long a request may stay silent before it is abandoned, not retried (default 20000; `--timeout` overrides it) |
+| `WEBINDEX_MAX_ATTEMPTS`, `WEBINDEX_RETRY_MS` | attempts per request (default 2, at most 5) and the back-off before a retry (default 600 ms) |
+| `WEBINDEX_POLITE_DELAY_MS` | floor between two requests to one host (default 400) |
+| `WEBINDEX_UA` | the browser User-Agent sent to sites |
+| `WEBINDEX_CACHE_DIR` | where the fetch cache — and the materialised container stack, in `compose/` — live (default `<tmp>/webindex-<uid>/cache`) |
+| `WEBINDEX_CACHE_TTL_HOURS`, `WEBINDEX_CACHE_TTL_MS` | how long a cached page stays fresh (default 24 h; hours may be fractional) |
+| `WEBINDEX_NO_WRITE` | write nothing: no cache entry, no eviction, no artifact |
+| `WEBINDEX_NO_WAYBACK` | `rescueViaWayback` never asks the Internet Archive (library only; the CLI never does) |
+| `WEBINDEX_PDF_ENGINE` | the PDF rungs to run, in order: a comma list of `pdf-inspector`, `anydoc`, `firecrawl`, `pdftotext`, `native`, `ocr`, or `none` |
+| `WEBINDEX_DOC_ENGINE` | the office rungs to run, in order: `anydoc`, `firecrawl`, `builtin`, or `none` |
+| `WEBINDEX_NO_NPX` | skip the rungs that would install through npx |
+| `WEBINDEX_NPX_TIMEOUT_MS` | how long one npx rung may run, first download included (default 90000) |
+| `WEBINDEX_OCR_MAX`, `WEBINDEX_OCR_LANG`, `WEBINDEX_OCR_TIMEOUT_MS` | documents one process may OCR (default 3), tesseract's language (default `eng`), and one document's budget (default 300000) |
+| `WEBINDEX_NO_ROBOTS` | `robots` and `crawl` do not consult robots.txt — only right on a site you own |
+| `WEBINDEX_ROBOTS_UA` | the user-agent token robots.txt groups are matched against (default `webindex`) |
+| `WEBINDEX_CRAWL_CONCURRENCY` | pages a crawl keeps in flight, 1–16 (default 4); one host still departs single-file |
+| `WEBINDEX_MAX_CRAWL_DELAY_MS` | the longest robots.txt `Crawl-delay` a crawl waits out (default 60000); a site asking for more is not crawled |
+| `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_TOKEN`, `GITEA_TOKEN` | optional forge tokens (`WEBINDEX_GITHUB_TOKEN`, `WEBINDEX_GITLAB_TOKEN`, `WEBINDEX_GITEA_TOKEN` win over them); each goes only to its own forge's host |
+| `WEBINDEX_FORGE_HOSTS` | self-hosted forges, e.g. `salsa.debian.org=gitlab,git.corp=github`: each is queried as that forge and receives that forge's token |
+| `WEBINDEX_NO_GH` | never reach for the `gh` CLI on github.com — plain HTTP only |
+| `WEBINDEX_REPO_DIR` | where `ensureClone` keeps working trees (library; default `<tmp>/webindex/repos`) |
+| `WEBINDEX_GIT_CLONE_TIMEOUT_MS`, `WEBINDEX_GIT_FETCH_TIMEOUT_MS`, `WEBINDEX_GIT_HISTORY_TIMEOUT_MS` | budgets for a clone (300000), a fetch (120000) and deepening history (300000) |
+| `WEBINDEX_SH_TIMEOUT_MS` | the default budget of a local command run through `sh` (60000) |
+| `WEBINDEX_OLLAMA`, `WEBINDEX_QDRANT` | embedding server and vector store base URLs, or `off` (defaults `http://localhost:11434`, `http://localhost:6333`) |
+| `WEBINDEX_EMBED_MODEL` | the embedding model to ask for, and to pull on `semantic up` (default `nomic-embed-text`) |
+| `WEBINDEX_EMBED_QUERY_PREFIX`, `WEBINDEX_EMBED_DOC_PREFIX` | the task prefixes put before a question and each document (`none` for none; default from the model) |
+| `WEBINDEX_EMBED_MAX_CHARS` | characters of each document embedded (default 8000, 0 = all) |
+| `WEBINDEX_EMBED_BATCH`, `WEBINDEX_EMBED_CONCURRENCY` | texts per embedding request (default 16) and requests in flight (default 4) |
+| `WEBINDEX_QDRANT_UPSERT_BATCH` | points per upsert request (default 256) |
+| `WEBINDEX_RRF_K` | the reciprocal-rank-fusion constant for `rank` and `hybrid` (default 60) |
+| `WEBINDEX_DOCKER_PULL_TIMEOUT_MS` | the image-pull budget of `up` (default 1200000) |
+
 ### The container stack is embedded
 
 `searxng`, `firecrawl` and `stack` do not need a checkout. The compose file, the
 SearXNG settings and the Firecrawl env are compiled into the binary and written
-out on first use — so they work from a Homebrew cellar, a global npm install or a
-vendored bundle alike.
+out on first use, into `compose/` beside the fetch cache — so they work from a
+Homebrew cellar, a global npm install or a vendored bundle alike.
+
+A compose file is something docker runs with root's rights, so before each
+action the written files are read back, and every directory from the cache root
+down must be yours, no symbolic link, and not writable by anyone else; otherwise
+the command refuses and says which path failed. With the docker client installed
+but no daemon answering, every action says so and exits 1 rather than reporting
+a status or blaming the image pull.
 
 The stack uses one fixed project name and one set of container names, so several
 tools on the same machine share a single set of containers instead of fighting
@@ -114,18 +178,18 @@ claude mcp add --transport http webindex http://127.0.0.1:7340/mcp
 | `webindex_fetch` | `url` (required), `lang`, `fullPage`, `timeoutMs`, `cache` | The page's readable text, then a trailer naming the final URL after redirects, its canonical URL and title, any note, and the rung that produced it. Handles HTML, PDFs and office documents, using Firecrawl when available and local extraction as fallback. `fullPage: true` keeps all HTML page text through the built-in reader, including navigation and consent banners. `timeoutMs` shortens the wait on a silent host. `cache: true` uses the revalidating on-disk cache (off by default): a fresh copy is reused for its TTL, a stale one costs a 304 when unchanged. Never raw bytes. |
 | `webindex_extract` | `path` (required), `fullPage` | The same for a file already on disk; `fullPage: true` keeps navigation and consent banners too. |
 | `webindex_rank` | `question` (required), `documents` (required), `limit`, `dense` | The reading order for a pool of candidates: BM25F, near-duplicate collapse, then MMR. A document's own `score` is fused with BM25F by rank; `dense: true` fuses in the local embedding lane too (a `note` says when there is none). Returns each entry's score and matched query terms, plus how many duplicates were collapsed and, in `duplicates`, each dropped mirror's URL with the URL it duplicated. The brick an agent otherwise re-implements — deterministic, no model, no network unless `dense` asks for one. |
-| `webindex_repo` | `repo` (required), `forge` | A repository's own record from GitHub, GitLab or Gitea: stars, licence, default branch, last push, archived. |
-| `webindex_issues` | `repo` (required), `terms`, `kind` (`issue` or `pr`), `limit`, `forge` | Issues or pull requests matching every term, relaxed once to the most distinctive ones (and said so in `note`) when together they match nothing. |
-| `webindex_releases` | `repo` (required), `limit`, `forge` | Releases, newest first, with their notes. |
-| `webindex_tags` | `repo` (required), `limit`, `forge` | Tags — the versions of a project that tags without publishing releases. |
-| `webindex_package` | `name` (required), `registry`, `version` | A library name resolved through npm, PyPI or crates.io to its repository, docs, current version, licence and deprecation. |
-| `webindex_meta` | `url` (required) | JSON-LD, OpenGraph and meta tags: author, dates, type, canonical URL. |
-| `webindex_robots` | `url` (required) | Whether robots.txt allows the URL, its crawl-delay and the sitemaps it names. |
-| `webindex_sitemap` | `url` (required), `max` | The URLs the site's sitemaps list, reading at most `max` documents (default 3); the children not reached come back in `unfetched`. |
-| `webindex_feed` | `url` (required) | A feed's dated entries, or those of the feeds a page advertises. |
-| `webindex_tables` | `url` (required), `markdown` | A page's tables as headers and rows, spans resolved. |
-| `webindex_embed` | `texts` (required) | One vector per text from the local Ollama; fails with the command that starts it when none answers. |
-| `webindex_crawl` | `url` (required), `max` (required), `depth`, `prefix`, `sitemap` | A bounded breadth-first walk honouring robots.txt at every hop: each page's URL, title and text, plus `disallowed`, `pending` and `notes`. Every page comes back inline, and an answer over 1 MB is withheld — ask for tens of pages, not hundreds. |
+| `webindex_repo` | `repo` (required), `forge` | A repository's record from GitHub, GitLab or Gitea: description, stars, licence, default branch, last push, topics, and whether it is archived — "is this maintained" from the forge, not from a README. |
+| `webindex_issues` | `repo` (required), `terms`, `kind` (`issue` or `pr`), `limit`, `forge` | Issues or pull/merge requests with number, title, state, labels and body. GitHub ranks by relevance and scores; GitLab and Gitea order by recency and score nothing. When all the terms together match nothing it searches once more with the most distinctive ones and says so in `note`. |
+| `webindex_releases` | `repo` (required), `limit`, `forge` | Releases, newest first, with their notes and dates. A project that only tags gets pointed at `webindex_tags`. |
+| `webindex_tags` | `repo` (required), `limit`, `forge` | Tags with a link to each — the versions of a project that publishes no releases. |
+| `webindex_package` | `name` (required), `registry`, `version` | The registry's own record: repository, homepage, docs, current version, licence and any deprecation. |
+| `webindex_meta` | `url` (required) | The page's JSON-LD, OpenGraph and meta tags: author, dates, type, site name, canonical URL. |
+| `webindex_robots` | `url` (required) | Whether robots.txt allows the URL, any crawl-delay, and the sitemaps it advertises. Advisory: `webindex_fetch` does not consult it. |
+| `webindex_sitemap` | `url` (required), `max` | Page URLs with their last-modified dates, reading at most `max` sitemap documents (default 3); the children it did not reach come back in `unfetched`. |
+| `webindex_feed` | `url` (required) | A feed parsed — RSS, Atom or JSON Feed — or the feeds a page advertises, with dated entries and absolute links. |
+| `webindex_tables` | `url` (required), `markdown` | Every `<table>` as headers and rows with `colspan`/`rowspan` resolved, or as markdown. |
+| `webindex_embed` | `texts` (required) | One vector per text from the local Ollama, in input order. Fails with a note naming the command that starts it when no embedding server answers. |
+| `webindex_crawl` | `url` (required), `max` (required), `depth`, `prefix`, `sitemap` | A bounded breadth-first walk honouring robots.txt at every hop and staying on the origin the seed lands on: each page's URL, title and text, what robots.txt refused, and what was left pending. Every page comes back inline, and an answer over 1 MB is withheld — ask for tens of pages, not hundreds. |
 
 Every tool is annotated `readOnlyHint` (none changes anything it reaches) and,
 except `webindex_extract`, `webindex_rank` and `webindex_embed`, `openWorldHint`.
