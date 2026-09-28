@@ -493,7 +493,13 @@ class Writer {
     const lead = content.slice(0, content.length - content.trimStart().length);
     const trail = content.slice(content.trimEnd().length);
     this.whitespace(lead);
-    if (core) this.push(wrapInline(f, core, this.heading > 0));
+    if (core) {
+      const markdown = wrapInline(f, core, this.heading > 0);
+      // A "!" straight before a link's "[" would turn the link into an image.
+      const last = this.parts.length - 1;
+      if (f.kind === "a" && markdown && !this.pendingSpace && this.parts[last]?.endsWith("!")) this.parts[last] = `${this.parts[last]!.slice(0, -1)}\\!`;
+      this.push(markdown);
+    }
     this.whitespace(trail);
     if (trailing) this.space();
   }
@@ -673,16 +679,23 @@ function codeLanguage(pre: string, inner: string, divs: readonly string[]): stri
 
 /**
  * A table used for layout rather than data: one that says so with its role,
- * or one holding another table. Written as blocks — flattened into one GFM
- * row, a whole page laid out in a table would read as a single cell.
+ * one holding another table, or one holding a code block (Pygments sets line
+ * numbers beside the code in a table). Written as blocks — flattened into one
+ * GFM row, a whole page laid out in a table would read as a single cell, and
+ * the code would lose its newlines.
+ *
+ * The search stops at the first <table> or <pre> after the opener, inside or
+ * not, so the tables of a page between them scan it once.
  */
 function isLayoutTable(open: string, html: string, region: Region): boolean {
   if (/^(?:presentation|none)$/i.test(htmlAttributes(open).get("role")?.trim() ?? "")) return true;
-  const nested = new RegExp(TABLE_OPEN.source, "gi");
-  nested.lastIndex = region.start;
-  const next = nested.exec(html);
+  const inner = new RegExp(LAYOUT_INSIDE.source, "gi");
+  inner.lastIndex = region.start;
+  const next = inner.exec(html);
   return next !== null && next.index < region.end;
 }
+
+const LAYOUT_INSIDE = /<(?:table|pre)[\s/>]/;
 
 /** An ordered list's first number: its `start`, else 1. */
 function listStart(open: string): number {

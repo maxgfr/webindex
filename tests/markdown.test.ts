@@ -149,6 +149,13 @@ describe("htmlToMarkdown: tables", () => {
     expect(md(nested)).toBe("| K |\n| --- |\n| V |\n\nSide");
   });
 
+  it("keeps a code block verbatim when a table only lays it out, as Pygments' line numbers do", () => {
+    const html =
+      '<div class="highlight-python"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre>1\n2</pre></div></td>' +
+      '<td class="code"><div class="highlight"><pre>def f():\n    return 1</pre></div></td></tr></table></div>';
+    expect(md(html)).toContain("```python\ndef f():\n    return 1\n```");
+  });
+
   it("escapes a cell's own syntax, as it does a paragraph's", () => {
     const html = "<table><caption>Engines [1]</caption><tr><th>*API*</th></tr><tr><td>Accepts &lt;length&gt; | a\\b</td></tr></table>";
     expect(md(html)).toBe("**Engines \\[1\\]**\n\n| \\*API\\* |\n| --- |\n| Accepts \\<length> \\| a\\\\b |");
@@ -204,6 +211,12 @@ describe("htmlToMarkdown: escaping", () => {
     expect(md("<h2>Section #</h2>")).toBe("## Section \\#");
   });
 
+  it("escapes a '!' written straight before a link, which would make it an image", () => {
+    expect(md('<p>Warning!<a href="https://x.test/">read this</a> Wow! <a href="https://x.test/">ok</a></p>')).toBe(
+      "Warning\\![read this](https://x.test/) Wow! [ok](https://x.test/)",
+    );
+  });
+
   it("escapes a doubled tilde, which GFM reads as strikethrough", () => {
     expect(md("<p>~~gone~~ ~5 minutes</p>")).toBe("\\~\\~gone\\~\\~ ~5 minutes");
   });
@@ -241,6 +254,7 @@ describe("htmlToMarkdown stays linear on hostile markup", () => {
     ["unclosed tables", "<table><tr><td>x".repeat(40_000)],
     ["nested tables", `${"<table><tr><td>x".repeat(10_000)}${"</td></tr></table>".repeat(10_000)}`],
     ["many small tables", "<table><tr><th>a</th></tr><tr><td>b</td></tr></table>".repeat(20_000)],
+    ["many tables before one far-off code block", `${"<table><tr><td>a</td></tr></table>".repeat(20_000)}<pre>x</pre>`],
     ["unclosed divs round a pre", `${'<div class="highlight-x">'.repeat(50_000)}<pre>x</pre>`],
     ["a link wrapped round thousands of blocks", `<a href="/x">${"<p>word</p>".repeat(60_000)}</a>`],
     ["underscores and tildes", "<p>" + "_~".repeat(200_000)],
