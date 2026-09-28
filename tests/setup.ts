@@ -74,9 +74,10 @@ beforeEach(() => {
   // `engines` themselves.
   process.env[`${TEST_PREFIX}_PDF_ENGINE`] = "native";
 
-  // The office ladder shells out to npx too and has no built-in last rung, so
-  // `none` disables it. This also keeps the default assertion honest: a
-  // document nothing can read must REFUSE, which is what doc-extract pins.
+  // The office ladder shells out to npx too, and its built-in last rung would
+  // read the committed fixtures — so `none` disables it. This keeps the default
+  // assertion honest: a document nothing can read must REFUSE, which is what
+  // doc-extract pins. Suites exercising the built-in rung set `builtin`.
   process.env[`${TEST_PREFIX}_DOC_ENGINE`] = "none";
 
   // OCR rasterises at 300 DPI through copyable-pdf + tesseract: machine-

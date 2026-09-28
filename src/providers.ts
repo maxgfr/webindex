@@ -10,7 +10,9 @@
 //
 //   • refuse a search endpoint before spending a request — its response is a
 //     result list, so pinning it would cite a query, not a document (the
-//     many-ids case needs no table: `addressedIdCount` reads it off any URL);
+//     many-ids case mostly needs no table: `addressedIdCount` reads it off any
+//     URL — except one this table would rewrite to a single record, so a batch
+//     E-utilities call is refused here);
 //   • say where the text lives when a page walls — some publishers rate-limit
 //     their HTML while a keyless API next door keeps serving the same document
 //     (PubMed answers `pubmed.ncbi.nlm.nih.gov/<pmid>/` with a reCAPTCHA
@@ -38,12 +40,17 @@ export interface ResolvedProvider {
   preferText?: true;
 }
 
-const PUBMED_LANDING = /^https?:\/\/(?:www\.)?pubmed\.ncbi\.nlm\.nih\.gov\/(\d{4,9})\/?$/i;
-const PMC_LANDING = /^https?:\/\/(?:www\.)?pmc\.ncbi\.nlm\.nih\.gov\/articles\/(PMC\d+)\/?$/i;
+// Each landing form may end in a query string or a fragment: PubMed's search UI
+// appends `?from_term=…`, arXiv's download button `?download=1`, and a shared
+// link a `#section`. None of them changes the record. The legacy
+// www.ncbi.nlm.nih.gov/pubmed/ and /pmc/articles/ paths are still linked from
+// everywhere, and redirect to the same records.
+const PUBMED_LANDING = /^https?:\/\/(?:(?:www\.)?pubmed\.ncbi\.nlm\.nih\.gov|(?:www\.)?ncbi\.nlm\.nih\.gov\/pubmed)\/(\d{4,9})\/?(?:[?#].*)?$/i;
+const PMC_LANDING = /^https?:\/\/(?:(?:www\.)?pmc\.ncbi\.nlm\.nih\.gov|(?:www\.)?ncbi\.nlm\.nih\.gov\/pmc)\/articles\/(PMC\d+)\/?(?:[?#].*)?$/i;
 const EUTILS = /^https?:\/\/eutils\.ncbi\.nlm\.nih\.gov\/entrez\/eutils\/([a-z]+)\.fcgi/i;
 // arXiv's PDF form, with or without the `.pdf` suffix and with or without a
 // version (`v2`) — the abstract page keeps the version, so it is not stripped.
-const ARXIV_PDF = /^https?:\/\/(?:www\.|export\.)?arxiv\.org\/pdf\/([^?#]+?)(?:\.pdf)?\/?$/i;
+const ARXIV_PDF = /^https?:\/\/(?:www\.|export\.)?arxiv\.org\/pdf\/([^?#]+?)(?:\.pdf)?\/?(?:[?#].*)?$/i;
 
 // NCBI accepts a comma-separated id list; agents (and copy-pasted UI links) also
 // produce space- or `+`-separated ones, which URL-decode to spaces.
@@ -97,6 +104,12 @@ function resolveEutils(raw: string, op: string): ResolvedProvider {
   }
   const db = (params.get("db") ?? "").toLowerCase();
   const ids = eutilsIds(params.get("id"));
+  // Several ids are several records. Rewritten to the first one's landing
+  // page, the batch was cited as one document — and the resolved URL no
+  // longer said otherwise, so `addressedIdCount` could not catch it either.
+  if (ids.length > 1) {
+    return { citeUrl: raw, reject: `${raw} addresses ${ids.length} records, not one document — fetch each record's own page instead.` };
+  }
   const id = ids[0];
   if (!id) return { citeUrl: raw };
   if (db === "pubmed" && /^\d+$/.test(id)) {

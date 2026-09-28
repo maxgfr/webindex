@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html><head><title>Blog — Acme Engineering</title></head>
+<body>
+<header><nav><a href="/">Acme</a> <a href="/blog">Blog</a> <a href="/careers">Careers</a></nav></header>
+<div class="container">
+<article class="post-preview"><h2><a href="/blog/rate-limits">How we rebuilt our rate limiter</a></h2><p class="meta">June 3, 2025 · 8 min read</p><p>Our old rate limiter used a fixed window counter in Redis. It worked, until a customer discovered they could send twice their quota by straddling the window boundary. This post walks through how we replaced it with a token bucket implemented as a Lua script, how we tested it under production traffic, and what we learned about clock skew between Redis replicas. We also cover the migration plan that let us switch 4,000 tenants over without a single dropped request and the dashboards we built to watch it.</p></article>
+<article class="post-preview"><h2><a href="/blog/postgres-16">Upgrading to Postgres 16 with zero downtime</a></h2><p class="meta">May 20, 2025 · 12 min read</p><p>Major version upgrades used to mean a maintenance window. This time we used logical replication to stand up a Postgres 16 cluster alongside the old one, replayed writes for two weeks, verified row counts and checksums table by table, and cut over with a DNS change that took eleven seconds. We describe the tooling we wrote to compare the clusters, the three extensions that did not survive the upgrade, and the query plan regression that almost made us roll back.</p></article>
+<article class="post-preview"><h2><a href="/blog/oncall">What we changed about on-call</a></h2><p class="meta">April 2, 2025 · 6 min read</p><p>Last year our on-call engineers were paged an average of fourteen times a week, and a third of those pages needed no action at all. We audited every alert that fired in a quarter, deleted half of them, rewrote the rest around user-facing symptoms, and introduced a follow-the-sun rotation across our three offices. Pages are down eighty percent, and the ones that remain are the ones that matter. Here is the full list of alerts we killed and why.</p></article>
+</div>
+<footer>© Acme</footer>
+</body></html>

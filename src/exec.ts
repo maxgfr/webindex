@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { envInt } from "./brand.js";
+import { killTree } from "./process-tree.js";
 
 // Running a local command and reading what it said.
 //
@@ -73,15 +74,22 @@ export function resetHaveCache(): void {
 
 /** Run a command synchronously. Never throws — a missing binary is a result. */
 export function sh(cmd: string, args: string[], opts: { cwd?: string; input?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): ShResult {
-  const r = spawnSync(cmd, args, {
-    cwd: opts.cwd,
-    input: opts.input,
-    timeout: opts.timeoutMs ?? defaultTimeoutMs(),
-    encoding: "utf8",
-    maxBuffer: STDOUT_CAP,
-    env: opts.env ?? process.env,
-  });
-  return toResult(r.status, r.stdout ?? "", r.stderr ?? "", r.error as NodeJS.ErrnoException | undefined);
+  let r: ReturnType<typeof spawnSync>;
+  try {
+    r = spawnSync(cmd, args, {
+      cwd: opts.cwd,
+      input: opts.input,
+      timeout: opts.timeoutMs ?? defaultTimeoutMs(),
+      encoding: "utf8",
+      maxBuffer: STDOUT_CAP,
+      env: opts.env ?? process.env,
+    });
+  } catch (e) {
+    // spawn validates argv before it runs anything: a NUL byte (which an MCP
+    // argument can carry into a ref name) throws here rather than failing.
+    return { ok: false, status: 1, stdout: "", stderr: (e as Error).message };
+  }
+  return toResult(r.status, String(r.stdout ?? ""), String(r.stderr ?? ""), r.error as NodeJS.ErrnoException | undefined);
 }
 
 /**
@@ -90,30 +98,43 @@ export function sh(cmd: string, args: string[], opts: { cwd?: string; input?: st
  * Preferred wherever several commands could overlap — a synchronous `git clone`
  * freezes everything else in the process for the whole transfer, which is the
  * difference between three clones taking as long as the slowest and taking as
- * long as all of them put together. SIGKILL on timeout, and never an orphan.
+ * long as all of them put together. SIGKILL on timeout — to the command and
+ * everything it started — and never an orphan.
  */
 export function shAsync(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): Promise<ShResult> {
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   return new Promise((resolve) => {
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const done = (r: ShResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       resolve(r);
     };
-    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      // A NUL in argv throws synchronously; it is a failed command, not a crash.
+      done({ ok: false, status: 1, stdout: "", stderr: (e as Error).message });
+      return;
+    }
     let stdout = "";
     let stderr = "";
-    child.stdout?.on("data", (d) => {
-      if (stdout.length < STDOUT_CAP) stdout += String(d);
+    // Decoded by a stream decoder, which holds a character split across two
+    // chunks until it is whole; `String(chunk)` turned each half into U+FFFD.
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (d: string) => {
+      if (stdout.length < STDOUT_CAP) stdout += d;
     });
     // Drained even when nobody reads it: a full stderr pipe blocks the child.
-    child.stderr?.on("data", (d) => {
-      if (stderr.length < STDOUT_CAP) stderr += String(d);
+    child.stderr?.on("data", (d: string) => {
+      if (stderr.length < STDOUT_CAP) stderr += d;
     });
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
+    timer = setTimeout(() => {
+      killTree(child);
       done({ ok: false, status: 124, stdout, stderr: stderr || `timed out after ${timeoutMs}ms` });
     }, timeoutMs);
     child.on("error", (e) => done(toResult(null, stdout, stderr, e as NodeJS.ErrnoException)));

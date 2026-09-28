@@ -38,6 +38,7 @@ describe("crawl redirects over HTTP", () => {
         "/start": "/dir/index",
         "/jump": "/private",
         "/outside": base.replace("127.0.0.1", "localhost") + "/private",
+        "/seed-cross": base.replace("127.0.0.1", "localhost") + "/dir/index",
         "/loop": "/loop",
         ...(redirectSitemap ? { "/sitemap.xml": "/private" } : {}),
       };
@@ -47,7 +48,11 @@ describe("crawl redirects over HTTP", () => {
         return;
       }
       res.writeHead(200, { "content-type": "text/html" });
-      res.end(path === "/dir/index" ? '<p>Index page</p><a href="child?a=1&amp;b=2">Child</a>' : "<p>Document content</p>");
+      const bodies: Record<string, string> = {
+        "/dir/index": '<p>Index page</p><a href="child?a=1&amp;b=2">Child</a>',
+        "/links": '<p>Links</p><a href="/outside">out</a>',
+      };
+      res.end(bodies[path] ?? "<p>Document content</p>");
     });
     await new Promise<void>((resolve) => server.listen(0, resolve));
     const address = server.address();
@@ -75,11 +80,21 @@ describe("crawl redirects over HTTP", () => {
     expect(result.disallowed).toEqual([`${base}/private`]);
   });
 
-  it("does not contact an out-of-origin redirect destination", async () => {
-    const result = await crawlSite(`${base}/outside`, { useSitemap: false, delayMs: 0, maxPages: 1, maxDepth: 0 });
+  it("does not contact an out-of-origin redirect destination of a link", async () => {
+    const result = await crawlSite(`${base}/links`, { useSitemap: false, delayMs: 0, maxPages: 5, maxDepth: 1 });
     expect(requests.some((path) => path.startsWith("localhost:"))).toBe(false);
-    expect(result.pages).toEqual([]);
-    expect(result.notes.join(" ")).toMatch(/origin/i);
+    expect(result.pages.map((page) => page.url)).toEqual([`${base}/links`]);
+    expect(result.notes.join(" ")).toMatch(/outside the crawl origin/i);
+  });
+
+  it("walks the origin the seed's own redirect lands on, under that origin's robots", async () => {
+    // The seed is the site the caller named; where it redirects is where that
+    // site lives. It used to be refused as "outside the crawl origin": 0 pages.
+    const other = base.replace("127.0.0.1", "localhost");
+    const result = await crawlSite(`${base}/seed-cross`, { useSitemap: false, delayMs: 0, maxPages: 3, maxDepth: 1 });
+    expect(result.pages.map((page) => page.url)).toEqual([`${other}/dir/index`, `${other}/dir/child?a=1&b=2`]);
+    expect(requests).toContain(`${other.replace("http://", "")}/robots.txt`);
+    expect(result.notes.join(" ")).toMatch(/seed redirected to/);
   });
 
   it("consults the destination origin's robots before following an allowed cross-origin redirect", async () => {

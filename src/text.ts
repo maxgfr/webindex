@@ -9,6 +9,7 @@
 // accent-insensitive patterns. Deterministic, no LLM, no dependencies.
 
 import { brand } from "./brand.js";
+import { fnv1a64 } from "./url.js";
 
 export function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -167,6 +168,38 @@ const STOPWORDS = new Set([
   "aux",
   "si",
   "ne",
+  "vs",
+  // German question scaffolding: the locale layer targets DE as well as FR.
+  "der",
+  "die",
+  "das",
+  "und",
+  "ist",
+  "sind",
+  "wie",
+  "ein",
+  "eine",
+  "einen",
+  "einem",
+  "einer",
+  "mit",
+  "für",
+  "von",
+  "zu",
+  "den",
+  "dem",
+  "im",
+  "auf",
+  "nicht",
+  "sich",
+  "oder",
+  "warum",
+  "wann",
+  "welche",
+  "welcher",
+  "welches",
+  "kann",
+  "wird",
 ]);
 
 /**
@@ -186,20 +219,71 @@ export function isStopword(term: string): boolean {
   // buildMatcher and to its own tokeniser alike — the two must agree on what a
   // term is, or a document ranks on a word the excerpt never highlights.
   const extra = brand().extraStopwords;
-  return extra ? extra.some((w) => w.toLowerCase() === t) : false;
+  return extra ? extraStopwordSet(extra).has(t) : false;
+}
+
+// Lowercased once per list, not once per token: the tokeniser asks for every
+// word it reads, and scanning forty extras per word doubled its cost. Keyed on
+// the array and its length, so a list a consumer extends in place is re-read.
+const extraSets = new WeakMap<readonly string[], { length: number; set: Set<string> }>();
+
+function extraStopwordSet(extra: readonly string[]): Set<string> {
+  const hit = extraSets.get(extra);
+  if (hit && hit.length === extra.length) return hit.set;
+  const set = new Set(extra.map((w) => w.toLowerCase()));
+  extraSets.set(extra, { length: extra.length, set });
+  return set;
+}
+
+// One question token: a run of letters, combining marks, digits and
+// underscores. Splitting on everything else took the subject out of "C++",
+// "C#", ".NET" and "HTTP/2", so a run keeps a trailing `+`/`#` pair (C++, C#,
+// F#, C++20), a `/2` or `/1.1` version, and .NET its leading dot. The marks are
+// part of the word, as bm25Tokenize has them: Devanagari, Thai and Tamil write
+// vowels as combining marks, and splitting at each one left fragments that
+// matched nothing.
+const TOKEN_RE =
+  /(?<![\p{L}\p{M}\p{N}_])\.net(?![\p{L}\p{M}\p{N}_])|[\p{L}\p{M}\p{N}_]+(?:[+#]{1,2}\d*(?![\p{L}\p{M}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{M}\p{N}_./]))?/giu;
+
+// Chinese and Japanese put no space between words, so a whole clause was one
+// keyword and no page ever matched it. bm25Tokenize reads them as overlapping
+// character bigrams, and so does this — the same rule, or the ranker and the
+// excerpt matcher disagree about what a term is (see rank.ts).
+const CJK_CHAR = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
+const CJK_RUNS = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
+
+/** A CJK run's overlapping bigrams; a lone ideograph is a word of its own. */
+function cjkBigrams(run: string): string[] {
+  const chars = Array.from(run);
+  if (chars.length === 1) return [run];
+  const out: string[] = [];
+  for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i]! + chars[i + 1]!);
+  return out;
 }
 
 export function keywords(question: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const raw of question.split(/[^\p{L}\p{N}_]+/u)) {
-    if (!raw) continue;
+  const add = (raw: string, minLength: number): void => {
     const lower = raw.toLowerCase();
-    if (raw.length < 2) continue;
-    if (isStopword(lower)) continue;
-    if (seen.has(lower)) continue;
+    if (raw.length < minLength || isStopword(lower) || seen.has(lower)) return;
     seen.add(lower);
     out.push(raw);
+  };
+  // NFC, as bm25Tokenize reads it: "e" plus a combining acute is one letter,
+  // just as a precomposed "é" is.
+  const nonAscii = NON_ASCII.test(question);
+  for (const [raw] of (nonAscii ? question.normalize("NFC") : question).matchAll(TOKEN_RE)) {
+    if (!nonAscii || !CJK_CHAR.test(raw)) {
+      add(raw, 2);
+      continue;
+    }
+    // Captured, so the pieces alternate: Latin or digits, then a CJK run.
+    for (const piece of raw.split(CJK_RUNS)) {
+      if (!piece) continue;
+      if (!CJK_CHAR.test(piece)) add(piece, 2);
+      else for (const gram of cjkBigrams(piece)) add(gram, 1);
+    }
   }
   return out;
 }
@@ -282,7 +366,8 @@ export function subtokens(raw: string): string[] {
     .replace(/(\p{Lu}+)(\p{Lu}\p{Ll})/gu, "$1 $2")
     .replace(/(\p{L})(\p{N})/gu, "$1 $2")
     .replace(/(\p{N})(\p{L})/gu, "$1 $2");
-  const parts = spaced.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  // Marks stay inside their word here too, or a Hindi word "splits" at its vowels.
+  const parts = spaced.split(/[^\p{L}\p{M}\p{N}]+/u).filter(Boolean);
   if (parts.length < 2) return [];
   const out: string[] = [];
   for (const p of parts) {
@@ -336,11 +421,35 @@ export function expandTokens(tokens: string[], max = 8): ExpandedKeyword[] {
   return [...byCanonical.values()];
 }
 
+// Ligatures a writer spells either way — "cœur"/"coeur", "Straße"/"Strasse",
+// "encyclopædia"/"encyclopaedia" — which no accent class can express, since
+// one side is two letters.
+const LIGATURE_SPELLING: Record<string, string> = { œ: "oe", æ: "ae", ß: "ss" };
+const LIGATURE_OF: Record<string, string> = { oe: "œ", ae: "æ", ss: "ß" };
+
+function charPattern(ch: string): string {
+  const cls = ACCENT_CLASSES[baseChar(ch)];
+  return cls ? `[${cls}]` : escapeRegExp(ch);
+}
+
 export function accentPattern(text: string): string {
+  const chars = [...text];
   let out = "";
-  for (const ch of text) {
-    const cls = ACCENT_CLASSES[baseChar(ch)];
-    out += cls ? `[${cls}]` : escapeRegExp(ch);
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i]!;
+    const spelled = LIGATURE_SPELLING[ch.toLowerCase()];
+    if (spelled) {
+      out += `(?:${escapeRegExp(ch)}|${charPattern(spelled[0]!)}${charPattern(spelled[1]!)})`;
+      continue;
+    }
+    const next = chars[i + 1];
+    const ligature = next && LIGATURE_OF[(ch + next).toLowerCase()];
+    if (ligature) {
+      out += `(?:${charPattern(ch)}${charPattern(next)}|${ligature})`;
+      i++;
+      continue;
+    }
+    out += charPattern(ch);
   }
   return out;
 }
@@ -363,19 +472,36 @@ export interface KeywordMatcher {
   matchLine(line: string): Set<string>;
 }
 
-function makeMatcher(expanded: ExpandedKeyword[]): KeywordMatcher {
-  const regexes: { re: RegExp; canonical: string }[] = [];
-  for (const ek of expanded) {
-    for (const v of ek.variants) {
-      regexes.push({ re: new RegExp(accentPattern(v.text), "i"), canonical: ek.canonical });
+// A keyword this short matches inside unrelated words — "go" in "algorithm"
+// and "Google", "js" in "json" — and every such line outscored the passage
+// that answered the question. So it must stand as a word: no letter, mark or
+// digit before it, no letter or mark after it but a plural "s" (a digit may
+// follow: "go1.18", "C++20"). Not a Chinese or Japanese bigram: those sit
+// between two letters by nature, since the script has no word boundary.
+const SHORT_VARIANT = 3;
+
+function lineRegex(source: string, text: string): RegExp {
+  if ([...text].length <= SHORT_VARIANT && !CJK_CHAR.test(text)) {
+    try {
+      return new RegExp(`(?<![\\p{L}\\p{M}\\p{N}])(?:${source})s?(?![\\p{L}\\p{M}])`, "iu");
+    } catch {
+      /* a caller's raw token that is no valid Unicode-mode pattern: match it as before */
     }
   }
-  const patterns = expanded.flatMap((ek) => ek.variants.map((v) => ({ source: accentPattern(v.text), canonical: ek.canonical })));
+  return new RegExp(source, "i");
+}
+
+function makeMatcher(expanded: ExpandedKeyword[]): KeywordMatcher {
+  const variants = expanded.flatMap((ek) => ek.variants.map((v) => ({ text: v.text, source: accentPattern(v.text), canonical: ek.canonical })));
+  const regexes = variants.map(({ text, source, canonical }) => ({ re: lineRegex(source, text), canonical }));
+  // Compiled once, not per call: canonicalOf runs per span an external scanner
+  // reports, and compiling a pattern each time was 20x the matching.
+  const anchored = variants.map(({ source, canonical }) => ({ re: new RegExp(`^(?:${source})$`, "i"), canonical }));
   return {
     expanded,
     canonicals: expanded.map((e) => e.canonical),
-    patterns,
-    canonicalOf: (span) => regexes.find(({ re }) => new RegExp(`^(?:${re.source})$`, "i").test(span))?.canonical,
+    patterns: variants.map(({ source, canonical }) => ({ source, canonical })),
+    canonicalOf: (span) => anchored.find(({ re }) => re.test(span))?.canonical,
     matchLine: (line) => {
       const hit = new Set<string>();
       for (const { re, canonical } of regexes) {
@@ -524,15 +650,23 @@ export function excerptWindows(
  * `max` is a parameter because the two uses want different lengths — a repo
  * identity is short and a research question is not — and truncating a question
  * at a repo's length collides distinct runs.
+ *
+ * A slug that had to drop letters (anything outside ASCII) or be cut at `max`
+ * ends in eight hex digits of a hash of the whole input. Without them
+ * `file:///srv/git/项目` and `file:///srv/git/文档` were both `file-srv-git`,
+ * and the second repository was handed the first one's checkout. An ASCII
+ * input that fits keeps its readable name as it always had.
  */
 export function slugify(input: string, opts: { max?: number; fallback?: string } = {}): string {
-  const s = input
+  const max = opts.max ?? 120;
+  const normalized = input
     .toLowerCase()
     .replace(/^https?:\/\//, "")
     .replace(/^git@/, "")
-    .replace(/\.git$/, "")
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, opts.max ?? 120);
-  return s || (opts.fallback ?? "");
+    .replace(/\.git$/, "");
+  const s = normalized.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!/[\u0080-\uffff]/.test(normalized) && s.length <= max) return s || (opts.fallback ?? "");
+  const tag = fnv1a64(normalized).toString(16).padStart(16, "0").slice(0, 8);
+  const head = s.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");
+  return head ? `${head}-${tag}` : tag;
 }

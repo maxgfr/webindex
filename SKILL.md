@@ -60,31 +60,42 @@ boundaries and a concrete MCP example.
 ## The commands
 
 ```
-webindex search <query> [--engine ddg|ddglite|mojeek|off] [--limit n] [--lang tag]
+webindex search <query> [--engine ddg|ddglite|mojeek|off] [--limit n] [--lang tag] [--region cc] [--timeout ms]
 webindex fetch <url> [--full-page]    # HTML main content, consent banners dropped; --full-page keeps all page text via the built-in reader
-webindex extract <file> [--full-page] # the same on disk; --full-page keeps navigation and consent banners too
-webindex rank --query <q> --docs <f> # BM25F + near-dup collapse + MMR
-webindex repo|issues|prs|releases <ref>
+webindex fetch <url> --format markdown # CommonMark: absolute links, fenced code, lists, tables — Firecrawl's shape, whichever extractor ran
+webindex fetch <url> --cache          # reuse a fresh copy for the TTL, revalidate a stale one (a 304 when unchanged); --refresh, --offline
+webindex fetch <url> <url> …         # several at once, each under a ==> <url> <== header (--json: an array); fails only if all did
+webindex extract <file|-> [--full-page] # the same on disk (- reads stdin); --full-page keeps navigation and consent banners too; --format markdown
+webindex rank --query <q> --docs <f> # BM25F + near-dup collapse + MMR; --dense adds the embedding lane
+webindex repo|issues|prs|releases|tags <ref> [--forge github|gitlab|gitea]  # a browser URL or a local checkout works
 webindex package <name> [--registry npm|pypi|crates]
-webindex meta|robots|sitemap|feed <url>
-webindex crawl <url> --max <n>       # bounded site walk, robots at every hop
-webindex tables <url>                # tables as data, not flattened prose
-webindex embed <text>                # local vectors, no key
+webindex meta|robots|sitemap|feed <url> # meta also reads a saved page: <file|->
+webindex crawl <url> --max <n>       # bounded site walk, robots at every hop; --prefix /docs/, --no-sitemap
+webindex tables <url|file|->         # tables as data, not flattened prose
+webindex embed <text> | --docs <f>   # local vectors, no key; a JSON array of texts in one run
 webindex hybrid --query <q>          # BM25F + dense, fused by RRF
-webindex changed <url> [--etag <v>]  # a 304 costs one round trip
+webindex changed <url> [--etag <v>] [--last-modified <d>]  # a 304 costs one round trip
 webindex cache status|clean [--all]
 webindex searxng|firecrawl|semantic|stack up|down|status
-webindex skill check|bundle|vendor|copy|doctor|init
-webindex doctor
+webindex skill check|bundle|vendor|copy|doctor|init|repin|finish|recall
+webindex mcp [--transport http]       # the webindex_* tools over MCP; --public-only, --extract-root <dir> wall it in
+webindex doctor [--json]
 ```
 
-Every command takes `--json`. Human output goes to stdout and degradation notes
-to stderr, so `webindex search q | head` stays a clean URL list.
+Every command that answers with data takes `--json` — all but the container
+commands, which print docker's own report, and `mcp`. Human output goes to
+stdout and degradation notes to stderr, so `webindex search q | head` stays a
+clean URL list. `webindex <command> --help` prints that command's usage alone.
+
+Exit codes: 0 when the command did what was asked; 1 when it ran and the answer
+is a failure — nothing found, a page unreadable, robots.txt saying no, a gate
+refusing; 2 when the invocation itself was wrong — an unknown command or flag, a
+missing or out-of-range value, a stray argument.
 
 ## What it will and will not do
 
 **In scope.** Discovery (SearXNG, the keyless engines, Firecrawl), retrieval
-(streaming byte caps, conditional GET, HTML→text, main-content extraction, the
+(streaming byte caps, conditional GET, HTML→text or Markdown, main-content extraction, the
 PDF and office ladders, Wayback rescue, a revalidating cache), text (keyword
 matching, URL identity), ranking (RRF, BM25F, SimHash, MMR), forges and package
 registries, and the whole MCP protocol.
@@ -135,6 +146,13 @@ a site is, and a caller that enumerates should ask first.
 The keyless engines are the only rung that reaches the public internet without
 being asked to — the rest is localhost by default. `WEBINDEX_ENGINES=off` turns
 them off for sandboxes, test suites and air-gapped runs.
+
+The MCP server fetches whatever URL it is handed and reads whatever file it is
+named. Exposed with `--allow-remote`, it refuses private and metadata addresses
+(at every redirect; `--allow-private` lifts it) and reads no local file unless
+`--extract-root <dir>` names the one directory it may; `WEBINDEX_MCP_TOKEN`
+makes HTTP require a bearer token. `--public-only` and `--extract-root` work
+without `--allow-remote` too.
 
 ## References
 

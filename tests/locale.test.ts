@@ -78,6 +78,81 @@ describe("ddgRegion (kl = region-language)", () => {
   });
 });
 
+describe("a full language tag is parsed, not split in two", () => {
+  // The second subtag is not always the region: BCP-47 puts an optional
+  // 4-letter SCRIPT there ("zh-Hant-TW", "sr-Latn-RS"), and a region can be
+  // three digits ("es-419", Latin America). Read as a region, the script
+  // produced kl=hant-zh and an Accept-Language of "zh-HANT", sent to every page.
+  it("skips a script subtag to find the region", () => {
+    expect(resolveRegion("zh-Hant-TW")).toBe("tw");
+    expect(resolveRegion("sr-Latn-RS")).toBe("rs");
+    expect(resolveRegion("es-419")).toBe("419");
+    expect(acceptLanguageHeader("zh-Hant-TW")).toBe("zh-TW,zh;q=0.9,en;q=0.5");
+    expect(acceptLanguageHeader("es-419")).toBe("es-419,es;q=0.9,en;q=0.5");
+  });
+
+  it("accepts the POSIX spelling", () => {
+    expect(baseLang("fr_FR")).toBe("fr");
+    expect(ddgRegion("fr_FR")).toBe("fr-fr");
+    expect(acceptLanguageHeader("pt_BR.UTF-8")).toBe("pt-BR,pt;q=0.9,en;q=0.5");
+  });
+
+  it("knows the country of a language whose code is not one", () => {
+    // Falling back to the language code sent Estonian to Ethiopia (ET), Catalan
+    // to Canada (CA) and Slovenian to Sierra Leone (SL).
+    expect(resolveRegion("et")).toBe("ee");
+    expect(resolveRegion("vi")).toBe("vn");
+    expect(resolveRegion("ms")).toBe("my");
+    expect(resolveRegion("fa")).toBe("ir");
+    expect(resolveRegion("ca")).toBe("es");
+    expect(resolveRegion("sl")).toBe("si");
+    expect(resolveRegion("sr")).toBe("rs");
+    expect(resolveRegion("fil")).toBe("ph");
+    expect(acceptLanguageHeader("et")).toBe("et-EE,et;q=0.9,en;q=0.5");
+    // "xa" is DuckDuckGo's name for Arabia, not a country: it belongs in `kl`
+    // alone, never in a header sent to every page.
+    expect(resolveRegion("ar")).toBe("sa");
+    expect(acceptLanguageHeader("ar")).toBe("ar-SA,ar;q=0.9,en;q=0.5");
+  });
+});
+
+describe("ddgRegion speaks DuckDuckGo's own region list", () => {
+  // Every value below is on the region list DuckDuckGo's own result pages
+  // offer. An unrecognised `kl` is IGNORED, so a wrong one de-localises the run
+  // silently.
+  it.each([
+    ["ko", "kr-kr"],
+    ["ko-KR", "kr-kr"],
+    ["zh-TW", "tw-tzh"],
+    ["zh-HK", "hk-tzh"],
+    ["zh-Hant-TW", "tw-tzh"],
+    ["zh-Hant", "tw-tzh"],
+    ["zh-Hans", "cn-zh"],
+    ["es-419", "xl-es"],
+    ["es-US", "ue-es"],
+    ["ca", "ct-ca"],
+    ["sl-SI", "sl-sl"],
+    ["sl", "sl-sl"],
+    ["ar-SA", "xa-ar"],
+    ["ar-EG", "xa-ar"],
+    ["et", "ee-et"],
+    ["vi", "vn-vi"],
+    ["ms", "my-ms"],
+    ["fa", "ir-fa"],
+    ["fil", "ph-tl"],
+  ])("%s → %s", (tag, kl) => {
+    expect(ddgRegion(tag)).toBe(kl);
+  });
+
+  it("gives --region wt the meaning the docs promise: no region at all", () => {
+    expect(ddgRegion("en", "wt")).toBe("wt-wt");
+    expect(ddgRegion("fr", "WT")).toBe("wt-wt");
+    // …and no country in the header it pairs with.
+    expect(acceptLanguageHeader("fr", "wt")).toBe("fr,en;q=0.5");
+    expect(acceptLanguageHeader("en", "wt")).toBe("en");
+  });
+});
+
 describe("the Accept-Language header keeps the real BCP-47 tag", () => {
   it("does not adopt DuckDuckGo's spelling", () => {
     // The alias exists for one engine's query parameter. An HTTP header that

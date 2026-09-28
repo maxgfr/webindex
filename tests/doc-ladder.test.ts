@@ -1,9 +1,13 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, afterEach, vi } from "vitest";
 // Env names are resolved through the brand, exactly as the engine resolves them
 // — so these tests stay correct whichever prefix a consumer configures.
 import { envName } from "../src/brand.js";
 import { extractDocument, enabledDocExtractors, resetDocLadderCache } from "../src/doc.js";
+import { extractPdf, resetPdfLadderCache } from "../src/pdf.js";
 import { runWithInput, ANYDOC_SPEC } from "../src/pdf/exec.js";
+import { docx } from "./zipfile.js";
 
 // The anydoc rung spawns `npx`, which on a cold machine is a network download —
 // the suite stays offline and deterministic (CONTRIBUTING.md, rule 3), so the
@@ -25,6 +29,7 @@ const BYTES = Buffer.from("PK pretend this is a .docx", "latin1");
 afterEach(() => {
   vi.unstubAllEnvs();
   resetDocLadderCache();
+  resetPdfLadderCache();
   runMock.mockReset();
   runMock.mockResolvedValue({ ok: false, stdout: "", error: "not installed" });
 });
@@ -32,7 +37,7 @@ afterEach(() => {
 describe("enabledDocExtractors", () => {
   it("defaults to the full ladder, strongest first", () => {
     vi.stubEnv(envName("DOC_ENGINE"), undefined);
-    expect(enabledDocExtractors()).toEqual(["anydoc", "firecrawl"]);
+    expect(enabledDocExtractors()).toEqual(["anydoc", "firecrawl", "builtin"]);
   });
 
   it("honours <PREFIX>_DOC_ENGINE by running exactly that rung", () => {
@@ -50,12 +55,24 @@ describe("enabledDocExtractors", () => {
   it("drops the rung that needs an implicit install under <PREFIX>_NO_NPX", () => {
     vi.stubEnv(envName("DOC_ENGINE"), undefined);
     vi.stubEnv(envName("NO_NPX"), "1");
-    expect(enabledDocExtractors()).toEqual(["firecrawl"]);
+    expect(enabledDocExtractors()).toEqual(["firecrawl", "builtin"]);
   });
 
   it("ignores an unknown engine name rather than emptying the ladder", () => {
     vi.stubEnv(envName("DOC_ENGINE"), "nope");
-    expect(enabledDocExtractors()).toEqual(["anydoc", "firecrawl"]);
+    expect(enabledDocExtractors()).toEqual(["anydoc", "firecrawl", "builtin"]);
+  });
+
+  it("forces the built-in reader on <PREFIX>_DOC_ENGINE=builtin", () => {
+    vi.stubEnv(envName("DOC_ENGINE"), "builtin");
+    expect(enabledDocExtractors()).toEqual(["builtin"]);
+  });
+
+  it("reads a comma list, whatever the case and spacing", () => {
+    vi.stubEnv(envName("DOC_ENGINE"), " Firecrawl , anydoc ");
+    expect(enabledDocExtractors()).toEqual(["firecrawl", "anydoc"]);
+    vi.stubEnv(envName("DOC_ENGINE"), "NONE");
+    expect(enabledDocExtractors()).toEqual([]);
   });
 
   it("lets an explicit engines list win over the environment", () => {
@@ -126,16 +143,18 @@ describe("extractDocument", () => {
   // The document travels on stdin and the format comes from the table in
   // formats.ts — nothing derived from a URL may reach argv.
   it("passes the document on stdin, and names a format only when the table does", async () => {
+    // The first call asks npx where the executable is; this answer is no path,
+    // so the conversion runs through npx itself.
     runMock.mockResolvedValue({ ok: true, stdout: "converted" });
+    const conversion = () => runMock.mock.calls.find(([, , input]) => input === BYTES)!;
     await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
-    const [cmd, args, input] = runMock.mock.calls[0]!;
+    const [cmd, args] = conversion();
     expect(cmd).toBe("npx");
     expect(args).toEqual(["-y", "--prefer-offline", ANYDOC_SPEC, "-"]);
-    expect(input).toBe(BYTES);
 
     runMock.mockClear();
     await extractDocument(BYTES, { format: "csv", textFallback: true }, { engines: ["anydoc"] });
-    expect(runMock.mock.calls[0]![1]).toEqual(["-y", "--prefer-offline", ANYDOC_SPEC, "-", "--format", "csv"]);
+    expect(conversion()[1]).toEqual(["-y", "--prefer-offline", ANYDOC_SPEC, "-", "--format", "csv"]);
   });
 
   it("falls through a failed rung to the next one", async () => {
@@ -155,5 +174,161 @@ describe("extractDocument", () => {
     await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
     await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
     expect(runMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// anydoc exits 1 on any malformed office file. Taken as "not installed", one
+// truncated .docx made every later office document in the process unreadable
+// — and the note blamed a missing converter while anydoc had said exactly
+// what was wrong.
+describe("a document the converter rejects", () => {
+  const TRUNCATED = BYTES.subarray(0, 8);
+
+  function workingAnydoc() {
+    runMock.mockImplementation(async (_cmd, _args, input) =>
+      input.equals(BYTES)
+        ? { ok: true, stdout: "# Quarterly report\n\nReal prose from the converter.\n" }
+        : { ok: false, stdout: "", error: "exit 1", stderr: "malformed document: not a PDF: file appears to be a ZIP archive\n" },
+    );
+  }
+
+  it("does not cost the next document its converter", async () => {
+    workingAnydoc();
+    expect((await extractDocument(BYTES, BINARY, { engines: ["anydoc"] })).via).toBe("anydoc");
+    expect((await extractDocument(TRUNCATED, BINARY, { engines: ["anydoc"] })).text).toBe("");
+    expect((await extractDocument(BYTES, BINARY, { engines: ["anydoc"] })).via).toBe("anydoc");
+  });
+
+  it("says what the converter said, not that there is none", async () => {
+    workingAnydoc();
+    const r = await extractDocument(TRUNCATED, BINARY, { engines: ["anydoc"] });
+    expect(r.reason).toBe("anydoc: malformed document: not a PDF: file appears to be a ZIP archive");
+  });
+
+  // anydoc names itself in its own messages; the note said "anydoc: anydoc: …".
+  it("names the tool once when its own message already does", async () => {
+    runMock.mockResolvedValue({ ok: false, stdout: "", error: "exit 1", stderr: "anydoc: unsupported input: unrecognized file content\n" });
+    const r = await extractDocument(TRUNCATED, BINARY, { engines: ["anydoc"] });
+    expect(r.reason).toBe("anydoc: unsupported input: unrecognized file content");
+  });
+
+  it("says anydoc could not be installed, and how to skip it, when npm is offline", async () => {
+    runMock.mockResolvedValue({ ok: false, stdout: "", error: "exit 1", stderr: "npm error code ENOTFOUND\nnpm error network request failed\n" });
+    const r = await extractDocument(BYTES, BINARY, { engines: ["anydoc", "firecrawl"] });
+    expect(r.reason).toMatch(/anydoc could not be installed \(npm error ENOTFOUND — offline\?\)/);
+    expect(r.reason).toContain(`${envName("NO_NPX")}=1`);
+  });
+
+  // pdf-inspector and anydoc come from the same registry: once it is known to
+  // be unreachable, a PDF's failed install spares the office ladder its own.
+  it("does not ask npm for anydoc once the PDF ladder found the registry unreachable", async () => {
+    runMock.mockResolvedValue({ ok: false, stdout: "", error: "exit 1", stderr: "npm error code ECONNREFUSED\n" });
+    await extractPdf(Buffer.from("%PDF-1.4\n"), { engines: ["pdf-inspector"] });
+    runMock.mockClear();
+    const r = await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
+    expect(runMock).not.toHaveBeenCalled();
+    expect(r.reason).toMatch(/anydoc could not be installed/);
+  });
+});
+
+// `npx <spec>` starts npm and re-resolves the package for every document: about
+// 0.6 s before the tool does anything, twenty times what it then spends on a
+// small file. The executable is found once per process and run directly.
+describe.skipIf(process.platform === "win32")("running an installed converter", () => {
+  const BIN = "/home/u/.npm/_npx/9874503ee8e3efdc/node_modules/.bin/anydoc";
+  const isProbe = (cmd: string, args: string[]) => cmd === "npx" && args.includes("-c");
+  const probes = () => runMock.mock.calls.filter(([cmd, args]) => isProbe(cmd, args));
+  const CONVERTED = { ok: true, stdout: "# Quarterly report\n\nReal prose from the converter.\n" };
+
+  it("finds the executable once, then runs it directly", async () => {
+    runMock.mockImplementation(async (cmd, args) => (isProbe(cmd, args) ? { ok: true, stdout: `${BIN}\n` } : CONVERTED));
+    expect((await extractDocument(BYTES, BINARY, { engines: ["anydoc"] })).via).toBe("anydoc");
+    await extractDocument(BYTES, { format: "csv", textFallback: true }, { engines: ["anydoc"] });
+    expect(probes()).toHaveLength(1);
+    expect(probes()[0]![1]).toEqual(["-y", "--prefer-offline", "--package", ANYDOC_SPEC, "-c", "command -v anydoc"]);
+    const runs = runMock.mock.calls.filter(([cmd]) => cmd === BIN);
+    expect(runs.map(([, args]) => args)).toEqual([["-"], ["-", "--format", "csv"]]);
+    expect(runs[0]![2]).toBe(BYTES);
+  });
+
+  it("shares one probe between concurrent first documents", async () => {
+    runMock.mockImplementation(async (cmd, args) => (isProbe(cmd, args) ? { ok: true, stdout: BIN } : CONVERTED));
+    await Promise.all([1, 2, 3].map(() => extractDocument(BYTES, BINARY, { engines: ["anydoc"] })));
+    expect(probes()).toHaveLength(1);
+    expect(runMock.mock.calls.filter(([cmd]) => cmd === BIN)).toHaveLength(3);
+  });
+
+  // Installed and found: a failure is this document's, even a timeout on the
+  // very first one — nothing is downloading any more.
+  it("never sets an installed converter aside over one document", async () => {
+    runMock.mockImplementation(async (cmd, args, input) =>
+      isProbe(cmd, args) ? { ok: true, stdout: BIN } : input.equals(BYTES) ? CONVERTED : { ok: false, stdout: "", error: "timed out after 90s" },
+    );
+    expect((await extractDocument(Buffer.from("PK slow"), BINARY, { engines: ["anydoc"] })).text).toBe("");
+    expect((await extractDocument(BYTES, BINARY, { engines: ["anydoc"] })).via).toBe("anydoc");
+  });
+
+  it("goes back through npx when the executable has gone from npm's cache", async () => {
+    runMock.mockImplementation(async (cmd, args) => {
+      if (isProbe(cmd, args)) return { ok: true, stdout: BIN };
+      return cmd === BIN ? { ok: false, stdout: "", error: "not installed" } : CONVERTED;
+    });
+    expect((await extractDocument(BYTES, BINARY, { engines: ["anydoc"] })).via).toBe("anydoc");
+    expect(runMock.mock.calls.at(-1)![1]).toEqual(["-y", "--prefer-offline", ANYDOC_SPEC, "-"]);
+    // …and the next document looks for it again rather than trusting a stale path.
+    await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
+    expect(probes()).toHaveLength(2);
+  });
+
+  it("does not run npx twice for a document when the probe found npm offline", async () => {
+    runMock.mockResolvedValue({ ok: false, stdout: "", error: "exit 1", stderr: "npm error code ENOTFOUND\n" });
+    const r = await extractDocument(BYTES, BINARY, { engines: ["anydoc"] });
+    expect(runMock).toHaveBeenCalledTimes(1);
+    expect(r.reason).toMatch(/anydoc could not be installed \(npm error ENOTFOUND — offline\?\)/);
+  });
+});
+
+// Offline, under NO_NPX, or wherever anydoc cannot be installed, every office
+// document used to be refused: the ladder had no rung of its own.
+describe("the built-in rung", () => {
+  const fixture = (name: string) => readFileSync(join(__dirname, "fixtures", "docs", name));
+
+  it("reads an OOXML document with no converter and no network", async () => {
+    const r = await extractDocument(fixture("report.docx"), BINARY, { engines: ["builtin"] });
+    expect(r.via).toBe("builtin");
+    expect(r.text).toContain("# Quarterly report");
+    expect(r.text).toContain("| EMEA | 1.2 | 1.5 |");
+    expect(runMock).not.toHaveBeenCalled();
+  });
+
+  it("is where the default ladder ends up when anydoc cannot run", async () => {
+    vi.stubEnv(envName("DOC_ENGINE"), undefined);
+    const r = await extractDocument(fixture("sales.xlsx"), BINARY);
+    expect(r.via).toBe("builtin");
+    expect(r.text).toContain("## Sales");
+  });
+
+  it("says why it could not read a file, and still reads the next one", async () => {
+    const r = await extractDocument(fixture("legacy.xls"), BINARY, { engines: ["builtin"] });
+    expect(r.text).toBe("");
+    expect(r.reason).toMatch(/^builtin: a legacy binary or password-protected Office file/);
+    expect((await extractDocument(fixture("deck.pptx"), BINARY, { engines: ["builtin"] })).via).toBe("builtin");
+  });
+
+  // Allowed to fail, not to lie: its output answers to the same gate as every
+  // other rung's.
+  it("puts its output through the quality gate", async () => {
+    const garbled = docx(`<w:p><w:r><w:t>${"&#1;&#2;&#3;".repeat(200)}</w:t></w:r></w:p>`);
+    const r = await extractDocument(garbled, BINARY, { engines: ["builtin"] });
+    expect(r.text).toBe("");
+    expect(r.reason).toMatch(/binary\/control characters/);
+  });
+
+  // A CSV is not a package: its text fallback is the caller's, and a reason
+  // blaming the ZIP reader would only mislead.
+  it("leaves a CSV to the caller's text fallback without blaming the ZIP reader", async () => {
+    const r = await extractDocument(Buffer.from("a,b\n1,2\n"), { format: "csv", textFallback: true }, { engines: ["builtin"] });
+    expect(r.text).toBe("");
+    expect(r.reason).toBe("no document converter available");
   });
 });

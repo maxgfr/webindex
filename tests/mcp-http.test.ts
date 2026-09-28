@@ -71,6 +71,26 @@ describe("JSON-RPC over POST", () => {
     expect(body).toHaveLength(2);
   });
 
+  it("refuses a batch from a client on 2025-06-18 or later, which removed them", async () => {
+    const res = await post([rpc(1, "ping")], { "mcp-protocol-version": "2025-06-18" });
+    expect(res.status).toBe(400);
+    expect(await json(res)).toMatchObject({ id: null, error: { code: -32600 } });
+  });
+
+  it("answers an empty batch with an invalid-request error, not a 202", async () => {
+    const res = await post([]);
+    expect(res.status).toBe(400);
+    expect(await json(res)).toMatchObject({ id: null, error: { code: -32600 } });
+  });
+
+  it("bounds how long a request may take to arrive, and nothing else", async () => {
+    // A slow-trickled body held its connection forever with the timeout off.
+    // Node's requestTimeout only covers receiving the request — a response that
+    // takes minutes to compute is not cut by it — so switching it off bought
+    // nothing but that.
+    expect(running.server.requestTimeout).toBeGreaterThan(0);
+  });
+
   it("answers a parse error rather than a 500", async () => {
     const res = await post("{not json");
     expect(res.status).toBe(200);
@@ -81,6 +101,117 @@ describe("JSON-RPC over POST", () => {
     const res = await post({ jsonrpc: "2.0", method: "notifications/initialized" });
     expect(res.status).toBe(202);
     expect(await res.text()).toBe("");
+  });
+
+  it("returns 202 for a POSTed response too, as the transport requires", async () => {
+    const res = await post({ jsonrpc: "2.0", id: 10, result: {} });
+    expect(res.status).toBe(202);
+    expect(await res.text()).toBe("");
+  });
+});
+
+describe("progress and cancellation over HTTP", () => {
+  const progressing = () =>
+    testAdapter({
+      callTool: async (_name, _args, ctx) => {
+        ctx!.progress(1, 2, "half");
+        ctx!.progress(2, 2);
+        return { text: "done" };
+      },
+    });
+  const asking = { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "probe_echo", arguments: { text: "x" }, _meta: { progressToken: "p" } } };
+
+  it("streams progress, then the answer, as SSE to a client that asked for progress and accepts a stream", async () => {
+    const s = await startHttpServer(progressing(), { port: 0 });
+    try {
+      const res = await fetch(s.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify(asking),
+      });
+      expect(res.headers.get("content-type")).toMatch(/^text\/event-stream/);
+      const events = (await res.text())
+        .split("\n\n")
+        .filter(Boolean)
+        .map((e) =>
+          JSON.parse(
+            e
+              .split("\n")
+              .find((l) => l.startsWith("data: "))!
+              .slice(6),
+          ),
+        );
+      expect(events.map((e) => e.method ?? `reply ${e.id}`)).toEqual(["notifications/progress", "notifications/progress", "reply 5"]);
+      expect(events[0].params).toEqual({ progressToken: "p", progress: 1, total: 2, message: "half" });
+      expect(events[2].result.content[0].text).toBe("done");
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("opens no stream for a message that will never be answered", async () => {
+    const s = await startHttpServer(progressing(), { port: 0 });
+    try {
+      const res = await fetch(s.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ ...asking, id: null }),
+      });
+      expect(res.status).toBe(202);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("answers plain JSON, with no progress mixed in, to a client that accepts only JSON", async () => {
+    const s = await startHttpServer(progressing(), { port: 0 });
+    try {
+      const res = await fetch(s.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify(asking),
+      });
+      expect(res.headers.get("content-type")).toMatch(/^application\/json/);
+      expect(await json(res)).toMatchObject({ id: 5, result: { content: [{ text: "done" }] } });
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("aborts the tool's signal when the client hangs up before the answer", async () => {
+    // Stateless: a notifications/cancelled in another POST cannot name this
+    // request, so the connection closing is the only cancel there is.
+    let aborted!: () => void;
+    const stopped = new Promise<void>((resolve) => {
+      aborted = resolve;
+    });
+    const s = await startHttpServer(
+      testAdapter({
+        callTool: (_name, _args, ctx) =>
+          new Promise((resolve) => {
+            ctx!.signal.addEventListener("abort", () => {
+              aborted();
+              resolve({ text: "stopped" });
+            });
+          }),
+      }),
+      { port: 0 },
+    );
+    try {
+      const ctrl = new AbortController();
+      const pending = fetch(s.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(rpc(1, "tools/call", { name: "probe_echo", arguments: { text: "x" } })),
+        signal: ctrl.signal,
+      }).catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 50));
+      ctrl.abort();
+      await pending;
+      await Promise.race([stopped, new Promise((_, reject) => setTimeout(() => reject(new Error("the tool was never told")), 2000))]);
+    } finally {
+      await s.close();
+    }
   });
 });
 
@@ -121,6 +252,39 @@ describe("origin checking", () => {
     });
     expect(res.status).toBe(200);
     await s.close();
+  });
+});
+
+describe("bearer token", () => {
+  // Opt-in, for a server others can reach: without it anyone who finds the
+  // port has a fetch-anything proxy.
+  it("answers only a request carrying the operator's token", async () => {
+    const s = await startHttpServer(testAdapter(), { port: 0, bearerToken: "s3cret-token" });
+    try {
+      const call = (headers: Record<string, string>) =>
+        fetch(s.url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(rpc(1, "ping")) });
+      const none = await call({});
+      expect(none.status).toBe(401);
+      expect(none.headers.get("www-authenticate")).toMatch(/^Bearer/);
+      expect((await call({ authorization: "Bearer wrong" })).status).toBe(401);
+      expect((await call({ authorization: "Bearer s3cret-token-and-more" })).status).toBe(401);
+      expect((await call({ authorization: "s3cret-token" })).status).toBe(401);
+      const ok = await call({ authorization: "Bearer s3cret-token" });
+      expect(ok.status).toBe(200);
+      expect(await json(ok)).toMatchObject({ id: 1, result: {} });
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("still answers a CORS preflight, which a browser sends without credentials", async () => {
+    const s = await startHttpServer(testAdapter(), { port: 0, bearerToken: "s3cret-token" });
+    try {
+      const pre = await fetch(s.url, { method: "OPTIONS", headers: { origin: "http://localhost:5173", "access-control-request-method": "POST" } });
+      expect(pre.status).toBe(204);
+    } finally {
+      await s.close();
+    }
   });
 });
 

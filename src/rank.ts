@@ -1,4 +1,5 @@
-import { foldTerm, isStopword, type KeywordMatcher } from "./text.js";
+import { brand } from "./brand.js";
+import { foldTerm, isStopword, type KeywordMatcher, subtokens } from "./text.js";
 import { canonicalizeUrl, domainOf, fnv1a64Words, normalizeDoi } from "./url.js";
 
 // Ranking: turning a pool of candidates into a reading order.
@@ -38,16 +39,39 @@ export interface Ranked {
  * reads POSITION, so it needs no calibration: an item's contribution from each
  * list is `1/(k + rank)`, and `k` damps the tail so rank 40 cannot outvote a
  * couple of top-tens.
+ *
+ * An item counts ONCE per list, at its best rank, as in Cormack et al. Callers
+ * key by canonical URL or DOI, so tracking-param variants, pagination overlap
+ * and abs/pdf twins inside one engine's list share a key — summed, one engine
+ * repeating a URL counted as much as two engines agreeing on it.
  */
 export function rrf<T>(lists: T[][], keyOf: (item: T) => string, k = 60): Map<string, number> {
   const score = new Map<string, number>();
   for (const list of lists) {
+    const seen = new Set<string>();
     list.forEach((item, idx) => {
       const key = keyOf(item);
+      if (seen.has(key)) return;
+      seen.add(key);
       score.set(key, (score.get(key) ?? 0) + 1 / (k + idx + 1));
     });
   }
   return score;
+}
+
+/**
+ * Code-unit order for tie-breaks. `localeCompare` reads the ICU default locale
+ * from LANG, so "aa" sorted after "ab" under da_DK and two machines produced two
+ * orders from one input — "deterministic" has to hold across machines.
+ */
+const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+// Trailing-character trims written as loops: `/\/+$/` backtracks once per
+// start position on a long run that does not reach the end.
+function trimTrailing(s: string, ch: string): string {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === ch) end--;
+  return s.slice(0, end);
 }
 
 // ── Identity ────────────────────────────────────────────────────────────────
@@ -64,7 +88,8 @@ export function arxivIdFromUrl(url: string): string | undefined {
   try {
     const u = new URL(url.trim());
     host = u.hostname.toLowerCase();
-    path = u.pathname;
+    // A trailing slash ("abs/2405.12345v2/") is the same page.
+    path = trimTrailing(u.pathname, "/");
   } catch {
     return undefined;
   }
@@ -78,26 +103,44 @@ export function arxivIdFromUrl(url: string): string | undefined {
 
 /**
  * The DOI inside a URL — a doi.org resolver link, or a publisher landing page
- * that carries the DOI in its path (`dl.acm.org/doi/…`, `/doi/full/…`). Returned
- * normalised, so a DOI-in-path collapses with a bare one.
+ * that carries the DOI in its path (`dl.acm.org/doi/…`, `/doi/full/…`,
+ * `link.springer.com/article/10.1007/…`, bioRxiv's `/content/10.1101/…v1`) or
+ * its query (PLOS's `?id=10.1371/…`). Returned normalised, so a DOI-in-path
+ * collapses with a bare one.
  */
 export function doiFromUrl(url: string): string | undefined {
   let host: string;
   let path: string;
+  let search: string;
   try {
     const u = new URL(url.trim());
     host = u.hostname.toLowerCase();
     path = u.pathname;
+    search = u.search;
   } catch {
     return undefined;
   }
+  const decode = (s: string): string => {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  };
   if (/(^|\.)(dx\.)?doi\.org$/.test(host)) {
-    const doi = normalizeDoi(decodeURIComponent(path.replace(/^\/+/, "").replace(/\/+$/, "")));
+    const doi = normalizeDoi(decode(trimTrailing(path.replace(/^\/+/, ""), "/")));
     return /^10\.\d{4,9}\//.test(doi) ? doi : undefined;
   }
   const m = /\/doi(?:\/(?:abs|full|pdf|epdf|e?pub))?\/(10\.\d{4,9}\/[^\s?#]+)/i.exec(path);
-  if (m) return normalizeDoi(decodeURIComponent(m[1]!).replace(/\/+$/, ""));
-  return undefined;
+  if (m) return normalizeDoi(trimTrailing(decode(m[1]!), "/"));
+  // No /doi/ segment: a DOI anywhere in the path or the query, after a slash
+  // or an `=`. The page's own suffixes are not part of it: `.pdf`, and on
+  // bioRxiv/medRxiv (10.1101) the version and the `.full`/`.abstract` views.
+  const loose = /(?:^|[/=])(10\.\d{4,9}\/[^\s?#&]+)/.exec(`${path}${search}`);
+  if (!loose) return undefined;
+  let doi = normalizeDoi(trimTrailing(decode(loose[1]!), "/")).replace(/\.pdf$/, "");
+  if (doi.startsWith("10.1101/")) doi = doi.replace(/\.(?:full|abstract|supplementary-material|article-info|article-metrics)$/, "").replace(/v\d+$/, "");
+  return doi;
 }
 
 /**
@@ -163,20 +206,74 @@ const indexTokenCache = new WeakMap<Bm25Index, WeakMap<Bm25Doc, CachedDocTokens>
 /**
  * Tokenise into canonical terms WITH repetition, so term frequency survives.
  *
- * Shares `foldTerm` and `isStopword` with `buildMatcher`, which is the point:
- * two scorers that disagree about whether "requests" and "request" are the same
- * term will disagree about relevance for reasons nobody can debug.
+ * Shares `foldTerm`, `isStopword` and `subtokens` with `buildMatcher`, which is
+ * the point: two scorers that disagree about whether "requests" and "request"
+ * — or "RateLimiter" and "rate limiter" — are the same term will disagree about
+ * relevance for reasons nobody can debug. An identifier therefore yields its
+ * whole folded form AND its inner words (`subtokens: false` keeps the whole
+ * form only).
+ *
+ * Chinese and Japanese, written without spaces, come back as overlapping
+ * character bigrams; a lone ideograph is kept as a unigram.
  */
-export function bm25Tokenize(text: string): string[] {
+export function bm25Tokenize(text: string, opts: { subtokens?: boolean } = {}): string[] {
+  return tokenize(text, opts.subtokens !== false);
+}
+
+// Anything that is not part of a word splits. Combining marks ARE part of it:
+// leaving \p{M} out split every Devanagari, Thai or Tamil word at each vowel
+// sign or virama, and the fragments mostly fell under two characters — a Hindi
+// question kept one meaningless piece.
+const WORD_SPLIT = /[^\p{L}\p{M}\p{N}_]+/u;
+const NON_ASCII = /[^\p{ASCII}]/u;
+// Chinese and Japanese put no space between words, so a whole clause used to be
+// ONE token and a natural question matched nothing. Overlapping bigrams are
+// Lucene's CJKBigramFilter answer: deterministic, no dictionary, no ICU data.
+// Script_Extensions, so the prolonged-sound mark ー (Common) stays in its run.
+const CJK_CHAR = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
+const CJK_RUNS = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
+// Where an identifier has inner words: RateLimiter, rate_limiter, http2Client.
+const IDENT_BOUNDARY = /_|[\p{Ll}\p{N}]\p{Lu}|\p{Lu}\p{Lu}\p{Ll}|\p{L}\p{N}|\p{N}\p{L}/u;
+// Real identifiers are short. The cap keeps `subtokens`, which backtracks on a
+// long run of capitals, off a hostile 100 KB "word".
+const MAX_IDENT = 64;
+
+function tokenize(text: string, expand: boolean): string[] {
   if (!text) return [];
   const out: string[] = [];
-  for (const raw of text.split(/[^\p{L}\p{N}_]+/u)) {
-    if (raw.length < 2) continue;
-    if (isStopword(raw)) continue;
-    const t = foldCached(raw);
-    if (t.length >= 2) out.push(t);
+  const nonAscii = NON_ASCII.test(text);
+  // NFC, so "e" plus a combining acute (U+0301) is one letter as a precomposed
+  // "é" is, and folds the same way. ASCII is already NFC.
+  for (const raw of (nonAscii ? text.normalize("NFC") : text).split(WORD_SPLIT)) {
+    if (!raw) continue;
+    if (nonAscii && CJK_CHAR.test(raw)) {
+      // Captured, so the pieces alternate: Latin or digits, then a CJK run.
+      for (const piece of raw.split(CJK_RUNS)) {
+        if (!piece) continue;
+        if (CJK_CHAR.test(piece)) pushBigrams(piece, out);
+        else pushTerm(piece, out, expand);
+      }
+    } else pushTerm(raw, out, expand);
   }
   return out;
+}
+
+function pushTerm(raw: string, out: string[], expand: boolean): void {
+  if (raw.length < 2 || isStopword(raw)) return;
+  const t = foldCached(raw);
+  if (t.length < 2) return;
+  out.push(t);
+  if (!expand || raw.length > MAX_IDENT) return;
+  for (const sub of subtermsCached(raw, t)) out.push(sub);
+}
+
+function pushBigrams(run: string, out: string[]): void {
+  const chars = Array.from(run);
+  if (chars.length === 1) {
+    out.push(run);
+    return;
+  }
+  for (let i = 0; i + 1 < chars.length; i++) out.push((chars[i] as string) + (chars[i + 1] as string));
 }
 
 // foldTerm is pure and vocabularies repeat: a 300-document pool folds the same
@@ -195,10 +292,38 @@ function foldCached(raw: string): string {
   return t;
 }
 
+// An identifier's folded inner words, by raw token. Code repeats its
+// identifiers far more than prose repeats words, and splitting one is four
+// regex passes: uncached, a code-heavy pool tokenised four times slower. The
+// split drops stopwords, so the cache is only good for the stopword list it was
+// filled under.
+const NO_SUBTERMS: readonly string[] = [];
+const subtermCache = new Map<string, readonly string[]>();
+let subtermExtras: { list: readonly string[] | undefined; length: number } = { list: undefined, length: 0 };
+
+function subtermsCached(raw: string, folded: string): readonly string[] {
+  const list = brand().extraStopwords;
+  if (list !== subtermExtras.list || (list?.length ?? 0) !== subtermExtras.length) {
+    subtermCache.clear();
+    subtermExtras = { list, length: list?.length ?? 0 };
+  }
+  const hit = subtermCache.get(raw);
+  if (hit !== undefined) return hit;
+  let subs = NO_SUBTERMS;
+  if (IDENT_BOUNDARY.test(raw)) {
+    subs = subtokens(raw)
+      .map(foldCached)
+      .filter((sub) => sub !== folded && sub.length >= 2);
+  }
+  if (subtermCache.size >= FOLD_CACHE_MAX) subtermCache.clear();
+  subtermCache.set(raw, subs);
+  return subs;
+}
+
 // Field-weighted token stream: body once, headings ×headingWeight, title
 // ×titleWeight — a query term in the title outranks the same term buried deep.
-function docTokens(doc: Bm25Doc, titleWeight: number, headingWeight: number): string[] {
-  const out = bm25Tokenize(doc.body);
+function docTokens(doc: Bm25Doc, titleWeight: number, headingWeight: number, body?: readonly string[]): string[] {
+  const out = body ? [...body] : bm25Tokenize(doc.body);
   const headings = bm25Tokenize(doc.headings);
   for (let r = 0; r < headingWeight; r++) out.push(...headings);
   const title = bm25Tokenize(doc.title);
@@ -231,8 +356,16 @@ function proximityBonus(tokens: string[], queryTerms: string[], window = 6, cap 
  * Below three documents IDF is too noisy to mean anything, so it degrades to
  * uniform (pure TF). A three-result pool where one term happens to be missing
  * from two of them would otherwise assign that term a huge weight on no evidence.
+ *
+ * `tokensOf` supplies a body's tokens, exactly as `bm25Tokenize(doc.body)`
+ * returns them, when the caller already has them — so a pipeline that also
+ * hashes and diversifies the same bodies tokenises each one once.
  */
-export function buildBm25Index(question: string, docs: readonly Bm25Doc[], opts: { k1?: number; b?: number } = {}): Bm25Index {
+export function buildBm25Index(
+  question: string,
+  docs: readonly Bm25Doc[],
+  opts: { k1?: number; b?: number; tokensOf?: (doc: Bm25Doc) => readonly string[] } = {},
+): Bm25Index {
   const k1 = opts.k1 ?? 1.2;
   const b = opts.b ?? 0.75;
   const titleWeight = 3;
@@ -243,7 +376,7 @@ export function buildBm25Index(question: string, docs: readonly Bm25Doc[], opts:
   const tokenCache = new WeakMap<Bm25Doc, CachedDocTokens>();
   let totalLen = 0;
   for (const doc of docs) {
-    const toks = docTokens(doc, titleWeight, headingWeight);
+    const toks = docTokens(doc, titleWeight, headingWeight, opts.tokensOf?.(doc));
     tokenCache.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens: toks });
     totalLen += toks.length;
     for (const t of new Set(toks)) df.set(t, (df.get(t) ?? 0) + 1);
@@ -366,15 +499,30 @@ export function recencyScore(meta: { year?: number } | undefined, minYear: numbe
 /**
  * 64-bit SimHash over 3-gram shingles. Near-duplicate documents land a few bits
  * apart; unrelated ones sit around 32.
+ *
+ * `tokens` hashes words the caller already has instead of tokenising `text`
+ * again — a pipeline that indexed a document need not read it a second time.
+ * Only hashes built from the same kind of tokens are comparable.
  */
-export function simhash(text: string): bigint {
-  const toks = bm25Tokenize(text);
-  if (!toks.length) return 0n;
+export function simhash(text: string, opts: { tokens?: readonly string[] } = {}): bigint {
+  const lanes = new Uint32Array(2);
+  // The unexpanded words by default: an identifier's inner words would add
+  // shingles, and a hash that moves between engine versions changes what
+  // `maxBits` means.
+  simhashLanes(opts.tokens ?? tokenize(text, false), lanes);
+  return (BigInt(lanes[0]!) << 32n) | BigInt(lanes[1]!);
+}
+
+/** SimHash as two 32-bit lanes, [hi, lo] — no BigInt, for the comparison hot path. */
+function simhashLanes(toks: readonly string[], out: Uint32Array): void {
+  out[0] = 0;
+  out[1] = 0;
+  if (!toks.length) return;
   // Each shingle is hashed as `${a} ${b} ${c}` — fed to FNV piecewise, which is
   // the same bytes without building the string. The 64 counters are read off
-  // two 32-bit words: no BigInt until the very end. Bit-exact with the BigInt
-  // reference (pinned in tests); on a 2 MB page this is the difference between
-  // 300 ms and a few ms.
+  // two 32-bit words: no BigInt at all. Bit-exact with the BigInt reference
+  // (pinned in tests); on a 2 MB page this is the difference between 300 ms
+  // and a few ms.
   const v = new Int32Array(64);
   const words = new Uint32Array(2);
   const pieces: string[] = toks.length < 3 ? [""] : ["", " ", "", " ", ""];
@@ -402,7 +550,8 @@ export function simhash(text: string): bigint {
     if (2 * v[b]! > n) lo |= 1 << b;
     if (2 * v[b + 32]! > n) hi |= 1 << b;
   }
-  return (BigInt(hi >>> 0) << 32n) | BigInt(lo >>> 0);
+  out[0] = hi;
+  out[1] = lo;
 }
 
 const MASK32 = 0xffffffffn;
@@ -438,33 +587,64 @@ export function hammingDistance(a: bigint, b: bigint): number {
  * Collapse near-duplicate items by SimHash over their text, keeping the
  * best-scored copy. Items shorter than `minChars` carry too little signal and
  * are never collapsed. Expects best-first input and preserves that order.
+ *
+ * `duplicates` names each dropped URL and the kept one it duplicated: a mirror
+ * is an alternate citation, and the evidence when a collapse was wrong.
+ *
+ * `tokensOf` hands over words the caller already tokenised (see `simhash`), so
+ * a pipeline reads each text once.
  */
 export function dedupeNearDuplicates<T extends Ranked>(
   items: readonly T[],
-  opts: { maxBits?: number; minChars?: number } = {},
-): { items: T[]; dropped: number } {
+  opts: { maxBits?: number; minChars?: number; tokensOf?: (it: T) => readonly string[] } = {},
+): { items: T[]; dropped: number; duplicates: { url: string; of: string }[] } {
   const maxBits = opts.maxBits ?? 3;
   const minChars = opts.minChars ?? 500;
-  const better = (a: T, b: T): boolean => (a.score !== b.score ? a.score > b.score : a.url.localeCompare(b.url) < 0);
-  const kept: { it: T; hash: bigint | null }[] = [];
-  let dropped = 0;
+  const better = (a: T, b: T): boolean => (a.score !== b.score ? a.score > b.score : byCodeUnit(a.url, b.url) < 0);
+  const kept: { it: T }[] = [];
+  // The hashed clusters, as two 32-bit lanes each: comparing numbers with two
+  // popcounts, rather than BigInts through an XOR, shifts and a Number
+  // conversion per pair, is what the n·kept scan spends its time on.
+  const hashed: { it: T }[] = [];
+  const his: number[] = [];
+  const los: number[] = [];
+  const lanes = new Uint32Array(2);
+  // Each dropped URL, and the cluster it joined — resolved at the end, because
+  // a later, better copy can still displace the one it was collapsed into.
+  const dups: { url: string; cluster: { it: T } }[] = [];
   for (const it of items) {
     const text = it.text || "";
-    const hash = text.length >= minChars ? simhash(text) : null;
-    if (hash !== null) {
-      const dup = kept.find((k) => k.hash !== null && hammingDistance(k.hash, hash) <= maxBits);
-      if (dup) {
-        dropped++;
-        if (better(it, dup.it)) {
-          dup.it = it;
-          dup.hash = hash;
-        }
-        continue;
+    if (text.length < minChars) {
+      kept.push({ it });
+      continue;
+    }
+    simhashLanes(opts.tokensOf ? opts.tokensOf(it) : tokenize(text, false), lanes);
+    const hi = lanes[0]!;
+    const lo = lanes[1]!;
+    let at = -1;
+    for (let k = 0; k < hashed.length; k++) {
+      if (popcount32(his[k]! ^ hi) + popcount32(los[k]! ^ lo) <= maxBits) {
+        at = k;
+        break;
       }
     }
-    kept.push({ it, hash });
+    if (at < 0) {
+      const cluster = { it };
+      kept.push(cluster);
+      hashed.push(cluster);
+      his.push(hi);
+      los.push(lo);
+      continue;
+    }
+    const dup = hashed[at]!;
+    if (better(it, dup.it)) {
+      dups.push({ url: dup.it.url, cluster: dup });
+      dup.it = it;
+      his[at] = hi;
+      los[at] = lo;
+    } else dups.push({ url: it.url, cluster: dup });
   }
-  return { items: kept.map((k) => k.it), dropped };
+  return { items: kept.map((k) => k.it), dropped: dups.length, duplicates: dups.map((d) => ({ url: d.url, of: d.cluster.it.url })) };
 }
 
 /**
@@ -482,67 +662,138 @@ export function dedupeNearDuplicates<T extends Ranked>(
  *
  * It REORDERS ONLY. Every input comes back exactly once: this changes what you
  * read first, never what you have. λ = 0.75 keeps relevance dominant, so
- * diversity breaks ties and demotes redundancy rather than promoting noise.
+ * diversity breaks ties and demotes redundancy rather than promoting noise —
+ * and every item scoring above zero is placed before any item that does not.
+ *
+ * MMR is quadratic in the pool. `window` bounds it: only the `window` most
+ * relevant items are diversified, and the rest follow in relevance order — the
+ * top of a long list is where diversity is read, and a 2 000-document pool then
+ * costs what a `window`-sized one does.
  */
-export function diversify<T extends Ranked>(items: readonly T[], tokensOf: (it: T) => Set<string>, lambda = 0.75): T[] {
+export function diversify<T extends Ranked>(items: readonly T[], tokensOf: (it: T) => Iterable<string>, lambda = 0.75, opts: { window?: number } = {}): T[] {
   if (items.length <= 2) return [...items];
-  const toks = new Map<T, Set<string>>(items.map((it) => [it, tokensOf(it)]));
-  const max = Math.max(...items.map((it) => it.score), 1e-9);
-  const rel = (it: T): number => it.score / max;
+  // The best-scored item always leads: the most relevant result is never demoted
+  // for being similar to nothing.
+  const sorted = [...items].sort((a, b) => b.score - a.score || byCodeUnit(a.url, b.url));
+  const window = opts.window !== undefined && opts.window > 0 ? Math.floor(opts.window) : sorted.length;
+  if (window >= sorted.length) return mmr(sorted, tokensOf, lambda);
+  // The tail is lower-scored than all of the window, so the relevant-first
+  // rule holds across the seam without further work.
+  return [...(window > 2 ? mmr(sorted.slice(0, window), tokensOf, lambda) : sorted.slice(0, window)), ...sorted.slice(window)];
+}
 
-  const jaccard = (a: Set<string>, b: Set<string>): number => {
-    if (!a.size || !b.size) return 0;
-    const [small, large] = a.size <= b.size ? [a, b] : [b, a];
-    let inter = 0;
-    for (const t of small) if (large.has(t)) inter++;
-    return inter / (a.size + b.size - inter);
-  };
+// Pairs whose similarities are kept after the normalising pass rather than
+// computed twice: 2 048 items is ~2.1 M pairs, 16 MB of doubles.
+const PAIR_CACHE_MAX = 2_048;
+
+/** Greedy MMR over items already sorted best-first. */
+function mmr<T extends Ranked>(sorted: readonly T[], tokensOf: (it: T) => Iterable<string>, lambda: number): T[] {
+  const m = sorted.length;
+  let max = 1e-9;
+  for (const it of sorted) if (it.score > max) max = it.score;
+
+  // Each token set as a sorted array of interned ids: Jaccard is then a merge
+  // of two integer arrays instead of a string-hash lookup per token.
+  const ids = new Map<string, number>();
+  const sets: Int32Array[] = [];
+  for (const it of sorted) {
+    const raw: number[] = [];
+    for (const t of tokensOf(it)) {
+      let id = ids.get(t);
+      if (id === undefined) {
+        id = ids.size;
+        ids.set(t, id);
+      }
+      raw.push(id);
+    }
+    const all = Int32Array.from(raw).sort();
+    let k = 0;
+    for (let j = 0; j < all.length; j++) if (j === 0 || all[j] !== all[j - 1]) all[k++] = all[j]!;
+    sets.push(all.subarray(0, k));
+  }
 
   // Similarity is normalised WITHIN the pool. Raw Jaccard between two long
   // documents is small even when they are redundant, so a raw penalty of ~0.06
   // is lost against a relevance range of 0..1. Dividing by the pool's own maximum
   // makes "as similar as anything here gets" equal 1, which is the quantity λ is
   // actually trading against.
+  const cache = m <= PAIR_CACHE_MAX ? new Float64Array((m * (m - 1)) / 2) : undefined;
+  const pair = (i: number, j: number): number => (i < j ? (i * (2 * m - i - 1)) / 2 + (j - i - 1) : (j * (2 * m - j - 1)) / 2 + (i - j - 1));
   let simMax = 0;
-  for (let i = 0; i < items.length; i++) {
-    for (let j = i + 1; j < items.length; j++) {
-      const v = jaccard(toks.get(items[i]!)!, toks.get(items[j]!)!);
+  for (let i = 0; i < m; i++) {
+    for (let j = i + 1; j < m; j++) {
+      const v = jaccardSorted(sets[i]!, sets[j]!);
+      if (cache) cache[pair(i, j)] = v;
       if (v > simMax) simMax = v;
     }
   }
-  const sim = (a: T, b: T): number => (simMax > 0 ? jaccard(toks.get(a)!, toks.get(b)!) / simMax : 0);
+  const sim = (i: number, j: number): number => (simMax > 0 ? (cache ? cache[pair(i, j)]! : jaccardSorted(sets[i]!, sets[j]!)) / simMax : 0);
 
-  const remaining = [...items];
-  const out: T[] = [];
-  // The best-scored item always leads: the most relevant result is never demoted
-  // for being similar to nothing.
-  remaining.sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
-  out.push(remaining.shift()!);
+  const out: T[] = [sorted[0]!];
+  const remaining: number[] = [];
+  for (let i = 1; i < m; i++) remaining.push(i);
   // Running max-similarity to the selected set, updated incrementally — what
   // keeps this O(n²) rather than O(n³).
-  const maxSim = new Map<T, number>(remaining.map((it) => [it, sim(it, out[0]!)]));
+  const maxSim = new Float64Array(m);
+  for (const i of remaining) maxSim[i] = sim(i, 0);
+  // Relevant items are placed before any irrelevant one. With similarity
+  // normalised to the pool's maximum, any overlap with the picked set can carry
+  // the full penalty, so a relevant page with rel < sim/3 went negative while an
+  // off-topic page (rel 0, sim 0) sat at 0 and was picked first — promoting
+  // noise, and with a `limit` cutting the relevant page altogether. Diversity
+  // still reorders freely within each tier.
+  let relevantLeft = 0;
+  for (const i of remaining) if (sorted[i]!.score > 0) relevantLeft++;
 
   while (remaining.length) {
-    let bestIdx = 0;
+    let bestPos = -1;
     let bestVal = Number.NEGATIVE_INFINITY;
-    for (let i = 0; i < remaining.length; i++) {
-      const it = remaining[i]!;
-      const val = lambda * rel(it) - (1 - lambda) * (maxSim.get(it) ?? 0);
-      if (val > bestVal || (val === bestVal && it.url.localeCompare(remaining[bestIdx]!.url) < 0)) {
+    for (let p = 0; p < remaining.length; p++) {
+      const it = sorted[remaining[p]!]!;
+      if (relevantLeft > 0 && !(it.score > 0)) continue;
+      const val = lambda * (it.score / max) - (1 - lambda) * maxSim[remaining[p]!]!;
+      if (bestPos < 0 || val > bestVal || (val === bestVal && byCodeUnit(it.url, sorted[remaining[bestPos]!]!.url) < 0)) {
         bestVal = val;
-        bestIdx = i;
+        bestPos = p;
       }
     }
-    const picked = remaining.splice(bestIdx, 1)[0]!;
-    out.push(picked);
-    for (const it of remaining) maxSim.set(it, Math.max(maxSim.get(it) ?? 0, sim(it, picked)));
+    const picked = remaining.splice(bestPos, 1)[0]!;
+    if (sorted[picked]!.score > 0) relevantLeft--;
+    out.push(sorted[picked]!);
+    for (const i of remaining) {
+      const v = sim(i, picked);
+      if (v > maxSim[i]!) maxSim[i] = v;
+    }
   }
   return out;
 }
 
+function jaccardSorted(a: Int32Array, b: Int32Array): number {
+  const na = a.length;
+  const nb = b.length;
+  if (!na || !nb) return 0;
+  let i = 0;
+  let j = 0;
+  let inter = 0;
+  while (i < na && j < nb) {
+    const x = a[i]!;
+    const y = b[j]!;
+    if (x === y) {
+      inter++;
+      i++;
+      j++;
+    } else if (x < y) i++;
+    else j++;
+  }
+  return inter / (na + nb - inter);
+}
+
 // ── Attribution ─────────────────────────────────────────────────────────────
 
-const URL_IN_TEXT = /https?:\/\/[a-z0-9.-]+/gi;
+// The scheme, an optional userinfo ("user@", which is not the host), and a host
+// in any script — `domainOf` does the IDN conversion. ASCII-only cut
+// "müller.de" to "m", and "https://user@evil.test" read as host "user".
+const URL_IN_TEXT = /https?:\/\/(?:[^\s/@?#]+@)?[\p{L}\p{N}.-]+/giu;
 
 /**
  * The hosts a text links out to, excluding its own domain and `www.` noise.
@@ -555,7 +806,8 @@ export function externalHosts(url: string, text: string): Set<string> {
   const self = domainOf(url).replace(/^www\./, "");
   const out = new Set<string>();
   for (const m of text.match(URL_IN_TEXT) ?? []) {
-    const h = domainOf(m).replace(/^www\./, "");
+    // A sentence's final period is not part of the host: "see https://mdn.io."
+    const h = trimTrailing(domainOf(trimTrailing(m, ".")), ".").replace(/^www\./, "");
     if (h && h !== self) out.add(h);
   }
   return out;

@@ -1,7 +1,10 @@
-import { env, envFlag } from "../brand.js";
-import { runWithInput, ANYDOC_SPEC } from "../pdf/exec.js";
+import { envFlag } from "../brand.js";
+import { ANYDOC_SPEC } from "../pdf/exec.js";
+import { enginesFromEnv } from "../pdf/ladder.js";
+import { failureDetail, resetNpxState, runNpx, skipNpxHint } from "../pdf/npx.js";
 import { assessExtractedText } from "../pdf/quality.js";
 import type { DocFormat } from "./formats.js";
+import { readOffice } from "./office.js";
 
 // The office-document extractor ladder: convert a fetched .docx/.pptx/.xlsx/…
 // to Markdown, and REFUSE rather than cite what nothing could read.
@@ -14,22 +17,23 @@ import type { DocFormat } from "./formats.js";
 // hundreds of kilobytes of U+FFFD under a citation, with no note saying so.
 //
 // Rung order, and why:
-//   1. anydoc     the only local converter for these formats. One npx download
-//                 (~4 MB) the first time it is ever used, then a local cache hit.
-//                 Reads the format from the BYTES, so a mislabelled file still
-//                 converts — see ./formats.ts.
+//   1. anydoc     the strongest converter for these formats, and the only one
+//                 for the legacy binary ones (.doc, .xls, .ppt) and RTF. One npx
+//                 download (~4 MB) the first time it is ever used, then a local
+//                 cache hit. Reads the format from the BYTES, so a mislabelled
+//                 file still converts — see ./formats.ts.
 //   2. firecrawl  the caller's already-running container, injected as a callback
 //                 so this module stays free of the client. Covers hosts without
 //                 npm, and platforms npm has no anydoc binary for.
-//
-// There is deliberately no built-in last rung. For PDFs one exists because a
-// text layer is plain enough to mine with zlib and a regex; unzipping OOXML and
-// walking its parts is a different order of problem, and a wrong answer here is
-// worse than no answer.
+//   3. builtin    the zero-dependency OOXML/OpenDocument reader in ./office.ts.
+//                 Always present, no subprocess, no network: what an offline or
+//                 NO_NPX run reads .docx, .xlsx, .pptx, .odt, .ods and .odp
+//                 with. Last because anydoc's Markdown is richer; its output
+//                 passes the same gate as everyone else's.
 
-export type DocExtractorId = "anydoc" | "firecrawl";
+export type DocExtractorId = "anydoc" | "firecrawl" | "builtin";
 
-export const DOC_EXTRACTORS: DocExtractorId[] = ["anydoc", "firecrawl"];
+export const DOC_EXTRACTORS: DocExtractorId[] = ["anydoc", "firecrawl", "builtin"];
 
 export interface DocExtraction {
   text: string;
@@ -51,25 +55,25 @@ export interface DocLadderOptions {
   engines?: DocExtractorId[];
 }
 
-// First run may download the anydoc binary; later runs are near-instant.
-// Generous, but paid at most once per process thanks to `dead` below.
-const NPX_TIMEOUT_MS = 90_000;
-
-// Rungs proven unavailable in this process (npm absent, Node too old for
-// anydoc, unsupported platform). Without this, a 40-source run would re-pay the
-// same 90s discovery for every single document.
-const dead = new Set<DocExtractorId>();
+// Rungs proven unavailable in this process (npm absent or offline, unsupported
+// platform), with what is worth repeating about them. Without this, a
+// 40-source run would re-pay the same failed discovery for every single
+// document. A converter that REJECTED a document never lands here: anydoc exits
+// 1 on any malformed file, and one truncated .docx used to cost every later
+// document its converter — see ../pdf/npx.ts.
+const dead = new Map<DocExtractorId, { failure?: string }>();
 
 /** Test seam: forget which rungs were found unavailable. */
 export function resetDocLadderCache(): void {
   dead.clear();
+  resetNpxState();
 }
 
 /**
- * The rungs to try, honouring `<PREFIX>_DOC_ENGINE` (force exactly one, or
- * `none` to disable the ladder) and `<PREFIX>_NO_NPX` (skip the rung that
- * needs an implicit install), where `<PREFIX>` is whatever the consuming skill
- * declared via `configure()`.
+ * The rungs to try, honouring `<PREFIX>_DOC_ENGINE` (a comma list of rungs to
+ * run, in order, or `none` to disable the ladder — parsed as `PDF_ENGINE` is)
+ * and `<PREFIX>_NO_NPX` (skip the rung that needs an implicit install), where
+ * `<PREFIX>` is whatever the consuming skill declared via `configure()`.
  *
  * An explicit `engines` list wins over both, exactly as in the PDF ladder: it is
  * the most specific instruction available, and it is how callers and tests drive
@@ -77,58 +81,77 @@ export function resetDocLadderCache(): void {
  */
 export function enabledDocExtractors(engines?: DocExtractorId[]): DocExtractorId[] {
   if (engines) return engines;
-  const forced = env("DOC_ENGINE");
-  if (forced === "none") return [];
-  if (forced && (DOC_EXTRACTORS as string[]).includes(forced)) return [forced as DocExtractorId];
+  const chosen = enginesFromEnv("DOC_ENGINE", DOC_EXTRACTORS);
+  if (chosen) return chosen;
   if (envFlag("NO_NPX")) return DOC_EXTRACTORS.filter((e) => e !== "anydoc");
   return DOC_EXTRACTORS;
 }
 
-async function viaAnydoc(bytes: Buffer, format?: string): Promise<string | undefined> {
-  // `-` reads the document from stdin. `--prefer-offline` keeps the steady state
-  // at one local cache hit instead of a registry round-trip per run; `-y` stops
-  // npx asking to install. No user input reaches argv — the document travels on
-  // stdin, and `format` comes from the table in ./formats.ts, never from a URL.
-  const args = ["-y", "--prefer-offline", ANYDOC_SPEC, "-"];
+/** What anydoc made of the document: its Markdown, or why there is none. */
+async function viaAnydoc(bytes: Buffer, format?: string): Promise<{ text?: string; failure?: string; unavailable?: boolean }> {
+  // `-` reads the document from stdin. No user input reaches argv — the
+  // document travels on stdin, and `format` comes from the table in
+  // ./formats.ts, never from a URL.
+  const args = ["-"];
   if (format) args.push("--format", format);
-  const r = await runWithInput("npx", args, bytes, NPX_TIMEOUT_MS);
-  return r.ok ? r.stdout : undefined;
+  const r = await runNpx(ANYDOC_SPEC, args, bytes);
+  if (r.ok) return { text: r.stdout };
+  // npx missing is the ordinary state of a machine without npm, not news.
+  if (r.unavailable === "not installed") return { unavailable: true };
+  if (r.unavailable) return { unavailable: true, failure: `anydoc ${r.unavailable}; ${skipNpxHint()}` };
+  return { failure: failureDetail("anydoc", r) };
+}
+
+/** What the built-in reader made of the document. Never unavailable: it needs nothing. */
+function viaBuiltin(bytes: Buffer, fmt: DocFormat): { text?: string; failure?: string } {
+  // A CSV is plain text, not a package; its fallback is the caller's to apply.
+  if (fmt.format === "csv") return {};
+  const r = readOffice(bytes);
+  return r.text === undefined ? { failure: `builtin: ${r.failure}` } : { text: r.text };
 }
 
 /**
  * Convert an office document to Markdown, trying each enabled rung in order and
  * returning the first result that the quality gate accepts.
  *
- * Never throws. When every rung fails, returns empty text plus the reason, so
- * the caller can say why the source is unusable instead of silently citing
- * nothing — or, worse, citing the raw bytes.
+ * Never throws. When every rung fails, returns empty text plus the reason — the
+ * gate's verdict, or what the converter itself said, or why it could not run —
+ * so the caller can say why the source is unusable instead of silently citing
+ * nothing, or, worse, citing the raw bytes.
  */
 export async function extractDocument(bytes: Buffer, fmt: DocFormat, opts: DocLadderOptions = {}): Promise<DocExtraction> {
   let lastReason: string | undefined;
+  const failures: string[] = [];
 
   for (const id of enabledDocExtractors(opts.engines)) {
-    if (dead.has(id)) continue;
-
-    let text: string | undefined;
-    try {
-      if (id === "anydoc") text = await viaAnydoc(bytes, fmt.format);
-      else text = opts.firecrawl ? await opts.firecrawl() : undefined;
-    } catch {
-      text = undefined; // a rung must never take the run down
-    }
-
-    if (text === undefined) {
-      // Tool missing / errored / no container. Never ask again this process —
-      // except Firecrawl, whose own client already memoises its availability
-      // probe and which can legitimately fail on one URL and work on the next.
-      if (id !== "firecrawl") dead.add(id);
+    const known = dead.get(id);
+    if (known) {
+      if (known.failure) failures.push(known.failure);
       continue;
     }
 
-    const verdict = assessExtractedText(text, "the converter produced no text");
-    if (verdict.ok) return { text: text.trim(), via: id };
+    let got: { text?: string; failure?: string; unavailable?: boolean };
+    try {
+      if (id === "anydoc") got = await viaAnydoc(bytes, fmt.format);
+      else if (id === "builtin") got = viaBuiltin(bytes, fmt);
+      // Never remembered as unavailable: Firecrawl's own client memoises its
+      // probe, and it can legitimately fail on one URL and work on the next.
+      else got = { text: opts.firecrawl ? await opts.firecrawl() : undefined };
+    } catch {
+      got = {}; // a rung must never take the run down
+    }
+
+    if (got.text === undefined) {
+      if (got.unavailable) dead.set(id, { failure: got.failure });
+      if (got.failure) failures.push(got.failure);
+      continue;
+    }
+
+    const verdict = assessExtractedText(got.text, "the converter produced no text");
+    if (verdict.ok) return { text: got.text.trim(), via: id };
     lastReason = verdict.reason;
   }
 
-  return { text: "", reason: lastReason ?? "no document converter available" };
+  const reason = [lastReason, ...failures].filter(Boolean).join("; ");
+  return { text: "", reason: reason || "no document converter available" };
 }

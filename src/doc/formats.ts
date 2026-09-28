@@ -104,3 +104,31 @@ export function docFormatForContentType(contentType: string): DocFormat | undefi
   const type = contentType.split(";")[0]?.trim().toLowerCase();
   return type ? BY_CONTENT_TYPE[type] : undefined;
 }
+
+// A PDF header may follow up to 1 KB of junk (readers accept it there), but it
+// starts a line: prose that merely mentions `%PDF-` mid-sentence is not one.
+const PDF_HEADER_RE = /(?:^|[\r\n])%PDF-\d/;
+const OLE_SIGNATURE = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+
+/**
+ * What these bytes are, when they are a document: `"pdf"`, an office format,
+ * or undefined for anything else (text, HTML, images, plain archives).
+ *
+ * For a response whose URL and headers gave nothing away — a download route
+ * answering `application/octet-stream`, or no type at all — and for a local
+ * file whose name lies. The signatures are the ones the converters themselves
+ * trust, which is why an office match carries no `format`: anydoc reads the
+ * real one from the same bytes.
+ *
+ * A ZIP counts only with a package manifest (`[Content_Types].xml` for OOXML,
+ * a leading `mimetype` entry for OpenDocument and EPUB): a source archive is
+ * not a document, and routing it to the converter would misreport it.
+ */
+export function sniffDocument(bytes: Buffer): "pdf" | DocFormat | undefined {
+  const head = bytes.subarray(0, 1024).toString("latin1");
+  if (PDF_HEADER_RE.test(head)) return "pdf";
+  if (bytes.subarray(0, 8).equals(OLE_SIGNATURE)) return BINARY;
+  if (head.startsWith("{\\rtf")) return BINARY;
+  if (head.startsWith("PK\x03\x04") && (head.startsWith("mimetype", 30) || bytes.includes("[Content_Types].xml"))) return BINARY;
+  return undefined;
+}

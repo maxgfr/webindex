@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildMatcher, isStopword, keywords, matcherFromTokens, rankedKeywords } from "../src/text.js";
+import { buildMatcher, excerptWindows, foldTerm, isStopword, keywords, matcherFromTokens, rankedKeywords } from "../src/text.js";
+import { focusedSnippet } from "../src/fetch.js";
+import { bm25Tokenize } from "../src/rank.js";
 import { configure, resetBrand } from "../src/brand.js";
 import { canonicalizeUrl, domainOf, fnv1a64, LOCAL_FILE_DOMAIN, normalizeDoi } from "../src/url.js";
 
@@ -22,6 +24,28 @@ describe("canonicalizeUrl", () => {
 
   it("strips tracking parameters and sorts what remains", () => {
     expect(canonicalizeUrl("https://x.test/p?utm_source=nl&b=2&a=1&fbclid=zz")).toBe("https://x.test/p?a=1&b=2");
+  });
+
+  it("keeps ?ref=, which selects a branch or tag on forge and raw-file APIs", () => {
+    // The fetch cache is keyed on this: two versions of one file used to share
+    // an entry, and one was served for the other.
+    const main = canonicalizeUrl("https://gitlab.test/api/v4/projects/1/repository/files/README.md/raw?ref=main");
+    expect(main).not.toBe(canonicalizeUrl("https://gitlab.test/api/v4/projects/1/repository/files/README.md/raw?ref=v1.0"));
+    expect(canonicalizeUrl("https://x.test/p?ref=v1.2")).toBe("https://x.test/p?ref=v1.2");
+    expect(canonicalizeUrl("https://x.test/p?ref_src=twsrc&ref_url=y")).toBe("https://x.test/p");
+  });
+
+  it("strips the ad and social click ids it used to keep", () => {
+    expect(canonicalizeUrl("https://x.test/p?msclkid=1&gclsrc=2&_gl=3&dclid=5&yclid=6&twclid=7&ttclid=8&li_fat_id=9&mkt_tok=a&igsh=b&id=42")).toBe(
+      "https://x.test/p?id=42",
+    );
+  });
+
+  it("strips a share link's si only where it is one", () => {
+    expect(canonicalizeUrl("https://youtu.be/dQw4w9WgXcQ?si=AbC")).toBe("https://youtu.be/dQw4w9WgXcQ");
+    expect(canonicalizeUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=AbC")).toBe("https://youtube.com/watch?v=dQw4w9WgXcQ");
+    expect(canonicalizeUrl("https://open.spotify.com/track/1?si=xyz")).toBe("https://open.spotify.com/track/1");
+    expect(canonicalizeUrl("https://units.test/convert?si=kg")).toBe("https://units.test/convert?si=kg");
   });
 
   it("re-encodes values, so an encoded delimiter cannot become one", () => {
@@ -111,6 +135,47 @@ describe("keywords", () => {
   it("deduplicates case-insensitively while keeping the original spelling", () => {
     expect(keywords("Retry retry RETRY")).toEqual(["Retry"]);
   });
+
+  it("keeps the distinctive term in C++, C#, .NET and HTTP/2", () => {
+    // Splitting on every non-letter left the question without its subject, and
+    // rankedKeywords fed narrow search APIs the rest.
+    expect(keywords("What is the C++ equivalent of Python's list comprehension?")).toContain("C++");
+    expect(keywords("How to use C# async/await?")).toContain("C#");
+    expect(keywords("What is .NET 8?")).toContain(".NET");
+    expect(keywords("Is HTTP/2 multiplexing faster than HTTP/1.1?")).toEqual(expect.arrayContaining(["HTTP/2", "HTTP/1.1", "multiplexing"]));
+    // A '+' between words is still a separator.
+    expect(keywords("a+b tuning")).toEqual(["tuning"]);
+  });
+
+  it("drops 'vs' and German question scaffolding", () => {
+    expect(keywords("node.js vs deno performance")).not.toContain("vs");
+    expect(keywords("Wie funktioniert die Datenschutz-Grundverordnung?")).toEqual(["funktioniert", "Datenschutz", "Grundverordnung"]);
+  });
+
+  it("keeps a word written with combining marks whole", () => {
+    // Devanagari, Thai and Tamil write vowels as combining marks. Splitting at
+    // each one left fragments that match nothing: "हिन्दी" became "ह" and "न्द".
+    expect(keywords("हिन्दी व्याकरण")).toEqual(["हिन्दी", "व्याकरण"]);
+    expect(keywords("สวัสดี ภาษาไทย")).toEqual(["สวัสดี", "ภาษาไทย"]);
+    expect(keywords("தமிழ் இலக்கணம்")).toEqual(["தமிழ்", "இலக்கணம்"]);
+    // A decomposed accent is part of its letter, as a precomposed one is.
+    expect(keywords("café menu")).toEqual(["café", "menu"]);
+  });
+
+  it("reads Chinese and Japanese as overlapping bigrams, a lone ideograph as itself", () => {
+    // A whole clause was one keyword, and no page repeats a question verbatim.
+    expect(keywords("東京の天気")).toEqual(["東京", "京の", "の天", "天気"]);
+    expect(keywords("水")).toEqual(["水"]);
+    expect(keywords("Node.js 的性能")).toEqual(["Node", "js", "的性", "性能"]);
+  });
+
+  it("agrees with bm25Tokenize on what a term is in those scripts", () => {
+    // The ranker and the excerpt matcher must see the same terms, or a page
+    // ranks on words its excerpt never highlights.
+    for (const q of ["हिन्दी व्याकरण के नियम", "東京の天気予報", "สวัสดี ภาษาไทย", "தமிழ் இலக்கணம்", "café menu"]) {
+      expect(keywords(q).map(foldTerm), q).toEqual([...new Set(bm25Tokenize(q, { subtokens: false }))]);
+    }
+  });
 });
 
 describe("rankedKeywords", () => {
@@ -149,6 +214,68 @@ describe("buildMatcher", () => {
     const m = buildMatcher("retry");
     expect(m.matchLine("retry retry retries").size).toBe(1);
   });
+
+  it("matches a short keyword as a word, not inside one", () => {
+    // "go" hit "algorithm" and "Google", and every such line outscored the
+    // passage that answered the question.
+    const m = buildMatcher("Go generics");
+    expect(m.matchLine("a sorting algorithm").size).toBe(0);
+    expect(m.matchLine("Google announced it").size).toBe(0);
+    expect(m.matchLine("Go 1.18 added type parameters").size).toBe(1);
+    expect(m.matchLine("go1.18 release notes").size).toBe(1);
+    expect(buildMatcher("js api").matchLine("parse json with jsonapi").size).toBe(0);
+    expect(buildMatcher("js api").matchLine("the JS APIs").size).toBe(2);
+  });
+
+  it("matches C++ and C# as written", () => {
+    expect(buildMatcher("C++ templates").matchLine("templates in C++20").size).toBe(2);
+    expect(buildMatcher("C# records").matchLine("C# 9 introduced records").size).toBe(2);
+    expect(buildMatcher("C# records").matchLine("CSS records").size).toBe(1);
+  });
+
+  it("highlights Hindi, Thai and Chinese or Japanese lines, which it used to miss entirely", () => {
+    expect(buildMatcher("हिन्दी व्याकरण").matchLine("यह हिन्दी व्याकरण की पुस्तक है").size).toBe(2);
+    expect(buildMatcher("ภาษาไทย").matchLine("เรียนภาษาไทย ออนไลน์").size).toBe(1);
+    expect(buildMatcher("東京の天気").matchLine("明日の東京の天気は晴れです").size).toBe(4);
+    expect(buildMatcher("天気").matchLine("東京の天気").size).toBe(1);
+    expect(buildMatcher("水").matchLine("水は大切です").size).toBe(1);
+    expect(buildMatcher("東京の天気").matchLine("an unrelated line").size).toBe(0);
+  });
+
+  it("matches a short word as a word in a script with combining marks", () => {
+    // "का" continues into "कां" through a combining mark, not a letter.
+    expect(buildMatcher("का").matchLine("कां").size).toBe(0);
+    expect(buildMatcher("का").matchLine("राम का घर").size).toBe(1);
+  });
+
+  it("folds the œ, æ and ß ligatures both ways", () => {
+    expect(buildMatcher("cœur réforme").matchLine("le coeur de la reforme").size).toBe(2);
+    expect(buildMatcher("coeur").matchLine("le cœur").size).toBe(1);
+    expect(buildMatcher("straße").matchLine("Strasse 5").size).toBe(1);
+    expect(buildMatcher("strasse").matchLine("Straße 5").size).toBe(1);
+    expect(buildMatcher("encyclopaedia").matchLine("encyclopædia").size).toBe(1);
+  });
+});
+
+describe("excerpts in Hindi, Chinese and Japanese", () => {
+  it("centres an excerpt window on the line that answers", () => {
+    const hindi = ["# परिचय", "यह पृष्ठ कुछ और बताता है।", "हिन्दी व्याकरण में संज्ञा के आठ भेद होते हैं।"].join("\n");
+    expect(excerptWindows(hindi, "हिन्दी व्याकरण", { before: 0, after: 1 })[0]).toMatchObject({ anchor: 2, score: 2, heading: "परिचय" });
+    const japanese = ["# 予報", "今日は一日中雨が降るでしょう。", "東京の天気は明日晴れるでしょう。"].join("\n");
+    expect(excerptWindows(japanese, "東京の天気", { before: 0, after: 1 })[0]).toMatchObject({ anchor: 2, score: 4 });
+  });
+
+  it("picks the sentence that answers for a focused snippet", () => {
+    const text = [
+      "# 天気予報",
+      "今日は一日中雨が降るでしょう、傘を持って出かけるのが良いでしょう。",
+      "東京の天気は明日には回復して晴れる見込みで、気温も上がるでしょう。",
+    ].join("\n");
+    // The question is not repeated verbatim anywhere, which is the usual case.
+    expect(focusedSnippet(text, "東京の天気予報を知りたい", { maxSentences: 1 })).toBe(
+      "天気予報 — 東京の天気は明日には回復して晴れる見込みで、気温も上がるでしょう。",
+    );
+  });
 });
 
 describe("isStopword", () => {
@@ -183,6 +310,26 @@ describe("extraStopwords", () => {
     configure({ name: "docs-tool", envPrefix: "DOCS", cli: "docs", extraStopwords: ["test"] });
     expect(keywords("how does the test harness retry?")).not.toContain("test");
     expect(buildMatcher("test harness").matchLine("a test file").size).toBe(0);
+  });
+
+  it("follows a new list, and one extended in place", () => {
+    const extras = ["Alpha"];
+    configure({ name: "docs-tool", envPrefix: "DOCS", cli: "docs", extraStopwords: extras });
+    expect(isStopword("alpha")).toBe(true);
+    extras.push("BETA");
+    expect(isStopword("beta")).toBe(true);
+    configure({ name: "docs-tool", envPrefix: "DOCS", cli: "docs", extraStopwords: ["gamma"] });
+    expect(isStopword("alpha")).toBe(false);
+    expect(isStopword("gamma")).toBe(true);
+  });
+
+  it("costs a lookup per term, not a scan of the extras", () => {
+    // The tokeniser asks for every word it reads; lowercasing each extra per
+    // word doubled bm25Tokenize's cost with forty extras.
+    configure({ name: "docs-tool", envPrefix: "DOCS", cli: "docs", extraStopwords: Array.from({ length: 2_000 }, (_, i) => `Extra${i}`) });
+    const started = performance.now();
+    for (let i = 0; i < 100_000; i++) isStopword("throttle");
+    expect(performance.now() - started).toBeLessThan(250);
   });
 
   it("is absent by default, so the shared list stands alone", () => {

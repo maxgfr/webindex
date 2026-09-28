@@ -84,6 +84,13 @@ export async function ocrPdf(bytes: Buffer): Promise<string | undefined> {
   if (ocrBudgetLeft() <= 0) return undefined;
   const { copyablePdf, tesseract } = await ocrTools();
   if (!copyablePdf || !tesseract) return undefined;
+  // Reserved here, synchronously, once the document is known to be attempted.
+  // Counted after the conversion instead, every concurrent scan passed the
+  // check above while the first was still converting — and pool.ts and a crawl
+  // run documents concurrently, which is exactly when the cap matters. A rung
+  // skipped for a missing binary returned above and costs nothing.
+  if (ocrBudgetLeft() <= 0) return undefined;
+  spent++;
 
   const dir = mkdtempSync(join(tmpdir(), `${brand().name}-ocr-`));
   try {
@@ -100,9 +107,8 @@ export async function ocrPdf(bytes: Buffer): Promise<string | undefined> {
     // Empty stdin, deliberately: it closes immediately, so any prompt the tool
     // might reach reads EOF and takes the default instead of hanging.
     const r = await runWithInput("copyable-pdf", ["-o", output, "-m", "-l", lang, input], Buffer.alloc(0), envInt("OCR_TIMEOUT_MS", DEFAULT_TIMEOUT_MS));
-    // Count a document against the budget once it has actually been attempted —
-    // a rung skipped for a missing binary costs nothing and must not.
-    spent++;
+    // Not attempted after all: the binary vanished since the probe. Refunded.
+    if (r.error === "not installed") spent = Math.max(0, spent - 1);
     if (!r.ok) return undefined;
 
     const md = output.replace(/\.pdf$/, ".md");

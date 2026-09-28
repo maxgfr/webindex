@@ -14,4 +14,11 @@ describe("decodeBody", () => {
   bench("utf-8 (4 MB)", () => {
     decodeBody(utf8_4m, "text/html; charset=utf-8");
   });
+  // No declaration anywhere: one validating pass, then the cp1252 rescue when it fails.
+  bench("undeclared utf-8 (4 MB)", () => {
+    decodeBody(utf8_4m, "text/html");
+  });
+  bench("undeclared windows-1252 (4 MB)", () => {
+    decodeBody(cp1252_4m, "text/html");
+  });
 });

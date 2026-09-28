@@ -1,7 +1,9 @@
 import { brand } from "../brand.js";
 import {
+  ANNOTATIONS_SINCE,
   DEFAULT_MAX_RESPONSE_BYTES,
   LATEST_PROTOCOL,
+  PROGRESS_MESSAGE_SINCE,
   RICH_TOOLS_SINCE,
   capResponse,
   negotiateProtocol,
@@ -17,8 +19,9 @@ import { listResources, readResource, ResourceError } from "./resources.js";
 // newline-delimited JSON, http.ts in request bodies; both call `handle`.
 //
 // Responses go out through a `send` callback rather than a return value. That
-// is not decoration: it is what lets a later revision stream progress
-// notifications over SSE without touching this file.
+// is not decoration: it is what lets a transport put progress notifications on
+// the same stream as the answer (stdio frames, an SSE response), or drop them
+// where there is no stream to carry them (a plain JSON response).
 //
 // ── What the engine owns, and what it does not ──────────────────────────────
 //
@@ -40,13 +43,31 @@ export interface JsonRpcMessage {
   [k: string]: unknown;
 }
 
+/**
+ * What a client may assume about a tool (MCP 2025-03-26 on). Hints, not
+ * guarantees — a client decides from them whether a call needs confirmation.
+ */
+export interface ToolAnnotations {
+  /** A display name; the server fills it from ToolDecl.title when absent. */
+  title?: string;
+  /** Changes nothing in its environment. */
+  readOnlyHint?: boolean;
+  /** May destroy or overwrite something (meaningful only when not read-only). */
+  destructiveHint?: boolean;
+  /** Calling it again with the same arguments has no further effect. */
+  idempotentHint?: boolean;
+  /** Reaches an open world — the web, a remote API — rather than a closed one. */
+  openWorldHint?: boolean;
+  [hint: string]: boolean | string | undefined;
+}
+
 export interface ToolDecl {
   name: string;
   description: string;
   inputSchema: JsonSchema;
   title?: string;
   outputSchema?: JsonSchema;
-  annotations?: Record<string, boolean>;
+  annotations?: ToolAnnotations;
 }
 
 export interface PromptDecl {
@@ -85,6 +106,35 @@ export class InvalidParamsError extends Error {}
 export class PromptError extends Error {}
 
 /**
+ * What the server hands a tool call besides its arguments.
+ *
+ * Dropping a cancelled call's answer is not cancelling it: the fetch, the crawl
+ * or the search went on to its own budget for a client that had moved on. The
+ * signal is how the work itself stops — pass it to whatever takes one.
+ */
+export interface ToolCallContext {
+  /** Aborted by the client's notifications/cancelled, or when the transport loses the request. */
+  signal: AbortSignal;
+  /**
+   * Report how far the call has got. A no-op unless the client asked with
+   * `_meta.progressToken`; a value that does not move forward is dropped, as
+   * the spec requires progress to increase.
+   */
+  progress(progress: number, total?: number, message?: string): void;
+}
+
+/** How a transport hands one message to the server, beyond the message itself. */
+export interface HandleOptions {
+  /** The transport lost the request — an HTTP client hung up. Aborts the tool's signal. */
+  signal?: AbortSignal;
+  /**
+   * Where notifications about this request (progress) go. Defaults to `send`;
+   * a batch collects its replies in `send`, so it names the stream here.
+   */
+  notify?: (out: JsonRpcMessage) => void;
+}
+
+/**
  * The skill half of the server. Everything the engine cannot know.
  *
  * `listTools` takes the negotiated protocol version because tool declarations
@@ -96,7 +146,7 @@ export interface McpAdapter {
   /** Version reported in `serverInfo`. The skill's, not the engine's. */
   version: string;
   listTools(protocol: ProtocolVersion): ToolDecl[];
-  callTool(name: string, args: Record<string, unknown>): Promise<ToolOutcome>;
+  callTool(name: string, args: Record<string, unknown>, context?: ToolCallContext): Promise<ToolOutcome>;
   /**
    * Per-tool advice for narrowing an oversized request. The engine detects the
    * overflow; only the skill knows which argument makes the result smaller.
@@ -123,8 +173,9 @@ export const ERR_INTERNAL = -32603;
 
 export interface McpServer {
   // Handle one message. `send` is called zero times for a notification, once
-  // for a request. Never throws.
-  handle(msg: JsonRpcMessage, send: (out: JsonRpcMessage) => void): Promise<void>;
+  // for a request (progress notifications aside — see HandleOptions.notify).
+  // Never throws.
+  handle(msg: JsonRpcMessage, send: (out: JsonRpcMessage) => void, opts?: HandleOptions): Promise<void>;
   // The version agreed during `initialize`. The HTTP transport overrides it per
   // request from the MCP-Protocol-Version header, since it has no session.
   protocolVersion(): ProtocolVersion;
@@ -139,14 +190,26 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
   let protocol: ProtocolVersion = LATEST_PROTOCOL;
   // Only active requests can be cancelled. Keep the original identifier type:
   // numeric 7 and string "7" name different JSON-RPC requests.
-  const active = new Map<string | number, { cancelled: boolean }>();
+  const active = new Map<string | number, ActiveRequest>();
 
-  const listTools = () => adapter.listTools(protocol);
+  const listTools = () => adapter.listTools(protocol).map((decl) => forRevision(decl, protocol));
   const prompts = () => adapter.prompts ?? [];
 
-  async function handle(msg: JsonRpcMessage, send: (out: JsonRpcMessage) => void): Promise<void> {
+  async function handle(msg: JsonRpcMessage, send: (out: JsonRpcMessage) => void, handleOpts: HandleOptions = {}): Promise<void> {
     if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
       send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: expected a JSON-RPC object" } });
+      return;
+    }
+
+    // A response is addressed to whoever sent the request, and this server
+    // sends none. Answering it — "method not found" under the same id — reached
+    // the client as the reply to ITS OWN request of that id.
+    if (msg.method === undefined && ("result" in msg || "error" in msg)) return;
+
+    // JSON-RPC ids are strings or numbers. Echoing `true` or an object back is
+    // not a response any client can match, so the error goes out under null.
+    if (msg.id !== undefined && msg.id !== null && typeof msg.id !== "string" && typeof msg.id !== "number") {
+      send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: `id` must be a string or a number" } });
       return;
     }
 
@@ -154,25 +217,57 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
     if (msg.id === undefined || msg.id === null) {
       if (msg.method === "notifications/cancelled") {
         const target = msg.params?.requestId;
-        if (typeof target === "string" || typeof target === "number") {
-          const request = active.get(target);
-          if (request) request.cancelled = true;
-        }
+        if (typeof target === "string" || typeof target === "number") active.get(target)?.cancel();
       }
       return;
     }
     const id = msg.id;
-    const request = { cancelled: false };
+    const controller = new AbortController();
+    const request: ActiveRequest = {
+      cancelled: false,
+      answered: false,
+      cancel() {
+        request.cancelled = true;
+        controller.abort();
+      },
+    };
     active.set(id, request);
+    // Linked by hand: AbortSignal.any is Node 20, and the bundle runs on 18.
+    const lost = handleOpts.signal;
+    const onLost = () => request.cancel();
+    if (lost?.aborted) request.cancel();
+    else lost?.addEventListener("abort", onLost, { once: true });
 
     const reply = (out: Omit<JsonRpcMessage, "jsonrpc" | "id">) => {
       // A cancelled request is dropped on the floor — answering it after the
       // client moved on is exactly what the notification asks us not to do.
       if (request.cancelled) return;
+      request.answered = true;
       send({ jsonrpc: "2.0", id, ...out });
     };
 
+    // Progress goes only to a request that asked for it, only forward, and
+    // never after its answer or its cancellation.
+    const token = (msg.params?._meta as Record<string, unknown> | undefined)?.progressToken;
+    const notify = handleOpts.notify ?? send;
+    let last = Number.NEGATIVE_INFINITY;
+    const progress = (value: number, total?: number, message?: string): void => {
+      if ((typeof token !== "string" && typeof token !== "number") || request.cancelled || request.answered) return;
+      if (!Number.isFinite(value) || value <= last) return;
+      last = value;
+      const params: Record<string, unknown> = { progressToken: token, progress: value };
+      if (total !== undefined && Number.isFinite(total)) params.total = total;
+      // `message` arrived in 2025-03-26.
+      if (message && protocol >= PROGRESS_MESSAGE_SINCE) params.message = message;
+      notify({ jsonrpc: "2.0", method: "notifications/progress", params });
+    };
+    const context: ToolCallContext = { signal: controller.signal, progress };
+
     try {
+      if (typeof msg.method !== "string") {
+        reply({ error: { code: ERR_INVALID_REQUEST, message: "invalid request: no `method`" } });
+        return;
+      }
       switch (msg.method) {
         case "initialize": {
           protocol = negotiateProtocol(msg.params?.protocolVersion);
@@ -200,10 +295,15 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
           reply({ result: { tools: listTools() } });
           return;
         case "tools/call":
-          await handleToolCall(msg, reply);
+          await handleToolCall(msg, reply, context);
           return;
         case "resources/list":
           reply({ result: { resources: listResources(opts.skillDir) } });
+          return;
+        // Part of the resources capability declared above; every resource is
+        // a fixed document, so there are no templates to offer.
+        case "resources/templates/list":
+          reply({ result: { resourceTemplates: [] } });
           return;
         case "resources/read": {
           const uri = typeof msg.params?.uri === "string" ? msg.params.uri : "";
@@ -247,13 +347,21 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
       reply({ error: { code: ERR_INTERNAL, message: errMessage(e) } });
     } finally {
       if (active.get(id) === request) active.delete(id);
+      lost?.removeEventListener("abort", onLost);
     }
   }
 
-  async function handleToolCall(msg: JsonRpcMessage, reply: (out: Omit<JsonRpcMessage, "jsonrpc" | "id">) => void): Promise<void> {
+  async function handleToolCall(msg: JsonRpcMessage, reply: (out: Omit<JsonRpcMessage, "jsonrpc" | "id">) => void, context: ToolCallContext): Promise<void> {
     const params = msg.params ?? {};
     const name = typeof params.name === "string" ? params.name : "";
-    const args = (params.arguments ?? {}) as Record<string, unknown>;
+    const rawArgs = params.arguments ?? {};
+    // A string or an array here was validated key by key — a string's
+    // characters as properties — and failed with a message about the wrong thing.
+    if (rawArgs === null || typeof rawArgs !== "object" || Array.isArray(rawArgs)) {
+      reply({ error: { code: ERR_INVALID_PARAMS, message: "`arguments` must be an object" } });
+      return;
+    }
+    const args = rawArgs as Record<string, unknown>;
 
     // An unknown tool and malformed arguments are PROTOCOL errors: the client
     // asked for something that doesn't exist or sent something the declared
@@ -280,7 +388,7 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
           decl.inputSchema.properties[key]?.type === "number" && typeof value === "string" ? Number(value) : value,
         ]),
       );
-      const { text: raw, artifact } = await adapter.callTool(name, normalized);
+      const { text: raw, artifact } = await adapter.callTool(name, normalized, context);
       const text = capResponse(raw, name, maxBytes, artifact, adapter.capAdvice);
       const capped = text !== raw;
       const structured = protocol >= RICH_TOOLS_SINCE ? structuredContentFor(text, capped, decl.outputSchema !== undefined) : undefined;
@@ -314,6 +422,34 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
     },
     tools: listTools,
   };
+}
+
+interface ActiveRequest {
+  cancelled: boolean;
+  answered: boolean;
+  cancel(): void;
+}
+
+/**
+ * A tool declaration as the negotiated revision defines it.
+ *
+ * `annotations` arrived in 2025-03-26, `title` and `outputSchema` in
+ * 2025-06-18. Gating them was each adapter's job, so an adapter that declared
+ * them unconditionally — webindex's own did — sent a 2024-11-05 client fields
+ * its schema does not have. Here it holds for every adapter. `annotations.title`
+ * carries the name for a 2025-03-26 client, which has no top-level `title`.
+ */
+function forRevision(decl: ToolDecl, protocol: ProtocolVersion): ToolDecl {
+  const { title, outputSchema, annotations, ...base } = decl;
+  const out: ToolDecl = { ...base };
+  if (protocol >= RICH_TOOLS_SINCE) {
+    if (title !== undefined) out.title = title;
+    if (outputSchema !== undefined) out.outputSchema = outputSchema;
+  }
+  if (protocol >= ANNOTATIONS_SINCE && annotations) {
+    out.annotations = title !== undefined && annotations.title === undefined ? { title, ...annotations } : annotations;
+  }
+  return out;
 }
 
 function errMessage(e: unknown): string {

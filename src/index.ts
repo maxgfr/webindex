@@ -43,6 +43,11 @@ export { ANYDOC_SPEC, PDF_INSPECTOR_SPEC, runWithInput } from "./pdf/exec.js";
 // rescueViaWayback available separately for explicit dead-link recovery.
 export * from "./fetch.js";
 
+// HTML → CommonMark: links and images absolute, code fenced, lists nested,
+// tables as GFM. The built-in reader's answer to Firecrawl's Markdown, so a
+// `format: "markdown"` fetch has one shape whichever extractor ran.
+export { htmlToMarkdown, type MarkdownOptions } from "./markdown.js";
+
 // The Firecrawl CLIENT — probe, scrape, search. The discovery *backend* built
 // on top of it stays with the consumer until the discovery layer moves.
 export {
@@ -61,6 +66,7 @@ export {
   type FirecrawlHit,
   type FirecrawlOptions,
   type FirecrawlScrape,
+  type FirecrawlSearchOptions,
   type ScrapeAttempt,
 } from "./firecrawl.js";
 
@@ -235,14 +241,18 @@ export {
   ERR_INVALID_PARAMS,
   ERR_INVALID_REQUEST,
   ERR_METHOD_NOT_FOUND,
+  InvalidParamsError,
   PromptError,
   ToolError,
+  type HandleOptions,
   type JsonRpcMessage,
   type McpAdapter,
   type McpServer,
   type PromptDecl,
   type PromptResult,
   type ServerOptions,
+  type ToolAnnotations,
+  type ToolCallContext,
   type ToolDecl,
   type ToolOutcome,
 } from "./mcp/server.js";

@@ -1,7 +1,8 @@
 import { brand } from "../brand.js";
-import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { createServer as createMcpServer, type JsonRpcMessage, type McpAdapter, type ServerOptions } from "./server.js";
-import { ASSUMED_HTTP_PROTOCOL, isOriginAllowed, isProtocolVersion, type ProtocolVersion } from "./protocol.js";
+import { createHash, timingSafeEqual } from "node:crypto";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import { createServer as createMcpServer, ERR_INVALID_REQUEST, type JsonRpcMessage, type McpAdapter, type ServerOptions } from "./server.js";
+import { ASSUMED_HTTP_PROTOCOL, batchRefusal, isOriginAllowed, isProtocolVersion, type ProtocolVersion } from "./protocol.js";
 
 // The Streamable HTTP transport, in its stateless form: one endpoint, POST,
 // JSON in and JSON out.
@@ -13,13 +14,15 @@ import { ASSUMED_HTTP_PROTOCOL, isOriginAllowed, isProtocolVersion, type Protoco
 // semantics) for no capability. Revisit only when something genuinely spans
 // calls.
 //
-// No SSE either: nothing here sends server-initiated messages, and the spec's
-// answer for a server with no stream to offer is 405 on GET, which is what this
-// does. server.ts already routes replies through a callback, so adding a stream
-// later is a change to this file alone.
+// SSE only where it carries something: a request that asked for progress, from
+// a client that accepts a stream, is answered as one (progress, then the
+// response). Nothing here sends server-initiated messages outside a request,
+// and the spec's answer for a server with no such stream is 405 on GET, which
+// is what this does.
 
 const MCP_PATH = "/mcp";
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
+const REQUEST_TIMEOUT_MS = 60_000;
 const CORS_HEADERS = "content-type, accept, mcp-protocol-version, mcp-session-id, authorization, last-event-id";
 
 export interface HttpOptions extends ServerOptions {
@@ -30,6 +33,12 @@ export interface HttpOptions extends ServerOptions {
   // this server fetches arbitrary URLs and reads files off disk, so an exposed
   // port is a fetch-anything primitive for whoever finds it.
   allowRemote?: boolean;
+  /**
+   * Answer only requests carrying `Authorization: Bearer <token>`; anything
+   * else gets a 401. The one wall that keeps a reachable port from being
+   * everyone's: the others limit what a caller can do, this limits who calls.
+   */
+  bearerToken?: string;
 }
 
 export interface RunningHttpServer {
@@ -41,16 +50,19 @@ export interface RunningHttpServer {
 
 const LOOPBACK_BIND = new Set(["127.0.0.1", "::1", "localhost"]);
 
-export function startHttpServer(adapter: McpAdapter, opts: HttpOptions = {}): Promise<RunningHttpServer> {
+export async function startHttpServer(adapter: McpAdapter, opts: HttpOptions = {}): Promise<RunningHttpServer> {
   const bind = opts.bind ?? "127.0.0.1";
   if (!LOOPBACK_BIND.has(bind) && !opts.allowRemote) {
-    return Promise.reject(
-      new Error(
-        `refusing to bind ${bind}: ${brand().name}'s MCP server fetches arbitrary URLs and reads local files. Pass --allow-remote if that is really what you want.`,
-      ),
+    throw new Error(
+      `refusing to bind ${bind}: ${brand().name}'s MCP server fetches arbitrary URLs and reads local files. Pass --allow-remote if that is really what you want.`,
     );
   }
 
+  // Imported here, not at module scope. node:http is the costliest builtin to
+  // load — its ESM facade pulls in undici — and a static import made every
+  // command of every consumer pay ~40 ms at start-up for a transport only
+  // `mcp --transport http` uses.
+  const { createServer: createHttpServer } = await import("node:http");
   const server = createHttpServer((req, res) => {
     void route(req, res, adapter, opts).catch((e) => {
       // Only if nothing was written yet: a throw after the response started
@@ -63,10 +75,12 @@ export function startHttpServer(adapter: McpAdapter, opts: HttpOptions = {}): Pr
     });
   });
 
-  // A cold documentation build runs for minutes. Node's default 300s request timeout
-  // would cut the socket with no JSON-RPC error, which the client reports as a
-  // crashed server rather than a slow tool.
-  server.requestTimeout = 0;
+  // How long a client may take to SEND one request. Node's requestTimeout ends
+  // once the request has arrived — a tool call that computes for minutes is
+  // not cut by it — so switching it off (as this did, to protect slow tools)
+  // protected nothing and let a body trickled a byte at a time hold its
+  // connection for ever. A minute is 4 MB at 70 KB/s.
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
   server.headersTimeout = 60_000;
   server.keepAliveTimeout = 120_000;
 
@@ -113,6 +127,14 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
     return;
   }
 
+  // After the preflight, which a browser sends without credentials, and before
+  // anything else — a caller without the token learns nothing, not even
+  // which paths exist.
+  if (opts.bearerToken !== undefined && !bearerMatches(header(req, "authorization"), opts.bearerToken)) {
+    sendJson(res, 401, { error: "this server needs `Authorization: Bearer <token>`" }, origin, { "www-authenticate": 'Bearer realm="mcp"' });
+    return;
+  }
+
   if (path !== MCP_PATH) {
     sendJson(res, 404, { error: `not found: ${path} (the MCP endpoint is ${MCP_PATH})` }, origin);
     return;
@@ -121,14 +143,13 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
   // GET would open the server→client SSE stream; there isn't one, and 405 is
   // the spec's way of saying so. DELETE terminates a session; there are none.
   if (req.method === "GET" || req.method === "DELETE") {
-    res.writeHead(405, { allow: "POST, OPTIONS", ...corsHeaders(origin) });
-    res.end(JSON.stringify({ error: `${req.method} is not supported: this server is stateless and offers no server-initiated stream` }));
+    const why = `${req.method} is not supported: this server is stateless and offers no server-initiated stream`;
+    sendJson(res, 405, { error: why }, origin, { allow: "POST, OPTIONS" });
     return;
   }
 
   if (req.method !== "POST") {
-    res.writeHead(405, { allow: "POST, OPTIONS", ...corsHeaders(origin) });
-    res.end(JSON.stringify({ error: `${req.method} is not supported` }));
+    sendJson(res, 405, { error: `${req.method} is not supported` }, origin, { allow: "POST, OPTIONS" });
     return;
   }
 
@@ -176,16 +197,52 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
     return;
   }
 
+  if (Array.isArray(parsed)) {
+    // Only a client that named its revision can have named one without
+    // batches; one that sent no header is read as 2025-03-26, which has them.
+    const refusal = batchRefusal(parsed, declared as ProtocolVersion | undefined);
+    if (refusal) {
+      sendJson(res, 400, { jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: refusal } }, origin);
+      return;
+    }
+  }
+
   // A server instance per request. Stateless means the negotiated version
   // cannot live on the server object: two overlapping requests on different
   // protocol versions would otherwise read each other's.
   const mcp = createMcpServer(adapter, opts);
   mcp.setProtocolVersion(protocol);
 
+  // The client hanging up is the only cancel this server can receive: being
+  // stateless, a notifications/cancelled POSTed separately cannot name this
+  // request — ids are only unique per client, and there is no session to say
+  // whose. Nobody is left to read the answer, so the work stops.
+  const lost = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) lost.abort();
+  });
+
+  // Progress needs a stream to travel on. A single request that asked for it,
+  // from a client that accepts one, is answered as SSE: its progress events,
+  // then its response, then the end of the stream. Everyone else gets the one
+  // JSON body they always did, with nothing but responses in it.
+  const single = Array.isArray(parsed) ? undefined : (parsed as JsonRpcMessage);
+  const token = single?.params?._meta as Record<string, unknown> | undefined;
+  const asked = typeof single?.id === "string" || typeof single?.id === "number";
+  if (asked && token?.progressToken !== undefined && accept.includes("text/event-stream")) {
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", ...corsHeaders(origin) });
+    const event = (m: JsonRpcMessage) => {
+      if (!res.writableEnded && !res.destroyed) res.write(`event: message\ndata: ${JSON.stringify(m)}\n\n`);
+    };
+    await mcp.handle(single, event, { signal: lost.signal, notify: event });
+    res.end();
+    return;
+  }
+
   const out: JsonRpcMessage[] = [];
   const collect = (m: JsonRpcMessage) => void out.push(m);
   const messages: JsonRpcMessage[] = Array.isArray(parsed) ? (parsed as JsonRpcMessage[]) : [parsed as JsonRpcMessage];
-  for (const m of messages) await mcp.handle(m, collect);
+  for (const m of messages) await mcp.handle(m, collect, { signal: lost.signal, notify: () => {} });
 
   // Nothing to answer means the body held only notifications or responses —
   // `notifications/initialized` arrives exactly this way, and a 200 with a body
@@ -197,6 +254,16 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
   }
 
   sendJson(res, 200, Array.isArray(parsed) ? out : out[0]!, origin);
+}
+
+// Compared as digests, so the comparison takes the same time whatever the
+// caller sent and however long it was: timingSafeEqual needs equal lengths,
+// and returning early on a length mismatch would announce the token's length.
+function bearerMatches(sent: string | undefined, token: string): boolean {
+  const m = /^Bearer[ \t]+(\S+)[ \t]*$/i.exec(sent ?? "");
+  if (!m) return false;
+  const digest = (s: string) => createHash("sha256").update(s).digest();
+  return timingSafeEqual(digest(m[1]!), digest(token));
 }
 
 function header(req: IncomingMessage, name: string): string | undefined {

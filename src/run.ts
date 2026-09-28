@@ -45,12 +45,13 @@ export function runId(d: Date = new Date()): string {
  * single quote closes and reopens the quoting (' → '"'"'), which is the one
  * escape the form does not admit directly.
  *
- * Newlines collapse to spaces so an emitted command stays ONE line. A runbook
+ * Line breaks — LF, CRLF and a lone CR, which a terminal takes as Enter just
+ * the same — collapse to spaces so an emitted command stays ONE line. A runbook
  * is copy-pasted by a human or a subagent; a command that wraps across lines is
  * a command that gets pasted half-executed.
  */
 export function shq(s: string): string {
-  return `'${s.replace(/\r?\n/g, " ").replaceAll("'", `'"'"'`)}'`;
+  return `'${s.replace(/\r\n?|\n/g, " ").replaceAll("'", `'"'"'`)}'`;
 }
 
 /**

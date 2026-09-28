@@ -2,8 +2,9 @@
 //
 // The implementation lives in ./pdf/: `native.ts` (the built-in reader),
 // `quality.ts` (is this text fit to cite?), `exec.ts` (run an external tool on
-// stdin), `ocr.ts` (the scanned-document rung) and `ladder.ts` (try the
-// strongest available extractor first).
+// stdin), `npx.ts` (run the npm-published rungs, and tell a tool that cannot
+// run from one that rejected a document), `ocr.ts` (the scanned-document rung)
+// and `ladder.ts` (try the strongest available extractor first).
 //
 // Callers want `extractPdf`. `pdfToText` stays exported because it is the
 // ladder's built-in rung and is worth testing on its own.

@@ -182,7 +182,9 @@ describe("authorized requests", () => {
 
   it.each(["pdf", "docx"])("does not send a guarded %s to the remote extractor", async (extension) => {
     process.env[envName(extension === "pdf" ? "PDF_ENGINE" : "DOC_ENGINE")] = "firecrawl";
-    const spy = installFetchMock(() => ({ bytes: Buffer.from("unreadable document") }));
+    // Labelled as a download: a .pdf/.docx URL answering text/html is read as
+    // the web page it is, which is not what this case is about.
+    const spy = installFetchMock(() => ({ bytes: Buffer.from("unreadable document"), contentType: "application/octet-stream" }));
     const result = await fetchAndExtract(`https://x.test/file.${extension}`, { firecrawl: "http://fc.test", authorizeUrl: async () => true });
     expect(result.text).toBe("");
     expect(spy).toHaveBeenCalledTimes(1);

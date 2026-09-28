@@ -4,7 +4,14 @@
 // the SAME source — which is what makes deduplication, the fetch cache key and
 // stable source numbering agree with each other.
 
-const TRACKING_PARAMS = /^(utm_|fbclid$|gclid$|mc_|ref$|ref_src$|ref_url$|spm$|_hsenc$|_hsmi$|igshid$)/i;
+// Click ids and campaign tags: they name how a reader arrived, never what they
+// read. Not a bare `ref`, which looks like one (`?ref=hn`) but on forge and
+// raw-file APIs selects the branch or tag served (`?ref=v1.0`) — dropping it
+// keyed two versions of one file to one cache entry.
+const TRACKING_PARAMS =
+  /^(utm_|fbclid$|gclid$|gclsrc$|dclid$|msclkid$|yclid$|twclid$|ttclid$|li_fat_id$|mkt_tok$|_gl$|mc_|ref_src$|ref_url$|spm$|_hsenc$|_hsmi$|igshid$|igsh$)/i;
+// `si` is a share-link tracker on these hosts only; elsewhere it can be data.
+const SHARE_SI_HOSTS = /(^|\.)(youtube\.com|youtu\.be|spotify\.com)$/;
 
 // Canonical form of a URL for deduplication. Lowercases ONLY scheme + host
 // (paths and query values are case-sensitive — github.com/Microsoft/TypeScript
@@ -22,8 +29,9 @@ export function canonicalizeUrl(raw: string): string {
     if ((proto === "http:" && port === "80") || (proto === "https:" && port === "443")) port = "";
     const path = u.pathname.replace(/\/+$/, ""); // case preserved
     const keep: [string, string][] = [];
+    const shareSi = SHARE_SI_HOSTS.test(host);
     for (const [k, v] of u.searchParams) {
-      if (!TRACKING_PARAMS.test(k)) keep.push([k, v]);
+      if (!TRACKING_PARAMS.test(k) && !(shareSi && k === "si")) keep.push([k, v]);
     }
     keep.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
     const search = keep.length ? "?" + keep.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&") : "";

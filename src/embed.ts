@@ -19,6 +19,7 @@
 import { brand, env, envInt } from "./brand.js";
 import { httpJson } from "./fetch.js";
 import { mapLimit } from "./pool.js";
+import { cachedProbe, type ProbeEntry } from "./probe.js";
 import { embedModel } from "./stack.js";
 
 /** Where the local Ollama answers. `off` disables the layer entirely. */
@@ -50,7 +51,7 @@ export interface EmbedResult {
   note?: string;
 }
 
-const probed = new Map<string, boolean>();
+const probed = new Map<string, ProbeEntry>();
 
 /** Test seam, and the escape hatch for a server that came up mid-run. */
 export function resetOllamaProbe(): void {
@@ -60,18 +61,14 @@ export function resetOllamaProbe(): void {
 /**
  * Whether the local embedding server answers.
  *
- * Cached per base for the process: a probe per call would double the request count of
- * every batch, and a server that goes away mid-run shows up as a failed embed
- * anyway.
+ * Cached per base: a probe per call would double the request count of every
+ * batch, and a server that goes away mid-run shows up as a failed embed anyway.
+ * A "no" is asked again after 30 s, so a server started mid-run is found.
  */
 export async function probeOllama(base: string = ollamaBase()): Promise<boolean> {
   const key = base.replace(/\/+$/, "");
   if (key.toLowerCase() === "off") return false;
-  const cached = probed.get(key);
-  if (cached !== undefined) return cached;
-  const r = await httpJson("GET", `${key}/api/tags`, undefined, { timeoutMs: 2_000, retries: 0 });
-  probed.set(key, r.ok);
-  return r.ok;
+  return cachedProbe(probed, key, async () => (await httpJson("GET", `${key}/api/tags`, undefined, { timeoutMs: 2_000, retries: 0 })).ok);
 }
 
 /**
@@ -100,11 +97,18 @@ export async function embed(texts: readonly string[], opts: { base?: string; mod
   for (let i = 0; i < texts.length; i += width) batches.push(texts.slice(i, i + width) as string[]);
 
   let note: string | undefined;
+  // One failed batch voids the whole result (below), so the batches still
+  // queued are not sent: against a server that accepts connections and never
+  // answers, issuing them all cost one timeout per round of `concurrency`
+  // before the note — ten minutes for a 300-document pool.
+  let failed = false;
   const results = await mapLimit(batches, opts.concurrency ?? embedConcurrency(), async (batch) => {
+    if (failed) return undefined;
     const r = await httpJson("POST", `${base}/api/embed`, { model, input: batch }, { timeoutMs: 60_000 });
     const got = r.ok ? (r.data?.embeddings as number[][] | undefined) : undefined;
     if (!got || got.length !== batch.length) {
-      note ??= `embedding failed at ${base} (${r.error ?? `status ${r.status}`}) — is \`${model}\` pulled? \`${brand().cli} semantic up\` pulls it.`;
+      failed = true;
+      note ??= embedFailure(base, model, r);
       return undefined;
     }
     return got;
@@ -115,6 +119,54 @@ export async function embed(texts: readonly string[], opts: { base?: string; mod
   // to every text after the gap, and nothing downstream could detect it.
   if (results.some((r) => r === undefined)) return { vectors: [], model, ...(note ? { note } : {}) };
   return { vectors: results.flat() as number[][], model };
+}
+
+/**
+ * Why an embed request failed, in the server's own words when it gave any.
+ *
+ * Ollama answers `{"error": "model \"x\" not found, try pulling it first"}`;
+ * the note used to show only the status and suggest a pull for every failure —
+ * a 500 or a timeout included. The pull is suggested only when the model is
+ * missing, with both ways to do it, since not everyone runs the bundled stack.
+ */
+function embedFailure(base: string, model: string, r: { ok: boolean; status: number; data: unknown; error?: string }): string {
+  const said = typeof (r.data as { error?: unknown } | undefined)?.error === "string" ? (r.data as { error: string }).error : undefined;
+  const why = r.error ?? (said ? `status ${r.status}: ${said}` : r.ok ? "the response held no vectors for this batch" : `status ${r.status}`);
+  const missing = r.status === 404 || /not found/i.test(said ?? "");
+  const hint = missing ? ` — \`ollama pull ${model}\`, or \`${brand().cli} semantic up\`, pulls it.` : ".";
+  return `embedding failed at ${base} (${why})${hint}`;
+}
+
+// The task prefixes the common local embedding models were trained with. A
+// model like nomic-embed-text "must include a task instruction prefix": without
+// one the question and the passages are embedded as the same task, and the
+// dense lane under-performs quietly. First match wins.
+const PREFIXES: readonly { model: RegExp; query: string; doc: string }[] = [
+  { model: /nomic-embed/i, query: "search_query: ", doc: "search_document: " },
+  { model: /mxbai-embed/i, query: "Represent this sentence for searching relevant passages: ", doc: "" },
+  { model: /snowflake-arctic-embed2/i, query: "query: ", doc: "" },
+  { model: /snowflake-arctic-embed/i, query: "Represent this sentence for searching relevant passages: ", doc: "" },
+  { model: /(?:^|[/:_-])(?:multilingual-)?e5(?:[-_:]|$)/i, query: "query: ", doc: "passage: " },
+];
+
+/**
+ * The prefixes to put before a query and before a document for `model` (the
+ * configured one by default): from a small table of the common local models,
+ * overridden by `${PREFIX}_EMBED_QUERY_PREFIX` / `${PREFIX}_EMBED_DOC_PREFIX`
+ * (`none` for no prefix; a space is added after a non-empty one). A model the
+ * table does not know gets none — the right answer for most models.
+ *
+ * `embed` itself never adds them: it embeds exactly what it is given. A caller
+ * indexing documents and querying them later applies the same pair both times.
+ */
+export function embedPrefixes(model: string = embedModel()): { query: string; doc: string } {
+  const known = PREFIXES.find((p) => p.model.test(model)) ?? { query: "", doc: "" };
+  const fromEnv = (name: string): string | undefined => {
+    const v = env(name);
+    if (v === undefined) return undefined;
+    return v.toLowerCase() === "none" ? "" : `${v} `;
+  };
+  return { query: fromEnv("EMBED_QUERY_PREFIX") ?? known.query, doc: fromEnv("EMBED_DOC_PREFIX") ?? known.doc };
 }
 
 /** Embed one text. Convenience over `embed`, same degradation. */

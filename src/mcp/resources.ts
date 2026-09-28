@@ -1,6 +1,6 @@
 import { brand } from "../brand.js";
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // The skill's own documentation, served over MCP.
@@ -104,6 +104,14 @@ export function readResource(uri: string, moduleDir?: string): ResourceContents 
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
   if (!statSync(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
+  // Containment alone served EVERY file under the root, and run from a checkout
+  // the root is the repository: .git/config (a token in a remote URL), .env,
+  // the sources — each one resources/read away, over HTTP too. Only what
+  // listResources advertises is served: SKILL.md and references/*.md.
+  const served = relative(root, target).split(sep).join("/");
+  if (served !== "SKILL.md" && !/^references\/[^/]+\.md$/.test(served)) {
+    throw new ResourceError(`not a resource this server serves: ${uri} (resources/list names them)`);
+  }
 
   return { uri, mimeType: "text/markdown", text: readFileSync(targetReal, "utf8") };
 }

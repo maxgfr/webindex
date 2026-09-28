@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { checkArtifactRecall } from "./skillkit/recall.js";
+import { checkArtifactRecall, recallPolicy } from "./skillkit/recall.js";
 import { finishRepin } from "./skillkit/finish.js";
 import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // The webindex command line.
@@ -13,15 +13,18 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // What it offers is what the engine actually does today: discover candidate
 // URLs through the local keyless stack, turn a URL or a local file into clean
 // text, drive the containers, and serve all of that to an agent over MCP.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-import { configure } from "./brand.js";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { configure, env, envFlag, envInt, envName } from "./brand.js";
 import { decodeLocal } from "./charset.js";
 import { ENGINE_VERSION } from "./version.js";
-import { docFormatForUrl, extractDocument, enabledDocExtractors } from "./doc.js";
-import { enabledExtractors, extractPdf, ocrTools } from "./pdf.js";
-import { extractMainHtml, fetchAndExtract, htmlToText, httpGet, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
+import { DOC_EXTRACTORS, docFormatForUrl, extractDocument, enabledDocExtractors, sniffDocument } from "./doc.js";
+import { enabledExtractors, extractPdf, ocrBudgetLeft, ocrTools, PDF_EXTRACTORS } from "./pdf.js";
+import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./pdf/exec.js";
+import { npxCacheState } from "./pdf/npx.js";
+import { have } from "./exec.js";
+import { type ExtractResult, extractMainHtml, fetchAndExtract, htmlToText, httpGet, httpJson, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
 import { firecrawlBase, probeFirecrawl } from "./firecrawl.js";
 import { embedModel, ensureComposeMaterialized, STACK_SERVICES, stackControl } from "./stack.js";
 import { ollamaBase, probeOllama } from "./embed.js";
@@ -29,17 +32,28 @@ import { hybridSearch, probeQdrant, qdrantBase } from "./vector.js";
 import { embed } from "./embed.js";
 import { crawlSite } from "./crawl.js";
 import { extractTables, tableToMarkdown } from "./tables.js";
+import { documentBaseUrl, htmlToMarkdown } from "./markdown.js";
 import { fingerprint, hasChanged } from "./changed.js";
-import { auditEngineUsage, auditSkillBundle, checkPins, readSkillConfig, scaffoldSkill, vendorEngine, type CliSurface } from "./skillkit/index.js";
+import {
+  auditEngineUsage,
+  auditSkillBundle,
+  checkPins,
+  readSkillConfig,
+  scaffoldSkill,
+  skillNameProblem,
+  vendorEngine,
+  type CliSurface,
+} from "./skillkit/index.js";
 import { isKeylessEngine, KEYLESS_ENGINES, type KeylessEngine } from "./engines.js";
-import { probeSearxng, search, searxngBase } from "./search.js";
-import { cacheClean, cacheDir, cacheStats } from "./cache.js";
+import { probeSearxng, search, searxngBase, searxngIsExplicit } from "./search.js";
+import { cacheClean, cacheDir, cachedFetchAndExtract, cacheStats, setCacheMode } from "./cache.js";
 import { fetchRobots, isAllowed } from "./robots.js";
 import { discoverFeeds, fetchFeed, fetchSitemap, parseFeed } from "./feed.js";
 import { pageMetadata } from "./structured.js";
-import { resolveRepo } from "./repo.js";
-import { listReleases, repoFacts, searchIssues } from "./forge.js";
-import { resolvePackage, type RegistryKind } from "./registry.js";
+import { type RepoRef, resolveRepo } from "./repo.js";
+import { apiBase, type ForgeKind, forgeAuthHeaders, forgeRef, listReleases, listTags, repoFactsResult, searchIssues } from "./forge.js";
+import { configuredForgeHosts, normalizeForgeHost } from "./forge-host.js";
+import { type RegistryKind, resolvePackageResult } from "./registry.js";
 import { bm25MatchedTerms, bm25Score, bm25Tokenize, buildBm25Index, dedupeNearDuplicates, diversify } from "./rank.js";
 import {
   argBool,
@@ -48,6 +62,7 @@ import {
   type CliSpec,
   type CommandArgs,
   EXIT_FAILURE,
+  EXIT_OK,
   EXIT_USAGE,
   isInvokedDirectly,
   jsonLine,
@@ -55,10 +70,13 @@ import {
   positionalText,
   UsageError,
 } from "./cli-kit.js";
-import { ensureDir, writeArtifact } from "./no-write.js";
+import { ensureDir, isNoWrite, writeArtifact } from "./no-write.js";
+import { mapLimit } from "./pool.js";
+import type { JsonSchemaProp } from "./mcp/protocol.js";
 import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
+import { confinePath, publicUrlRefusal, publicUrlsOnly } from "./mcp/policy.js";
 
 configure({ name: "webindex", envPrefix: "WEBINDEX", cli: "webindex", contactUrl: "https://github.com/maxgfr/webindex" });
 
@@ -69,34 +87,46 @@ documents — and serve that to an agent over MCP. Zero dependencies, no API key
 
 USAGE
   webindex search <query> [--json] [--limit <n>] [--pages <n>] [--lang <tag>]
-                          [--engine ddg|ddglite|mojeek|off] [--searxng <base>|off]
-  webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>] [--full-page]
-  webindex extract <file> [--json] [--full-page]
-  webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--json]
-  webindex repo <ref> [--json]
-  webindex issues <ref> [--terms "<words>"] [--limit <n>] [--json]
-  webindex prs <ref> [--terms "<words>"] [--limit <n>] [--json]
-  webindex releases <ref> [--limit <n>] [--json]
+                          [--region <cc>|wt] [--engine ddg|ddglite|mojeek|off]
+                          [--searxng <base>|off] [--firecrawl <base>|off]
+                          [--timeout <ms>]
+  webindex fetch <url> [<url> …] [--json] [--format text|markdown]
+                       [--firecrawl <base>|off] [--lang <tag>] [--full-page] [--cache]
+                       [--refresh] [--offline] [--timeout <ms>]
+  webindex extract <file|-> [--json] [--format text|markdown] [--full-page]
+  webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--dense] [--json]
+  webindex repo <ref> [--forge github|gitlab|gitea] [--json]
+  webindex issues <ref> [--terms "<words>"] [--limit <n>] [--forge <kind>] [--json]
+  webindex prs <ref> [--terms "<words>"] [--limit <n>] [--forge <kind>] [--json]
+  webindex releases <ref> [--limit <n>] [--forge <kind>] [--json]
+  webindex tags <ref> [--limit <n>] [--forge <kind>] [--json]
   webindex package <name> [--registry npm|pypi|crates] [--version <semver>] [--json]
-  webindex meta <url> [--json]
+  webindex meta <url|file|-> [--json]
   webindex robots <url> [--json]
   webindex sitemap <url> [--max <n>] [--json]
   webindex feed <url> [--json]
   webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>] [--allow-remote]
+               [--public-only] [--allow-private] [--extract-root <dir>]
   webindex searxng   up|down|status
   webindex firecrawl up|down|status
   webindex semantic  up|down|status
   webindex stack     up|down|status|path
   webindex cache     status|clean [--all] [--json]
-  webindex crawl <url> --max <n> [--depth <n>] [--cross-origin] [--json]
-  webindex tables <url> [--markdown] [--json]
-  webindex embed <text> [--json]
+  webindex crawl <url> --max <n> [--depth <n>] [--prefix <path>] [--no-sitemap]
+                       [--cross-origin] [--json]
+  webindex tables <url|file|-> [--markdown] [--json]
+  webindex embed <text> | --docs <file.json|-> [--lines] [--json]
   webindex hybrid --query <q> [--docs <file.json|->] [--limit <n>] [--json]
-  webindex changed <url> [--etag <v>] [--hash <sha256>] [--json]
-  webindex skill     check|bundle|copy|doctor [--root <dir>] [--json]
+  webindex changed <url> [--etag <v>] [--last-modified <date>] [--hash <sha256>]
+                         [--timeout <ms>] [--json]
+  webindex skill     check [--engine <name>] [--root <dir>] [--json]
+  webindex skill     bundle|copy|doctor [--root <dir>] [--json]
   webindex skill     vendor [--engine <name>] --ref <tag> | --check
+  webindex skill     repin [--root <dir>] [--json]
+  webindex skill     finish [--root <dir>]
+  webindex skill     recall [--ref <baseline>] [--root <dir>]
   webindex skill     init <name> [--root <dir>]
-  webindex doctor
+  webindex doctor [--json]
   webindex version
 
 COMMANDS
@@ -104,32 +134,91 @@ COMMANDS
              engines (DuckDuckGo, DDG Lite, Mojeek — no key, no container),
              then Firecrawl. Prints what it found, or says which backend was
              missing and how to start it — those are different answers.
+             --lang is the result language; --region a country overriding
+             the one it implies (fr + ca is Canadian French), or wt for none.
+             --timeout bounds the WHOLE cascade, every rung and page; the
+             rungs it never reached are named. --json adds each rung's
+             outcome (rungs) and whether anything answered (searched).
   fetch      Fetch a URL and print the extracted text. Routes PDFs and office
-             documents to their ladders automatically. Uses Firecrawl when
+             documents to their ladders automatically — by URL, content-type,
+             download filename or the bytes themselves; images, media and
+             archives get a note, never their bytes. Uses Firecrawl when
              available, with built-in extraction as fallback. HTML is reduced
-             to main content with consent banners dropped.
-  extract    Same extraction, on a file already on disk. For both, --full-page
-             keeps the whole HTML page through the built-in reader: navigation,
-             footer and consent banners included.
+             to main content with consent banners dropped; --full-page keeps
+             the whole page through the built-in reader, navigation, footer and
+             consent banners included. --format markdown writes an HTML page as
+             CommonMark — links and images absolute, code fenced, lists and
+             tables kept — the shape Firecrawl returns (the default, text,
+             flattens all but the headings); PDFs and office documents keep
+             their text either way. Caching is opt-in: --cache reuses a fresh
+             copy for the TTL (24 h) and revalidates a stale one with a
+             conditional GET, so an unchanged page costs a 304; --refresh
+             re-fetches and rewrites the entry; --offline serves only what the
+             cache holds. --json adds finalUrl (after redirects), canonical,
+             documentType and cached. Several URLs are read four at a time
+             (WEBINDEX_FETCH_CONCURRENCY), each printed under a "==> <url> <=="
+             header in the order given, or as one --json array; a URL with
+             nothing readable is named on stderr, and the run fails only when
+             every one of them did.
+  extract    Same extraction, on a file already on disk (- reads stdin),
+             recognised by its bytes when its name says otherwise. --full-page
+             keeps the whole HTML page, navigation and consent banners included;
+             --format markdown writes it as CommonMark, as fetch does. Plain
+             text and documents keep their text either way.
   rank       Order candidate documents against a question — BM25F, then a
              near-duplicate collapse, then MMR so the top says several
              different things. Reads a JSON array of {url,title,text} from
-             --docs or stdin. Deterministic; no model, no network.
+             --docs or stdin; a document's own "score" (a search engine's
+             relevance) is fused with BM25F by rank, but never lifts one that
+             shares no term with the question. Each collapsed mirror is named
+             on stderr (in "duplicates" with --json). MMR reorders the best
+             max(5 × --limit, 100); the rest follow by relevance. Warns when no
+             document contains any term of the question. Deterministic; no
+             model, no network — unless --dense fuses in the local embedding
+             lane first (as hybrid does), which degrades to BM25F with a note
+             when no embedding server answers.
   repo       A repository's own facts: stars, licence, default branch, last
              push, and whether it is archived — the record, not the README.
-  issues     Search a repository's issues on GitHub, GitLab or Gitea.
-  prs        The same, over pull or merge requests.
+             A <ref> is owner/repo, any repository URL (one copied from a
+             browser works), git@host:owner/repo, or a local checkout, read as
+             its origin. --forge names what a self-hosted host runs when its
+             name does not say (salsa.debian.org is a GitLab).
+  issues     Search a repository's issues on GitHub, GitLab or Gitea. Every
+             term must match; when together they match nothing, it searches
+             once more with the most distinctive ones and says so on stderr.
+  prs        Search a repository's pull or merge requests, as issues searches
+             its issues.
   releases   Its releases, newest first, with their notes.
+  tags       Its tags — the versions of a project that tags without
+             publishing releases.
   package    A library NAME resolved through npm, PyPI or crates.io to its
              repository, docs, current version, licence and deprecation.
+             --version answers for that version (or an npm dist-tag) or not
+             at all. A registry that cannot be reached stops the search, so
+             another ecosystem's namesake never answers in its place.
   meta       What a page says about itself: JSON-LD, OpenGraph and meta tags —
-             author, dates, type, canonical URL.
+             author, dates, type, canonical URL. A saved page on disk (- reads
+             stdin) is decoded as extract decodes it.
   robots     Whether robots.txt permits fetching that URL. Exits non-zero when
              it does not, so it composes in a shell.
-  sitemap    The URLs a site lists in its sitemap, following the index at most
-             --max documents deep (default 3).
-  feed       A site's RSS/Atom feed, or the feeds the page advertises.
-  mcp        Serve fetch/extract to an agent over MCP (stdio by default).
+  sitemap    The URLs a site lists in its sitemap: the ones robots.txt names,
+             and an index's children, reading at most --max documents
+             (default 3); /sitemap.xml is guessed only when robots.txt names
+             none. Gzipped and plain-text sitemaps too, up to the protocol's
+             50 MB. The children --max did not reach are named on stderr.
+  feed       A site's RSS, Atom or JSON Feed, or the feeds the page
+             advertises. Relative entry links are resolved.
+  mcp        Serve these commands to an agent as MCP tools — search, fetch,
+             extract, rank, the forge, registry and site lookups, tables,
+             embed and crawl (hybrid and skill stay here). stdio by default;
+             --transport http binds loopback unless --allow-remote.
+             --public-only refuses URLs that are, or resolve to, loopback,
+             private, link-local or metadata addresses, checked again at
+             every redirect; --extract-root <dir> confines webindex_extract
+             to one directory (symlinks resolved). --allow-remote turns both
+             walls on: no local file at all without --extract-root, and
+             --allow-private lifts the address one. With WEBINDEX_MCP_TOKEN
+             set, HTTP answers only requests carrying it as a bearer token.
   searxng    Bring the keyless SearXNG container up or down, or show it.
   firecrawl  Same for Firecrawl, which cleans a page with a real browser. It
              delegates its own search to SearXNG, so this starts both.
@@ -138,17 +227,28 @@ COMMANDS
   stack      Everything at once; 'path' prints where the compose file was
              written. The stack is EMBEDDED in this binary — no checkout needed.
   cache      What the on-disk fetch cache holds, and how to evict it. 'clean'
-             drops stale entries, '--all' drops every one.
+             drops stale entries, '--all' drops every one. Both only ever
+             count or remove files the cache itself wrote.
   crawl      Walk a site from a seed, breadth-first, honouring robots.txt at
              every hop. --max is REQUIRED: following one citation is not
              crawling and needs no permission, but enumerating a site is, and
              an unbounded walk is the one thing here that can inconvenience
-             somebody else's server.
+             somebody else's server. --max counts pages returned; a failed
+             fetch costs none, but a crawl makes at most 3 x --max page
+             requests. The walk stays on the origin the seed lands on (its
+             http->https or www redirect included), seeds itself from the
+             sitemap (--no-sitemap to skip it; a seed below the root takes only
+             its own section's entries), and --prefix /docs/ keeps it under a
+             path. Links to images, media and archives are not fetched. A
+             robots.txt that errors, or a Crawl-delay over 60 s, stops it.
   tables     The tables on a page as headers and rows, with colspan and rowspan
              resolved. Plain extraction flattens a table into prose in which
-             every figure has lost its row and column.
+             every figure has lost its row and column. A saved page on disk (-
+             reads stdin) is decoded as extract decodes it.
   embed      Vectors for a text, from the local Ollama. No key, and nothing
-             leaves the machine. Needs \`webindex semantic up\`.
+             leaves the machine. Needs \`webindex semantic up\`. --docs embeds a
+             JSON array of strings (--lines: one text per non-empty line) in
+             one run, in input order.
   hybrid     Rank documents against a question with BOTH retrievers, fused by
              RRF: BM25F cannot find a page that never uses your words, and a
              dense index cannot match an exact identifier. Degrades to the
@@ -156,6 +256,9 @@ COMMANDS
   changed    Whether a URL changed since a fingerprint you already hold. A 304
              costs one round trip and no body; the answer says how it was
              decided, because etag and content-hash are different evidence.
+             With no --etag, --last-modified or --hash it prints a baseline
+             (etag, last-modified, hash of the raw bytes, status), and fails
+             rather than print one it could not read.
   skill      The packaging toolchain for a repository built ON this engine,
              driven by its skill.json. 'vendor' pins an engine by tag and
              sha256 (--check re-verifies offline, and fails a pin older than
@@ -163,25 +266,76 @@ COMMANDS
              the engine exports; 'bundle' proves \`skills add\` would install a
              working skill rather than a lone SKILL.md; 'copy' embeds the built
              engine in the package; 'init' scaffolds a new skill repository.
+             'repin', 'finish' and 'recall' are the steps of the reusable
+             .github/workflows/skill-repin.yml: move every pin to the newest
+             stable release, wait for CI and publication to complete, and check
+             that regenerated artifacts kept every identity of the --ref
+             baseline (HEAD by default).
              Dev-time only — it reads a repo, it never runs inside one.
-  doctor     Report which optional helpers are reachable and which extraction
-             rungs are available on this machine.
+  doctor     Report which optional helpers are reachable, and what each
+             extraction rung will do on this machine: installed, downloads on
+             first use, not installed, built-in, or switched off (and by which
+             variable). The npx rungs are checked against npm's cache, never
+             installed.
 
 ENVIRONMENT
-  WEBINDEX_FIRECRAWL     Firecrawl base URL, or "off"  (default http://localhost:3002)
-  WEBINDEX_PDF_ENGINE    force one PDF rung: native|pdf-inspector|anydoc|firecrawl|pdftotext|ocr
-  WEBINDEX_DOC_ENGINE    force one office rung, or "none" to disable
-  WEBINDEX_NO_NPX        skip the rungs that would install through npx
-  WEBINDEX_OCR_MAX       documents this process may OCR (default 3)
+  WEBINDEX_SEARXNG       SearXNG base URL, or "off"   (default http://localhost:8888)
   WEBINDEX_ENGINES       keyless engines to try: a comma list, or "off"  (default all)
+  WEBINDEX_FIRECRAWL     Firecrawl base URL, or "off"  (default http://localhost:3002)
+  WEBINDEX_FIRECRAWL_KEY a bearer key, only for a hosted Firecrawl
+  WEBINDEX_PAGE_DELAY_MS pause between two result pages of one engine (default 350)
+  WEBINDEX_PDF_ENGINE    the PDF rungs to run, in order: a comma list of
+                         pdf-inspector|anydoc|firecrawl|pdftotext|native|ocr, or "none"
+  WEBINDEX_DOC_ENGINE    the office rungs to run, in order: a comma list of
+                         anydoc|firecrawl|builtin, or "none" to disable
+                         (builtin reads OOXML and OpenDocument with no network)
+  WEBINDEX_NO_NPX        skip the rungs that would install through npx
+  WEBINDEX_NPX_TIMEOUT_MS  how long one npx rung may run, first download included
+                         (default 90000)
+  WEBINDEX_OCR_MAX       documents this process may OCR (default 3)
+  WEBINDEX_OCR_LANG, WEBINDEX_OCR_TIMEOUT_MS
+                         tesseract's language (default eng), one document's budget (300000)
   WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
   WEBINDEX_QDRANT        vector store base URL, or "off"      (default http://localhost:6333)
   WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
-  WEBINDEX_CACHE_DIR     where the fetch cache lives
+  WEBINDEX_EMBED_QUERY_PREFIX, WEBINDEX_EMBED_DOC_PREFIX
+                         the task prefixes hybrid puts before the question and each
+                         document ("none" for none); default from the model — nomic's
+                         "search_query: " / "search_document: ", mxbai's, e5's
+  WEBINDEX_EMBED_MAX_CHARS  characters of each document hybrid embeds (default 8000, 0 = all)
+  WEBINDEX_EMBED_BATCH, WEBINDEX_EMBED_CONCURRENCY
+                         texts per embedding request (16), requests in flight (4)
+  WEBINDEX_QDRANT_UPSERT_BATCH  points per upsert request (default 256)
+  WEBINDEX_RRF_K         the fusion constant rank and hybrid use (default 60)
+  WEBINDEX_TIMEOUT_MS    how long a request may stay silent before it is abandoned,
+                         not retried (default 20000; --timeout overrides it per call)
+  WEBINDEX_MAX_ATTEMPTS, WEBINDEX_RETRY_MS
+                         attempts per request (default 2, at most 5), back-off before a retry (600)
+  WEBINDEX_CACHE_DIR     where the fetch cache lives, and the stack in compose/
+                         (default <tmp>/webindex-<uid>/cache)
+  WEBINDEX_CACHE_TTL_HOURS  how long a cached page stays fresh (default 24; fractions allowed)
+  WEBINDEX_NO_WRITE      write nothing: no cache entry, no eviction
+  WEBINDEX_NO_ROBOTS     robots and crawl do not consult robots.txt — only on a site you own
+  WEBINDEX_ROBOTS_UA     the token robots.txt groups are matched against (default webindex)
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
+  WEBINDEX_FETCH_CONCURRENCY  URLs one fetch keeps in flight, 1-16 (default 4)
   WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
+  WEBINDEX_MAX_CRAWL_DELAY_MS the longest robots.txt Crawl-delay a crawl waits out, in ms
+                              (default 60000); a site asking for more is not crawled
+  WEBINDEX_PUBLIC_ONLY   set to make every \`mcp\` run --public-only
+  WEBINDEX_EXTRACT_ROOT  the directory \`mcp\` confines webindex_extract to (--extract-root)
+  WEBINDEX_MCP_TOKEN     the bearer token \`mcp --transport http\` then requires
   WEBINDEX_UA            override the browser User-Agent
+  GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, GITEA_TOKEN
+                         optional forge tokens (WEBINDEX_GITHUB_TOKEN and its kin win over
+                         them); each goes only to github.com, gitlab.com, or a host listed
+                         in WEBINDEX_FORGE_HOSTS
+  WEBINDEX_FORGE_HOSTS   self-hosted forges, e.g. "salsa.debian.org=gitlab,git.corp=github":
+                         each is queried as that forge and receives that forge's token
+  WEBINDEX_NO_GH         never reach for the gh CLI on github.com — plain HTTP only
+  WEBINDEX_DOCKER_PULL_TIMEOUT_MS  the image-pull budget of up (default 1200000)
 
+The README lists every variable, the library-only ones included.
 Every optional helper degrades to a note. Nothing here needs an API key.`;
 
 // The flag surface, declared rather than discovered.
@@ -200,10 +354,12 @@ export const VALUE_FLAGS = [
   "engine",
   "depth",
   "etag",
+  "last-modified",
   "hash",
   "limit",
   "pages",
   "lang",
+  "region",
   "searxng",
   "firecrawl",
   "engine",
@@ -216,8 +372,29 @@ export const VALUE_FLAGS = [
   "version",
   "terms",
   "max",
+  "timeout",
+  "forge",
+  "prefix",
+  "extract-root",
+  "format",
 ];
-export const BOOL_FLAGS = ["json", "allow-remote", "all", "check", "markdown", "cross-origin", "full-page"];
+export const BOOL_FLAGS = [
+  "json",
+  "allow-remote",
+  "all",
+  "check",
+  "markdown",
+  "cross-origin",
+  "no-sitemap",
+  "full-page",
+  "cache",
+  "refresh",
+  "offline",
+  "dense",
+  "lines",
+  "public-only",
+  "allow-private",
+];
 export const COMMANDS = [
   "search",
   "fetch",
@@ -227,6 +404,7 @@ export const COMMANDS = [
   "issues",
   "prs",
   "releases",
+  "tags",
   "package",
   "meta",
   "robots",
@@ -246,6 +424,9 @@ export const COMMANDS = [
 ];
 
 const SPEC: CliSpec = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS };
+
+/** What `webindex skill` does. The last three are the repin workflow's steps (.github/workflows/skill-repin.yml). */
+const SKILL_ACTIONS = ["check", "bundle", "vendor", "copy", "doctor", "init", "repin", "finish", "recall"];
 
 function fail(msg: string): never {
   process.stderr.write(`webindex: ${msg}\n`);
@@ -268,23 +449,136 @@ function usage(msg: string): never {
   process.exit(EXIT_USAGE);
 }
 
-/** Extraction over bytes already in hand — the shared half of `extract`. */
-async function extractLocal(path: string, fullPage = false): Promise<{ text: string; extractor: string; reason?: string; consentDropped: number }> {
+/** `--format text|markdown`: the shape of an HTML page's text, text by default. */
+function argFormat(args: CommandArgs): "text" | "markdown" {
+  const format = argValue(args, "format") ?? "text";
+  if (format !== "text" && format !== "markdown") throw new UsageError(`--format expects text or markdown, got "${format}"`);
+  return format;
+}
+
+/** `--timeout <ms>`: a positive whole number of milliseconds, or absent for the default. */
+function argTimeout(args: CommandArgs): number | undefined {
+  const ms = argInt(args, "timeout");
+  if (ms !== undefined && ms < 1) throw new UsageError(`--timeout expects a positive number of milliseconds, got "${ms}"`);
+  return ms;
+}
+
+/**
+ * The walls `webindex mcp` puts round its tools, from the flags and the
+ * environment.
+ *
+ * --allow-remote turns the two that matter on by default: a server others can
+ * reach refuses private addresses (lifted by --allow-private) and reads no
+ * local file (unless --extract-root names the one directory it may). Keyed on
+ * the flag rather than on the bind address, because "others can reach this" is
+ * what the flag says — a loopback server behind a reverse proxy is reachable
+ * too, and its operator can say so.
+ */
+function mcpPolicy(args: CommandArgs, allowRemote: boolean): WebindexToolPolicy {
+  const allowPrivate = argBool(args, "allow-private");
+  if (allowPrivate && argBool(args, "public-only")) usage("--public-only and --allow-private contradict each other");
+  const publicOnly = !allowPrivate && (argBool(args, "public-only") || envFlag("PUBLIC_ONLY") || allowRemote);
+  const rootArg = argValue(args, "extract-root") ?? env("EXTRACT_ROOT");
+  let extractRoot: string | undefined;
+  if (rootArg !== undefined) {
+    extractRoot = resolve(rootArg);
+    let isDir = false;
+    try {
+      isDir = statSync(extractRoot).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) usage(`--extract-root ${rootArg} is not a directory`);
+  }
+  return { publicOnly, ...(extractRoot !== undefined ? { extractRoot } : allowRemote ? { noLocalFiles: true } : {}) };
+}
+
+/** What the policy is, said once at startup — nothing when there is none. */
+function mcpPolicyNotice(policy: WebindexToolPolicy, allowRemote: boolean, allowPrivate: boolean): string[] {
+  const lines: string[] = [];
+  if (policy.publicOnly) lines.push(`fetches: public addresses only${allowRemote ? " (the --allow-remote default; --allow-private lifts it)" : ""}.`);
+  else if (allowRemote && allowPrivate) lines.push("fetches: any address, this machine's own network included (--allow-private).");
+  if (policy.extractRoot !== undefined) lines.push(`local files: only under ${policy.extractRoot}.`);
+  else if (policy.noLocalFiles) lines.push("local files: none, and webindex_extract is off (--extract-root <dir> offers one directory).");
+  return lines;
+}
+
+/**
+ * The MCP fetch tool's `timeoutMs`. Clamped rather than refused: an agent's
+ * odd value should cost it a default, not the call — but never an unbounded
+ * wait on a server other clients share.
+ */
+function toolTimeoutMs(value: unknown): number | undefined {
+  const n = typeof value === "string" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(300_000, Math.max(1, Math.round(n))) : undefined;
+}
+
+// The whole webindex_search cascade's budget: every rung and page within it.
+const SEARCH_TOOL_BUDGET_MS = 45_000;
+// The most result pages webindex_search walks per engine.
+const SEARCH_TOOL_MAX_PAGES = 5;
+
+const FORGE_KINDS: readonly ForgeKind[] = ["github", "gitlab", "gitea"];
+const isForgeKind = (v: string): v is ForgeKind => (FORGE_KINDS as readonly string[]).includes(v);
+const isRegistryKind = (v: string): v is RegistryKind => v === "npm" || v === "pypi" || v === "crates";
+
+// The optional `forge` argument the repository tools share.
+const FORGE_ARG: JsonSchemaProp = {
+  type: "string",
+  description: "Which forge a self-hosted host runs when its name does not say (salsa.debian.org is gitlab). Omit for github.com, gitlab.com, Codeberg.",
+  enum: [...FORGE_KINDS],
+};
+
+// The optional `format` argument webindex_fetch and webindex_extract share.
+const FORMAT_ARG: JsonSchemaProp = {
+  type: "string",
+  description:
+    "The shape of an HTML page's text: text (default; headings kept as #, the rest flattened) or markdown (CommonMark with absolute links, fenced code, lists and tables — the shape Firecrawl returns). PDFs and office documents keep their text either way.",
+  enum: ["text", "markdown"],
+};
+
+/** Why an httpGet failed: the status a server gave, or — when none answered — what went wrong instead. */
+const fetchFailure = (r: { status: number; error?: string }): string => (r.status ? `status ${r.status}` : (r.error ?? "no answer"));
+
+/** A repository argument as the forge commands read it: parsed, and a local checkout read as its origin. */
+function forgeTarget(raw: string, kind: ForgeKind | undefined): RepoRef {
+  const opts = kind ? { kind } : {};
+  return forgeRef(resolveRepo(raw, opts), opts);
+}
+
+/**
+ * Extraction over a file on disk — the shared half of `extract` and
+ * `webindex_extract`. `given` is bytes already in hand (the CLI's stdin), for
+ * which `path` is only a name to route by.
+ */
+async function extractLocal(
+  path: string,
+  fullPage = false,
+  given?: Buffer,
+  format: "text" | "markdown" = "text",
+): Promise<{ text: string; extractor: string; reason?: string; consentDropped: number }> {
   let bytes: Buffer;
   try {
-    bytes = readFileSync(path);
+    bytes = given ?? readFileSync(path);
   } catch (e) {
     throw new ToolError(`cannot read ${path}: ${(e as Error).message}`);
   }
   const asUrl = pathToFileURL(path).href;
 
-  if (looksLikePdfUrl(asUrl) || bytes.subarray(0, 5).toString("latin1") === "%PDF-") {
+  // The bytes before the name: an extension-less download or a .docx saved as
+  // .txt is still a document, and read by its name it came back as the ZIP's
+  // bytes under extractor "plain".
+  const sniffed = sniffDocument(bytes);
+  if (sniffed === "pdf" || (!sniffed && looksLikePdfUrl(asUrl))) {
     const r = await extractPdf(bytes);
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
-  const fmt = docFormatForUrl(asUrl);
+  const fmt = sniffed ?? docFormatForUrl(asUrl);
   if (fmt) {
     const r = await extractDocument(bytes, fmt);
+    // A format that is already text (CSV) is read as text when nothing could
+    // convert it, as fetchAndExtract does — refusing it helped no one.
+    if (!r.text && fmt.textFallback) return { text: decodeLocal(bytes, { sniffHtmlCharset: false }), extractor: "plain", consentDropped: 0 };
     return { text: r.text, extractor: r.via ?? "none", reason: r.reason, consentDropped: 0 };
   }
   const extension = extname(path).toLowerCase();
@@ -292,10 +586,46 @@ async function extractLocal(path: string, fullPage = false): Promise<{ text: str
   // A Markdown file quoting `<meta charset="iso-8859-1">` as an example is not
   // declaring its own encoding: only a document that may be HTML gets sniffed.
   const raw = decodeLocal(bytes, { sniffHtmlCharset: !explicitText });
+  // Decoded text keeps no NUL (a UTF-16 BOM is honoured above); binary data —
+  // an image, an archive — always has one early. Never print its bytes.
+  if (raw.slice(0, 1024).includes("\u0000")) return { text: "", extractor: "none", reason: "binary data, not a text document", consentDropped: 0 };
   const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
-  const text = looksHtml ? htmlToText(fullPage ? raw : extractMainHtml(raw), { fullPage }) : raw;
-  const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text) : { text, dropped: 0 };
+  const markdown = format === "markdown";
+  const main = looksHtml && !fullPage ? extractMainHtml(raw) : raw;
+  // A file has no address of its own to resolve against — only the <base href>
+  // a saved page may carry, and only when that one is absolute.
+  const text = !looksHtml ? raw : markdown ? htmlToMarkdown(main, { fullPage, baseUrl: documentBaseUrl(raw) }) : htmlToText(main, { fullPage });
+  const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text, { markdown }) : { text, dropped: 0 };
   return { text: consent.text, extractor: looksHtml ? "native" : "plain", consentDropped: consent.dropped };
+}
+
+/**
+ * The commit a release tag names, for `skill vendor --ref`: the files are then
+ * fetched by that immutable commit rather than by a tag that could move.
+ *
+ * Through the GitHub CLI when it is installed — the repin workflow's path, with
+ * its authentication — else GitHub's REST API, keyless for a public repository.
+ * It used to be gh or nothing, and a machine without gh got "spawnSync gh
+ * ENOENT" for an answer.
+ */
+async function tagCommit(repo: string, tag: string): Promise<string> {
+  let viaGh: string | undefined;
+  if (have("gh")) {
+    try {
+      return releaseCommit(repo, tag);
+    } catch (e) {
+      viaGh = (e as Error).message.trim().split("\n")[0];
+    }
+  }
+  const r = await httpJson("GET", `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(tag)}`, undefined, {
+    accept: "application/vnd.github+json",
+    headers: forgeAuthHeaders("github", "api.github.com"),
+  });
+  const sha = r.ok ? (r.data as { sha?: unknown } | undefined)?.sha : undefined;
+  if (typeof sha === "string" && /^[a-f0-9]{40}$/.test(sha)) return sha;
+  throw new ToolError(
+    `could not resolve ${repo}@${tag} to a commit — GitHub answered ${r.status ? `HTTP ${r.status}` : (r.error ?? "nothing")}${viaGh ? `, and gh said: ${viaGh}` : ""}`,
+  );
 }
 
 /** One candidate as the CLI and the MCP tool accept it. */
@@ -315,6 +645,36 @@ interface RankedOut {
   matched: string[];
 }
 
+interface RankResult {
+  ranked: RankedOut[];
+  collapsed: number;
+  duplicates: { url: string; of: string }[];
+  queryTerms: string[];
+  /** Why the order is less than it looks: no dense lane when one was asked for, or no document matched. */
+  note?: string;
+}
+
+/**
+ * Ranks that ties share ("1, 2, 2, 4"): two documents one lane cannot tell
+ * apart are left for the other lanes to order, rather than ranked by whichever
+ * happened to come first.
+ */
+function competitionRanks(values: readonly number[]): number[] {
+  const order = values.map((_, i) => i).sort((a, b) => values[b]! - values[a]!);
+  const ranks = new Array<number>(values.length);
+  order.forEach((i, p) => {
+    const prev = order[p - 1];
+    ranks[i] = prev !== undefined && values[prev] === values[i] ? ranks[prev]! : p + 1;
+  });
+  return ranks;
+}
+
+// MMR is quadratic in what it diversifies, and diversity is read at the top of
+// a list: it reorders the best max(5 × limit, MMR_WINDOW) candidates and the
+// rest follow in relevance order. At 2 000 documents that is milliseconds
+// instead of seconds, and the top of the list barely moves.
+const MMR_WINDOW = 100;
+
 /**
  * The shared ranking pipeline behind `webindex rank` and `webindex_rank`.
  *
@@ -322,24 +682,72 @@ interface RankedOut {
  * the list is not four rewrites of one argument. Scores are normalised to the
  * pool max, so "0.7" means "70% as relevant as the best thing here" rather than
  * an uncalibrated BM25 magnitude nobody can compare across runs.
+ *
+ * Two optional lanes are fused with BM25F by reciprocal rank, which needs no
+ * calibration between a BM25 score, a cosine and a search engine's number: the
+ * documents' own `score`, and with `dense` the embedding lane `hybridSearch`
+ * computes. Without the dense lane nothing here reads meaning, so a document
+ * sharing no term with the question stays at zero whatever its own score says.
  */
-function rankDocuments(question: string, docs: RankInput[], limit?: number): { ranked: RankedOut[]; collapsed: number; queryTerms: string[] } {
+async function rankDocuments(question: string, docs: RankInput[], opts: { limit?: number; dense?: boolean } = {}): Promise<RankResult> {
+  const { limit } = opts;
   const bm = docs.map((d, i) => ({ id: String(i), title: d.title ?? "", headings: d.headings ?? "", body: d.text ?? "" }));
-  const index = buildBm25Index(question, bm);
-  const raw = docs.map((_, i) => bm25Score(index, bm[i]!));
-  const max = Math.max(...raw, 1e-9);
+  // Each body is tokenised ONCE, and the tokens shared by the index, the
+  // near-duplicate hash and the diversity pass — it used to be read three times.
+  const bodyTokens = bm.map((d) => bm25Tokenize(d.body));
+  const index = buildBm25Index(question, bm, { tokensOf: (d) => bodyTokens[Number(d.id)]! });
+  const raw = bm.map((d) => bm25Score(index, d));
+
+  const lanes: (number | undefined)[][] = [];
+  // A document's own `score` — typically its search engine's relevance — was
+  // validated and documented, then ignored: equal BM25 documents scored 0.01
+  // and 0.99 were ordered by URL.
+  if (docs.some((d) => d.score !== undefined)) {
+    const ranks = competitionRanks(docs.map((d) => d.score ?? Number.NEGATIVE_INFINITY));
+    lanes.push(docs.map((d, i) => (d.score === undefined ? undefined : ranks[i])));
+  }
+  const notes: string[] = [];
+  let dense = false;
+  if (opts.dense) {
+    const h = await hybridSearch(question, bm);
+    const ranks = new Array<number | undefined>(bm.length);
+    for (const hit of h.hits) if (hit.denseRank !== undefined) ranks[Number(hit.doc.id)] = hit.denseRank;
+    dense = ranks.some((r) => r !== undefined);
+    if (dense) lanes.push(ranks);
+    else notes.push(h.note ?? "the dense lane returned nothing — ranked with BM25F only.");
+  }
+  let relevance = raw;
+  if (lanes.length) {
+    const k = envInt("RRF_K", 60);
+    const lexical = competitionRanks(raw);
+    relevance = raw.map((s, i) => {
+      if (!dense && !(s > 0)) return 0;
+      let fused = 1 / (k + lexical[i]!);
+      for (const lane of lanes) if (lane[i] !== undefined) fused += 1 / (k + lane[i]!);
+      return fused;
+    });
+  }
+  if (!dense && index.queryTerms.length && raw.every((s) => !(s > 0))) {
+    notes.push("no document contains any term of the question — the order is not a relevance ranking.");
+  }
+  // A loop, not Math.max(...relevance): spreading a very large pool overflows the stack.
+  let max = 1e-9;
+  for (const r of relevance) if (r > max) max = r;
 
   const scored = docs.map((d, i) => ({
     url: d.url,
     title: d.title,
     text: d.text ?? "",
-    score: (raw[i] ?? 0) / max,
+    score: (relevance[i] ?? 0) / max,
     matched: bm25MatchedTerms(index, bm[i]!),
+    tokens: bodyTokens[i]!,
   }));
-  scored.sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
+  // Code-unit tie-break: localeCompare reads LANG, and two machines disagreed.
+  scored.sort((a, b) => b.score - a.score || (a.url < b.url ? -1 : a.url > b.url ? 1 : 0));
 
-  const { items: unique, dropped } = dedupeNearDuplicates(scored);
-  const ordered = diversify(unique, (it) => new Set(bm25Tokenize(it.text)));
+  const { items: unique, dropped, duplicates } = dedupeNearDuplicates(scored, { tokensOf: (it) => it.tokens });
+  const window = Math.max((limit && limit > 0 ? limit : 0) * 5, MMR_WINDOW);
+  const ordered = diversify(unique, (it) => it.tokens, 0.75, { window });
 
   const ranked = ordered.slice(0, limit && limit > 0 ? limit : undefined).map((it, i) => ({
     rank: i + 1,
@@ -348,12 +756,80 @@ function rankDocuments(question: string, docs: RankInput[], limit?: number): { r
     score: Number(it.score.toFixed(4)),
     matched: it.matched,
   }));
-  return { ranked, collapsed: dropped, queryTerms: index.queryTerms };
+  return { ranked, collapsed: dropped, duplicates, queryTerms: index.queryTerms, ...(notes.length ? { note: notes.join(" ") } : {}) };
 }
+
+/** JSON.parse that says which input was broken and what was expected, instead of the parser's bare message. */
+function parseJsonInput(text: string, label: string, expected: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(`${label} is not valid JSON (${(e as Error).message}) — ${expected}`);
+  }
+}
+
+/**
+ * The text a command reads from `--docs <file>` or, without it, stdin. A
+ * terminal on stdin with no --docs is a usage error, not a silent wait for
+ * input that is not coming.
+ */
+function readDocsInput(args: CommandArgs, usageLine: string): { text: string; label: string } {
+  const src = argValue(args, "docs");
+  if (src === undefined && process.stdin.isTTY) usage(usageLine);
+  const label = `--docs ${src === undefined || src === "-" ? "(stdin)" : src}`;
+  try {
+    return { text: readFileSync(src === undefined || src === "-" ? 0 : src, "utf8"), label };
+  } catch (e) {
+    fail(`cannot read ${src === undefined || src === "-" ? "stdin" : src}: ${(e as Error).message}`);
+  }
+}
+
+/** Stdin's bytes, for a `-` argument. A terminal would never send any, so it is a usage error. */
+function readStdin(usageLine: string): Buffer {
+  if (process.stdin.isTTY) usage(usageLine);
+  try {
+    return readFileSync(0);
+  } catch (e) {
+    fail(`cannot read stdin: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * The HTML a page-level command reads: an http(s) URL fetched, or a file on
+ * disk (stdin for `-`) decoded exactly as `extract` decodes one — BOM, then the
+ * declared charset, then UTF-8 with a Windows-1252 fallback.
+ *
+ * A saved page, or one only a logged-in browser could fetch, used to be refused
+ * with "needs an http(s) URL", though reading its tables or its metadata needs
+ * no network at all. `url` is set only for a fetched page: resolving a relative
+ * canonical against a file:// address would invent a URL the page never had.
+ */
+async function readPage(target: string, accept: string, usageLine: string): Promise<{ body: string; url?: string }> {
+  if (/^https?:\/\//i.test(target)) {
+    const page = await httpGet(target, { accept });
+    if (!page.ok) fail(`could not fetch ${target} (status ${page.status})`);
+    return { body: page.body, url: page.url };
+  }
+  let bytes: Buffer;
+  if (target === "-") bytes = readStdin(usageLine);
+  else {
+    try {
+      bytes = readFileSync(target.startsWith("file:") ? fileURLToPath(target) : target);
+    } catch (e) {
+      fail(`${target} is neither an http(s) URL nor a readable file (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`);
+    }
+  }
+  const body = decodeLocal(bytes, { sniffHtmlCharset: true });
+  // Decoded text keeps no NUL; an image or an archive has one early.
+  if (body.slice(0, 1024).includes("\u0000")) fail(`${target === "-" ? "stdin" : target} is binary data, not an HTML page`);
+  return { body };
+}
+
+const RANK_DOCS_SHAPE = "pass a JSON array of {url, text} via --docs <file> or stdin";
 
 /** Parse and validate the `documents` payload both entry points accept. */
 function parseRankDocs(value: unknown, where: string): RankInput[] {
-  const arr = typeof value === "string" ? JSON.parse(value) : value;
+  const arr = typeof value === "string" ? parseJsonInput(value, where, "pass a JSON array of {url, text}") : value;
   if (!Array.isArray(arr) || !arr.length) throw new Error(`${where} must be a non-empty JSON array of {url, text}`);
   return arr.map((d, i) => {
     if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error(`${where}[${i}] is not an object`);
@@ -369,6 +845,72 @@ function parseRankDocs(value: unknown, where: string): RankInput[] {
   });
 }
 
+// The tools that stay on this machine: a file on disk, a pool the caller sent,
+// the local embedding server. Every other one reaches the open web or a public
+// API, whose answers no one here controls.
+const CLOSED_WORLD_TOOLS = new Set(["webindex_extract", "webindex_rank", "webindex_embed"]);
+
+/**
+ * The hints a client reads before calling. Without them it must assume any
+ * tool may be destructive and ask before every call — and none of these writes,
+ * deletes or changes anything it reaches (the fetch cache is this engine's own
+ * bookkeeping, not the caller's environment), so a repeat call is harmless too.
+ */
+function withHints(tools: ToolDecl[]): ToolDecl[] {
+  return tools.map((t) => ({
+    ...t,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: !CLOSED_WORLD_TOOLS.has(t.name) },
+  }));
+}
+
+/**
+ * The declarations as this server's policy shapes them. A tool that could only
+ * fail is not offered — the model would spend a call learning that — and an
+ * argument the policy constrains says so where the model reads it.
+ */
+function withPolicy(policy: WebindexToolPolicy, tools: ToolDecl[]): ToolDecl[] {
+  const root = policy.extractRoot;
+  const offered = root === undefined && policy.noLocalFiles ? tools.filter((t) => t.name !== "webindex_extract") : tools;
+  const withArg = (t: ToolDecl, name: string, prop: JsonSchemaProp): ToolDecl => ({
+    ...t,
+    inputSchema: { ...t.inputSchema, properties: { ...t.inputSchema.properties, [name]: prop } },
+  });
+  return withHints(
+    offered.map((t) => {
+      if (t.name === "webindex_extract" && root !== undefined) {
+        return withArg(t, "path", {
+          type: "string",
+          description: `Path to the file, under ${root} — the only directory this server reads; a relative path is read from there.`,
+        });
+      }
+      if (t.name === "webindex_fetch" && policy.publicOnly) {
+        return withArg(t, "cache", {
+          type: "boolean",
+          description: "Ignored here: this server fetches public addresses only, and never reads the on-disk cache, which unguarded runs share.",
+        });
+      }
+      return t;
+    }),
+  );
+}
+
+/**
+ * The walls an operator can put round the tools (`webindex mcp` flags).
+ *
+ * Off by default: on a developer's own machine, fetching any URL and reading
+ * any file is the point. Exposed with --allow-remote, the first two are on
+ * unless lifted, because a fetch that reaches 169.254.169.254 hands out cloud
+ * credentials and a file tool reads ~/.ssh.
+ */
+export interface WebindexToolPolicy {
+  /** Refuse URLs that are, or resolve to, non-public addresses — checked again at every redirect. */
+  publicOnly?: boolean;
+  /** Read local files (webindex_extract, a repository named by its path) only under this directory. */
+  extractRoot?: string;
+  /** Read no local file at all: webindex_extract is not offered. `extractRoot` wins over it. */
+  noLocalFiles?: boolean;
+}
+
 /**
  * webindex's own MCP tools: fetch a URL, extract a file.
  *
@@ -376,228 +918,310 @@ function parseRankDocs(value: unknown, where: string): RankInput[] {
  * without a subprocess, and a host embedding several engines can mount these
  * tools inside its own server rather than spawning `webindex mcp`.
  */
-export function webindexAdapter(): McpAdapter {
+export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
+  // One authorizer for the adapter's life: fetchRobots keys its cache by it.
+  const guard = policy.publicOnly ? publicUrlsOnly() : undefined;
+  const refuseUrl = async (url: string): Promise<void> => {
+    if (!guard) return;
+    const why = await publicUrlRefusal(url);
+    if (why) throw new ToolError(`Refused ${url}: ${why} — this server fetches public addresses only.`);
+  };
+  const root = policy.extractRoot;
+  const localFiles = root !== undefined || !policy.noLocalFiles;
+  // A local path, as the policy allows it: under the root, or not at all.
+  const localPath = (requested: string): string => {
+    if (!localFiles) throw new ToolError(`${requested} is a path on this machine, and this server reads no local files.`);
+    if (root === undefined) return requested;
+    try {
+      return confinePath(root, requested);
+    } catch (e) {
+      throw new ToolError((e as Error).message);
+    }
+  };
+  // A forge host a caller named, where the operator did not: under the
+  // public-only policy it must resolve publicly like any URL. The forge client
+  // follows its own redirects, so this is checked once, on the API base.
+  const refuseForgeHost = async (ref: RepoRef, kind: ForgeKind | undefined): Promise<void> => {
+    if (!guard || configuredForgeHosts().has(normalizeForgeHost(ref.host))) return;
+    await refuseUrl(apiBase(ref, kind ? { kind } : {}));
+  };
   return {
     version: ENGINE_VERSION,
-    listTools: (): ToolDecl[] => [
-      {
-        name: "webindex_search",
-        title: "Search for candidate URLs",
-        description:
-          "Find candidate URLs: a locally-running SearXNG first, then the keyless engines (DuckDuckGo, DuckDuckGo Lite, Mojeek — no key, no container), then Firecrawl. " +
-          "Returns title, URL and snippet — not page text; follow up with webindex_fetch on the ones worth reading. " +
-          "When nothing answers it says which piece was missing rather than returning an empty result that reads like 'nothing exists'.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: { type: "string", description: "What to search for." },
-            limit: { type: "number", description: "How many hits to aim for (default 10)." },
-            lang: { type: "string", description: "BCP-47 language tag, e.g. fr-FR." },
-            engine: {
-              type: "string",
-              description: "Pin one keyless engine: ddg | ddglite | mojeek. Omit to let the cascade choose.",
-              enum: [...KEYLESS_ENGINES],
+    listTools: (): ToolDecl[] =>
+      withPolicy(policy, [
+        {
+          name: "webindex_search",
+          title: "Search for candidate URLs",
+          description:
+            "Find candidate URLs: a locally-running SearXNG first, then the keyless engines (DuckDuckGo, DuckDuckGo Lite, Mojeek — no key, no container), then Firecrawl. " +
+            "Returns title, URL and snippet — not page text; follow up with webindex_fetch on the ones worth reading. " +
+            "When nothing answers it says which piece was missing rather than returning an empty result that reads like 'nothing exists'. " +
+            `The whole cascade is bounded at ${SEARCH_TOOL_BUDGET_MS / 1000} s; the last line names each rung's outcome (rungs: searxng=unreachable ddg=hits(8) …).`,
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "What to search for." },
+              limit: { type: "number", description: "How many hits to aim for (default 10)." },
+              lang: { type: "string", description: "BCP-47 language tag, e.g. fr-FR." },
+              region: { type: "string", description: "Country code overriding the one `lang` implies, e.g. ca for fr + Canada; wt asks for no region." },
+              pages: { type: "number", description: `Result pages to walk per engine (default 1, at most ${SEARCH_TOOL_MAX_PAGES}).` },
+              engine: {
+                type: "string",
+                description:
+                  "Restrict the keyless rung to one engine: ddg | ddglite | mojeek (SearXNG and Firecrawl still run around it). Omit to try all three in turn.",
+                enum: [...KEYLESS_ENGINES],
+              },
             },
+            required: ["query"],
           },
-          required: ["query"],
         },
-      },
-      {
-        name: "webindex_fetch",
-        title: "Fetch a URL as clean text",
-        description:
-          "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR) and office documents, " +
-          "and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text plus which rung produced it — never raw bytes. " +
-          "Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "The http(s) URL to fetch." },
-            lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." },
-            fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
-          },
-          required: ["url"],
-        },
-      },
-      {
-        name: "webindex_extract",
-        title: "Extract text from a local file",
-        description: "Read a PDF, office document or HTML file already on disk and return its text, using the same extraction ladders as webindex_fetch.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            path: { type: "string", description: "Absolute path to the file." },
-            fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
-          },
-          required: ["path"],
-        },
-      },
-      {
-        name: "webindex_rank",
-        title: "Rank candidate documents against a question",
-        description:
-          "Order a pool of documents by relevance to a question: BM25F (title and headings weighted above body), then SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. " +
-          "Returns the ranking with a score, the matched query terms, and what was collapsed — deterministic, no model, no network. Use it after gathering pages from any search provider to decide what to actually read. Scores measure relevance within this pool, not factual accuracy.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            question: { type: "string", description: "What the ranking is for." },
-            documents: {
-              type: "array",
-              description:
-                'The pool. Each item is {url, text} plus optional {title, headings, score}. Passed as JSON, e.g. [{"url":"…","title":"…","text":"…"}].',
+        {
+          name: "webindex_fetch",
+          title: "Fetch a URL as clean text",
+          description:
+            "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR) and office documents (anydoc → Firecrawl → a built-in OOXML/OpenDocument reader), " +
+            "and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text, then a trailer with the final URL after redirects, the page's canonical URL and title, any note, and which rung produced it — never raw bytes. " +
+            "Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "The http(s) URL to fetch." },
+              lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." },
+              fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
+              format: FORMAT_ARG,
+              timeoutMs: {
+                type: "number",
+                description: "Give up on a silent host after this many ms (default 20000, at most 300000). A timed-out request is not retried.",
+              },
+              cache: {
+                type: "boolean",
+                description: "Use the on-disk cache: a fresh copy is reused for its TTL (24 h by default), a stale one revalidated with a conditional GET.",
+              },
             },
-            limit: { type: "number", description: "How many ranked entries to return (default all)." },
+            required: ["url"],
           },
-          required: ["question", "documents"],
         },
-      },
-      {
-        name: "webindex_repo",
-        title: "A repository's own facts",
-        description:
-          "Read a repository's record from GitHub, GitLab or Gitea: description, stars, licence, default branch, last push, topics, and whether it is ARCHIVED. " +
-          "Answers 'is this maintained' from the forge rather than from a README that says it is. Keyless; a token only raises the quota.",
-        inputSchema: {
-          type: "object",
-          properties: { repo: { type: "string", description: "owner/repo, a URL, or git@host:owner/repo." } },
-          required: ["repo"],
-        },
-      },
-      {
-        name: "webindex_issues",
-        title: "Search a repository's issues or pull requests",
-        description:
-          "Search issues (or pull/merge requests) in one repository across GitHub, GitLab and Gitea. Returns number, title, state, labels and body. " +
-          "GitHub results are relevance-ranked and carry a score; GitLab and Gitea have no search endpoint, so theirs are recency-ordered and carry none — deliberately, rather than inventing one.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            repo: { type: "string", description: "owner/repo, or a repository URL." },
-            terms: { type: "string", description: "What to look for." },
-            kind: { type: "string", description: "issue (default) or pr.", enum: ["issue", "pr"] },
-            limit: { type: "number", description: "How many to return (default 10)." },
+        {
+          name: "webindex_extract",
+          title: "Extract text from a local file",
+          description: "Read a PDF, office document or HTML file already on disk and return its text, using the same extraction ladders as webindex_fetch.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Absolute path to the file." },
+              fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
+              format: FORMAT_ARG,
+            },
+            required: ["path"],
           },
-          required: ["repo"],
         },
-      },
-      {
-        name: "webindex_releases",
-        title: "A repository's releases",
-        description: "List releases newest-first with their notes and dates — the authoritative answer to 'what changed', and to 'when was X added'.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            repo: { type: "string", description: "owner/repo, or a repository URL." },
-            limit: { type: "number", description: "How many (default 20)." },
+        {
+          name: "webindex_rank",
+          title: "Rank candidate documents against a question",
+          description:
+            "Order a pool of documents by relevance to a question: BM25F (title and headings weighted above body), then SimHash collapse of near-duplicates, then MMR so the top of the list says several different things rather than restating one. " +
+            "Returns the ranking with a score, the matched query terms, and what was collapsed (each dropped mirror's URL and the URL it duplicated), plus a `note` when no document matched or the dense lane was missing — deterministic, no model, no network unless `dense` asks for the local embedding lane. " +
+            "Use it after gathering pages from any search provider to decide what to actually read. Scores measure relevance within this pool, not factual accuracy.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              question: { type: "string", description: "What the ranking is for." },
+              documents: {
+                type: "array",
+                description:
+                  'The pool. Each item is {url, text} plus optional {title, headings, score}. A `score` (e.g. the search engine\'s own relevance) is fused with BM25F by rank; it never lifts a document sharing no term with the question. Passed as JSON, e.g. [{"url":"…","title":"…","text":"…"}].',
+              },
+              limit: { type: "number", description: "How many ranked entries to return (default all)." },
+              dense: {
+                type: "boolean",
+                description:
+                  "Fuse the local embedding lane (Ollama) with BM25F before the collapse and MMR, so a page that never uses the question's words can still rank. Falls back to BM25F with a `note` when no embedding server answers. Default false: deterministic and offline.",
+              },
+            },
+            required: ["question", "documents"],
           },
-          required: ["repo"],
         },
-      },
-      {
-        name: "webindex_package",
-        title: "Resolve a library name to its real coordinates",
-        description:
-          "Look a package up in npm, PyPI or crates.io and return its repository, homepage, documentation URL, current version, licence and any DEPRECATION notice. " +
-          "Use this before searching the web for a library: it uses bounded registry requests, and it is the registry's own answer rather than whatever ranks for '<name> official documentation'.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            name: { type: "string", description: "The package name." },
-            registry: { type: "string", description: "Skip the guessing when you know the ecosystem.", enum: ["npm", "pypi", "crates"] },
-            version: { type: "string", description: "A specific version, instead of the latest." },
+        {
+          name: "webindex_repo",
+          title: "A repository's own facts",
+          description:
+            "Read a repository's record from GitHub, GitLab or Gitea: description, stars, licence, default branch, last push, topics, and whether it is ARCHIVED. " +
+            "Answers 'is this maintained' from the forge rather than from a README that says it is. Keyless; a token only raises the quota.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              repo: { type: "string", description: "owner/repo, a URL (a browser URL works), git@host:owner/repo, or a local checkout (read as its origin)." },
+              forge: FORGE_ARG,
+            },
+            required: ["repo"],
           },
-          required: ["name"],
         },
-      },
-      {
-        name: "webindex_meta",
-        title: "What a page says about itself",
-        description:
-          "Read a page's own structured metadata — JSON-LD, OpenGraph and meta tags — and return author, publication and modification dates, type, site name and canonical URL. " +
-          "Far cheaper and far more reliable than inferring a publication date from body text, and it does not need the page's prose at all.",
-        inputSchema: { type: "object", properties: { url: { type: "string", description: "The page to inspect." } }, required: ["url"] },
-      },
-      {
-        name: "webindex_robots",
-        title: "Is this URL ours to fetch?",
-        description:
-          "Check the site's robots.txt for this URL: whether it is allowed, any crawl-delay, and the sitemaps the file advertises. " +
-          "Advisory — webindex_fetch does not consult it, because following one citation is not crawling. Ask before enumerating a site.",
-        inputSchema: { type: "object", properties: { url: { type: "string", description: "The URL to check." } }, required: ["url"] },
-      },
-      {
-        name: "webindex_sitemap",
-        title: "What pages does this site list?",
-        description:
-          "Fetch and parse the site's sitemap (following the ones robots.txt names first), returning page URLs with their last-modified dates. " +
-          "A sitemap index is followed at most `max` documents deep — enumerating a site is a budget you set, not something this does on its own.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "Any URL on the site." },
-            max: { type: "number", description: "Sitemap documents to fetch (default 3)." },
+        {
+          name: "webindex_issues",
+          title: "Search a repository's issues or pull requests",
+          description:
+            "Search issues (or pull/merge requests) in one repository across GitHub, GitLab and Gitea. Returns number, title, state, labels and body. " +
+            "GitHub results for `terms` are relevance-ranked and carry a score; GitLab and Gitea have no search endpoint, so theirs are recency-ordered and carry none — deliberately, rather than inventing one. " +
+            "Every term must match; when all of them together match nothing, it searches once more with the most distinctive ones and says so in `note`.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              repo: { type: "string", description: "owner/repo, or a repository URL." },
+              terms: { type: "string", description: "What to look for." },
+              kind: { type: "string", description: "issue (default) or pr.", enum: ["issue", "pr"] },
+              limit: { type: "number", description: "How many to return (default 10)." },
+              forge: FORGE_ARG,
+            },
+            required: ["repo"],
           },
-          required: ["url"],
         },
-      },
-      {
-        name: "webindex_feed",
-        title: "A site's RSS or Atom feed",
-        description:
-          "Parse a feed URL, or discover and parse the feeds a page advertises. Returns dated, ordered entries — the site telling you what it published and when, " +
-          "instead of a web search guessing.",
-        inputSchema: { type: "object", properties: { url: { type: "string", description: "A feed URL, or a page that links to one." } }, required: ["url"] },
-      },
-      {
-        name: "webindex_tables",
-        title: "The tables on a page, as data",
-        description:
-          "Extract every <table> as headers and rows, with colspan and rowspan resolved. Plain extraction flattens a table into a run of cell text, which reads " +
-          "plausibly while every figure has lost the row and column it belonged to — use this whenever the answer is IN a table.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "The page holding the table(s)." },
-            markdown: { type: "boolean", description: "Render as markdown instead of JSON rows." },
+        {
+          name: "webindex_releases",
+          title: "A repository's releases",
+          description:
+            "List releases newest-first with their notes and dates — the authoritative answer to 'what changed', and to 'when was X added'. " +
+            "A project that tags versions without publishing releases has none: use webindex_tags for it.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              repo: { type: "string", description: "owner/repo, or a repository URL." },
+              limit: { type: "number", description: "How many (default 20)." },
+              forge: FORGE_ARG,
+            },
+            required: ["repo"],
           },
-          required: ["url"],
         },
-      },
-      {
-        name: "webindex_embed",
-        title: "Embed text with the local model",
-        description:
-          "Turn text into vectors with the local Ollama, which needs no key and sends nothing off the machine. Returns one vector per input, in input order. " +
-          "Answers with a note rather than an error when the service is not running.",
-        inputSchema: {
-          type: "object",
-          properties: { texts: { type: "array", items: { type: "string" }, description: "The texts to embed." } },
-          required: ["texts"],
-        },
-      },
-      {
-        name: "webindex_crawl",
-        title: "Walk a site, within a budget",
-        description:
-          "Follow links from a seed page, breadth-first, honouring robots.txt at EVERY hop and staying on the seed's origin. `max` pages is required — enumerating " +
-          "someone else's site is the one operation here that can inconvenience them, so the budget is not optional. Returns each page's URL, title and text.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "The seed page." },
-            max: { type: "number", description: "Hard ceiling on pages fetched. Required." },
-            depth: { type: "number", description: "How many links deep to follow (default 2)." },
+        {
+          name: "webindex_tags",
+          title: "A repository's tags",
+          description:
+            "List a repository's tags with a link to each — the versions of a project that tags without publishing forge releases, where webindex_releases finds nothing.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              repo: { type: "string", description: "owner/repo, or a repository URL." },
+              limit: { type: "number", description: "How many (default 50)." },
+              forge: FORGE_ARG,
+            },
+            required: ["repo"],
           },
-          required: ["url", "max"],
         },
-      },
-    ],
+        {
+          name: "webindex_package",
+          title: "Resolve a library name to its real coordinates",
+          description:
+            "Look a package up in npm, PyPI or crates.io and return its repository, homepage, documentation URL, current version, licence and any DEPRECATION notice. " +
+            "Use this before searching the web for a library: it uses bounded registry requests, and it is the registry's own answer rather than whatever ranks for '<name> official documentation'.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "The package name." },
+              registry: { type: "string", description: "Skip the guessing when you know the ecosystem.", enum: ["npm", "pypi", "crates"] },
+              version: { type: "string", description: "A specific version, instead of the latest." },
+            },
+            required: ["name"],
+          },
+        },
+        {
+          name: "webindex_meta",
+          title: "What a page says about itself",
+          description:
+            "Read a page's own structured metadata — JSON-LD, OpenGraph and meta tags — and return author, publication and modification dates, type, site name and canonical URL. " +
+            "Far cheaper and far more reliable than inferring a publication date from body text, and it does not need the page's prose at all.",
+          inputSchema: { type: "object", properties: { url: { type: "string", description: "The page to inspect." } }, required: ["url"] },
+        },
+        {
+          name: "webindex_robots",
+          title: "Is this URL ours to fetch?",
+          description:
+            "Check the site's robots.txt for this URL: whether it is allowed, any crawl-delay, and the sitemaps the file advertises. " +
+            "Advisory — webindex_fetch does not consult it, because following one citation is not crawling. Ask before enumerating a site.",
+          inputSchema: { type: "object", properties: { url: { type: "string", description: "The URL to check." } }, required: ["url"] },
+        },
+        {
+          name: "webindex_sitemap",
+          title: "What pages does this site list?",
+          description:
+            "Fetch and parse the site's sitemap (the ones robots.txt names, else /sitemap.xml; gzipped and plain-text ones too), returning page URLs with their last-modified dates. " +
+            "At most `max` documents are read — enumerating a site is a budget you set, not something this does on its own — and the child sitemaps it did not reach come back in `unfetched`.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "Any URL on the site." },
+              max: { type: "number", description: "Sitemap documents to fetch (default 3)." },
+            },
+            required: ["url"],
+          },
+        },
+        {
+          name: "webindex_feed",
+          title: "A site's RSS, Atom or JSON feed",
+          description:
+            "Parse a feed URL (RSS, Atom or JSON Feed), or discover and parse the feeds a page advertises. Returns dated, ordered entries with absolute URLs — the site telling you what it published and when, " +
+            "instead of a web search guessing.",
+          inputSchema: { type: "object", properties: { url: { type: "string", description: "A feed URL, or a page that links to one." } }, required: ["url"] },
+        },
+        {
+          name: "webindex_tables",
+          title: "The tables on a page, as data",
+          description:
+            "Extract every <table> as headers and rows, with colspan and rowspan resolved. Plain extraction flattens a table into a run of cell text, which reads " +
+            "plausibly while every figure has lost the row and column it belonged to — use this whenever the answer is IN a table.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "The page holding the table(s)." },
+              markdown: { type: "boolean", description: "Render as markdown instead of JSON rows." },
+            },
+            required: ["url"],
+          },
+        },
+        {
+          name: "webindex_embed",
+          title: "Embed text with the local model",
+          description:
+            "Turn text into vectors with the local Ollama, which needs no key and sends nothing off the machine. Returns one vector per input, in input order. " +
+            "Fails with a note naming the command that starts the service when it is not running.",
+          inputSchema: {
+            type: "object",
+            properties: { texts: { type: "array", items: { type: "string" }, description: "The texts to embed." } },
+            required: ["texts"],
+          },
+        },
+        {
+          name: "webindex_crawl",
+          title: "Walk a site, within a budget",
+          description:
+            "Follow links from a seed page, breadth-first, honouring robots.txt at EVERY hop and staying on the origin the seed lands on. `max` pages is required — enumerating " +
+            "someone else's site is the one operation here that can inconvenience them, so the budget is not optional. Returns each page's URL, title and text, " +
+            "the URLs robots.txt refused (`disallowed`), how many in-scope URLs the budget did not reach (`pending`), and `notes`.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "The seed page." },
+              max: {
+                type: "number",
+                description:
+                  "Pages to return. Required. A failed fetch costs no page, but the crawl makes at most 3 × `max` page requests in all. " +
+                  "Every page's text comes back inline and an answer over 1 MB is withheld, so ask for the tens of pages you will read, not hundreds.",
+              },
+              depth: { type: "number", description: "How many links deep to follow (default 2)." },
+              prefix: { type: "string", description: "Only follow URLs whose path starts with this, e.g. `/docs/`." },
+              sitemap: {
+                type: "boolean",
+                description: "Seed the walk from the site's sitemap too (default true; a seed below the root takes only its own section's entries).",
+              },
+            },
+            required: ["url", "max"],
+          },
+        },
+      ]),
     capAdvice: {
       webindex_search: "lower `limit`",
       webindex_repo: "this repository's record is unusually large; ask for what you need instead",
       webindex_issues: "lower `limit`, or narrow `terms`",
       webindex_releases: "lower `limit` — release notes are long",
+      webindex_tags: "lower `limit`",
       webindex_package: "this package's registry record is unusually large; pin a `version`",
       webindex_meta: "the page is very large; this reads only its head, so a cap here means the document itself is enormous",
       webindex_robots: "this site's robots.txt is unusually large; read it directly",
@@ -610,14 +1234,44 @@ export function webindexAdapter(): McpAdapter {
       webindex_embed: "send fewer `texts` — a vector per input is large, and they are rarely worth reading inline",
       webindex_crawl: "lower `max`, or `depth` — a crawl's whole output is the sum of its pages",
     },
-    async callTool(name, args) {
+    async callTool(name, args, ctx) {
+      // What the server hands every call: the client's cancel, and a way to
+      // report progress. Passed on to whatever takes it — a cancelled call must
+      // stop fetching, not only have its answer dropped.
+      const signal = ctx?.signal;
       if (name === "webindex_fetch") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
+        await refuseUrl(url);
         const fullPage = args.fullPage === true;
-        const r = await fetchAndExtract(url, { acceptLanguage: args.lang ? String(args.lang) : undefined, fullPage, stripConsent: !fullPage });
+        const fetchOpts = {
+          acceptLanguage: args.lang ? String(args.lang) : undefined,
+          fullPage,
+          stripConsent: !fullPage,
+          format: args.format === "markdown" ? ("markdown" as const) : ("text" as const),
+          timeoutMs: toolTimeoutMs(args.timeoutMs),
+          signal,
+        };
+        // Guarded, every hop is checked (which also keeps Firecrawl — a fetcher
+        // no hook reaches — out of it), and the cache is not read: it holds what
+        // unguarded runs fetched, a private page among them.
+        const r: ExtractResult & { cached?: boolean } = guard
+          ? await fetchAndExtract(url, { ...fetchOpts, authorizeUrl: guard })
+          : await cachedFetchAndExtract(url, fetchOpts, args.cache === true);
         if (!r.text) throw new ToolError(`Nothing readable at ${url}${r.note ? ` — ${r.note}` : ""}.`);
-        return { text: `${r.text}\n\n---\nextractor: ${r.extractor ?? "native"}` };
+        // Provenance a citation needs — where the text came from after
+        // redirects, what the page calls itself — plus anything the fetch had
+        // to say. The extractor stays the last line, as it always was.
+        const trailer = [
+          `url: ${r.finalUrl}`,
+          ...(r.canonical && r.canonical !== r.finalUrl ? [`canonical: ${r.canonical}`] : []),
+          ...(r.title ? [`title: ${r.title}`] : []),
+          ...(r.documentType ? [`document: ${r.documentType}`] : []),
+          ...(r.cached ? ["cached: true"] : []),
+          ...(r.note ? [`note: ${r.note}`] : []),
+          `extractor: ${r.extractor ?? "native"}`,
+        ];
+        return { text: `${r.text}\n\n---\n${trailer.join("\n")}` };
       }
       if (name === "webindex_search") {
         const q = String(args.query ?? "").trim();
@@ -628,14 +1282,29 @@ export function webindexAdapter(): McpAdapter {
         const r = await search(q, {
           limit: typeof args.limit === "number" ? args.limit : undefined,
           lang: args.lang ? String(args.lang) : undefined,
+          region: args.region ? String(args.region) : undefined,
+          // Clamped, not refused: every page is another request to an engine
+          // that rations them, and an agent's 50 should cost it a few pages,
+          // not the call.
+          pages:
+            typeof args.pages === "number" && Number.isFinite(args.pages) ? Math.min(SEARCH_TOOL_MAX_PAGES, Math.max(1, Math.trunc(args.pages))) : undefined,
+          // An MCP host gives up on a tool call long before a cascade of
+          // timeouts would: better a partial answer that says where it
+          // stopped than none at all.
+          timeoutMs: SEARCH_TOOL_BUDGET_MS,
+          signal,
           ...(engines ? { engines } : {}),
         });
-        if (!r.hits.length) throw new ToolError(r.notes.join(" ") || "No results.");
+        // The notes are prose; this line is the same facts in a form an agent
+        // can act on without parsing English — "blocked" is not "empty".
+        const rungs = r.rungs?.length ? `rungs: ${r.rungs.map((x) => `${x.rung}=${x.outcome}${x.hits ? `(${x.hits})` : ""}`).join(" ")}` : "";
+        if (!r.hits.length) throw new ToolError([r.notes.join(" ") || "No results.", rungs].filter(Boolean).join("\n"));
         const body = r.hits.map((h, i) => `${i + 1}. ${h.title}\n   ${h.url}${h.snippet ? `\n   ${h.snippet}` : ""}`).join("\n\n");
-        return { text: r.notes.length ? `${body}\n\n---\n${r.notes.join("\n")}` : body };
+        const trailer = [...r.notes, rungs].filter(Boolean);
+        return { text: trailer.length ? `${body}\n\n---\n${trailer.join("\n")}` : body };
       }
       if (name === "webindex_extract") {
-        const r = await extractLocal(String(args.path ?? ""), args.fullPage === true);
+        const r = await extractLocal(localPath(String(args.path ?? "")), args.fullPage === true, undefined, args.format === "markdown" ? "markdown" : "text");
         if (!r.text) throw new ToolError(`Nothing readable in that file${r.reason ? ` — ${r.reason}` : ""}.`);
         return { text: `${r.text}\n\n---\nextractor: ${r.extractor}` };
       }
@@ -648,7 +1317,7 @@ export function webindexAdapter(): McpAdapter {
         } catch (e) {
           throw new InvalidParamsError((e as Error).message);
         }
-        const r = rankDocuments(question, docs, typeof args.limit === "number" ? args.limit : undefined);
+        const r = await rankDocuments(question, docs, { limit: typeof args.limit === "number" ? args.limit : undefined, dense: args.dense === true });
         if (!r.queryTerms.length) {
           throw new ToolError("`question` has no rankable terms once stopwords are removed — nothing to score against.");
         }
@@ -657,60 +1326,90 @@ export function webindexAdapter(): McpAdapter {
       if (name === "webindex_package") {
         const pkg = String(args.name ?? "").trim();
         if (!pkg) throw new ToolError("`name` is required.");
-        const reg = args.registry ? (String(args.registry) as RegistryKind) : undefined;
-        const p = await resolvePackage(pkg, { ...(reg ? { registry: reg } : {}), ...(args.version ? { version: String(args.version) } : {}) });
-        if (!p) throw new ToolError(`No registry knows a package called "${pkg}".`);
+        const reg = args.registry === undefined ? undefined : String(args.registry);
+        if (reg !== undefined && !isRegistryKind(reg)) throw new InvalidParamsError("`registry` must be one of: npm, pypi, crates");
+        const { facts: p, note } = await resolvePackageResult(pkg, {
+          ...(reg ? { registry: reg } : {}),
+          ...(args.version ? { version: String(args.version) } : {}),
+        });
+        if (!p) throw new ToolError(note ?? `No registry knows a package called "${pkg}".`);
         return { text: JSON.stringify(p, null, 2) };
       }
-      if (name === "webindex_repo" || name === "webindex_issues" || name === "webindex_releases") {
-        const ref = resolveRepo(String(args.repo ?? ""));
-        if (ref.host === "generic") throw new ToolError(`"${String(args.repo ?? "")}" does not name a repository.`);
+      if (name === "webindex_repo" || name === "webindex_issues" || name === "webindex_releases" || name === "webindex_tags") {
+        const forge = args.forge === undefined ? undefined : String(args.forge);
+        if (forge !== undefined && !isForgeKind(forge)) throw new InvalidParamsError(`\`forge\` must be one of: ${FORGE_KINDS.join(", ")}`);
+        const raw = String(args.repo ?? "");
+        const kind = forge ? { kind: forge } : {};
+        // A local checkout is read (its origin remote) before anything else, so
+        // the file policy is applied before forgeRef runs git in it.
+        const parsed = resolveRepo(raw, kind);
+        if (parsed.isLocal) localPath(resolve(raw.trim()));
+        const ref = forgeRef(parsed, kind);
+        if (ref.host === "generic") throw new ToolError(`"${raw}" does not name a repository.`);
+        await refuseForgeHost(ref, forge);
         const limit = typeof args.limit === "number" ? args.limit : undefined;
+        const opts = { ...(limit ? { limit } : {}), ...(forge ? { kind: forge } : {}) };
         if (name === "webindex_repo") {
-          const f = await repoFacts(ref);
-          if (!f) throw new ToolError(`Could not read ${ref.webUrl ?? ref.raw} — is it public, and is ${ref.host} a forge?`);
+          const { facts: f, note } = await repoFactsResult(ref, opts);
+          if (!f) throw new ToolError(note ?? `Could not read ${ref.webUrl ?? ref.raw}.`);
           return { text: JSON.stringify({ ref, ...f }, null, 2) };
         }
         const r =
           name === "webindex_releases"
-            ? await listReleases(ref, { ...(limit ? { limit } : {}) })
-            : await searchIssues(
-                ref,
-                String(args.terms ?? "")
-                  .split(/\s+/)
-                  .filter(Boolean),
-                args.kind === "pr" ? "pr" : "issue",
-                { ...(limit ? { limit } : {}) },
-              );
+            ? await listReleases(ref, opts)
+            : name === "webindex_tags"
+              ? await listTags(ref, opts)
+              : await searchIssues(
+                  ref,
+                  String(args.terms ?? "")
+                    .split(/\s+/)
+                    .filter(Boolean),
+                  args.kind === "pr" ? "pr" : "issue",
+                  opts,
+                );
         // A quota answer is not "nothing exists" — say which it was.
-        if (!r.items.length) throw new ToolError(r.note ?? `Nothing found for ${ref.raw}.`);
+        if (!r.items.length) {
+          if (!r.note && name === "webindex_releases")
+            throw new ToolError(`No releases published for ${ref.raw} — its versions may only be tags: try webindex_tags.`);
+          throw new ToolError(r.note ?? `Nothing found for ${ref.raw}.`);
+        }
         return { text: JSON.stringify(r, null, 2) };
       }
       if (name === "webindex_meta" || name === "webindex_robots" || name === "webindex_sitemap" || name === "webindex_feed") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
+        await refuseUrl(url);
+        const robotsOpts = guard ? { authorizeUrl: guard } : {};
 
         if (name === "webindex_robots") {
-          const r = await fetchRobots(url);
+          const r = await fetchRobots(url, robotsOpts);
           return { text: JSON.stringify({ url, allowed: isAllowed(r, url), ...r }, null, 2) };
         }
         if (name === "webindex_sitemap") {
-          const robots = await fetchRobots(url);
-          const s = await fetchSitemap(url, { sitemaps: robots.sitemaps, max: typeof args.max === "number" ? args.max : undefined });
-          if (!s.urls.length && !s.sitemaps.length) throw new ToolError(`No sitemap found for ${url}.`);
+          const robots = await fetchRobots(url, robotsOpts);
+          const max = typeof args.max === "number" ? args.max : undefined;
+          const s = await fetchSitemap(url, {
+            sitemaps: robots.sitemaps,
+            max,
+            signal,
+            authorizeUrl: guard,
+            onDocument: (doc, fetched) => ctx?.progress(fetched, max ?? 3, doc),
+          });
+          if (!s.urls.length && !s.sitemaps.length) throw new ToolError(`No sitemap found for ${url}.${s.notes?.length ? ` ${s.notes.join(" ")}` : ""}`);
           return { text: JSON.stringify(s, null, 2) };
         }
-        const page = await httpGet(url, { accept: "text/html,application/xml,*/*" });
-        if (!page.ok) throw new ToolError(`Could not fetch ${url} (status ${page.status}).`);
-        if (name === "webindex_meta") return { text: JSON.stringify(pageMetadata(page.body), null, 2) };
+        const page = await httpGet(url, { accept: "text/html,application/xml,application/feed+json,*/*", signal, authorizeUrl: guard });
+        if (!page.ok) throw new ToolError(`Could not fetch ${url} (${fetchFailure(page)}).`);
+        if (name === "webindex_meta") return { text: JSON.stringify(pageMetadata(page.body, { baseUrl: page.url }), null, 2) };
 
-        const direct = parseFeed(page.body);
-        if (direct) return { text: JSON.stringify(direct, null, 2) };
-        const found = discoverFeeds(page.body, page.url);
+        const direct = parseFeed(page.body, page.url);
+        // A feed with no entries may still point at the one that has them.
+        const found = direct?.items.length ? [] : discoverFeeds(page.body, page.url);
+        if (direct && !found.length) return { text: JSON.stringify(direct, null, 2) };
         if (!found.length) throw new ToolError(`${url} is not a feed and advertises none.`);
         const feeds = [];
         for (const f of found) {
-          const parsed = await fetchFeed(f);
+          const parsed = await fetchFeed(f, { signal, authorizeUrl: guard });
           if (parsed) feeds.push({ url: f, ...parsed });
         }
         if (!feeds.length) throw new ToolError(`${url} advertises ${found.length} feed(s), none of which parsed.`);
@@ -719,8 +1418,9 @@ export function webindexAdapter(): McpAdapter {
       if (name === "webindex_tables") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
-        const page = await httpGet(url, { accept: "text/html,*/*" });
-        if (!page.ok) throw new ToolError(`could not fetch ${url} (status ${page.status})`);
+        await refuseUrl(url);
+        const page = await httpGet(url, { accept: "text/html,*/*", signal, authorizeUrl: guard });
+        if (!page.ok) throw new ToolError(`could not fetch ${url} (${fetchFailure(page)})`);
         const tables = extractTables(page.body);
         if (!tables.length) throw new ToolError(`${url} has no tables — use webindex_fetch for its text.`);
         return { text: args.markdown ? tables.map(tableToMarkdown).join("\n\n") : JSON.stringify(tables, null, 2) };
@@ -738,8 +1438,18 @@ export function webindexAdapter(): McpAdapter {
         const max = Number(args.max);
         if (!Number.isInteger(max) || max < 1)
           throw new ToolError("`max` is required and must be a positive whole number — a crawl without a budget is not one.");
-        const r = await crawlSite(url, { maxPages: max, ...(args.depth !== undefined ? { maxDepth: Number(args.depth) } : {}) });
-        if (!r.pages.length) throw new ToolError(`nothing readable from ${url}${r.notes.length ? ` — ${r.notes[0]}` : ""}`);
+        await refuseUrl(url);
+        let read = 0;
+        const r = await crawlSite(url, {
+          maxPages: max,
+          signal,
+          ...(guard ? { authorizeUrl: guard } : {}),
+          onPage: (page) => ctx?.progress(++read, max, page.url),
+          ...(args.depth !== undefined ? { maxDepth: Number(args.depth) } : {}),
+          ...(typeof args.prefix === "string" && args.prefix ? { prefix: args.prefix } : {}),
+          ...(args.sitemap === false ? { useSitemap: false } : {}),
+        });
+        if (!r.pages.length) throw new ToolError(`nothing readable from ${url}${r.notes.length ? ` — ${r.notes.join(" ")}` : ""}`);
         return {
           text: JSON.stringify(
             {
@@ -775,10 +1485,106 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 }
 
+/**
+ * `webindex <cmd> --help`: that command's lines from USAGE and its paragraph
+ * from COMMANDS, cut out of HELP rather than written a second time — a second
+ * copy is a second thing to drift. Falls back to the whole of HELP for a
+ * command it cannot find there.
+ */
+function commandHelp(cmd: string): string {
+  const section = (title: string) => {
+    const lines = HELP.split("\n");
+    const start = lines.indexOf(title);
+    const end = lines.indexOf("", start);
+    return start === -1 ? [] : lines.slice(start + 1, end === -1 ? undefined : end);
+  };
+  // An entry is its first line and the deeper-indented lines that continue it.
+  const entries = (lines: string[], head: RegExp) => {
+    const out: { name: string; lines: string[] }[] = [];
+    for (const line of lines) {
+      const m = head.exec(line);
+      if (m) out.push({ name: m[1] as string, lines: [line] });
+      else out.at(-1)?.lines.push(line);
+    }
+    return out.filter((e) => e.name === cmd).flatMap((e) => e.lines);
+  };
+  const usageLines = entries(section("USAGE"), /^ {2}webindex ([a-z-]+)/);
+  const described = entries(section("COMMANDS"), /^ {2}([a-z-]+) /);
+  if (!usageLines.length) return HELP;
+  return [
+    `webindex v${ENGINE_VERSION}`,
+    "",
+    "USAGE",
+    ...usageLines,
+    "",
+    ...described,
+    "",
+    "Run `webindex --help` for every command and the environment variables.",
+  ].join("\n");
+}
+
+/**
+ * `fetch` over several URLs: at most `<PREFIX>_FETCH_CONCURRENCY` in flight
+ * (default 4), each page printed under a `==> <url> <==` header as soon as
+ * every page before it is out — in the order given, however they finish — or,
+ * with --json, one array in that order. A URL that yields nothing is named on
+ * stderr; the run fails only when every one of them did, since one dead link
+ * in a reading list is not a failed reading list.
+ */
+async function fetchSeveral<R>(
+  urls: readonly string[],
+  fetchOne: (url: string) => Promise<ExtractResult & { cached?: boolean }>,
+  json: boolean,
+  record: (url: string, r: ExtractResult & { cached?: boolean }) => R,
+): Promise<void> {
+  const results: (ExtractResult & { cached?: boolean })[] = [];
+  let next = 0;
+  let wrote = false;
+  const report = (i: number): void => {
+    const r = results[i]!;
+    if (!r.text) {
+      process.stderr.write(`webindex: nothing readable at ${urls[i]}${r.note ? ` — ${r.note}` : ""}\n`);
+      return;
+    }
+    if (json) return;
+    process.stdout.write(`${wrote ? "\n" : ""}==> ${urls[i]} <==\n${r.text}\n`);
+    wrote = true;
+    if (r.note) process.stderr.write(`  ${r.note}\n`);
+  };
+  await mapLimit(urls, envInt("FETCH_CONCURRENCY", 4, 1, 16), async (url, i) => {
+    results[i] = await fetchOne(url);
+    while (next < urls.length && results[next]) report(next++);
+  });
+  if (json) {
+    const records = results.map((r, i) => record(urls[i]!, r));
+    process.stdout.write(JSON.stringify(records, null, 2) + "\n");
+  }
+  if (results.every((r) => !r.text)) fail(`none of the ${urls.length} URLs had anything readable`);
+}
+
+/**
+ * How many bare words a command takes: a query or a text any number, the URLs
+ * `fetch` reads any number, `rank`, `hybrid`, `doctor` and `mcp` none,
+ * everything else one — a URL, a file, a reference, an action. A second one
+ * used to be dropped (`fetch a b` fetched a, before it took a list) or glued
+ * onto the first (`tables a b` fetched the URL "a b"), and the command then
+ * succeeded at something other than what was typed.
+ */
+function positionalLimit(args: CommandArgs): { max: number; hint?: string } {
+  const cmd = args.command;
+  if (cmd === "search" || cmd === "embed" || cmd === "fetch") return { max: Number.POSITIVE_INFINITY };
+  if (cmd === "rank" || cmd === "hybrid") return { max: 0, hint: 'the question goes in --query "<q>"' };
+  if (cmd === "doctor" || cmd === "mcp") return { max: 0 };
+  if (cmd === "skill") return { max: args.positional[0] === "init" ? 2 : 1 };
+  if (cmd === "issues" || cmd === "prs") return { max: 1, hint: 'search words go in --terms "<words>"' };
+  if (cmd === "repo" || cmd === "releases" || cmd === "tags") return { max: 1, hint: "quote a path that contains spaces" };
+  return { max: 1 };
+}
+
 async function dispatch(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv, SPEC);
   if (parsed.kind === "help") {
-    process.stdout.write(HELP + "\n");
+    process.stdout.write((parsed.command ? commandHelp(parsed.command) : HELP) + "\n");
     return;
   }
   if (parsed.kind === "version") {
@@ -787,18 +1593,27 @@ async function dispatch(argv: string[]): Promise<void> {
   }
   const args: CommandArgs = parsed;
   const cmd = args.command;
+  const arity = positionalLimit(args);
+  if (args.positional.length > arity.max) {
+    const extra = args.positional[arity.max] as string;
+    const takes = arity.max === 0 ? "no arguments" : arity.max === 1 ? "one argument" : `${arity.max} arguments`;
+    usage(`unexpected argument "${extra}" — \`webindex ${cmd}\` takes ${takes}${arity.hint ? `; ${arity.hint}` : ""} (see \`webindex ${cmd} --help\`)`);
+  }
 
   if (cmd === "search") {
     const q = positionalText(args);
     if (!q) usage("usage: webindex search <query>");
     const engine = argValue(args, "engine");
-    if (engine && engine !== "off" && !isKeylessEngine(engine)) fail(`unknown --engine "${engine}" — expected one of ${KEYLESS_ENGINES.join(", ")}, or off`);
+    if (engine && engine !== "off" && !isKeylessEngine(engine)) usage(`unknown --engine "${engine}" — expected one of ${KEYLESS_ENGINES.join(", ")}, or off`);
     const r = await search(q, {
-      limit: argInt(args, "limit"),
-      pages: argInt(args, "pages"),
+      limit: argInt(args, "limit", { min: 1 }),
+      pages: argInt(args, "pages", { min: 1 }),
       lang: argValue(args, "lang"),
+      region: argValue(args, "region"),
       searxng: argValue(args, "searxng"),
       firecrawl: argValue(args, "firecrawl"),
+      // The budget for the whole cascade, not one request.
+      timeoutMs: argTimeout(args),
       ...(engine ? { engines: engine === "off" ? [] : [engine as KeylessEngine] } : {}),
     });
     if (argBool(args, "json")) {
@@ -815,46 +1630,79 @@ async function dispatch(argv: string[]): Promise<void> {
   }
 
   if (cmd === "fetch") {
-    const url = args.positional[0];
-    if (!url) usage("usage: webindex fetch <url>");
-    if (!/^https?:\/\//i.test(url)) fail("fetch needs an http(s) URL");
+    const urls = args.positional;
+    if (!urls.length) usage("usage: webindex fetch <url> [<url> …]");
+    // Every argument is checked before anything is fetched: a typo in the
+    // tenth URL should not cost the first nine requests and then fail.
+    const bad = urls.find((u) => !/^https?:\/\//i.test(u));
+    if (bad !== undefined) {
+      fail(
+        `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync(bad) ? ` — for a file on disk, \`webindex extract ${bad}\`` : ""}`,
+      );
+    }
     const fullPage = argBool(args, "full-page");
-    const r = await fetchAndExtract(url, {
+    const format = argFormat(args);
+    const refresh = argBool(args, "refresh");
+    const offline = argBool(args, "offline");
+    if (refresh && offline) usage("--refresh and --offline contradict each other: one always fetches, the other never does");
+    // Set both switches every time, so a value from an earlier call in the same
+    // process can never leak into this one.
+    setCacheMode({ refresh, offline });
+    const fetchOpts = {
       acceptLanguage: argValue(args, "lang"),
       firecrawl: argValue(args, "firecrawl"),
       fullPage,
       stripConsent: !fullPage,
+      format,
+      timeoutMs: argTimeout(args),
+    };
+    const cache = argBool(args, "cache") || refresh;
+    const json = argBool(args, "json");
+    const record = (url: string, r: ExtractResult & { cached?: boolean }) => ({
+      url,
+      // Where the text actually came from — after redirects — and the
+      // address the page gives for itself: what a citation needs.
+      finalUrl: r.finalUrl,
+      canonical: r.canonical,
+      title: r.title,
+      extractor: r.extractor,
+      documentType: r.documentType,
+      status: r.status,
+      cached: r.cached === true,
+      chars: r.text.length,
+      note: r.note,
+      text: r.text,
+      fullPage,
+      consentDropped: r.consentDropped ?? 0,
     });
-    if (argBool(args, "json")) {
-      process.stdout.write(
-        JSON.stringify(
-          {
-            url,
-            title: r.title,
-            extractor: r.extractor,
-            status: r.status,
-            chars: r.text.length,
-            note: r.note,
-            text: r.text,
-            fullPage,
-            consentDropped: r.consentDropped ?? 0,
-          },
-          null,
-          2,
-        ) + "\n",
-      );
+    if (urls.length > 1) {
+      await fetchSeveral(urls, (url) => cachedFetchAndExtract(url, fetchOpts, cache), json, record);
+      return;
+    }
+    const url = urls[0] as string;
+    const r = await cachedFetchAndExtract(url, fetchOpts, cache);
+    if (json) {
+      process.stdout.write(JSON.stringify(record(url, r), null, 2) + "\n");
     } else if (r.text) {
       process.stdout.write(r.text + "\n");
+      // A prefix cut at the size cap, a document link that served a web page,
+      // a Firecrawl fallback: said beside the text, as search says its notes,
+      // rather than only when there is no text at all.
+      if (r.note) process.stderr.write(`  ${r.note}\n`);
     }
     if (!r.text) fail(`nothing readable at ${url}${r.note ? ` — ${r.note}` : ""}`);
     return;
   }
 
   if (cmd === "extract") {
+    const EXTRACT_USAGE = "usage: webindex extract <file|-> [--format text|markdown] [--full-page] [--json]";
     const path = args.positional[0];
-    if (!path) usage("usage: webindex extract <file>");
+    if (!path) usage(EXTRACT_USAGE);
     const fullPage = argBool(args, "full-page");
-    const r = await extractLocal(path, fullPage);
+    const format = argFormat(args);
+    // `-` reads stdin, so another tool's output can be extracted without a
+    // temp file; its bytes are routed by what they are, having no name.
+    const r = await extractLocal(path, fullPage, path === "-" ? readStdin(EXTRACT_USAGE) : undefined, format);
     if (argBool(args, "json")) {
       process.stdout.write(
         JSON.stringify(
@@ -872,24 +1720,42 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "mcp") {
     const transport = argValue(args, "transport") ?? "stdio";
+    const allowRemote = argBool(args, "allow-remote");
+    const policy = mcpPolicy(args, allowRemote);
+    // stderr, not stdout: stdio's stdout is the protocol stream, and keeping
+    // the two transports identical here means no one has to remember which is
+    // which.
+    const notice = mcpPolicyNotice(policy, allowRemote, argBool(args, "allow-private"));
     if (transport === "stdio") {
-      await runStdioServer(webindexAdapter());
+      for (const line of notice) process.stderr.write(`webindex: ${line}\n`);
+      await runStdioServer(webindexAdapter(policy));
       return;
     }
-    if (transport !== "http") fail(`unknown transport "${transport}" — expected stdio or http`);
-    const port = argInt(args, "port") ?? 7340;
-    if (!Number.isInteger(port) || port < 0 || port > 65535) fail("invalid --port");
+    if (transport !== "http") usage(`unknown transport "${transport}" — expected stdio or http`);
+    const port = argInt(args, "port", { min: 0, max: 65535 }) ?? 7340;
+    const token = env("MCP_TOKEN");
     let running: Awaited<ReturnType<typeof startHttpServer>>;
     try {
-      running = await startHttpServer(webindexAdapter(), { port, bind: argValue(args, "bind"), allowRemote: argBool(args, "allow-remote") });
+      running = await startHttpServer(webindexAdapter(policy), {
+        port,
+        bind: argValue(args, "bind"),
+        allowRemote,
+        ...(token ? { bearerToken: token } : {}),
+      });
     } catch (e) {
       fail((e as Error).message);
     }
-    // stderr, not stdout: an HTTP server's stdout is not a protocol stream, but
-    // keeping the two transports identical here means no one has to remember
-    // which is which.
     process.stderr.write(`webindex: MCP server listening on ${running.url}\n`);
-    process.stderr.write(`  client: claude mcp add --transport http webindex ${running.url}\n`);
+    const header = token ? ` --header "Authorization: Bearer $${envName("MCP_TOKEN")}"` : "";
+    process.stderr.write(`  client: claude mcp add --transport http webindex ${running.url}${header}\n`);
+    if (allowRemote) {
+      process.stderr.write(
+        token
+          ? "  exposed beyond this machine (--allow-remote); every request needs the bearer token.\n"
+          : `  exposed beyond this machine (--allow-remote) with no authentication: anyone who can reach the port can use it. Set ${envName("MCP_TOKEN")} to require a bearer token.\n`,
+      );
+    }
+    for (const line of notice) process.stderr.write(`  ${line}\n`);
     return;
   }
 
@@ -920,23 +1786,19 @@ async function dispatch(argv: string[]): Promise<void> {
   }
 
   if (cmd === "rank") {
+    const RANK_USAGE = "usage: webindex rank --query <question> --docs <file.json|-> [--limit <n>] [--dense] [--json]";
     const question = argValue(args, "query");
-    if (!question) usage("usage: webindex rank --query <question> --docs <file.json|-> [--limit <n>] [--json]");
-    const src = argValue(args, "docs") ?? "-";
-    let payload: string;
-    try {
-      payload = src === "-" ? readFileSync(0, "utf8") : readFileSync(src, "utf8");
-    } catch (e) {
-      fail(`cannot read ${src === "-" ? "stdin" : src}: ${(e as Error).message}`);
-    }
+    if (!question) usage(RANK_USAGE);
+    // Flags first: a bad --limit is worth saying before a large pool is read.
+    const limit = argInt(args, "limit", { min: 1 });
+    const input = readDocsInput(args, RANK_USAGE);
     let docs: RankInput[];
     try {
-      docs = parseRankDocs(payload, "--docs");
+      docs = parseRankDocs(parseJsonInput(input.text, input.label, RANK_DOCS_SHAPE), "--docs");
     } catch (e) {
       fail((e as Error).message);
     }
-    const limit = argInt(args, "limit");
-    const r = rankDocuments(question, docs, limit);
+    const r = await rankDocuments(question, docs, { limit, dense: argBool(args, "dense") });
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));
     } else {
@@ -947,8 +1809,12 @@ async function dispatch(argv: string[]): Promise<void> {
           .map((x) => `${x.rank}. [${x.score.toFixed(3)}] ${x.title ?? x.url}\n   ${x.url}${x.matched.length ? `\n   matched: ${x.matched.join(", ")}` : ""}`)
           .join("\n\n") + "\n",
       );
-      if (r.collapsed) process.stderr.write(`${r.collapsed} near-duplicate(s) collapsed.\n`);
+      if (r.collapsed) {
+        process.stderr.write(`${r.collapsed} near-duplicate(s) collapsed.\n`);
+        for (const d of r.duplicates) process.stderr.write(`  ${d.url} duplicates ${d.of}\n`);
+      }
     }
+    if (r.note) process.stderr.write(`  ${r.note}\n`);
     if (!r.queryTerms.length) {
       process.stderr.write("The question has no rankable terms once stopwords are removed — the order is arbitrary.\n");
       process.exit(1);
@@ -958,22 +1824,27 @@ async function dispatch(argv: string[]): Promise<void> {
 
   // What a code host and a package registry say about a project. Read-only,
   // keyless, and answering from the record rather than from a README.
-  if (cmd === "repo" || cmd === "issues" || cmd === "prs" || cmd === "releases" || cmd === "package") {
+  if (cmd === "repo" || cmd === "issues" || cmd === "prs" || cmd === "releases" || cmd === "tags" || cmd === "package") {
     const target = positionalText(args);
     if (!target) usage(`usage: webindex ${cmd} <${cmd === "package" ? "name" : "repo"}> [--json]`);
     const asJson = argBool(args, "json");
-    const limit = argInt(args, "limit");
+    const limit = argInt(args, "limit", { min: 1 });
     const emit = (obj: unknown, human: string[]) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}\n`);
 
     if (cmd === "package") {
-      const reg = argValue(args, "registry") as RegistryKind | undefined;
-      const p = await resolvePackage(target, {
+      const reg = argValue(args, "registry");
+      if (reg !== undefined && !isRegistryKind(reg)) usage(`--registry expects npm, pypi or crates, got "${reg}"`);
+      const { facts: p, note } = await resolvePackageResult(target, {
         ...(reg ? { registry: reg } : {}),
         ...(argValue(args, "version") ? { version: argValue(args, "version") } : {}),
       });
-      if (!p) fail(`no registry knows a package called "${target}"`);
+      if (!p) fail(note ?? `no registry knows a package called "${target}"`);
+      // The name and what it is come first: without --registry the answer may
+      // be another ecosystem's namesake, and that must be visible at a glance.
       emit(p, [
+        `  name        ${p.name}`,
         `  registry    ${p.registry}`,
+        `  description ${p.description ?? "—"}`,
         `  version     ${p.version ?? "—"}`,
         `  repository  ${p.repository ?? "—"}`,
         `  homepage    ${p.homepage ?? "—"}`,
@@ -984,12 +1855,15 @@ async function dispatch(argv: string[]): Promise<void> {
       return;
     }
 
-    const ref = resolveRepo(target);
+    const forge = argValue(args, "forge");
+    if (forge !== undefined && !isForgeKind(forge)) usage(`--forge expects github, gitlab or gitea, got "${forge}"`);
+    const ref = forgeTarget(target, forge);
     if (ref.host === "generic") fail(`"${target}" does not name a repository`);
+    const opts = { ...(limit ? { limit } : {}), ...(forge ? { kind: forge } : {}) };
 
     if (cmd === "repo") {
-      const f = await repoFacts(ref);
-      if (!f) fail(`could not read ${ref.webUrl ?? target} — is it public, and is ${ref.host} a forge?`);
+      const { facts: f, note } = await repoFactsResult(ref, opts);
+      if (!f) fail(note ?? `could not read ${ref.webUrl ?? target}`);
       emit({ ref, ...f }, [
         `  name        ${f.fullName ?? `${ref.owner}/${ref.repo}`}`,
         `  description ${f.description ?? "—"}`,
@@ -1004,11 +1878,15 @@ async function dispatch(argv: string[]): Promise<void> {
 
     const r =
       cmd === "releases"
-        ? await listReleases(ref, { ...(limit ? { limit } : {}) })
-        : await searchIssues(ref, (argValue(args, "terms") ?? "").split(/\s+/).filter(Boolean), cmd === "prs" ? "pr" : "issue", {
-            ...(limit ? { limit } : {}),
-          });
-    if (!r.items.length) fail(r.note ?? `nothing found for ${target}`);
+        ? await listReleases(ref, opts)
+        : cmd === "tags"
+          ? await listTags(ref, opts)
+          : await searchIssues(ref, (argValue(args, "terms") ?? "").split(/\s+/).filter(Boolean), cmd === "prs" ? "pr" : "issue", opts);
+    if (!r.items.length) {
+      // Plenty of projects tag every version and never publish a release.
+      if (!r.note && cmd === "releases") fail(`no releases published for ${target} — try \`webindex tags ${target}\``);
+      fail(r.note ?? `nothing found for ${target}`);
+    }
     emit(
       r,
       r.items.map((i) => `${i.number ? `#${i.number} ` : ""}${i.title}${i.state ? ` [${i.state}]` : ""}\n  ${i.url}`),
@@ -1022,8 +1900,11 @@ async function dispatch(argv: string[]): Promise<void> {
   // a full extraction.
   if (cmd === "meta" || cmd === "robots" || cmd === "sitemap" || cmd === "feed") {
     const target = positionalText(args);
-    if (!target) usage(`usage: webindex ${cmd} <url>`);
-    if (!/^https?:\/\//i.test(target)) fail("expected an http(s) URL");
+    const usageLine = `usage: webindex ${cmd} <url${cmd === "meta" ? "|file|-" : ""}>`;
+    if (!target) usage(usageLine);
+    // A page's own metadata is in its HTML, wherever that came from; robots,
+    // sitemaps and feeds are things a SITE serves.
+    if (cmd !== "meta" && !/^https?:\/\//i.test(target)) fail("expected an http(s) URL");
     const asJson = argBool(args, "json");
     const emit = (obj: unknown, human: string[]) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}\n`);
 
@@ -1032,7 +1913,15 @@ async function dispatch(argv: string[]): Promise<void> {
       const allowed = isAllowed(r, target);
       emit({ url: target, allowed, ...r }, [
         `  allowed   ${allowed ? "yes" : "no"}`,
-        `  rules     ${r.absent ? "none (no robots.txt)" : r.rules.length}`,
+        `  rules     ${
+          envFlag("NO_ROBOTS")
+            ? `not consulted (${envName("NO_ROBOTS")})`
+            : r.unreachable
+              ? `none readable (${r.status ? `HTTP ${r.status}` : "no answer"}) — RFC 9309 says to assume nothing may be crawled`
+              : r.absent
+                ? `none (no robots.txt${r.status ? `, HTTP ${r.status}` : ""})`
+                : r.rules.length
+        }`,
         ...(r.crawlDelayMs ? [`  delay     ${r.crawlDelayMs}ms`] : []),
         ...(r.sitemaps.length ? [`  sitemaps  ${r.sitemaps.join("\n            ")}`] : []),
       ]);
@@ -1041,49 +1930,59 @@ async function dispatch(argv: string[]): Promise<void> {
     }
     if (cmd === "sitemap") {
       const robots = await fetchRobots(target);
-      const s = await fetchSitemap(target, { sitemaps: robots.sitemaps, max: argInt(args, "max") });
+      const s = await fetchSitemap(target, { sitemaps: robots.sitemaps, max: argInt(args, "max", { min: 1 }) });
+      if (!asJson) for (const n of s.notes ?? []) process.stderr.write(`${n}\n`);
       if (!s.urls.length && !s.sitemaps.length) fail(`no sitemap found for ${target}`);
+      // An index whose children the budget did not reach is not an empty
+      // site: say which documents are left, and what reads them.
+      const unread = s.unfetched ?? [];
+      if (!asJson && unread.length)
+        process.stderr.write(`${unread.length} child sitemap(s) not read — raise --max to follow them:\n  ${unread.join("\n  ")}\n`);
+      if (!s.urls.length && !asJson) fail(`no page URLs in the ${s.sitemaps.length ? "sitemap index" : "sitemap"} read so far`);
       emit(
         s,
         s.urls.map((u) => u.loc),
       );
       return;
     }
-    const page = await httpGet(target, { accept: "text/html,application/xml,*/*" });
+    if (cmd === "meta") {
+      const page = await readPage(target, "text/html,*/*", usageLine);
+      const m = pageMetadata(page.body, page.url ? { baseUrl: page.url } : {});
+      emit(m, [
+        `  title      ${m.title ?? "—"}`,
+        `  type       ${m.type ?? "—"}`,
+        `  site       ${m.siteName ?? "—"}`,
+        `  published  ${m.publishedAt ?? "—"}`,
+        `  modified   ${m.modifiedAt ?? "—"}`,
+        `  authors    ${m.authors.join(", ") || "—"}`,
+        `  canonical  ${m.canonicalUrl ?? "—"}`,
+      ]);
+      return;
+    }
+    const page = await httpGet(target, { accept: "text/html,application/xml,application/feed+json,*/*" });
     if (!page.ok) fail(`could not fetch ${target} (status ${page.status})`);
-    if (cmd === "feed") {
-      const direct = parseFeed(page.body);
-      if (direct) {
-        emit(
-          direct,
-          direct.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}\n  ${i.url ?? ""}`),
-        );
-        return;
-      }
-      const found = discoverFeeds(page.body, page.url);
-      if (!found.length) fail(`${target} advertises no feed`);
-      const feeds = [];
-      for (const f of found) {
-        const parsed = await fetchFeed(f);
-        if (parsed) feeds.push({ url: f, ...parsed });
-      }
-      if (!feeds.length) fail(`${target} advertises ${found.length} feed(s), none of which parsed`);
+    // What is left is `feed`.
+    const direct = parseFeed(page.body, page.url);
+    // A feed with no entries may still point at the one that has them.
+    const found = direct?.items.length ? [] : discoverFeeds(page.body, page.url);
+    if (direct && !found.length) {
       emit(
-        feeds,
-        feeds.flatMap((f) => [`# ${f.title ?? f.url}`, ...f.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}\n  ${i.url ?? ""}`)]),
+        direct,
+        direct.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}\n  ${i.url ?? ""}`),
       );
       return;
     }
-    const m = pageMetadata(page.body);
-    emit(m, [
-      `  title      ${m.title ?? "—"}`,
-      `  type       ${m.type ?? "—"}`,
-      `  site       ${m.siteName ?? "—"}`,
-      `  published  ${m.publishedAt ?? "—"}`,
-      `  modified   ${m.modifiedAt ?? "—"}`,
-      `  authors    ${m.authors.join(", ") || "—"}`,
-      `  canonical  ${m.canonicalUrl ?? "—"}`,
-    ]);
+    if (!found.length) fail(`${target} advertises no feed`);
+    const feeds = [];
+    for (const f of found) {
+      const parsed = await fetchFeed(f);
+      if (parsed) feeds.push({ url: f, ...parsed });
+    }
+    if (!feeds.length) fail(`${target} advertises ${found.length} feed(s), none of which parsed`);
+    emit(
+      feeds,
+      feeds.flatMap((f) => [`# ${f.title ?? f.url}`, ...f.items.map((i) => `${i.published ? `${i.published}  ` : ""}${i.title ?? ""}\n  ${i.url ?? ""}`)]),
+    );
     return;
   }
 
@@ -1092,8 +1991,12 @@ async function dispatch(argv: string[]): Promise<void> {
     if (action !== "status" && action !== "clean") usage("usage: webindex cache status|clean [--all]");
     if (action === "clean") {
       const all = argBool(args, "all");
-      const removed = cacheClean(all);
-      process.stdout.write(`${removed} entr${removed === 1 ? "y" : "ies"} removed (${all ? "all" : "stale only"}) from ${cacheDir()}\n`);
+      const noWrite = isNoWrite();
+      const removed = noWrite ? 0 : cacheClean(all);
+      if (argBool(args, "json")) process.stdout.write(jsonLine({ dir: cacheDir(), removed, all, noWrite }));
+      // "0 entries removed" would read as an empty cache, not a blocked clean.
+      else if (noWrite) process.stdout.write(`no-write mode: nothing removed from ${cacheDir()}\n`);
+      else process.stdout.write(`${removed} entr${removed === 1 ? "y" : "ies"} removed (${all ? "all" : "stale only"}) from ${cacheDir()}\n`);
       return;
     }
     const s = cacheStats();
@@ -1123,10 +2026,16 @@ async function dispatch(argv: string[]): Promise<void> {
     // operation here that can inconvenience them, so the budget is a decision
     // the caller makes rather than one this command makes for them.
     if (max === undefined) usage("crawl needs --max <n> — an unbounded walk of somebody else's site is not something to do by accident");
+    // The same answer the MCP tool gives: a budget of nothing is not a budget.
+    if (max < 1) usage("--max must be a positive whole number — a crawl without a budget is not one");
+    const prefix = argValue(args, "prefix");
+    const depth = argInt(args, "depth", { min: 0 });
     const r = await crawlSite(seed, {
       maxPages: max,
-      ...(argInt(args, "depth") !== undefined ? { maxDepth: argInt(args, "depth") as number } : {}),
+      ...(depth !== undefined ? { maxDepth: depth } : {}),
       crossOrigin: argBool(args, "cross-origin"),
+      useSitemap: !argBool(args, "no-sitemap"),
+      ...(prefix ? { prefix } : {}),
     });
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));
@@ -1140,11 +2049,10 @@ async function dispatch(argv: string[]): Promise<void> {
   }
 
   if (cmd === "tables") {
+    const TABLES_USAGE = "usage: webindex tables <url|file|-> [--json]";
     const url = positionalText(args);
-    if (!url) usage("usage: webindex tables <url>");
-    if (!/^https?:\/\//i.test(url)) fail("tables needs an http(s) URL");
-    const page = await httpGet(url, { accept: "text/html,*/*" });
-    if (!page.ok) fail(`could not fetch ${url} (status ${page.status})`);
+    if (!url) usage(TABLES_USAGE);
+    const page = await readPage(url, "text/html,*/*", TABLES_USAGE);
     const tables = extractTables(page.body);
     if (!tables.length) fail(`no tables on ${url}`);
     process.stdout.write(argBool(args, "json") ? jsonLine(tables) : `${tables.map(tableToMarkdown).join("\n\n")}\n`);
@@ -1152,8 +2060,36 @@ async function dispatch(argv: string[]): Promise<void> {
   }
 
   if (cmd === "embed") {
+    const EMBED_USAGE = "usage: webindex embed <text> | --docs <file.json|-> [--lines] [--json]";
     const text = positionalText(args);
-    if (!text) usage("usage: webindex embed <text>");
+    if (argValue(args, "docs") !== undefined || argBool(args, "lines")) {
+      // A file of passages in one run: one probe, the batching embed() already
+      // does, and the vectors in input order.
+      if (text) usage(EMBED_USAGE);
+      const input = readDocsInput(args, EMBED_USAGE);
+      const shape = "a non-empty JSON array of strings (or one text per line with --lines)";
+      let texts: string[];
+      if (argBool(args, "lines")) texts = input.text.split(/\r?\n/).filter((l) => l.trim());
+      else {
+        let arr: unknown;
+        try {
+          arr = parseJsonInput(input.text, input.label, `pass ${shape}`);
+        } catch (e) {
+          fail((e as Error).message);
+        }
+        texts = Array.isArray(arr) && arr.every((t) => typeof t === "string") ? (arr as string[]) : [];
+      }
+      if (!texts.length) fail(`${input.label} must be ${shape}`);
+      const r = await embed(texts);
+      if (!r.vectors.length) fail(r.note ?? "the embedding server returned nothing");
+      process.stdout.write(
+        argBool(args, "json")
+          ? jsonLine({ model: r.model, dimensions: r.vectors[0]?.length ?? 0, vectors: r.vectors })
+          : `${r.vectors.map((v) => v.join(" ")).join("\n")}\n`,
+      );
+      return;
+    }
+    if (!text) usage(EMBED_USAGE);
     const r = await embed([text]);
     if (!r.vectors.length) fail(r.note ?? "the embedding server returned nothing");
     process.stdout.write(
@@ -1163,25 +2099,21 @@ async function dispatch(argv: string[]): Promise<void> {
   }
 
   if (cmd === "hybrid") {
+    const HYBRID_USAGE = "usage: webindex hybrid --query <question> --docs <file.json|->";
     const question = argValue(args, "query");
-    if (!question) usage("usage: webindex hybrid --query <question> --docs <file.json|->");
-    const src = argValue(args, "docs") ?? "-";
-    let payload: string;
-    try {
-      payload = src === "-" ? readFileSync(0, "utf8") : readFileSync(src, "utf8");
-    } catch (e) {
-      fail(`cannot read ${src === "-" ? "stdin" : src}: ${(e as Error).message}`);
-    }
+    if (!question) usage(HYBRID_USAGE);
+    const limit = argInt(args, "limit", { min: 1 });
+    const input = readDocsInput(args, HYBRID_USAGE);
     let docs: RankInput[];
     try {
-      docs = parseRankDocs(payload, "--docs");
+      docs = parseRankDocs(parseJsonInput(input.text, input.label, RANK_DOCS_SHAPE), "--docs");
     } catch (e) {
       fail((e as Error).message);
     }
     const r = await hybridSearch(
       question,
       docs.map((d, i) => ({ id: d.url ?? String(i), title: d.title ?? "", headings: "", body: d.text ?? "" })),
-      { ...(argInt(args, "limit") !== undefined ? { limit: argInt(args, "limit") as number } : {}) },
+      limit !== undefined ? { limit } : {},
     );
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(r));
@@ -1198,16 +2130,29 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "changed") {
     const url = positionalText(args);
-    if (!url) usage("usage: webindex changed <url> [--etag <v>] [--hash <sha256>]");
+    if (!url) usage("usage: webindex changed <url> [--etag <v>] [--last-modified <date>] [--hash <sha256>]");
     if (!/^https?:\/\//i.test(url)) fail("changed needs an http(s) URL");
     const etag = argValue(args, "etag");
+    const lastModified = argValue(args, "last-modified");
     const hash = argValue(args, "hash");
-    if (!etag && !hash) {
-      const f = await fingerprint(url);
-      process.stdout.write(argBool(args, "json") ? jsonLine(f) : `etag ${f.etag ?? "-"}\nhash ${f.contentHash ?? "-"}\n`);
+    const timeoutMs = argTimeout(args);
+    if (!etag && !lastModified && !hash) {
+      const f = await fingerprint(url, { timeoutMs });
+      if (argBool(args, "json")) process.stdout.write(jsonLine(f));
+      else if (!f.error) {
+        const lines = [`etag ${f.etag ?? "-"}`, `last-modified ${f.lastModified ?? "-"}`, `hash ${f.contentHash ?? "-"}`, `status ${f.status}`];
+        process.stdout.write(lines.join("\n") + "\n");
+      }
+      // A baseline with no hash is no baseline: a watcher that stores it
+      // learns the page was unreadable only on its next run.
+      if (f.error) fail(`could not read ${url}: ${f.error}`);
       return;
     }
-    const v = await hasChanged(url, { ...(etag ? { etag } : {}), ...(hash ? { contentHash: hash } : {}) });
+    const v = await hasChanged(
+      url,
+      { ...(etag ? { etag } : {}), ...(lastModified ? { lastModified } : {}), ...(hash ? { contentHash: hash } : {}) },
+      { timeoutMs },
+    );
     if (argBool(args, "json")) {
       process.stdout.write(jsonLine(v));
     } else {
@@ -1227,13 +2172,19 @@ async function dispatch(argv: string[]): Promise<void> {
     const action = args.positional[0] ?? "";
     const root = resolve(argValue(args, "root") ?? process.cwd());
     const asJson = argBool(args, "json");
+    // Before skill.json is read: with none on disk, a missing or misspelt
+    // action was answered "no readable skill.json" — the wrong problem, exit 1.
+    if (!SKILL_ACTIONS.includes(action)) usage(`usage: webindex skill ${SKILL_ACTIONS.join("|")}`);
 
     if (action === "init") {
       const name = args.positional[1];
       if (!name) usage("usage: webindex skill init <name> [--root <dir>]");
+      const badName = skillNameProblem(name);
+      if (badName) usage(badName);
       const r = scaffoldSkill(root, name, { exists: existsSync });
       for (const e of r.errors) process.stderr.write(`  ${e}\n`);
-      process.stdout.write(asJson ? jsonLine(r) : `${r.written.map((p) => `  wrote ${relative(root, p)}`).join("\n")}\n`);
+      if (asJson) process.stdout.write(jsonLine(r));
+      else if (r.written.length) process.stdout.write(`${r.written.map((p) => `  wrote ${relative(root, p)}`).join("\n")}\n`);
       if (!r.written.length) process.exit(EXIT_FAILURE);
       return;
     }
@@ -1245,10 +2196,20 @@ async function dispatch(argv: string[]): Promise<void> {
     }
 
     if (action === "recall") {
+      // With no policy nothing is compared, and "preserved" would claim a
+      // check that never ran.
+      if (!recallPolicy(root)) {
+        process.stdout.write("No repin.recall policy in skill.json — no artifact was compared.\n");
+        return;
+      }
       const lost = checkArtifactRecall(root, argValue(args, "ref") ?? "HEAD");
       if (lost.length) fail(lost.join("\n"));
       process.stdout.write("Artifact identities and evidence preserved\n");
       return;
+    }
+    // Both drive `gh` throughout; without it they died on "spawnSync gh ENOENT".
+    if ((action === "finish" || action === "repin") && !have("gh")) {
+      fail(`skill ${action} drives the GitHub CLI (gh), which is not installed — install it and authenticate (gh auth login, or GH_TOKEN in CI).`);
     }
     if (action === "finish") {
       await finishRepin(root);
@@ -1262,13 +2223,6 @@ async function dispatch(argv: string[]): Promise<void> {
     }
 
     if (action === "vendor") {
-      if (argBool(args, "list")) {
-        for (const [name, pin] of Object.entries(config.engines)) {
-          const meta = JSON.parse(readFileSync(join(root, config.vendorDir, pin.meta), "utf8"));
-          process.stdout.write(`${name} ${pin.repo} ${meta.tag}\n`);
-        }
-        return;
-      }
       // `--check` is offline on purpose: this runs in CI on every commit, and a
       // gate that needs the network goes red when GitHub does.
       if (argBool(args, "check")) {
@@ -1284,6 +2238,9 @@ async function dispatch(argv: string[]): Promise<void> {
       }
       const ref = argValue(args, "ref");
       if (!ref) usage("usage: webindex skill vendor [--engine <name>] --ref <tag>   |   webindex skill vendor --check");
+      // vendorEngine refuses this too, but only after the tag was resolved —
+      // which asked GitHub about a ref that could never be pinned.
+      if (!/^v\d+\.\d+\.\d+$/.test(ref)) usage(`--ref expects a stable release tag like v1.2.3, got "${ref}"`);
       const only = argValue(args, "engine");
       const names = only ? [only] : Object.keys(config.engines);
       const fetchFile = async (url: string) => {
@@ -1292,7 +2249,7 @@ async function dispatch(argv: string[]): Promise<void> {
       };
       for (const n of names) {
         const pin = config.engines[n];
-        const r = await vendorEngine(root, config, n, ref, fetchFile, pin ? releaseCommit(pin.repo, ref) : undefined);
+        const r = await vendorEngine(root, config, n, ref, fetchFile, pin ? await tagCommit(pin.repo, ref) : undefined);
         for (const w of r.written) process.stdout.write(`  wrote ${relative(root, w)}\n`);
         if (r.errors.length) {
           for (const e of r.errors) process.stderr.write(`webindex: ${e}\n`);
@@ -1416,8 +2373,6 @@ async function dispatch(argv: string[]): Promise<void> {
       }
       return;
     }
-
-    usage("usage: webindex skill check|bundle|vendor|copy|doctor|init");
   }
 
   if (cmd === "doctor") {
@@ -1425,18 +2380,83 @@ async function dispatch(argv: string[]): Promise<void> {
     const sx = searxngBase();
     const ol = ollamaBase();
     const qd = qdrantBase();
-    const [fc, sxUp, olUp, qdUp] = await Promise.all([base ? probeFirecrawl(base) : false, sx ? probeSearxng(sx) : false, probeOllama(ol), probeQdrant(qd)]);
+    const pdfRungs = enabledExtractors();
+    const docRungs = enabledDocExtractors();
+    // The npx rungs are asked whether npm already holds them, never told to
+    // install: doctor must not download 10 MB to say what a run would do.
+    const cacheState = (id: string, spec: string) =>
+      (pdfRungs as string[]).includes(id) || (docRungs as string[]).includes(id) ? npxCacheState(spec) : undefined;
+    const [fc, sxUp, olUp, qdUp, inspectorCache, anydocCache, ocr] = await Promise.all([
+      base ? probeFirecrawl(base) : false,
+      sx ? probeSearxng(sx, searxngIsExplicit()) : false,
+      probeOllama(ol),
+      probeQdrant(qd),
+      cacheState("pdf-inspector", PDF_INSPECTOR_SPEC),
+      cacheState("anydoc", ANYDOC_SPEC),
+      ocrTools(),
+    ]);
     const off = (s: string) => s.toLowerCase() === "off";
-    const ocr = await ocrTools();
+    const npxRung = (state: Awaited<ReturnType<typeof npxCacheState>> | undefined) =>
+      state === "cached"
+        ? "installed (npx cache)"
+        : state === "not cached"
+          ? "downloads on first use (npx)"
+          : state === "no npx"
+            ? "npx not found"
+            : "runs through npx";
+    // What each rung will actually do here — not merely that it is enabled.
+    const rungState = (id: string): string => {
+      if (id === "pdf-inspector") return npxRung(inspectorCache);
+      if (id === "anydoc") return npxRung(anydocCache);
+      if (id === "firecrawl") return base ? (fc ? `answering at ${base}` : `not reachable at ${base}`) : "disabled";
+      if (id === "pdftotext") return have("pdftotext") ? "installed" : "not installed";
+      if (id === "ocr") {
+        if (ocrBudgetLeft() <= 0) return `off (${envName("OCR_MAX")}=${env("OCR_MAX")})`;
+        return ocr.copyablePdf && ocr.tesseract
+          ? "available"
+          : `unavailable (copyable-pdf: ${ocr.copyablePdf ? "yes" : "no"}, tesseract: ${ocr.tesseract ? "yes" : "no"})`;
+      }
+      if (id === "builtin") return "built-in (OOXML and OpenDocument)";
+      return "built-in";
+    };
+    // The ladder in the order it runs, then the rungs the environment switched
+    // off, with the variable that did it.
+    const rungRows = (all: readonly string[], enabled: readonly string[], engineVar: string) => {
+      const why = env(engineVar)?.trim() ? `${envName(engineVar)}=${env(engineVar)!.trim()}` : envName("NO_NPX");
+      return [
+        ...enabled.map((id) => ({ id, enabled: true, state: rungState(id) })),
+        ...all.filter((id) => !enabled.includes(id)).map((id) => ({ id, enabled: false, state: `off (${why})` })),
+      ];
+    };
+    const pdf = rungRows(PDF_EXTRACTORS, pdfRungs, "PDF_ENGINE");
+    const doc = rungRows(DOC_EXTRACTORS, docRungs, "DOC_ENGINE");
+    if (argBool(args, "json")) {
+      const service = (base: string | null | undefined, up: boolean, extra: Record<string, string> = {}) =>
+        base ? { state: up ? "answering" : "unreachable", base, ...(up ? extra : {}) } : { state: "disabled" };
+      process.stdout.write(
+        jsonLine({
+          version: ENGINE_VERSION,
+          services: {
+            searxng: service(sx, sxUp),
+            firecrawl: service(base, fc),
+            ollama: service(off(ol) ? undefined : ol, olUp, { model: embedModel() }),
+            qdrant: service(off(qd) ? undefined : qd, qdUp),
+          },
+          rungs: { pdf, doc },
+        }),
+      );
+      return;
+    }
+    const rungLines = (label: string, rows: { id: string; state: string }[]) =>
+      rows.map(({ id, state }, i) => `  ${(i ? "" : label).padEnd(12)}${id.padEnd(15)}${state}`);
     const lines = [
       `webindex ${ENGINE_VERSION}`,
       `  searxng     ${sx ? (sxUp ? `answering at ${sx}` : `not reachable at ${sx} — \`webindex searxng up\` starts it`) : "disabled"}`,
       `  firecrawl   ${base ? (fc ? `answering at ${base}` : `not reachable at ${base} — the built-in extractor is used instead`) : "disabled"}`,
       `  ollama      ${off(ol) ? "disabled" : olUp ? `answering at ${ol} (model ${embedModel()})` : `not reachable at ${ol} — \`webindex semantic up\` starts it`}`,
       `  qdrant      ${off(qd) ? "disabled" : qdUp ? `answering at ${qd}` : `not reachable at ${qd} — \`webindex semantic up\` starts it`}`,
-      `  pdf rungs   ${enabledExtractors().join(", ")}`,
-      `  doc rungs   ${enabledDocExtractors().join(", ") || "none (disabled)"}`,
-      `  ocr         ${ocr.copyablePdf && ocr.tesseract ? "available" : `unavailable (copyable-pdf: ${ocr.copyablePdf ? "yes" : "no"}, tesseract: ${ocr.tesseract ? "yes" : "no"})`}`,
+      ...rungLines("pdf rungs", pdf),
+      ...rungLines("doc rungs", doc),
       "",
       "  Everything optional degrades to a note — nothing above is required, and none of it needs a key.",
     ];
@@ -1447,9 +2467,36 @@ async function dispatch(argv: string[]): Promise<void> {
   fail(`unknown command "${cmd}" — run \`webindex --help\``);
 }
 
+/**
+ * Whether node was started with THIS file, under whatever name it has.
+ *
+ * isInvokedDirectly() matches the basename against the brand, which covers the
+ * installed `webindex`, a Homebrew symlink and an npm shim — but a release
+ * asset saved as `webindex-1.20.0.mjs` matched nothing, and running it printed
+ * nothing and exited 0. The module's own URL against the started file's real
+ * path answers for any name, and is still false when the file is imported.
+ */
+function isStartedFile(): boolean {
+  try {
+    return !!process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
 // Only when run as a program. Importing this module must not start anything —
 // the skill-bundle gate imports the built artifact to read its flag tables.
-if (isInvokedDirectly()) {
+if (isInvokedDirectly() || isStartedFile()) {
+  // A reader that stops early — `webindex extract big.pdf | head -1` — closes
+  // the pipe, and the next write fails with EPIPE. That is the reader's answer,
+  // not a failure of ours: stop quietly, as `cat` does, rather than end in a
+  // Node stack trace printed over the output that was asked for.
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on("error", (e: NodeJS.ErrnoException) => {
+      if (e.code === "EPIPE") process.exit(EXIT_OK);
+      throw e;
+    });
+  }
   main().catch((e) => {
     process.stderr.write(`webindex: ${(e as Error).message}\n`);
     process.exit(EXIT_FAILURE);

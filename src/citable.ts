@@ -11,12 +11,34 @@
 // DOI, an arXiv id, a PMID — so any API payload that names its own document
 // resolves without the engine knowing the API exists.
 
-// Hosts that only ever serve machine payloads.
-const API_HOSTS = new Set(["eutils.ncbi.nlm.nih.gov", "api.crossref.org", "api.openalex.org", "api.semanticscholar.org", "export.arxiv.org"]);
+// Hosts that only ever serve machine payloads — the scholarly APIs, and the
+// registry and forge APIs this engine calls itself.
+const API_HOSTS = new Set([
+  "eutils.ncbi.nlm.nih.gov",
+  "api.crossref.org",
+  "api.openalex.org",
+  "api.semanticscholar.org",
+  "export.arxiv.org",
+  "api.github.com",
+  "registry.npmjs.org",
+  "api.stackexchange.com",
+]);
 // Hosts that serve BOTH pages and an API, so only the API path counts.
 // An /api/ prefix also hosts HTML reference pages (for example Node.js docs).
 // Keep machine host/format checks; the prefix alone must not reject HTML.
-const API_PATHS = [/^\/europepmc\/webservices\//i, /^\/search\/publ\/api/i, /^\/api\/(?!.*\.html?$)/i, /\.(fcgi|cgi)$/i];
+//
+// Not a `.cgi` suffix on its own: Bugzilla's show_bug.cgi, man.cgi and gitweb
+// are how those sites serve PEOPLE, and are the citation in a bug hunt. NCBI's
+// eutils keep their own rule; a CGI asked for XML or JSON is caught by the
+// format test below.
+const API_PATHS = [
+  /^\/europepmc\/webservices\//i,
+  /^\/search\/publ\/api/i,
+  /^\/api\/(?!.*\.html?$)/i,
+  /^\/entrez\/eutils\//i,
+  /^\/pypi\/[^/]+(?:\/[^/]+)?\/json\/?$/i,
+  /^\/wayback\/available\b/i,
+];
 // Payload formats nobody reads in a browser.
 const API_FORMATS = /[?&](format|retmode|rettype|output)=(json|xml|text|atom|csv|bibtex)\b/i;
 
@@ -73,8 +95,11 @@ export function isCitableUrl(url: string): boolean {
 // matters: "doi: 10.1126/science.aad5227." would otherwise carry the sentence's
 // full stop into the URL.
 const DOI_RE = /\b(10\.\d{4,9}\/[^\s"'<>()[\],;]+)/;
-const ARXIV_RE = /\barxiv[:\s/]+((?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?\/\d{7})(?:v\d+)?)/i;
+// "arXiv:2408.05636", and — the commonest way a payload names one — a link to
+// arxiv.org/abs/… or /pdf/…, old-style ids (hep-th/9901001) included.
+const ARXIV_RE = /\barxiv(?:\.org\/(?:abs|pdf)\/|[:\s/]+)((?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?\/\d{7})(?:v\d+)?)/i;
 const PMID_RE = /\bPMID:?\s*(\d{4,9})\b/i;
+const PMCID_RE = /\b(PMC\d{5,9})\b/;
 
 // An arXiv identifier as it appears as a whole PATH SEGMENT (…/2408.05636,
 // …/2408.05636v2). Deliberately host-independent — this is the identifier's
@@ -104,7 +129,7 @@ export function urlDeclaresIdentity(url: string): boolean {
  *
  *   1. the canonical link the page declares (`<link rel=canonical>` / `og:url`),
  *   2. a DOI — the identifier publishers agree on,
- *   3. an arXiv id, 4. a PMID.
+ *   3. an arXiv id, 4. a PMID, 5. a PMC id.
  *
  * Returns undefined when the payload names no document, which is the honest
  * answer: the caller then refuses or asks the agent for the page.
@@ -123,6 +148,9 @@ export function deriveCitableUrl(text: string, canonical?: string): string | und
 
   const pmid = head.match(PMID_RE)?.[1];
   if (pmid) return `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`;
+
+  const pmcid = head.match(PMCID_RE)?.[1];
+  if (pmcid) return `https://pmc.ncbi.nlm.nih.gov/articles/${pmcid}/`;
 
   return undefined;
 }

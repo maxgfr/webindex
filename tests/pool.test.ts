@@ -58,6 +58,40 @@ describe("mapLimit", () => {
     expect(await mapLimit([1, 2], 0, async (n) => n)).toEqual([1, 2]);
   });
 
+  it("treats a width that is not a number as 1, rather than doing nothing", async () => {
+    // Math.max(1, NaN) is NaN: no workers were started and the call resolved
+    // to an array of holes, with fn never called.
+    for (const width of [Number.NaN, Number("ten"), Number.POSITIVE_INFINITY, -3]) {
+      let calls = 0;
+      const out = await mapLimit([1, 2, 3], width, async (n) => {
+        calls++;
+        return n * 2;
+      });
+      expect(out, String(width)).toEqual([2, 4, 6]);
+      expect(calls, String(width)).toBe(3);
+    }
+  });
+
+  it("stops claiming items once one has rejected", async () => {
+    // The caller has already been handed the rejection; running fn on every
+    // remaining item — network requests, in practice — is work nobody reads.
+    const started: number[] = [];
+    await expect(
+      mapLimit(
+        Array.from({ length: 10 }, (_, i) => i),
+        3,
+        async (n) => {
+          started.push(n);
+          await new Promise((r) => setTimeout(r, n === 0 ? 1 : 20));
+          if (n === 0) throw new Error("first");
+          return n;
+        },
+      ),
+    ).rejects.toThrow("first");
+    await new Promise((r) => setTimeout(r, 80));
+    expect(started).toEqual([0, 1, 2]);
+  });
+
   it("rejects the whole call when an item throws, like Promise.all", async () => {
     await expect(
       mapLimit([1, 2, 3], 2, async (n) => {

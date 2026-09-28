@@ -67,6 +67,48 @@ describe("notifications", () => {
     expect(await call(rpc("ping", {}, 7), server)).toMatchObject({ id: 7, result: {} });
   });
 
+  it("aborts the signal the tool was handed, so the work stops and not only the answer", async () => {
+    // Suppressing the response left the fetch, the crawl or the search running
+    // to its own budget for a client that had already moved on.
+    let seen: AbortSignal | undefined;
+    const server = createServer(
+      testAdapter({
+        callTool: (_name, _args, ctx) =>
+          new Promise((resolve) => {
+            seen = ctx!.signal;
+            ctx!.signal.addEventListener("abort", () => resolve({ text: "stopped" }));
+          }),
+      }),
+    );
+    const pending = call(rpc("tools/call", { name: "probe_echo", arguments: { text: "hi" } }, 8), server);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(seen?.aborted).toBe(false);
+    await call({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 8, reason: "user" } }, server);
+    expect(seen?.aborted).toBe(true);
+    expect(await pending).toBeUndefined();
+  });
+
+  it("aborts it too when the transport loses the request", async () => {
+    let seen: AbortSignal | undefined;
+    const server = createServer(
+      testAdapter({
+        callTool: (_name, _args, ctx) =>
+          new Promise((resolve) => {
+            seen = ctx!.signal;
+            ctx!.signal.addEventListener("abort", () => resolve({ text: "stopped" }));
+          }),
+      }),
+    );
+    const lost = new AbortController();
+    const out: JsonRpcMessage[] = [];
+    const pending = server.handle(rpc("tools/call", { name: "probe_echo", arguments: { text: "hi" } }, 9), (m) => void out.push(m), { signal: lost.signal });
+    await new Promise((r) => setTimeout(r, 5));
+    lost.abort();
+    await pending;
+    expect(seen?.aborted).toBe(true);
+    expect(out).toEqual([]);
+  });
+
   it("ignores unknown and already-completed cancellation ids", async () => {
     const server = createServer(testAdapter());
     for (const id of [7, "ghost"]) {
@@ -75,6 +117,70 @@ describe("notifications", () => {
       await call({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id } }, server);
       expect(await call(rpc("ping", {}, id), server)).toMatchObject({ id, result: {} });
     }
+  });
+});
+
+describe("progress", () => {
+  const reporting = () =>
+    createServer(
+      testAdapter({
+        callTool: async (_name, _args, ctx) => {
+          ctx!.progress(1, 3, "first page");
+          ctx!.progress(1, 3, "not forward: dropped");
+          ctx!.progress(2);
+          return { text: "done" };
+        },
+      }),
+    );
+  const withToken = (token: unknown, id = 1) => rpc("tools/call", { name: "probe_echo", arguments: { text: "x" }, _meta: { progressToken: token } }, id);
+
+  it("sends notifications/progress for a request that asked with a progressToken, and only forward", async () => {
+    const server = reporting();
+    const replies: JsonRpcMessage[] = [];
+    const notes: JsonRpcMessage[] = [];
+    await server.handle(withToken("tok"), (m) => void replies.push(m), { notify: (m) => void notes.push(m) });
+    expect(notes).toEqual([
+      { jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: "tok", progress: 1, total: 3, message: "first page" } },
+      { jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: "tok", progress: 2 } },
+    ]);
+    expect(replies).toHaveLength(1);
+  });
+
+  it("sends them through `send` when the transport names no other channel", async () => {
+    const server = reporting();
+    const all: JsonRpcMessage[] = [];
+    await server.handle(withToken(7), (m) => void all.push(m));
+    expect(all.map((m) => m.method ?? "reply")).toEqual(["notifications/progress", "notifications/progress", "reply"]);
+  });
+
+  it("leaves out the message for a 2024-11-05 client, whose notification has none", async () => {
+    const server = reporting();
+    await call(rpc("initialize", { protocolVersion: "2024-11-05" }), server);
+    const notes: JsonRpcMessage[] = [];
+    await server.handle(withToken("tok"), () => {}, { notify: (m) => void notes.push(m) });
+    expect((notes[0]!.params as any).message).toBeUndefined();
+  });
+
+  it("sends nothing to a request that did not ask", async () => {
+    const all: JsonRpcMessage[] = [];
+    await reporting().handle(rpc("tools/call", { name: "probe_echo", arguments: { text: "x" } }), (m) => void all.push(m));
+    expect(all.map((m) => m.method ?? "reply")).toEqual(["reply"]);
+  });
+
+  it("sends nothing once the call was answered", async () => {
+    let late!: () => void;
+    const server = createServer(
+      testAdapter({
+        callTool: async (_name, _args, ctx) => {
+          late = () => ctx!.progress(5);
+          return { text: "done" };
+        },
+      }),
+    );
+    const all: JsonRpcMessage[] = [];
+    await server.handle(withToken("tok"), (m) => void all.push(m));
+    late();
+    expect(all).toHaveLength(1);
   });
 });
 
@@ -190,6 +296,35 @@ describe("malformed input", () => {
     }
   });
 
+  it("never answers a response", async () => {
+    // The server sends no requests, so a response is not addressed to it — and
+    // answering one with an error under the same id would reach the client as
+    // the reply to ITS request of that id.
+    expect(await call({ jsonrpc: "2.0", id: 10, result: {} })).toBeUndefined();
+    expect(await call({ jsonrpc: "2.0", id: 11, error: { code: -1, message: "no" } })).toBeUndefined();
+  });
+
+  it("rejects an id that is neither a string nor a number, answering with a null id", async () => {
+    // Echoing `true` or an object back as the id is not a JSON-RPC response at all.
+    for (const id of [true, { a: 1 }, [1]]) {
+      const r = await call({ jsonrpc: "2.0", id, method: "ping" } as unknown as JsonRpcMessage);
+      expect(r, JSON.stringify(id)).toMatchObject({ id: null, error: { code: -32600 } });
+    }
+  });
+
+  it("rejects a request without a method as invalid, not as an unknown method", async () => {
+    const r = await call({ jsonrpc: "2.0", id: 9 });
+    expect(r).toMatchObject({ id: 9, error: { code: -32600 } });
+  });
+
+  it("rejects tool arguments that are not an object", async () => {
+    for (const args of ["text=hi", ["hi"], 7]) {
+      const r = await call(rpc("tools/call", { name: "probe_echo", arguments: args }));
+      expect(r!.error, JSON.stringify(args)).toMatchObject({ code: -32602 });
+      expect((r!.error as any).message).toMatch(/`arguments` must be an object/);
+    }
+  });
+
   it("reports an unknown method", async () => {
     const r = await call(rpc("does/not/exist"));
     expect(r!.error).toMatchObject({ code: -32601 });
@@ -198,5 +333,60 @@ describe("malformed input", () => {
   it("requires a uri for resources/read", async () => {
     const r = await call(rpc("resources/read", {}));
     expect(r!.error).toMatchObject({ code: -32602 });
+  });
+
+  it("answers resources/templates/list, which the resources capability covers, with none", async () => {
+    // Clients probe it as soon as `resources` is declared; "method not found"
+    // there reads as a broken server.
+    expect(await call(rpc("resources/templates/list"))).toMatchObject({ result: { resourceTemplates: [] } });
+  });
+});
+
+describe("version-gated tool fields", () => {
+  // An adapter that declares every field whatever the client negotiated: the
+  // server, not each adapter, is where the revision a field needs is known.
+  const eager = () =>
+    createServer(
+      testAdapter({
+        listTools: () => [
+          {
+            name: "probe_echo",
+            title: "Echo",
+            description: "Echo the text back.",
+            inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+            outputSchema: { type: "object", properties: {}, required: [] },
+            annotations: { readOnlyHint: true },
+          },
+        ],
+      }),
+    );
+  const echoOn = async (version: string) => {
+    const server = eager();
+    await call(rpc("initialize", { protocolVersion: version }), server);
+    return ((await call(rpc("tools/list"), server))!.result as any).tools[0];
+  };
+
+  it("sends none of them to a 2024-11-05 client", async () => {
+    expect(await echoOn("2024-11-05")).toEqual({
+      name: "probe_echo",
+      description: "Echo the text back.",
+      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+    });
+  });
+
+  it("sends annotations, carrying the title, to a 2025-03-26 client", async () => {
+    // `title` and `outputSchema` arrived in 2025-06-18; `annotations.title` in
+    // 2025-03-26, so that is where an older client can still read the name.
+    const echo = await echoOn("2025-03-26");
+    expect(echo.title).toBeUndefined();
+    expect(echo.outputSchema).toBeUndefined();
+    expect(echo.annotations).toEqual({ title: "Echo", readOnlyHint: true });
+  });
+
+  it("sends every field from 2025-06-18 on", async () => {
+    const echo = await echoOn(LATEST_PROTOCOL);
+    expect(echo.title).toBe("Echo");
+    expect(echo.outputSchema).toBeDefined();
+    expect(echo.annotations).toEqual({ title: "Echo", readOnlyHint: true });
   });
 });

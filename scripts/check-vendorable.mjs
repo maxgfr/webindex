@@ -24,11 +24,16 @@ const src = readFileSync(join(scriptsDir, "engine.mjs"), "utf8");
 
 // Static `import ... from "x"`, side-effect `import "x"`, and re-exports.
 const SPECIFIER_RE = /(?:^|\n)\s*(?:import|export)\b[^'"\n]*?["']([^"']+)["']/g;
+// And the ones inside functions: `await import("x")` and `require("x")`. The
+// bundle loads node:http this way, only when the MCP HTTP transport starts, and
+// a dynamic import of a package would break a consumer exactly as a static one
+// does — just later, and only on the path that reaches it.
+const DYNAMIC_RE = /\b(?:import|require)\(\s*["']([^"']+)["']\s*\)/g;
 const builtins = new Set(builtinModules);
 
 const offenders = new Set();
 const seen = new Set();
-for (const m of src.matchAll(SPECIFIER_RE)) {
+for (const m of [...src.matchAll(SPECIFIER_RE), ...src.matchAll(DYNAMIC_RE)]) {
   const spec = m[1];
   seen.add(spec);
   const bare = spec.startsWith("node:") ? spec.slice(5) : spec;

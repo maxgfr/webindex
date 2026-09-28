@@ -1,9 +1,10 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BOOL_FLAGS, HELP, main, VALUE_FLAGS, webindexAdapter } from "../src/cli.js";
+import { BOOL_FLAGS, COMMANDS, HELP, main, VALUE_FLAGS, webindexAdapter } from "../src/cli.js";
 import { documentedFlags, missingFromHelp } from "../src/cli-kit.js";
 import { createServer, ToolError } from "../src/mcp/server.js";
 import { LATEST_PROTOCOL } from "../src/mcp/protocol.js";
@@ -11,6 +12,9 @@ import { STACK_SERVICES } from "../src/stack.js";
 import { installFetchMock, routes } from "./fetchmock.js";
 import { envName } from "../src/brand.js";
 import { resetOllamaProbe } from "../src/embed.js";
+import { resetCacheMode } from "../src/cache.js";
+import { resetHaveCache } from "../src/exec.js";
+import { resetSearxngProbeCache } from "../src/search.js";
 
 // Every stack service the engine knows, except `all` — the CLI spells that one
 // `stack`. Derived rather than typed out, because a hand-written list is exactly
@@ -45,6 +49,11 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  // `fetch --refresh/--offline` set process-wide cache switches.
+  resetCacheMode();
+  // A "no embedding server" verdict stands for 30 s; a case that met one must
+  // not hand it to the next.
+  resetOllamaProbe();
   rmSync(dir, { recursive: true, force: true });
 });
 afterAll(() => vi.restoreAllMocks());
@@ -69,6 +78,16 @@ async function run(argv: string[]): Promise<number> {
   }
 }
 
+/** A fetch that never answers, and rejects only once the caller's signal fires. */
+function hangingFetch() {
+  return vi.fn(
+    (_input: unknown, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" })));
+      }),
+  );
+}
+
 // The article exceeds 30% of the visible page, so main-content isolation wins.
 const articlePage = (consent = "") =>
   `<nav><a href="/">Home</a> <a href="/about">About</a></nav><article><h1>Rate limiting</h1><p>Token buckets smooth bursts. This sentence pads the article so the region is not tiny.</p>${consent}<p>Second paragraph with more words to pass the size gate of extractMainHtml.</p></article><footer>© Example</footer>`;
@@ -88,6 +107,37 @@ describe("help and version", () => {
       shapes.push(stdout());
     }
     expect(new Set(shapes).size).toBe(1);
+  });
+
+  it("answers `<command> --help` with that command's usage and description", async () => {
+    expect(await run(["fetch", "--help"])).toBe(0);
+    const help = stdout();
+    expect(help).toMatch(/^\s+webindex fetch <url>/m);
+    expect(help).toMatch(/Fetch a URL and print the extracted text/);
+    // Not every other command's, and not the environment table.
+    expect(help).not.toMatch(/webindex search </);
+    expect(help).not.toMatch(/ENVIRONMENT/);
+    expect(help).toMatch(/webindex --help/);
+  });
+
+  it.each([
+    ["fetch", ["--full-page", "--format markdown"]],
+    ["extract", ["--full-page", "--format markdown"]],
+  ])("explains in `%s --help` what its own flags do, not only in another command's paragraph", async (cmd, flags) => {
+    // --full-page was explained only under extract ("For both, …"), so
+    // `fetch --help` listed it in the usage line and never said what it did.
+    expect(await run([cmd, "--help"])).toBe(0);
+    const described = stdout().split("\n\n")[2] ?? "";
+    for (const flag of flags) expect(described, flag).toContain(flag);
+  });
+
+  it("gives every command a help of its own", async () => {
+    for (const cmd of [...SERVICE_ROUTES, "search", "prs", "stack", "skill", "doctor", "hybrid"]) {
+      out = [];
+      expect(await run([cmd, "--help"]), cmd).toBe(0);
+      expect(stdout(), cmd).toMatch(new RegExp(`^\\s+webindex ${cmd}\\b`, "m"));
+      expect(stdout().split("\n").length, cmd).toBeLessThan(40);
+    }
   });
 
   it("prints a bare semver for version", async () => {
@@ -110,6 +160,7 @@ describe("help and version", () => {
       "issues",
       "prs",
       "releases",
+      "tags",
       "package",
       "meta",
       "robots",
@@ -174,12 +225,37 @@ describe("search", () => {
     await run(["search", "q", "--json", "--searxng", "http://sxcli3.test"]);
     const parsed = JSON.parse(stdout());
     expect(parsed.hits[0]).toMatchObject({ url: "https://a.test/1", via: "searxng" });
+    // What each rung did, for a script that must tell "blocked" from "empty".
+    expect(parsed.searched).toBe(true);
+    expect(parsed.rungs[0]).toEqual({ rung: "searxng", outcome: "hits", hits: 1 });
   });
 
   it("exits non-zero when it found nothing, so a script can tell", async () => {
     up({ results: [] });
     expect(await run(["search", "q", "--searxng", "http://sxcli4.test"])).toBe(1);
     expect(stderr()).toContain("stack up");
+  });
+
+  it("takes --region, and hands SearXNG the language-region pair", async () => {
+    // locale.ts documents `--region wt` as the opt-out, and the CLI rejected
+    // --region as an unknown flag.
+    const spy = up({ results: [] });
+    expect(await run(["search", "q", "--lang", "fr", "--region", "ca", "--searxng", "http://sxcli5.test"])).toBe(1);
+    const asked = spy.mock.calls.map((c) => String(c[0])).find((u) => u.includes("/search?"))!;
+    expect(new URL(asked).searchParams.get("language")).toBe("fr-CA");
+  });
+
+  it("holds the whole search to --timeout", async () => {
+    vi.stubGlobal("fetch", hangingFetch());
+    const t0 = performance.now();
+    try {
+      expect(await run(["search", "q", "--engine", "ddg", "--timeout", "150"])).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(performance.now() - t0).toBeLessThan(3000); // not DuckDuckGo's 12 s
+    expect(stderr()).toMatch(/DuckDuckGo unreachable \(timed out after \d+ ms\)/);
+    expect(await run(["search", "q", "--timeout", "0"])).toBe(2);
   });
 
   it("asks for a query rather than searching for nothing", async () => {
@@ -221,6 +297,37 @@ describe("extract", () => {
     expect(result.text.includes("Accept all cookies")).toBe(fullPage);
     expect(result.text.includes("Manage preferences")).toBe(fullPage);
     expect(result).toMatchObject({ fullPage, consentDropped: fullPage ? 0 : 2 });
+  });
+
+  it("writes Markdown with --format markdown, isolated and consent-filtered like text", async () => {
+    const f = join(dir, "page.html");
+    const extra = '<p>See <a href="https://x.test/ref">the reference</a> and run <code>npm i</code>.</p><p>Accept all cookies</p>';
+    writeFileSync(f, `<html><head><base href="https://docs.test/v1/"></head><body>${articlePage(extra)}<p><a href="guide">Guide</a></p></body></html>`);
+    expect(await run(["extract", f, "--format", "markdown", "--json"])).toBe(0);
+    const result = JSON.parse(stdout());
+    expect(result.text).toContain("# Rate limiting");
+    expect(result.text).toContain("See [the reference](https://x.test/ref) and run `npm i`.");
+    expect(result.text).not.toMatch(/Home|About|Accept all cookies/);
+    expect(result.consentDropped).toBe(1);
+    out = [];
+    // A saved page's own <base href> is the one address it can resolve against.
+    expect(await run(["extract", f, "--format", "markdown", "--full-page"])).toBe(0);
+    expect(stdout()).toContain("[Home](https://docs.test/)");
+    expect(stdout()).toContain("[Guide](https://docs.test/v1/guide)");
+  });
+
+  it("keeps plain text and documents as they are under --format markdown", async () => {
+    const f = join(dir, "notes.txt");
+    writeFileSync(f, "a *literal* note");
+    expect(await run(["extract", f, "--format", "markdown"])).toBe(0);
+    expect(stdout()).toBe("a *literal* note\n");
+  });
+
+  it("refuses a --format it does not know", async () => {
+    const f = join(dir, "page.html");
+    writeFileSync(f, articlePage());
+    expect(await run(["extract", f, "--format", "html"])).toBe(2);
+    expect(stderr()).toMatch(/--format expects text or markdown, got "html"/);
   });
 
   it("isolates main HTML content and reports extraction options in JSON", async () => {
@@ -330,9 +437,133 @@ describe("fetch argument handling", () => {
     }
   });
 
+  it("says on stderr what it had to say about the text it printed", async () => {
+    // The note reached --json and the MCP trailer, and was dropped here: a PDF
+    // link that served a login page printed that page's text as the document.
+    installFetchMock(routes([["x.test/paper.pdf", { body: articlePage(), contentType: "text/html" }]]));
+    try {
+      expect(await run(["fetch", "https://x.test/paper.pdf"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stdout()).toContain("Token buckets");
+    expect(stdout()).not.toMatch(/looked like a PDF/);
+    expect(stderr()).toMatch(/looked like a PDF but the server returned HTML/);
+  });
+
+  it("gives up on a silent host after --timeout, and says so", async () => {
+    vi.stubGlobal("fetch", hangingFetch());
+    try {
+      expect(await run(["fetch", "https://blackhole.test/page", "--timeout", "5"])).toBe(1);
+      expect(stderr()).toMatch(/timed out after 5 ms/);
+      err = [];
+      expect(await run(["changed", "https://blackhole.test/page", "--etag", '"a"', "--timeout", "5"])).toBe(1);
+      expect(stderr()).toMatch(/timed out after 5 ms/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reuses a cached page only when asked to with --cache", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "cache");
+    const spy = installFetchMock(routes([["x.test/page", { body: articlePage(), contentType: "text/html" }]]));
+    try {
+      expect(await run(["fetch", "https://x.test/page"])).toBe(0);
+      expect(await run(["fetch", "https://x.test/page"])).toBe(0);
+      expect(spy).toHaveBeenCalledTimes(2); // opt-in: no flag, no cache
+      expect(await run(["fetch", "https://x.test/page", "--cache"])).toBe(0);
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--cache", "--json"])).toBe(0);
+      expect(spy).toHaveBeenCalledTimes(3);
+      expect(JSON.parse(stdout())).toMatchObject({ cached: true });
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--refresh", "--json"])).toBe(0);
+      expect(spy).toHaveBeenCalledTimes(4);
+      expect(JSON.parse(stdout())).toMatchObject({ cached: false });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("serves only what the cache holds with --offline", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "cache");
+    const spy = installFetchMock(routes([["x.test/page", { body: articlePage(), contentType: "text/html" }]]));
+    try {
+      expect(await run(["fetch", "https://x.test/other", "--offline"])).toBe(1);
+      expect(stderr()).toMatch(/not in the cache/);
+      expect(spy).not.toHaveBeenCalled();
+      expect(await run(["fetch", "https://x.test/page", "--cache"])).toBe(0);
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--offline"])).toBe(0);
+      expect(stdout()).toContain("Token buckets");
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(await run(["fetch", "https://x.test/page", "--offline", "--refresh"])).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("says where the text came from after redirects, and what the page calls itself", async () => {
+    const body = `<html><head><link rel="canonical" href="https://x.test/canonical"></head><body>${articlePage()}</body></html>`;
+    installFetchMock(() => ({ body, contentType: "text/html", url: "https://x.test/final" }));
+    try {
+      expect(await run(["fetch", "https://x.test/start", "--json"])).toBe(0);
+      expect(JSON.parse(stdout())).toMatchObject({ url: "https://x.test/start", finalUrl: "https://x.test/final", canonical: "https://x.test/canonical" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("prints Markdown with --format markdown, links absolute against the page's address", async () => {
+    const body = articlePage('<p>Read <a href="/docs/limits">the limits</a>.</p>');
+    installFetchMock(() => ({ body, contentType: "text/html", url: "https://x.test/blog/post" }));
+    try {
+      expect(await run(["fetch", "https://x.test/start", "--format", "markdown"])).toBe(0);
+      expect(stdout()).toContain("# Rate limiting");
+      expect(stdout()).toContain("Read [the limits](https://x.test/docs/limits).");
+      out = [];
+      expect(await run(["fetch", "https://x.test/start", "--format", "text"])).toBe(0);
+      expect(stdout()).toContain("Read the limits.");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(await run(["fetch", "https://x.test/start", "--format", "md"])).toBe(2);
+    expect(stderr()).toMatch(/--format expects text or markdown, got "md"/);
+  });
+
+  it("caches a Markdown read apart from a text one", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "cache");
+    const spy = installFetchMock(routes([["x.test/page", { body: articlePage("<p>A <em>point</em>.</p>"), contentType: "text/html" }]]));
+    try {
+      expect(await run(["fetch", "https://x.test/page", "--cache"])).toBe(0);
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--cache", "--format", "markdown", "--json"])).toBe(0);
+      expect(JSON.parse(stdout())).toMatchObject({ cached: false });
+      expect(JSON.parse(stdout()).text).toContain("A *point*.");
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--offline", "--format", "markdown"])).toBe(0);
+      expect(stdout()).toContain("A *point*.");
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("refuses a --timeout that is not a positive whole number", async () => {
+    expect(await run(["fetch", "https://x.test/page", "--timeout", "0"])).toBe(2);
+    expect(await run(["fetch", "https://x.test/page", "--timeout", "soon"])).toBe(2);
+  });
+
   it("refuses a non-http argument rather than guessing", async () => {
     expect(await run(["fetch", "example.com"])).toBe(1);
     expect(stderr()).toMatch(/http\(s\) URL/);
+  });
+
+  it("points a file on disk at extract", async () => {
+    const path = join(dir, "page.html");
+    writeFileSync(path, "<p>hi</p>");
+    expect(await run(["fetch", path])).toBe(1);
+    expect(stderr()).toMatch(/`webindex extract/);
   });
 
   it("needs a url", async () => {
@@ -346,6 +577,132 @@ describe("fetch argument handling", () => {
   });
 });
 
+describe("fetch with several URLs", () => {
+  const page = (marker: string) => articlePage(`<p>Marker ${marker}.</p>`);
+  const letter = (url: string) => url.slice(-1);
+  /** A fetch that answers after `delay(url)` ms, counting how many are in flight at once. */
+  const timedFetch = (delay: (url: string) => number, status: (url: string) => number = () => 200) => {
+    const seen = { inFlight: 0, peak: 0 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        seen.peak = Math.max(seen.peak, ++seen.inFlight);
+        await new Promise((r) => setTimeout(r, delay(url)));
+        seen.inFlight--;
+        const code = status(url);
+        return new Response(code === 200 ? page(letter(url)) : "gone", { status: code, headers: { "content-type": "text/html" } });
+      }),
+    );
+    return seen;
+  };
+
+  it("prints each page under its own header, in the order given however they finish", async () => {
+    timedFetch((url) => (url.endsWith("/a") ? 40 : 0));
+    try {
+      expect(await run(["fetch", "https://x.test/a", "https://x.test/b", "https://x.test/c"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    const o = stdout();
+    expect(o.startsWith("==> https://x.test/a <==\n")).toBe(true);
+    const at = (s: string) => o.indexOf(s);
+    expect(at("Marker a")).toBeLessThan(at("\n\n==> https://x.test/b <==\n"));
+    expect(at("Marker b")).toBeLessThan(at("\n\n==> https://x.test/c <==\n"));
+    expect(o).toContain("Marker c");
+    expect(o.match(/^==> /gm)).toHaveLength(3);
+  });
+
+  it("answers --json with an array, one entry per URL in order, the failures included", async () => {
+    timedFetch(
+      () => 0,
+      (url) => (url.endsWith("/b") ? 404 : 200),
+    );
+    try {
+      expect(await run(["fetch", "https://x.test/a", "https://x.test/b", "--json", "--format", "markdown"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    const results = JSON.parse(stdout());
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({ url: "https://x.test/a", status: 200, fullPage: false });
+    expect(results[0].text).toContain("Marker a");
+    expect(results[1]).toMatchObject({ url: "https://x.test/b", status: 404, text: "", chars: 0 });
+    expect(results[1].note).toMatch(/Could not fetch/);
+  });
+
+  it("names each failure on stderr, and succeeds when any page was read", async () => {
+    timedFetch(
+      () => 0,
+      (url) => (url.endsWith("/b") ? 404 : 200),
+    );
+    try {
+      expect(await run(["fetch", "https://x.test/a", "https://x.test/b"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stdout()).toContain("Marker a");
+    expect(stdout()).not.toContain("https://x.test/b");
+    expect(stderr()).toMatch(/nothing readable at https:\/\/x\.test\/b — Could not fetch/);
+  });
+
+  it("fails when every URL failed, naming each", async () => {
+    timedFetch(
+      () => 0,
+      () => 404,
+    );
+    try {
+      expect(await run(["fetch", "https://x.test/a", "https://x.test/b"])).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stdout()).toBe("");
+    expect(stderr()).toMatch(/nothing readable at https:\/\/x\.test\/a/);
+    expect(stderr()).toMatch(/nothing readable at https:\/\/x\.test\/b/);
+    expect(stderr()).toMatch(/none of the 2 URLs/);
+  });
+
+  it.each([
+    [undefined, 4],
+    ["2", 2],
+  ])("keeps at most %s (default 4) in flight", async (width, peak) => {
+    if (width) process.env[envName("FETCH_CONCURRENCY")] = width;
+    const seen = timedFetch(() => 15);
+    try {
+      expect(await run(["fetch", ...["a", "b", "c", "d", "e", "f"].map((l) => `https://x.test/${l}`), "--json"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(seen.peak).toBe(peak);
+    expect(JSON.parse(stdout()).map((r: { url: string }) => r.url)).toEqual(["a", "b", "c", "d", "e", "f"].map((l) => `https://x.test/${l}`));
+  });
+
+  it("refuses the whole list, before fetching anything, when one is not an http(s) URL", async () => {
+    const seen = timedFetch(() => 0);
+    try {
+      expect(await run(["fetch", "https://x.test/a", "example.com"])).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stderr()).toMatch(/fetch needs an http\(s\) URL, got "example\.com"/);
+    expect(seen.peak).toBe(0);
+  });
+
+  it("prints a single page exactly as it always did: no header, an object for --json", async () => {
+    timedFetch(() => 0);
+    try {
+      expect(await run(["fetch", "https://x.test/a"])).toBe(0);
+      expect(stdout()).not.toContain("==>");
+      expect(stdout().startsWith("# Rate limiting\n")).toBe(true);
+      out = [];
+      expect(await run(["fetch", "https://x.test/a", "--json"])).toBe(0);
+      expect(Array.isArray(JSON.parse(stdout()))).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("doctor", () => {
   it("reports every optional helper without needing any of them", async () => {
     process.env.WEBINDEX_TEST_FIRECRAWL = "off";
@@ -355,6 +712,73 @@ describe("doctor", () => {
     expect(s).toMatch(/pdf rungs/);
     expect(s).toMatch(/doc rungs/);
     expect(s).toMatch(/ocr/);
+  });
+
+  // It printed the enabled list as "available": pdftotext when it was not
+  // installed, firecrawl when it was unreachable, and nothing about the npx
+  // rungs downloading on first use or failing offline.
+  it("says what each rung will actually do on this machine", async () => {
+    process.env[envName("FIRECRAWL")] = "off";
+    delete process.env[envName("PDF_ENGINE")];
+    delete process.env[envName("DOC_ENGINE")];
+    vi.stubEnv("PATH", join(dir, "no-tools-here"));
+    resetHaveCache();
+    try {
+      expect(await run(["doctor"])).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      resetHaveCache();
+    }
+    const s = stdout();
+    expect(s).toMatch(/pdf rungs {3}pdf-inspector {2}npx not found\n/);
+    expect(s).toMatch(/^ {14}firecrawl {6}disabled$/m);
+    expect(s).toMatch(/^ {14}pdftotext {6}not installed$/m);
+    expect(s).toMatch(/^ {14}native {9}built-in$/m);
+    expect(s).toContain(`ocr            off (${envName("OCR_MAX")}=0)`);
+    expect(s).toMatch(/doc rungs {3}anydoc {9}npx not found\n/);
+    expect(s).toMatch(/^ {14}builtin {8}built-in \(OOXML and OpenDocument\)$/m);
+  });
+
+  it("does not report a notebook server on SearXNG's default port as SearXNG", async () => {
+    // 8888 is Jupyter's default port too. SearXNG's /healthz answers "OK".
+    process.env[envName("FIRECRAWL")] = "off";
+    delete process.env[envName("SEARXNG")];
+    installFetchMock(() => ({ status: 200, body: "<html><title>Jupyter Server</title></html>", contentType: "text/html" }));
+    try {
+      expect(await run(["doctor"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+      resetSearxngProbeCache();
+    }
+    expect(stdout()).toMatch(/searxng {5}not reachable at http:\/\/localhost:8888/);
+  });
+
+  it("answers as JSON on demand: each service and each rung, as data", async () => {
+    // --json was accepted and ignored; a script asking what this machine can
+    // do had to parse the aligned text.
+    process.env[envName("FIRECRAWL")] = "off";
+    process.env[envName("OLLAMA")] = "off";
+    process.env[envName("QDRANT")] = "off";
+    expect(await run(["doctor", "--json"])).toBe(0);
+    const j = JSON.parse(stdout());
+    expect(j.version).toMatch(/^\d+\.\d+\.\d+/);
+    expect(j.services.searxng).toEqual({ state: "disabled" });
+    expect(j.services.firecrawl).toEqual({ state: "disabled" });
+    expect(j.services.ollama).toEqual({ state: "disabled" });
+    expect(j.rungs.pdf).toContainEqual({ id: "native", enabled: true, state: "built-in" });
+    expect(j.rungs.pdf).toContainEqual({ id: "pdf-inspector", enabled: false, state: `off (${envName("PDF_ENGINE")}=native)` });
+    expect(j.rungs.doc.map((r: { id: string }) => r.id)).toEqual(["anydoc", "firecrawl", "builtin"]);
+  });
+
+  it("lists a rung the environment switched off, and which variable did it", async () => {
+    process.env[envName("FIRECRAWL")] = "off";
+    process.env[envName("NO_NPX")] = "1";
+    delete process.env[envName("PDF_ENGINE")];
+    expect(await run(["doctor"])).toBe(0);
+    const s = stdout();
+    expect(s).toContain(`pdf-inspector  off (${envName("NO_NPX")})`);
+    expect(s).toContain(`anydoc         off (${envName("DOC_ENGINE")}=none)`);
+    expect(s).toMatch(/pdf rungs {3}firecrawl/);
   });
 });
 
@@ -400,14 +824,63 @@ describe("unknown input", () => {
     expect(await run(["robots", "https://r.test/public/x"])).toBe(0);
   });
 
+  // A value outside a flag's set is the same mistake as an unknown flag: the
+  // invocation is wrong, and nothing ran. These exited 1 — "ran, and the
+  // answer is a failure" — while --registry and --forge already exited 2.
   it("rejects an unknown mcp transport", async () => {
-    expect(await run(["mcp", "--transport", "carrier-pigeon"])).toBe(1);
+    expect(await run(["mcp", "--transport", "carrier-pigeon"])).toBe(2);
     expect(stderr()).toMatch(/unknown transport/);
   });
 
   it("rejects an out-of-range port", async () => {
-    expect(await run(["mcp", "--transport", "http", "--port", "99999"])).toBe(1);
-    expect(stderr()).toMatch(/invalid --port/);
+    expect(await run(["mcp", "--transport", "http", "--port", "99999"])).toBe(2);
+    expect(stderr()).toMatch(/--port expects a whole number from 0 to 65535/);
+  });
+
+  it("rejects an engine it does not know as a usage error", async () => {
+    expect(await run(["search", "q", "--engine", "altavista"])).toBe(2);
+    expect(stderr()).toMatch(/unknown --engine "altavista"/);
+  });
+
+  it.each([
+    [["search", "q", "--limit", "0"], /--limit expects a whole number of at least 1/],
+    [["search", "q", "--limit", "-1"], /--limit expects a whole number of at least 1/],
+    [["search", "q", "--pages", "0"], /--pages expects a whole number of at least 1/],
+    [["search", "q", "--limit="], /--limit expects a whole number, got ""/],
+    [["rank", "--query", "q", "--limit", "0"], /--limit expects a whole number of at least 1/],
+    [["hybrid", "--query", "q", "--limit", "-2"], /--limit expects a whole number of at least 1/],
+    [["releases", "o/r", "--limit", "0"], /--limit expects a whole number of at least 1/],
+    [["sitemap", "https://s.test/", "--max", "0"], /--max expects a whole number of at least 1/],
+    [["crawl", "https://c.test/", "--max", "5", "--depth", "-1"], /--depth expects a whole number of at least 0/],
+  ])("refuses a budget of nothing rather than quietly answering another question: %j", async (argv, message) => {
+    // The libraries clamp — `--limit 0` came back as one result, `--depth -1`
+    // as the seed alone, `--limit 0` on rank as every document — so each of
+    // these ran to success answering something other than what was asked.
+    expect(await run(argv)).toBe(2);
+    expect(stderr()).toMatch(message);
+  });
+
+  it.each([
+    [["extract", "a.html", "b.html"], /unexpected argument "b\.html"/],
+    [["tables", "https://a.test/", "https://b.test/"], /unexpected argument/],
+    [["package", "hono", "express"], /unexpected argument "express"/],
+    [["issues", "o/r", "rate", "limit"], /--terms/],
+    [["rank", "rate", "limiting", "--query", "q"], /--query/],
+    [["stack", "path", "extra"], /unexpected argument "extra"/],
+    [["doctor", "now"], /unexpected argument "now"/],
+  ])("refuses an argument it would otherwise drop or glue onto another: %j", async (argv, message) => {
+    // `fetch a b` fetched a and dropped b (it fetches both now); `tables a b`
+    // fetched the URL "a b"; `rank rate limiting --query q` ranked against q
+    // and ignored the words that looked like the question.
+    expect(await run(argv)).toBe(2);
+    expect(stderr()).toMatch(message);
+  });
+
+  it("refuses contradictory address policies, and a root that is not a directory", async () => {
+    expect(await run(["mcp", "--public-only", "--allow-private"])).toBe(2);
+    expect(stderr()).toMatch(/contradict/);
+    expect(await run(["mcp", "--extract-root", join(dir, "nope")])).toBe(2);
+    expect(stderr()).toMatch(/--extract-root .* is not a directory/);
   });
 });
 
@@ -442,6 +915,29 @@ describe("the MCP tools", () => {
     }
   });
 
+  it.each(["webindex_fetch", "webindex_extract"])("%s declares an optional format, text or markdown", (name) => {
+    const tool = adapter.listTools(LATEST_PROTOCOL).find((tool) => tool.name === name)!;
+    expect(tool.inputSchema.properties.format).toMatchObject({ type: "string", enum: ["text", "markdown"] });
+    expect(tool.inputSchema.required).not.toContain("format");
+  });
+
+  it.each(["webindex_fetch", "webindex_extract"])("%s answers in Markdown when asked", async (name) => {
+    const path = join(dir, "page.html");
+    const body = articlePage('<p>See <a href="https://x.test/ref">the reference</a>.</p>');
+    writeFileSync(path, body);
+    installFetchMock(routes([["x.test/page", { body, contentType: "text/html" }]]));
+    try {
+      const args = name === "webindex_fetch" ? { url: "https://x.test/page" } : { path };
+      const markdown = await webindexAdapter().callTool(name, { ...args, format: "markdown" });
+      expect(markdown.text).toContain("See [the reference](https://x.test/ref).");
+      const text = await webindexAdapter().callTool(name, { ...args, format: "text" });
+      expect(text.text).toContain("See the reference.");
+      expect(text).toEqual(await webindexAdapter().callTool(name, args));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("declares its tools, each with a required argument and cap advice", () => {
     const tools = adapter.listTools(LATEST_PROTOCOL);
     expect(tools.map((t) => t.name)).toEqual([
@@ -452,6 +948,7 @@ describe("the MCP tools", () => {
       "webindex_repo",
       "webindex_issues",
       "webindex_releases",
+      "webindex_tags",
       "webindex_package",
       "webindex_meta",
       "webindex_robots",
@@ -471,6 +968,38 @@ describe("the MCP tools", () => {
       // names the argument to narrow — which only works if every tool has one.
       expect(adapter.capAdvice?.[t.name], t.name).toBeTruthy();
     }
+  });
+
+  it("annotates every tool as read-only, and the ones that reach the web as open-world", () => {
+    // Without hints a client has to treat each tool as possibly destructive
+    // and ask before every call; none of these changes anything anywhere.
+    const closed = ["webindex_extract", "webindex_rank", "webindex_embed"];
+    for (const t of adapter.listTools(LATEST_PROTOCOL)) {
+      expect(t.annotations, t.name).toEqual({
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: !closed.includes(t.name),
+      });
+      expect(t.title, t.name).toBeTruthy();
+    }
+    // What a 2025-03-26 client sees: the hints, with the title carried inside.
+    const server = createServer(webindexAdapter());
+    server.setProtocolVersion("2025-03-26");
+    const fetchTool = server.tools().find((t) => t.name === "webindex_fetch")!;
+    expect(fetchTool.title).toBeUndefined();
+    expect(fetchTool.annotations).toMatchObject({ title: "Fetch a URL as clean text", readOnlyHint: true, openWorldHint: true });
+  });
+
+  it("tells the model the limits it will actually meet", () => {
+    // The declarations are all a model reads before calling: a budget or a
+    // clamp that only the code knows about reads as a hang, or as ignored input.
+    const tool = (name: string) => adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === name)!;
+    expect(tool("webindex_search").description).toMatch(/45 s/);
+    expect(tool("webindex_search").description).toMatch(/rungs:/);
+    expect(tool("webindex_fetch").inputSchema.properties.timeoutMs!.description).toMatch(/300000/);
+    expect(tool("webindex_crawl").description).toMatch(/pending/);
+    expect(tool("webindex_crawl").inputSchema.properties.max!.description).toMatch(/1 MB/);
   });
 
   it("does not promise a single network request for package metadata", () => {
@@ -498,6 +1027,50 @@ describe("the MCP tools", () => {
     await expect(adapter.callTool("webindex_search", { query: "rate limiting" })).rejects.toThrow(/stack up/);
   });
 
+  it("lets an agent walk more pages and set a region, within reason", async () => {
+    const tool = adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_search")!;
+    expect(tool.inputSchema.properties.pages?.type).toBe("number");
+    expect(tool.inputSchema.properties.region?.type).toBe("string");
+    expect(tool.inputSchema.required).toEqual(["query"]);
+    process.env[envName("SEARXNG")] = "http://sx-mcp-pages.test";
+    // Every page brings ten new results, so only the clamp stops the walk.
+    const spy = installFetchMock((url) => {
+      if (!url.includes("/search?")) return { body: "OK", contentType: "text/plain" };
+      const page = Number(new URL(url).searchParams.get("pageno") ?? "1");
+      const results = Array.from({ length: 10 }, (_, i) => ({ url: `https://a.test/${page}/${i}`, title: `r${i}` }));
+      return { body: JSON.stringify({ results }), contentType: "application/json" };
+    });
+    try {
+      await adapter.callTool("webindex_search", { query: "q", pages: 50, limit: 500, lang: "fr", region: "be" });
+    } finally {
+      vi.unstubAllGlobals();
+      process.env[envName("SEARXNG")] = "off";
+    }
+    const queries = spy.mock.calls.map((c) => String(c[0])).filter((u) => u.includes("/search?"));
+    expect(queries).toHaveLength(5);
+    expect(new URL(queries[0]!).searchParams.get("language")).toBe("fr-BE");
+  });
+
+  it("ends a search with one line saying what each rung did", async () => {
+    // The notes are English; the rung line is the same facts in a form an
+    // agent can read without parsing prose.
+    process.env[envName("SEARXNG")] = "http://sx-mcp.test";
+    installFetchMock(
+      routes([
+        ["/search", { body: JSON.stringify({ results: [{ url: "https://a.test/1", title: "A" }] }), contentType: "application/json" }],
+        ["/healthz", { body: "OK", contentType: "text/plain" }],
+      ]),
+    );
+    try {
+      const r = await adapter.callTool("webindex_search", { query: "q" });
+      expect(r.text.split("\n").at(-1)).toBe("rungs: searxng=hits(1) firecrawl=disabled");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    process.env[envName("SEARXNG")] = "off";
+    await expect(adapter.callTool("webindex_search", { query: "q" })).rejects.toThrow(/\nrungs: searxng=disabled firecrawl=disabled$/);
+  });
+
   it("fetches a URL and says which rung produced the text", async () => {
     vi.stubGlobal(
       "fetch",
@@ -510,6 +1083,47 @@ describe("the MCP tools", () => {
     expect(r.text).toContain("token buckets");
     expect(r.text).toMatch(/extractor: \w+$/);
     vi.unstubAllGlobals();
+  });
+
+  it("lets an agent opt into the revalidating cache", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "cache");
+    const tool = adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_fetch")!;
+    expect(tool.inputSchema.properties.cache?.type).toBe("boolean");
+    const spy = installFetchMock(routes([["x.test/page", { body: articlePage(), contentType: "text/html" }]]));
+    try {
+      await adapter.callTool("webindex_fetch", { url: "https://x.test/page", cache: true });
+      const again = await adapter.callTool("webindex_fetch", { url: "https://x.test/page", cache: true });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(again.text).toMatch(/\ncached: true\n/);
+      await adapter.callTool("webindex_fetch", { url: "https://x.test/page" });
+      expect(spy).toHaveBeenCalledTimes(2); // off unless asked
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("names the final URL and any note in the trailer, above the extractor", async () => {
+    installFetchMock(() => ({ body: articlePage(), contentType: "text/html", url: "https://x.test/final" }));
+    try {
+      const r = await adapter.callTool("webindex_fetch", { url: "https://x.test/start" });
+      const trailer = r.text.slice(r.text.lastIndexOf("\n---\n"));
+      expect(trailer).toMatch(/^url: https:\/\/x\.test\/final$/m);
+      expect(trailer).toMatch(/extractor: native$/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("lets an agent shorten the fetch timeout", async () => {
+    const tool = adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_fetch")!;
+    expect(tool.inputSchema.properties.timeoutMs?.type).toBe("number");
+    expect(tool.inputSchema.required).not.toContain("timeoutMs");
+    vi.stubGlobal("fetch", hangingFetch());
+    try {
+      await expect(adapter.callTool("webindex_fetch", { url: "https://blackhole.test/p", timeoutMs: 5 })).rejects.toThrow(/timed out after 5 ms/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("refuses a non-http url as a tool error, not a crash", async () => {
@@ -528,6 +1142,135 @@ describe("the MCP tools", () => {
 
   it("reports an unknown tool as a tool error", async () => {
     await expect(adapter.callTool("webindex_nope", {})).rejects.toBeInstanceOf(ToolError);
+  });
+
+  describe("the operator's walls", () => {
+    // Opt-in hardening for a server others can reach: fetch only public
+    // addresses, read files from one directory or none.
+    it("refuses a private or metadata address before asking anything, when public-only", async () => {
+      const spy = installFetchMock(() => ({ body: "<p>secret</p>", contentType: "text/html" }));
+      const guarded = webindexAdapter({ publicOnly: true });
+      for (const [tool, args] of [
+        ["webindex_fetch", { url: "http://169.254.169.254/latest/meta-data/" }],
+        ["webindex_meta", { url: "http://127.0.0.1:8080/admin" }],
+        ["webindex_tables", { url: "http://[::1]/" }],
+        ["webindex_feed", { url: "http://10.0.0.1/feed" }],
+        ["webindex_robots", { url: "http://192.168.1.1/" }],
+        ["webindex_sitemap", { url: "http://localhost/" }],
+        ["webindex_crawl", { url: "http://172.16.0.1/", max: 2 }],
+      ] as const) {
+        await expect(guarded.callTool(tool, { ...args }), tool).rejects.toThrow(/not a public address|public addresses only/);
+      }
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("refuses a redirect into a private address, at the hop", async () => {
+      // A public page that answers 302 → the metadata endpoint is the classic
+      // way round a check made only on the URL a caller sent.
+      installFetchMock((url) =>
+        url.startsWith("http://93.184.216.34/")
+          ? { status: 302, body: "", headers: { location: "http://169.254.169.254/latest/meta-data/iam/" } }
+          : { body: "<p>credentials</p>", contentType: "text/html" },
+      );
+      const guarded = webindexAdapter({ publicOnly: true });
+      await expect(guarded.callTool("webindex_fetch", { url: "http://93.184.216.34/go" })).rejects.toThrow(/not authorized: http:\/\/169\.254\.169\.254/);
+      await expect(guarded.callTool("webindex_meta", { url: "http://93.184.216.34/go" })).rejects.toThrow(/not authorized/);
+      await expect(guarded.callTool("webindex_tables", { url: "http://93.184.216.34/go" })).rejects.toThrow(/not authorized/);
+    });
+
+    it("refuses a self-hosted forge on a private address, unless the operator declared it", async () => {
+      const guarded = webindexAdapter({ publicOnly: true });
+      await expect(guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/group/project", forge: "gitlab" })).rejects.toThrow(/not a public address/);
+      process.env[envName("FORGE_HOSTS")] = "10.1.2.3=gitlab";
+      installFetchMock(() => ({ status: 404, body: "{}", contentType: "application/json" }));
+      await expect(guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/group/project" })).rejects.not.toThrow(/not a public address/);
+    });
+
+    it("reads files only under --extract-root, relative paths against it, symlinks checked", async () => {
+      const root = join(dir, "served");
+      mkdirSync(root);
+      writeFileSync(join(root, "note.md"), "inside the root");
+      writeFileSync(join(dir, "secret.md"), "outside the root");
+      const confined = webindexAdapter({ extractRoot: root });
+      expect((await confined.callTool("webindex_extract", { path: "note.md" })).text).toContain("inside the root");
+      expect((await confined.callTool("webindex_extract", { path: join(root, "note.md") })).text).toContain("inside the root");
+      await expect(confined.callTool("webindex_extract", { path: join(dir, "secret.md") })).rejects.toThrow(/outside/);
+      await expect(confined.callTool("webindex_extract", { path: "../secret.md" })).rejects.toThrow(/outside/);
+      const decl = confined.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_extract")!;
+      expect(decl.inputSchema.properties.path!.description).toContain(root);
+    });
+
+    it("offers no file tool at all when local files are off, and reads no local checkout", async () => {
+      const closed = webindexAdapter({ noLocalFiles: true });
+      expect(closed.listTools(LATEST_PROTOCOL).map((t) => t.name)).not.toContain("webindex_extract");
+      await expect(closed.callTool("webindex_extract", { path: join(dir, "x.md") })).rejects.toThrow(/local files/);
+      await expect(closed.callTool("webindex_repo", { repo: dir })).rejects.toThrow(/local/);
+    });
+
+    it("confines a local checkout named to the forge tools as it confines files", async () => {
+      const root = join(dir, "served");
+      mkdirSync(root);
+      await expect(webindexAdapter({ extractRoot: root }).callTool("webindex_repo", { repo: dir })).rejects.toThrow(/outside/);
+    });
+  });
+
+  describe("cancellation and progress", () => {
+    // The server hands every call a signal its client's cancel aborts; a tool
+    // that does not pass it on keeps fetching for nobody.
+    const ctx = (signal: AbortSignal, onProgress: (p: number, total?: number, message?: string) => void = () => {}) => ({
+      signal,
+      progress: onProgress,
+    });
+    const site = () =>
+      installFetchMock((url) => {
+        if (url.includes("robots.txt")) return { status: 404, body: "", contentType: "text/plain" };
+        if (url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+        if (url === "https://cx.test/") return { body: '<html><body><p>root</p><a href="/a">a</a><a href="/b">b</a></body></html>', contentType: "text/html" };
+        return { body: "<html><body><p>leaf</p></body></html>", contentType: "text/html" };
+      });
+
+    it("webindex_crawl reports each page it read, and stops when cancelled", async () => {
+      process.env[envName("POLITE_DELAY_MS")] = "0";
+      const spy = site();
+      const ctrl = new AbortController();
+      const seen: [number, number | undefined, string | undefined][] = [];
+      const r = await adapter.callTool(
+        "webindex_crawl",
+        { url: "https://cx.test/", max: 5, depth: 1 },
+        ctx(ctrl.signal, (p, total, message) => {
+          seen.push([p, total, message]);
+          ctrl.abort();
+        }),
+      );
+      expect(seen).toEqual([[1, 5, "https://cx.test/"]]);
+      const pages = spy.mock.calls.map((c) => String(c[0])).filter((u) => !/robots|sitemap/.test(u));
+      expect(pages).toEqual(["https://cx.test/"]);
+      expect(JSON.parse(r.text).notes.join(" ")).toMatch(/cancelled/);
+    });
+
+    it("webindex_fetch abandons its request", async () => {
+      const spy = vi.fn(
+        (_input: unknown, init?: RequestInit) =>
+          new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })))),
+      );
+      vi.stubGlobal("fetch", spy);
+      try {
+        const ctrl = new AbortController();
+        setTimeout(() => ctrl.abort(), 10);
+        await expect(adapter.callTool("webindex_fetch", { url: "https://hang.test/p" }, ctx(ctrl.signal))).rejects.toThrow(/cancelled/);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("webindex_search, webindex_sitemap and webindex_tables ask nothing once cancelled", async () => {
+      const spy = installFetchMock(() => ({ body: "<table><tr><td>1</td></tr></table>", contentType: "text/html" }));
+      const done = AbortSignal.abort();
+      await expect(adapter.callTool("webindex_tables", { url: "https://t.test/" }, ctx(done))).rejects.toThrow(/cancelled/);
+      await expect(adapter.callTool("webindex_sitemap", { url: "https://t.test/" }, ctx(done))).rejects.toBeInstanceOf(ToolError);
+      await expect(adapter.callTool("webindex_search", { query: "q", engine: "ddg" }, ctx(done))).rejects.toThrow(/cancelled/);
+      expect(spy.mock.calls.map((c) => String(c[0])).filter((u) => !u.includes("robots.txt"))).toEqual([]);
+    });
   });
 
   it("carries narrowing advice for both tools", () => {
@@ -577,6 +1320,25 @@ describe("the fetch cache", () => {
     process.env[envName("CACHE_DIR")] = join(dir, "empty-cache");
     expect(await run(["cache", "clean", "--all"])).toBe(0);
     expect(stdout()).toMatch(/0 entries removed \(all\)/);
+  });
+
+  it("says a no-write run removed nothing, rather than reporting zero entries", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "empty-cache");
+    process.env[envName("NO_WRITE")] = "1";
+    expect(await run(["cache", "clean", "--all"])).toBe(0);
+    expect(stdout()).toMatch(/no-write mode: nothing removed/);
+  });
+
+  it("reports an eviction as JSON on demand, as status does", async () => {
+    // --json was accepted and ignored: a script got the sentence.
+    process.env[envName("CACHE_DIR")] = join(dir, "empty-cache");
+    expect(await run(["cache", "clean", "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toEqual({ dir: join(dir, "empty-cache"), removed: 0, all: false, noWrite: false });
+
+    out = [];
+    process.env[envName("NO_WRITE")] = "1";
+    expect(await run(["cache", "clean", "--all", "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ removed: 0, all: true, noWrite: true });
   });
 
   it("rejects an action it does not have", async () => {
@@ -648,10 +1410,129 @@ describe("rank", () => {
     expect(await run(["rank", "--query", "what is the of", "--docs", withDocs(DOCS)])).toBe(1);
     expect(stderr()).toMatch(/no rankable terms/);
   });
+
+  it("never ranks a document that matched nothing above one that matched", async () => {
+    // MMR used to pick the off-topic pages (relevance 0, similarity 0) before a
+    // relevant one whose overlap with the top result carried the full penalty.
+    const pool = JSON.stringify([
+      { url: "https://a.test/1", title: "Rate limiting with a token bucket", text: "A token bucket refills at a fixed rate; rate limiting caps bursts." },
+      { url: "https://a.test/2", title: "Token bucket explained", text: "The token bucket algorithm refills tokens at a fixed rate." },
+      { url: "https://c.test/3", title: "Slow braised beef", text: "Braise the beef slowly with onions and wine." },
+      { url: "https://d.test/4", title: "Match report", text: "The home side won after extra time." },
+      { url: "https://e.test/5", title: "Why do my requests get 429?", text: "Your client exceeded the rate the server allows." },
+    ]);
+    await run(["rank", "--query", "token bucket rate limiting", "--docs", withDocs(pool), "--json"]);
+    const ranked = JSON.parse(stdout()).ranked as { url: string; matched: string[] }[];
+    const lastMatched = ranked.map((r) => r.matched.length > 0).lastIndexOf(true);
+    const firstUnmatched = ranked.findIndex((r) => r.matched.length === 0);
+    expect(lastMatched).toBeLessThan(firstUnmatched);
+    expect(ranked.slice(0, 3).map((r) => r.url)).toContain("https://e.test/5");
+  });
+
+  it("names each collapsed mirror and the URL it duplicated", async () => {
+    const article = `A token bucket refills at a fixed rate and caps at its burst size. ${"Each request removes one token from the bucket. ".repeat(20)}`;
+    const pool = JSON.stringify([
+      { url: "https://origin.test/a", title: "Token bucket", text: article },
+      { url: "https://mirror.test/a", title: "Token bucket (mirror)", text: `${article} ` },
+      { url: "https://other.test/b", title: "Leaky bucket", text: "A leaky bucket drains at a constant rate." },
+    ]);
+    await run(["rank", "--query", "token bucket", "--docs", withDocs(pool), "--json"]);
+    const j = JSON.parse(stdout());
+    expect(j.collapsed).toBe(1);
+    expect(j.duplicates).toEqual([{ url: "https://mirror.test/a", of: "https://origin.test/a" }]);
+
+    out = [];
+    err = [];
+    await run(["rank", "--query", "token bucket", "--docs", withDocs(pool)]);
+    expect(stderr()).toMatch(/1 near-duplicate\(s\) collapsed/);
+    expect(stderr()).toContain("https://mirror.test/a");
+    expect(stdout()).not.toContain("https://mirror.test/a");
+  });
+
+  it("fuses a document's own score with BM25F, but never lifts one that matched nothing", async () => {
+    // `score` was validated and documented, then ignored: equal BM25 documents
+    // with 0.01 and 0.99 were ordered by URL.
+    const pool = JSON.stringify([
+      { url: "https://a.test/1", title: "Token bucket", text: "token bucket", score: 0.01 },
+      { url: "https://b.test/2", title: "Token bucket", text: "token bucket", score: 0.99 },
+      { url: "https://c.test/3", title: "Cooking", text: "braise the beef", score: 5 },
+    ]);
+    await run(["rank", "--query", "token bucket", "--docs", withDocs(pool), "--json"]);
+    const ranked = JSON.parse(stdout()).ranked as { url: string; score: number }[];
+    expect(ranked.map((r) => r.url)).toEqual(["https://b.test/2", "https://a.test/1", "https://c.test/3"]);
+    expect(ranked[0]!.score).toBe(1);
+    expect(ranked[2]!.score).toBe(0);
+  });
+
+  it("warns when no document contains any term of the question", async () => {
+    // The order is then the URL tie-break, which a bare exit 0 passed off as a ranking.
+    expect(await run(["rank", "--query", "quantum chromodynamics", "--docs", withDocs(DOCS), "--json"])).toBe(0);
+    expect(JSON.parse(stdout()).note).toMatch(/no document contains/);
+    expect(stderr()).toMatch(/no document contains any term of the question/);
+  });
+
+  it("says which input is not valid JSON, and how to pass one", async () => {
+    expect(await run(["rank", "--query", "x", "--docs", withDocs('[{"url": "a"')])).toBe(1);
+    expect(stderr()).toMatch(/--docs .*docs\.json is not valid JSON/);
+    expect(stderr()).toMatch(/JSON array of \{url, text\}/);
+  });
+
+  it("asks for documents instead of waiting on a terminal", async () => {
+    const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+    try {
+      expect(await run(["rank", "--query", "token bucket"])).toBe(2);
+      expect(stderr()).toMatch(/usage: webindex rank/);
+    } finally {
+      if (tty) Object.defineProperty(process.stdin, "isTTY", tty);
+      else delete (process.stdin as { isTTY?: boolean }).isTTY;
+    }
+  });
+
+  it("adds the dense lane with --dense, and says so when there is none", async () => {
+    // The dense lane lifts a document that never uses the question's words.
+    resetOllamaProbe();
+    process.env[envName("OLLAMA")] = "http://ol.test";
+    installFetchMock((url, init) => {
+      if (url.includes("/api/tags")) return { status: 200, body: "{}", contentType: "application/json" };
+      const input = JSON.parse(String(init?.body)).input as string[];
+      const vec = (t: string) => (/question|Throttling/.test(t) ? [1, 0] : [0, 1]);
+      return { status: 200, body: JSON.stringify({ embeddings: input.map(vec) }), contentType: "application/json" };
+    });
+    const pool = JSON.stringify([
+      { url: "https://a.test/", title: "The question itself", text: "the question" },
+      { url: "https://b.test/", title: "Cooking", text: "braising" },
+      { url: "https://c.test/", title: "Throttling requests", text: "shaping traffic" },
+    ]);
+    await run(["rank", "--query", "the question", "--docs", withDocs(pool), "--dense", "--json"]);
+    const j = JSON.parse(stdout());
+    expect(j.note).toBeUndefined();
+    expect(j.ranked.map((r: { url: string }) => r.url).slice(0, 2)).toEqual(["https://a.test/", "https://c.test/"]);
+
+    out = [];
+    err = [];
+    resetOllamaProbe();
+    installFetchMock(() => ({ status: 502, body: "", contentType: "text/plain" }));
+    expect(await run(["rank", "--query", "the question", "--docs", withDocs(pool), "--dense"])).toBe(0);
+    expect(stdout()).toContain("https://a.test/");
+    expect(stdout()).not.toMatch(/semantic up/);
+    expect(stderr()).toMatch(/semantic up/);
+  });
+
+  it("orders tied documents the same on every machine", async () => {
+    // Code units, not localeCompare: "B" (0x42) sorts before "a" (0x61) whatever
+    // LANG says. Two documents, so the order is the pipeline's own sort.
+    const tie = JSON.stringify([
+      { url: "https://s.test/a", title: "Token bucket", text: "token bucket" },
+      { url: "https://s.test/B", title: "Token bucket", text: "token bucket" },
+    ]);
+    await run(["rank", "--query", "token bucket", "--docs", withDocs(tie), "--json"]);
+    expect(JSON.parse(stdout()).ranked.map((r: { url: string }) => r.url)).toEqual(["https://s.test/B", "https://s.test/a"]);
+  });
 });
 
 describe("the forge, registry and page-metadata commands", () => {
-  const json = (o: unknown) => ({ body: JSON.stringify(o), contentType: "application/json" });
+  const json = (o: unknown, status = 200) => ({ status, body: JSON.stringify(o), contentType: "application/json" });
 
   it("prints a repository's record, and flags an archived one", async () => {
     vi.stubGlobal(
@@ -668,8 +1549,87 @@ describe("the forge, registry and page-metadata commands", () => {
     expect(stdout()).toContain("MIT");
   });
 
+  it("says why a repository could not be read, not 'is it public?' for everything", async () => {
+    installFetchMock(() => ({ status: 404, body: JSON.stringify({ message: "Not Found" }), contentType: "application/json" }));
+    expect(await run(["repo", "github.com/missing/x"])).toBe(1);
+    expect(stderr()).toMatch(/no such repository on github\.com/);
+    await expect(webindexAdapter().callTool("webindex_repo", { repo: "github.com/missing/x" })).rejects.toThrow(/no such repository/);
+
+    err = [];
+    installFetchMock(() => ({
+      status: 403,
+      body: JSON.stringify({ message: "API rate limit exceeded" }),
+      contentType: "application/json",
+      headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1893456000" },
+    }));
+    expect(await run(["repo", "github.com/a/b"])).toBe(1);
+    expect(stderr()).toMatch(/rate-limited this request until 2030-01-01T00:00:00\.000Z/);
+
+    err = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.github.com"), { code: "ENOTFOUND" }) });
+      }),
+    );
+    expect(await run(["repo", "github.com/a/b"])).toBe(1);
+    expect(stderr()).toMatch(/network error reaching api\.github\.com — getaddrinfo ENOTFOUND/);
+  });
+
+  it("lists tags, and points at them when a project publishes no releases", async () => {
+    installFetchMock((url) =>
+      url.includes("/tags") ? json([{ name: "3.8.13" }, { name: "3.8.12" }]) : url.includes("/releases") ? json([]) : json({ full_name: "a/b" }),
+    );
+    expect(await run(["tags", "gitlab.com/gnutls/gnutls", "--limit", "2"])).toBe(0);
+    expect(stdout()).toContain("3.8.13\n  https://gitlab.com/gnutls/gnutls/-/tags/3.8.13");
+
+    expect(await run(["releases", "gitlab.com/gnutls/gnutls"])).toBe(1);
+    expect(stderr()).toMatch(/no releases published for gitlab\.com\/gnutls\/gnutls — try `webindex tags/);
+
+    const r = await webindexAdapter().callTool("webindex_tags", { repo: "gitlab.com/gnutls/gnutls", limit: 2 });
+    expect(JSON.parse(r.text).items.map((i: { title: string }) => i.title)).toEqual(["3.8.13", "3.8.12"]);
+    await expect(webindexAdapter().callTool("webindex_releases", { repo: "gitlab.com/gnutls/gnutls" })).rejects.toThrow(/webindex_tags/);
+  });
+
+  it("queries a self-hosted forge as the forge --forge names", async () => {
+    const seen: string[] = [];
+    installFetchMock((url) => {
+      seen.push(url);
+      return json({ path_with_namespace: "debian/dpkg", star_count: 3 });
+    });
+    expect(await run(["repo", "https://salsa.debian.org/debian/dpkg/-/tree/main", "--forge", "gitlab"])).toBe(0);
+    expect(seen[0]).toBe("https://salsa.debian.org/api/v4/projects/debian%2Fdpkg?license=true");
+    await webindexAdapter().callTool("webindex_repo", { repo: "salsa.debian.org/debian/dpkg", forge: "gitlab" });
+    expect(seen[1]).toBe(seen[0]);
+
+    err = [];
+    expect(await run(["repo", "salsa.debian.org/debian/dpkg", "--forge", "bitbucket"])).toBe(2);
+    expect(stderr()).toMatch(/--forge expects github, gitlab or gitea/);
+    await expect(webindexAdapter().callTool("webindex_repo", { repo: "salsa.debian.org/debian/dpkg", forge: "bitbucket" })).rejects.toThrow(
+      /`forge` must be one of/,
+    );
+  });
+
+  it("reads a local checkout as the repository it is a clone of", async () => {
+    const checkout = mkdtempSync(join(tmpdir(), "webindex-checkout-"));
+    try {
+      execFileSync("git", ["-C", checkout, "init", "-q"]);
+      execFileSync("git", ["-C", checkout, "remote", "add", "origin", "git@github.com:maxgfr/webindex.git"]);
+      const seen: string[] = [];
+      installFetchMock((url) => {
+        seen.push(url);
+        return json({ full_name: "maxgfr/webindex", stargazers_count: 1 });
+      });
+      expect(await run(["repo", checkout, "--json"])).toBe(0);
+      expect(seen[0]).toBe("https://api.github.com/repos/maxgfr/webindex");
+      expect(JSON.parse(stdout()).ref).toMatchObject({ host: "github.com", owner: "maxgfr", repo: "webindex" });
+    } finally {
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
   it("refuses free text rather than inventing a repository", async () => {
-    expect(await run(["repo", "some", "words"])).toBe(1);
+    expect(await run(["repo", "some words"])).toBe(1);
     expect(stderr()).toMatch(/does not name a repository/);
   });
 
@@ -701,6 +1661,28 @@ describe("the forge, registry and page-metadata commands", () => {
     expect(JSON.parse(stdout())).toMatchObject({ registry: "npm", version: "2.0.0", repository: "https://github.com/a/b" });
   });
 
+  it("names the package it found, so a namesake from another ecosystem shows", async () => {
+    installFetchMock((url) =>
+      url.includes("pypi.org") ? json({ info: { name: "react", version: "4.3.0", summary: "Server-side rendering of React components" } }) : json({}, 404),
+    );
+    expect(await run(["package", "react"])).toBe(0);
+    expect(stdout()).toMatch(/name {8}react\n/);
+    expect(stdout()).toMatch(/registry {4}pypi/);
+    expect(stdout()).toContain("Server-side rendering of React components");
+  });
+
+  it("says a registry was down rather than that it had no such package", async () => {
+    installFetchMock(() => json({}, 503));
+    expect(await run(["package", "react"])).toBe(1);
+    expect(stderr()).toMatch(/npm could not be asked \(status 503\)/);
+    await expect(webindexAdapter().callTool("webindex_package", { name: "react" })).rejects.toThrow(/npm could not be asked/);
+  });
+
+  it("refuses a registry it does not know as a usage error, not a TypeError", async () => {
+    expect(await run(["package", "react", "--registry", "foo"])).toBe(2);
+    expect(stderr()).toMatch(/--registry expects npm, pypi or crates/);
+  });
+
   it("says so when no registry knows the name", async () => {
     installFetchMock(() => ({ status: 404, body: "{}", contentType: "application/json" }));
     expect(await run(["package", "nope-xyz"])).toBe(1);
@@ -726,10 +1708,80 @@ describe("the forge, registry and page-metadata commands", () => {
     expect(await run(["robots", "https://ex.test/public"])).toBe(0);
   });
 
+  it("says a robots.txt that errored forbids everything, rather than calling it missing", async () => {
+    installFetchMock(() => ({ status: 503, body: "", contentType: "text/plain" }));
+    expect(await run(["robots", "https://down.test/page"])).toBe(1);
+    expect(stdout()).toContain("allowed   no");
+    expect(stdout()).toMatch(/HTTP 503.*RFC 9309/);
+  });
+
+  it("says robots checks were switched off, rather than that there was no file", async () => {
+    installFetchMock(() => ({ body: "User-agent: *\nDisallow: /", contentType: "text/plain" }));
+    process.env[envName("NO_ROBOTS")] = "1";
+    expect(await run(["robots", "https://off.test/x"])).toBe(0);
+    expect(stdout()).toMatch(/not consulted \(WEBINDEX_TEST_NO_ROBOTS\)/);
+    expect(stdout()).not.toMatch(/no robots\.txt/);
+  });
+
   it("lists the URLs a sitemap declares", async () => {
     installFetchMock((url) => (url.endsWith("robots.txt") ? { status: 404, body: "" } : { body: "<urlset><url><loc>https://ex.test/p1</loc></url></urlset>" }));
     expect(await run(["sitemap", "https://ex.test/x"])).toBe(0);
     expect(stdout()).toContain("https://ex.test/p1");
+  });
+
+  it("names the child sitemaps --max did not reach, rather than printing an empty line", async () => {
+    const index = "<sitemapindex><sitemap><loc>https://sm.test/a.xml</loc></sitemap><sitemap><loc>https://sm.test/b.xml</loc></sitemap></sitemapindex>";
+    installFetchMock((url) =>
+      url.endsWith("robots.txt")
+        ? { body: "Sitemap: https://sm.test/index.xml", contentType: "text/plain" }
+        : url.endsWith("/index.xml")
+          ? { body: index, contentType: "application/xml" }
+          : { body: `<urlset><url><loc>${url.replace(".xml", "-page")}</loc></url></urlset>`, contentType: "application/xml" },
+    );
+    expect(await run(["sitemap", "https://sm.test/", "--max", "1"])).toBe(1);
+    expect(stderr()).toMatch(/2 child sitemap\(s\) not read.*raise --max/s);
+    expect(stderr()).toContain("https://sm.test/b.xml");
+
+    out = [];
+    err = [];
+    expect(await run(["sitemap", "https://sm.test/", "--max", "2"])).toBe(0);
+    expect(stdout().trim()).toBe("https://sm.test/a-page");
+    expect(stderr()).toMatch(/1 child sitemap\(s\) not read.*raise --max/s);
+  });
+
+  it("resolves a feed's relative links, reads JSON Feed, and looks past a page that only looks like a feed", async () => {
+    installFetchMock(() => ({ body: '<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Rel</title><link href="/blog/post-2"/></entry></feed>' }));
+    expect(await run(["feed", "https://ex.test/atom.xml"])).toBe(0);
+    expect(stdout()).toContain("https://ex.test/blog/post-2");
+
+    out = [];
+    installFetchMock(() => ({
+      body: JSON.stringify({ version: "https://jsonfeed.org/version/1.1", items: [{ id: "1", title: "Jay", url: "/j" }] }),
+      contentType: "application/feed+json",
+    }));
+    expect(await run(["feed", "https://ex.test/feed.json"])).toBe(0);
+    expect(stdout()).toContain("https://ex.test/j");
+
+    out = [];
+    installFetchMock((url) =>
+      url.includes("feed.xml")
+        ? { body: "<rss><channel><title>B</title><item><title>Real</title><link>https://ex.test/r</link></item></channel></rss>" }
+        : {
+            body: "<!doctype html><html><head><link rel=alternate type=application/rss+xml href=/feed.xml></head><body><channel-nav></channel-nav></body></html>",
+          },
+    );
+    expect(await run(["feed", "https://ex.test/page"])).toBe(0);
+    expect(stdout()).toContain("Real");
+  });
+
+  it("follows the feed an empty feed points to", async () => {
+    installFetchMock((url) =>
+      url.includes("full.xml")
+        ? { body: "<rss><channel><title>B</title><item><title>Moved here</title><link>https://ex.test/m</link></item></channel></rss>" }
+        : { body: '<feed xmlns="http://www.w3.org/2005/Atom"><title>Stub</title><link rel="alternate" type="application/rss+xml" href="/full.xml"/></feed>' },
+    );
+    expect(await run(["feed", "https://ex.test/stub.xml"])).toBe(0);
+    expect(stdout()).toContain("Moved here");
   });
 
   it("parses a feed directly, and discovers one from a page", async () => {
@@ -753,11 +1805,28 @@ describe("the forge, registry and page-metadata commands", () => {
     expect(stderr()).toMatch(/advertises no feed/);
   });
 
-  it("insists on an http(s) URL for the page-level lookups", async () => {
-    for (const cmd of ["meta", "robots", "sitemap", "feed"]) {
+  it("insists on an http(s) URL for the site-level lookups", async () => {
+    for (const cmd of ["robots", "sitemap", "feed"]) {
       err = [];
       expect(await run([cmd, "not-a-url"]), cmd).toBe(1);
       expect(stderr(), cmd).toMatch(/expected an http\(s\) URL/);
+    }
+  });
+
+  it("reads what a page on disk says about itself", async () => {
+    // A saved page — or one only a logged-in browser could fetch — answered
+    // "expected an http(s) URL", though nothing here needs the network.
+    const path = join(dir, "saved.html");
+    writeFileSync(path, '<html><head><title>Saved</title><link rel="canonical" href="https://ex.test/saved"></head><body></body></html>');
+    expect(await run(["meta", path, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ title: "Saved", canonicalUrl: "https://ex.test/saved" });
+  });
+
+  it("says a target is neither a URL nor a file, rather than that it is not a URL", async () => {
+    for (const cmd of ["meta", "tables"]) {
+      err = [];
+      expect(await run([cmd, join(dir, "nowhere.html")]), cmd).toBe(1);
+      expect(stderr(), cmd).toMatch(/neither an http\(s\) URL nor a readable file/);
     }
   });
 });
@@ -862,6 +1931,36 @@ describe("the docs↔CLI drift gate", () => {
     const universe = new Set([...VALUE_FLAGS, ...BOOL_FLAGS, "help", "version"]);
     expect(documentedFlags(HELP).filter((f) => !universe.has(f))).toEqual([]);
   });
+
+  it("counts its own surfaces correctly in the README, and tables every MCP tool", async () => {
+    // The README said 308 library exports while the bundle had 320, and its
+    // MCP table described four of sixteen tools.
+    const readme = readFileSync(join(import.meta.dirname, "..", "README.md"), "utf8");
+    const lib = await import("../src/index.js");
+    expect(readme).toContain(`**${Object.keys(lib).length} library exports**`);
+    expect(readme).toContain(`**${COMMANDS.length} CLI commands**`);
+    const tools = webindexAdapter().listTools(LATEST_PROTOCOL);
+    expect(readme).toContain(`**${tools.length} MCP\ntools**`);
+    for (const t of tools) expect(readme, t.name).toMatch(new RegExp(`^\\| \`${t.name}\` \\|`, "m"));
+    for (const cmd of COMMANDS) expect(readme, cmd).toMatch(new RegExp(`^\\| \`webindex (?:[a-z|\\\\]*\\|)?${cmd}\\b`, "m"));
+  });
+
+  it("documents every environment variable the engine reads, in the README", () => {
+    // HELP carries the ones a command-line user reaches for; the README has to
+    // carry all of them. WEBINDEX_SEARXNG — the first rung of every search —
+    // was named in neither.
+    const srcDir = join(import.meta.dirname, "..", "src");
+    const walk = (d: string): string[] =>
+      readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : e.name.endsWith(".ts") ? [join(d, e.name)] : []));
+    const read = new Set<string>();
+    for (const file of walk(srcDir)) {
+      for (const m of readFileSync(file, "utf8").matchAll(/\b(?:env|envInt|envFlag|envName|enginesFromEnv|fromEnv)\(\s*"([A-Z][A-Z0-9_]*)"/g)) read.add(m[1]!);
+    }
+    expect(read.size).toBeGreaterThan(30); // a negative control for the scan itself
+    const readme = readFileSync(join(srcDir, "..", "README.md"), "utf8");
+    expect([...read].filter((v) => !readme.includes(`WEBINDEX_${v}`)).sort()).toEqual([]);
+    for (const v of ["SEARXNG", "NO_ROBOTS", "FIRECRAWL_KEY", "DOCKER_PULL_TIMEOUT_MS", "OCR_LANG"]) expect(HELP, v).toContain(`WEBINDEX_${v}`);
+  });
 });
 
 // The `skill` command family, driven end to end through main(). The library
@@ -905,6 +2004,46 @@ describe("webindex skill", () => {
   it("asks for a name rather than scaffolding an unnamed skill", async () => {
     expect(await run(["skill", "init", "--root", repo])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex skill init/);
+  });
+
+  it("refuses a name it cannot use as a usage error, and prints no empty report", async () => {
+    expect(await run(["skill", "init", "Bad_Name", "--root", repo])).toBe(2);
+    expect(stderr()).toMatch(/not a usable skill name/);
+    expect(stdout()).toBe("");
+  });
+
+  it("does not call artifacts preserved when no recall policy asked it to compare any", async () => {
+    // With no `repin.recall` in skill.json nothing was compared, and the gate
+    // still printed "Artifact identities and evidence preserved".
+    skillJson();
+    expect(await run(["skill", "recall", "--root", repo])).toBe(0);
+    expect(stdout()).toMatch(/No repin\.recall policy/);
+    expect(stdout()).not.toMatch(/preserved/);
+  });
+
+  it.each(["repin", "finish"])("says `skill %s` needs the GitHub CLI when it is not installed", async (action) => {
+    // It died on "spawnSync gh ENOENT".
+    skillJson();
+    vi.stubEnv("PATH", join(dir, "no-gh-here"));
+    resetHaveCache();
+    try {
+      expect(await run(["skill", action, "--root", repo])).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+      resetHaveCache();
+    }
+    expect(stderr()).toMatch(/drives the GitHub CLI \(gh\), which is not installed/);
+  });
+
+  it("names the actions it knows before looking for a skill.json", async () => {
+    // With no skill.json, `webindex skill` and `webindex skill frobnicate`
+    // answered "no readable skill.json" — the wrong problem, and exit 1.
+    for (const argv of [["skill"], ["skill", "frobnicate"]]) {
+      err = [];
+      expect(await run([...argv, "--root", repo]), argv.join(" ")).toBe(2);
+      expect(stderr()).toMatch(/usage: webindex skill /);
+      expect(stderr()).not.toMatch(/skill\.json/);
+    }
   });
 
   it("refuses to run any gate without a readable skill.json", async () => {
@@ -977,6 +2116,60 @@ describe("webindex skill", () => {
     skillJson();
     expect(await run(["skill", "vendor", "--root", repo])).toBe(2);
     expect(stderr()).toMatch(/--ref <tag>/);
+  });
+
+  it("refuses a ref that is no release tag before asking GitHub anything", async () => {
+    skillJson();
+    const spy = installFetchMock(() => ({ status: 500, body: "" }));
+    try {
+      expect(await run(["skill", "vendor", "--ref", "1.20", "--root", repo])).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stderr()).toMatch(/--ref expects a stable release tag like v1\.2\.3, got "1\.20"/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("vendors by the tag's commit without the GitHub CLI, through the REST API", async () => {
+    // Resolving the tag went through `gh api` only, and a machine without gh
+    // got "spawnSync gh ENOENT" and nothing else.
+    skillJson();
+    const sha = "a".repeat(40);
+    const bundle = 'const ENGINE_VERSION = "1.0.0";\n';
+    installFetchMock((url) => {
+      if (url === "https://api.github.com/repos/maxgfr/webindex/commits/v1.0.0") return { body: JSON.stringify({ sha }), contentType: "application/json" };
+      if (url === `https://raw.githubusercontent.com/maxgfr/webindex/${sha}/scripts/engine.mjs`) return { body: bundle };
+      if (url === `https://raw.githubusercontent.com/maxgfr/webindex/${sha}/scripts/engine.d.mts`) return { body: "export {};\n" };
+      return undefined;
+    });
+    vi.stubEnv("PATH", join(dir, "no-gh-here"));
+    resetHaveCache();
+    try {
+      expect(await run(["skill", "vendor", "--ref", "v1.0.0", "--root", repo])).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+      resetHaveCache();
+    }
+    expect(stdout()).toMatch(/pinned webindex v1\.0\.0 \(1\.0\.0\)/);
+    expect(JSON.parse(readFileSync(join(repo, "src", "vendor", "webindex.meta.json"), "utf8"))).toMatchObject({ tag: "v1.0.0", commit: sha });
+    expect(readFileSync(join(repo, "src", "vendor", "webindex-engine.mjs"), "utf8")).toBe(bundle);
+  });
+
+  it("says why a tag could not be resolved, rather than failing on a missing binary", async () => {
+    skillJson();
+    installFetchMock(() => ({ status: 404, body: '{"message":"No commit found for SHA: v1.0.0"}', contentType: "application/json" }));
+    vi.stubEnv("PATH", join(dir, "no-gh-here"));
+    resetHaveCache();
+    try {
+      expect(await run(["skill", "vendor", "--ref", "v1.0.0", "--root", repo])).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+      resetHaveCache();
+    }
+    expect(stderr()).toMatch(/could not resolve maxgfr\/webindex@v1\.0\.0 to a commit/);
+    expect(stderr()).not.toMatch(/ENOENT/);
   });
 
   // A well-shaped package now includes EXPORTING the flag surface: without it
@@ -1058,6 +2251,29 @@ describe("the new commands", () => {
     expect(stdout()).toContain("| --- | --- |");
   });
 
+  it("reads the tables of a page on disk, decoded as extract decodes it", async () => {
+    // A Latin-1 page that declares its charset: read as UTF-8 it would turn
+    // every accented figure label into U+FFFD.
+    const path = join(dir, "latin1.html");
+    writeFileSync(
+      path,
+      Buffer.concat([
+        Buffer.from('<html><head><meta charset="iso-8859-1"></head><body><table><tr><th>Ann'),
+        Buffer.from([0xe9]),
+        Buffer.from("e</th><th>Total</th></tr><tr><td>2024</td><td>12</td></tr></table></body></html>"),
+      ]),
+    );
+    expect(await run(["tables", path, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())[0]).toEqual({ headers: ["Année", "Total"], rows: [["2024", "12"]] });
+  });
+
+  it("refuses a file on disk that is not a web page", async () => {
+    const path = join(dir, "blob.bin");
+    writeFileSync(path, Buffer.from([0x00, 0x01, 0x02, 0x03, 0x00]));
+    expect(await run(["tables", path])).toBe(1);
+    expect(stderr()).toMatch(/binary data, not an HTML page/);
+  });
+
   it("says so when a page has no tables, rather than printing nothing", async () => {
     installFetchMock(() => page("<p>prose</p>"));
     expect(await run(["tables", "https://t.test/"])).toBe(1);
@@ -1069,6 +2285,31 @@ describe("the new commands", () => {
     // inconvenience them, so the ceiling is the caller's decision.
     expect(await run(["crawl", "https://s.test/"])).toBe(2);
     expect(stderr()).toMatch(/needs --max/);
+  });
+
+  it("refuses a budget below one page, as the MCP tool does", async () => {
+    // `--max 0` used to run a one-page crawl while MCP refused `max: 0`.
+    expect(await run(["crawl", "https://s.test/", "--max", "0"])).toBe(2);
+    expect(stderr()).toMatch(/--max must be a positive whole number/);
+    await expect(webindexAdapter().callTool("webindex_crawl", { url: "https://s.test/", max: 0 })).rejects.toThrow(/positive whole number/);
+  });
+
+  it("keeps a crawl under a path prefix, and off the sitemap when asked", async () => {
+    const site = () =>
+      installFetchMock((url) => {
+        if (url.includes("robots.txt")) return { status: 404, body: "", contentType: "text/plain" };
+        if (url.includes("sitemap")) return { body: "<urlset><url><loc>https://sc.test/docs/listed</loc></url></urlset>", contentType: "application/xml" };
+        if (url === "https://sc.test/") return page('<a href="/docs/a">a</a><a href="/shop/b">b</a>');
+        return page("<p>ok</p>");
+      });
+    const spy = site();
+    expect(await run(["crawl", "https://sc.test/", "--max", "10", "--depth", "1", "--prefix", "/docs/", "--no-sitemap", "--json"])).toBe(0);
+    expect(JSON.parse(stdout()).pages.map((p: { url: string }) => p.url)).toEqual(["https://sc.test/", "https://sc.test/docs/a"]);
+    expect(spy.mock.calls.map((c) => String(c[0])).filter((u) => u.includes("sitemap"))).toEqual([]);
+
+    site();
+    const r = await webindexAdapter().callTool("webindex_crawl", { url: "https://sc.test/", max: 10, depth: 1, prefix: "/docs/", sitemap: true });
+    expect(JSON.parse(r.text).pages.map((p: { url: string }) => p.url)).toEqual(["https://sc.test/", "https://sc.test/docs/listed", "https://sc.test/docs/a"]);
   });
 
   it("walks a site within its budget and reports what it was refused", async () => {
@@ -1103,6 +2344,43 @@ describe("the new commands", () => {
     expect(stderr()).toMatch(/semantic up/);
   });
 
+  it("embeds a whole file of texts in one run, in input order", async () => {
+    // The MCP tool took texts[]; the CLI took one argv string, so a file of
+    // passages cost a process and a probe per line.
+    resetOllamaProbe();
+    process.env[envName("OLLAMA")] = "http://ol.test";
+    const batches: string[][] = [];
+    installFetchMock((url, init) => {
+      if (url.includes("/api/tags")) return { status: 200, body: "{}", contentType: "application/json" };
+      const input = JSON.parse(String(init?.body)).input as string[];
+      batches.push(input);
+      return { status: 200, body: JSON.stringify({ embeddings: input.map((t) => [t.length, 0]) }), contentType: "application/json" };
+    });
+    const file = join(dir, "texts.json");
+    writeFileSync(file, JSON.stringify(["a", "bbb", "cc"]));
+    expect(await run(["embed", "--docs", file, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({
+      dimensions: 2,
+      vectors: [
+        [1, 0],
+        [3, 0],
+        [2, 0],
+      ],
+    });
+
+    out = [];
+    const lines = join(dir, "texts.txt");
+    writeFileSync(lines, "first line\n\nsecond\n");
+    expect(await run(["embed", "--docs", lines, "--lines"])).toBe(0);
+    expect(stdout()).toBe("10 0\n6 0\n");
+
+    out = [];
+    err = [];
+    writeFileSync(file, JSON.stringify(["a", 3]));
+    expect(await run(["embed", "--docs", file])).toBe(1);
+    expect(stderr()).toMatch(/--docs .* must be a non-empty JSON array of strings/);
+  });
+
   it("ranks hybridly, and keeps the degradation note off stdout", async () => {
     // The reason a run ranked lexically must be visible without landing in the
     // middle of the ranking — the same rule `search` follows.
@@ -1132,6 +2410,36 @@ describe("the new commands", () => {
     installFetchMock(() => ({ status: 200, body: "v2", contentType: "text/html", headers: { etag: '"b"' } }));
     expect(await run(["changed", "https://c.test/", "--etag", '"a"'])).toBe(0);
     expect(stdout()).toMatch(/^changed \(via etag\)/);
+  });
+
+  it("prints every validator and the status in a baseline", async () => {
+    installFetchMock(() => ({ status: 200, body: "v1", contentType: "text/html", headers: { "last-modified": "Wed, 21 Oct 2015 07:28:00 GMT" } }));
+    expect(await run(["changed", "https://c.test/"])).toBe(0);
+    expect(stdout()).toMatch(/^etag -$/m);
+    expect(stdout()).toMatch(/^last-modified Wed, 21 Oct 2015 07:28:00 GMT$/m);
+    expect(stdout()).toMatch(/^hash [0-9a-f]{64}$/m);
+    expect(stdout()).toMatch(/^status 200$/m);
+  });
+
+  it.each([false, true])("fails a baseline it could not read instead of printing an empty one (json=%s)", async (json) => {
+    // A watcher storing "etag - / hash -" stored nothing, and learned of the
+    // failure only on its next run.
+    installFetchMock(() => ({ status: 404, body: "gone", contentType: "text/html" }));
+    expect(await run(["changed", "https://c.test/missing", ...(json ? ["--json"] : [])])).toBe(1);
+    expect(stderr()).toMatch(/could not read https:\/\/c\.test\/missing: status 404/);
+    if (json) expect(JSON.parse(stdout())).toMatchObject({ status: 404, error: "status 404" });
+    else expect(stdout()).toBe("");
+  });
+
+  it("revalidates with --last-modified, for servers that send no ETag", async () => {
+    let sent: Record<string, string> = {};
+    installFetchMock((_url, init) => {
+      sent = (init?.headers ?? {}) as Record<string, string>;
+      return { status: 304, body: "" };
+    });
+    expect(await run(["changed", "https://c.test/", "--last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"])).toBe(0);
+    expect(sent["if-modified-since"]).toBe("Wed, 21 Oct 2015 07:28:00 GMT");
+    expect(stdout()).toMatch(/^unchanged \(via not-modified\)/);
   });
 
   it("exits non-zero when it could not tell whether a URL changed", async () => {
@@ -1193,6 +2501,34 @@ describe("audit regressions", () => {
     expect(JSON.parse(messages[0].result.content[0].text).ranked).toHaveLength(1);
   });
 
+  it("adds the dense lane to webindex_rank on request, and returns the note when there is none", async () => {
+    resetOllamaProbe();
+    process.env[envName("OLLAMA")] = "http://ol.test";
+    installFetchMock(() => ({ status: 502, body: "", contentType: "text/plain" }));
+    const adapter = webindexAdapter();
+    const decl = adapter.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_rank");
+    expect(decl?.inputSchema.properties).toHaveProperty("dense");
+    const r = await adapter.callTool("webindex_rank", {
+      question: "alpha",
+      dense: true,
+      documents: [
+        { url: "a", text: "alpha beta" },
+        { url: "b", text: "zeta" },
+      ],
+    });
+    const j = JSON.parse(r.text);
+    expect(j.ranked.map((x: { url: string }) => x.url)).toEqual(["a", "b"]);
+    expect(j.note).toMatch(/semantic up/);
+  });
+
+  it("says plainly that webindex_embed fails, with the note, when nothing answers", async () => {
+    const decl = webindexAdapter()
+      .listTools(LATEST_PROTOCOL)
+      .find((t) => t.name === "webindex_embed");
+    expect(decl?.description).not.toMatch(/rather than an error/);
+    expect(decl?.description).toMatch(/fails with a note/i);
+  });
+
   it.each(["text", "title", "headings"])("rejects an incorrectly typed rank %s as invalid params", async (field) => {
     const server = createServer(webindexAdapter());
     const messages: any[] = [];
@@ -1223,6 +2559,53 @@ describe("audit regressions", () => {
     expect(await run(["rank", "--query", "what is the of", "--docs", docs, ...(json ? ["--json"] : [])])).toBe(1);
     expect(stderr()).toContain("no rankable terms");
     if (json) expect(JSON.parse(stdout()).queryTerms).toEqual([]);
+  });
+
+  // extractLocal routed office files by extension only: an extension-less or
+  // misnamed .docx came back as 37 KB of `PK\u0003\u0004…`, extractor "plain",
+  // exit 0.
+  it.each(["report", "report.txt", "report.bin"])("reads a local office document named %s by its bytes", async (name) => {
+    const file = join(dir, name);
+    writeFileSync(file, readFileSync(join(__dirname, "fixtures", "docs", "sample.docx")));
+    expect(await run(["extract", file, "--json"])).toBe(1);
+    const result = JSON.parse(stdout());
+    expect(result.text).toBe("");
+    expect(result.extractor).toBe("none");
+    expect(result.reason).toMatch(/no document converter available/);
+  });
+
+  it("reads a local office document through the built-in rung, whatever its name", async () => {
+    process.env[envName("DOC_ENGINE")] = "builtin";
+    const file = join(dir, "report.bin");
+    writeFileSync(file, readFileSync(join(__dirname, "fixtures", "docs", "report.docx")));
+    expect(await run(["extract", file, "--json"])).toBe(0);
+    const result = JSON.parse(stdout());
+    expect(result.extractor).toBe("builtin");
+    expect(result.text).toContain("| EMEA | 1.2 | 1.5 |");
+  });
+
+  it("reads a local PDF with no extension through the PDF ladder", async () => {
+    const file = join(dir, "paper");
+    writeFileSync(file, "%PDF-1.4\n1 0 obj\n<< /Length 30 >>\nstream\nBT (Local PDF text) Tj ET\nendstream\nendobj\n");
+    expect(await run(["extract", file, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ text: "Local PDF text", extractor: "native" });
+  });
+
+  // `.csv` went to the converter before the plain-text list was consulted, and
+  // with no converter (NO_NPX, offline, DOC_ENGINE=none) a CSV was refused.
+  it("falls back to the plain text of a local CSV when no converter is available", async () => {
+    const file = join(dir, "data.csv");
+    writeFileSync(file, "region,q1,q2\nEMEA,1.2,1.5\n");
+    expect(await run(["extract", file, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ text: "region,q1,q2\nEMEA,1.2,1.5\n", extractor: "plain" });
+  });
+
+  it("refuses a local binary file instead of printing its bytes", async () => {
+    const file = join(dir, "photo.png");
+    writeFileSync(file, Buffer.from("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10", "latin1"));
+    expect(await run(["extract", file, "--json"])).toBe(1);
+    expect(JSON.parse(stdout())).toMatchObject({ text: "", extractor: "none" });
+    expect(JSON.parse(stdout()).reason).toMatch(/binary/);
   });
 
   it.each([false, true])("fails an empty local extraction consistently (json=%s)", async (json) => {

@@ -47,6 +47,9 @@ describe("shq", () => {
     // A runbook is copy-pasted; a command that wraps gets pasted half-executed.
     expect(shq("two\nlines")).toBe("'two lines'");
     expect(shq("crlf\r\nlines")).toBe("'crlf lines'");
+    // A lone CR — an old Mac file, a pasted form field — is a line break to a
+    // terminal too: pasted, it submits the half before it.
+    expect(shq("old\rmac")).toBe("'old mac'");
   });
 
   it("survives a question that is entirely quotes", () => {
