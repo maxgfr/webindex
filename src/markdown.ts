@@ -652,7 +652,8 @@ const BASE_TAG = /<base(?=[\s/>])[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/gi;
 /**
  * The URL a document's relative links resolve against: its first `<base href>`,
  * itself resolved against `pageUrl`, else `pageUrl`. Read from the WHOLE page —
- * the base lives in <head>, which main-content isolation cuts away.
+ * the base lives in <head>, which main-content isolation cuts away. A data: or
+ * javascript: base is ignored, as the HTML spec has a browser ignore it.
  */
 export function documentBaseUrl(html: string, pageUrl?: string): string | undefined {
   if (!/<base[\s/>]/i.test(html)) return pageUrl;
@@ -660,7 +661,8 @@ export function documentBaseUrl(html: string, pageUrl?: string): string | undefi
     const href = htmlAttributes(m[0]).get("href");
     if (href === undefined) continue;
     try {
-      return new URL(decodeEntities(href).trim(), pageUrl).href;
+      const base = new URL(decodeEntities(href).trim(), pageUrl);
+      return base.protocol === "data:" || base.protocol === "javascript:" ? pageUrl : base.href;
     } catch {
       return pageUrl;
     }

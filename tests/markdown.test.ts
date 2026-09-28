@@ -84,6 +84,12 @@ describe("htmlToMarkdown: inline", () => {
     expect(md(html, "https://d.test/v1/page")).toBe("[Guide](https://d.test/v2/guide)");
   });
 
+  it("ignores a <base href> that is javascript: or data:, as a browser does", () => {
+    const html = '<head><base href="javascript:alert(1)//"></head><p><a href="guide">Guide</a></p>';
+    expect(md(html, "https://d.test/v1/page")).toBe("[Guide](https://d.test/v1/guide)");
+    expect(md(html.replace("javascript:alert(1)//", "data:text/html,x"), "https://d.test/v1/page")).toBe("[Guide](https://d.test/v1/guide)");
+  });
+
   it("keeps a relative link as written when there is nothing to resolve it against", () => {
     expect(md('<p><a href="guide.html">Guide</a></p>')).toBe("[Guide](guide.html)");
   });
