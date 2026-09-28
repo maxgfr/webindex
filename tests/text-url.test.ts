@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildMatcher, isStopword, keywords, matcherFromTokens, rankedKeywords } from "../src/text.js";
+import { buildMatcher, excerptWindows, foldTerm, isStopword, keywords, matcherFromTokens, rankedKeywords } from "../src/text.js";
+import { focusedSnippet } from "../src/fetch.js";
+import { bm25Tokenize } from "../src/rank.js";
 import { configure, resetBrand } from "../src/brand.js";
 import { canonicalizeUrl, domainOf, fnv1a64, LOCAL_FILE_DOMAIN, normalizeDoi } from "../src/url.js";
 
@@ -149,6 +151,31 @@ describe("keywords", () => {
     expect(keywords("node.js vs deno performance")).not.toContain("vs");
     expect(keywords("Wie funktioniert die Datenschutz-Grundverordnung?")).toEqual(["funktioniert", "Datenschutz", "Grundverordnung"]);
   });
+
+  it("keeps a word written with combining marks whole", () => {
+    // Devanagari, Thai and Tamil write vowels as combining marks. Splitting at
+    // each one left fragments that match nothing: "हिन्दी" became "ह" and "न्द".
+    expect(keywords("हिन्दी व्याकरण")).toEqual(["हिन्दी", "व्याकरण"]);
+    expect(keywords("สวัสดี ภาษาไทย")).toEqual(["สวัสดี", "ภาษาไทย"]);
+    expect(keywords("தமிழ் இலக்கணம்")).toEqual(["தமிழ்", "இலக்கணம்"]);
+    // A decomposed accent is part of its letter, as a precomposed one is.
+    expect(keywords("café menu")).toEqual(["café", "menu"]);
+  });
+
+  it("reads Chinese and Japanese as overlapping bigrams, a lone ideograph as itself", () => {
+    // A whole clause was one keyword, and no page repeats a question verbatim.
+    expect(keywords("東京の天気")).toEqual(["東京", "京の", "の天", "天気"]);
+    expect(keywords("水")).toEqual(["水"]);
+    expect(keywords("Node.js 的性能")).toEqual(["Node", "js", "的性", "性能"]);
+  });
+
+  it("agrees with bm25Tokenize on what a term is in those scripts", () => {
+    // The ranker and the excerpt matcher must see the same terms, or a page
+    // ranks on words its excerpt never highlights.
+    for (const q of ["हिन्दी व्याकरण के नियम", "東京の天気予報", "สวัสดี ภาษาไทย", "தமிழ் இலக்கணம்", "café menu"]) {
+      expect(keywords(q).map(foldTerm), q).toEqual([...new Set(bm25Tokenize(q, { subtokens: false }))]);
+    }
+  });
 });
 
 describe("rankedKeywords", () => {
@@ -206,12 +233,48 @@ describe("buildMatcher", () => {
     expect(buildMatcher("C# records").matchLine("CSS records").size).toBe(1);
   });
 
+  it("highlights Hindi, Thai and Chinese or Japanese lines, which it used to miss entirely", () => {
+    expect(buildMatcher("हिन्दी व्याकरण").matchLine("यह हिन्दी व्याकरण की पुस्तक है").size).toBe(2);
+    expect(buildMatcher("ภาษาไทย").matchLine("เรียนภาษาไทย ออนไลน์").size).toBe(1);
+    expect(buildMatcher("東京の天気").matchLine("明日の東京の天気は晴れです").size).toBe(4);
+    expect(buildMatcher("天気").matchLine("東京の天気").size).toBe(1);
+    expect(buildMatcher("水").matchLine("水は大切です").size).toBe(1);
+    expect(buildMatcher("東京の天気").matchLine("an unrelated line").size).toBe(0);
+  });
+
+  it("matches a short word as a word in a script with combining marks", () => {
+    // "का" continues into "कां" through a combining mark, not a letter.
+    expect(buildMatcher("का").matchLine("कां").size).toBe(0);
+    expect(buildMatcher("का").matchLine("राम का घर").size).toBe(1);
+  });
+
   it("folds the œ, æ and ß ligatures both ways", () => {
     expect(buildMatcher("cœur réforme").matchLine("le coeur de la reforme").size).toBe(2);
     expect(buildMatcher("coeur").matchLine("le cœur").size).toBe(1);
     expect(buildMatcher("straße").matchLine("Strasse 5").size).toBe(1);
     expect(buildMatcher("strasse").matchLine("Straße 5").size).toBe(1);
     expect(buildMatcher("encyclopaedia").matchLine("encyclopædia").size).toBe(1);
+  });
+});
+
+describe("excerpts in Hindi, Chinese and Japanese", () => {
+  it("centres an excerpt window on the line that answers", () => {
+    const hindi = ["# परिचय", "यह पृष्ठ कुछ और बताता है।", "हिन्दी व्याकरण में संज्ञा के आठ भेद होते हैं।"].join("\n");
+    expect(excerptWindows(hindi, "हिन्दी व्याकरण", { before: 0, after: 1 })[0]).toMatchObject({ anchor: 2, score: 2, heading: "परिचय" });
+    const japanese = ["# 予報", "今日は一日中雨が降るでしょう。", "東京の天気は明日晴れるでしょう。"].join("\n");
+    expect(excerptWindows(japanese, "東京の天気", { before: 0, after: 1 })[0]).toMatchObject({ anchor: 2, score: 4 });
+  });
+
+  it("picks the sentence that answers for a focused snippet", () => {
+    const text = [
+      "# 天気予報",
+      "今日は一日中雨が降るでしょう、傘を持って出かけるのが良いでしょう。",
+      "東京の天気は明日には回復して晴れる見込みで、気温も上がるでしょう。",
+    ].join("\n");
+    // The question is not repeated verbatim anywhere, which is the usual case.
+    expect(focusedSnippet(text, "東京の天気予報を知りたい", { maxSentences: 1 })).toBe(
+      "天気予報 — 東京の天気は明日には回復して晴れる見込みで、気温も上がるでしょう。",
+    );
   });
 });
 

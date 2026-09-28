@@ -120,6 +120,17 @@ describe("help and version", () => {
     expect(help).toMatch(/webindex --help/);
   });
 
+  it.each([
+    ["fetch", ["--full-page", "--format markdown"]],
+    ["extract", ["--full-page", "--format markdown"]],
+  ])("explains in `%s --help` what its own flags do, not only in another command's paragraph", async (cmd, flags) => {
+    // --full-page was explained only under extract ("For both, …"), so
+    // `fetch --help` listed it in the usage line and never said what it did.
+    expect(await run([cmd, "--help"])).toBe(0);
+    const described = stdout().split("\n\n")[2] ?? "";
+    for (const flag of flags) expect(described, flag).toContain(flag);
+  });
+
   it("gives every command a help of its own", async () => {
     for (const cmd of [...SERVICE_ROUTES, "search", "prs", "stack", "skill", "doctor", "hybrid"]) {
       out = [];
@@ -286,6 +297,37 @@ describe("extract", () => {
     expect(result.text.includes("Accept all cookies")).toBe(fullPage);
     expect(result.text.includes("Manage preferences")).toBe(fullPage);
     expect(result).toMatchObject({ fullPage, consentDropped: fullPage ? 0 : 2 });
+  });
+
+  it("writes Markdown with --format markdown, isolated and consent-filtered like text", async () => {
+    const f = join(dir, "page.html");
+    const extra = '<p>See <a href="https://x.test/ref">the reference</a> and run <code>npm i</code>.</p><p>Accept all cookies</p>';
+    writeFileSync(f, `<html><head><base href="https://docs.test/v1/"></head><body>${articlePage(extra)}<p><a href="guide">Guide</a></p></body></html>`);
+    expect(await run(["extract", f, "--format", "markdown", "--json"])).toBe(0);
+    const result = JSON.parse(stdout());
+    expect(result.text).toContain("# Rate limiting");
+    expect(result.text).toContain("See [the reference](https://x.test/ref) and run `npm i`.");
+    expect(result.text).not.toMatch(/Home|About|Accept all cookies/);
+    expect(result.consentDropped).toBe(1);
+    out = [];
+    // A saved page's own <base href> is the one address it can resolve against.
+    expect(await run(["extract", f, "--format", "markdown", "--full-page"])).toBe(0);
+    expect(stdout()).toContain("[Home](https://docs.test/)");
+    expect(stdout()).toContain("[Guide](https://docs.test/v1/guide)");
+  });
+
+  it("keeps plain text and documents as they are under --format markdown", async () => {
+    const f = join(dir, "notes.txt");
+    writeFileSync(f, "a *literal* note");
+    expect(await run(["extract", f, "--format", "markdown"])).toBe(0);
+    expect(stdout()).toBe("a *literal* note\n");
+  });
+
+  it("refuses a --format it does not know", async () => {
+    const f = join(dir, "page.html");
+    writeFileSync(f, articlePage());
+    expect(await run(["extract", f, "--format", "html"])).toBe(2);
+    expect(stderr()).toMatch(/--format expects text or markdown, got "html"/);
   });
 
   it("isolates main HTML content and reports extraction options in JSON", async () => {
@@ -472,6 +514,41 @@ describe("fetch argument handling", () => {
     }
   });
 
+  it("prints Markdown with --format markdown, links absolute against the page's address", async () => {
+    const body = articlePage('<p>Read <a href="/docs/limits">the limits</a>.</p>');
+    installFetchMock(() => ({ body, contentType: "text/html", url: "https://x.test/blog/post" }));
+    try {
+      expect(await run(["fetch", "https://x.test/start", "--format", "markdown"])).toBe(0);
+      expect(stdout()).toContain("# Rate limiting");
+      expect(stdout()).toContain("Read [the limits](https://x.test/docs/limits).");
+      out = [];
+      expect(await run(["fetch", "https://x.test/start", "--format", "text"])).toBe(0);
+      expect(stdout()).toContain("Read the limits.");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(await run(["fetch", "https://x.test/start", "--format", "md"])).toBe(2);
+    expect(stderr()).toMatch(/--format expects text or markdown, got "md"/);
+  });
+
+  it("caches a Markdown read apart from a text one", async () => {
+    process.env[envName("CACHE_DIR")] = join(dir, "cache");
+    const spy = installFetchMock(routes([["x.test/page", { body: articlePage("<p>A <em>point</em>.</p>"), contentType: "text/html" }]]));
+    try {
+      expect(await run(["fetch", "https://x.test/page", "--cache"])).toBe(0);
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--cache", "--format", "markdown", "--json"])).toBe(0);
+      expect(JSON.parse(stdout())).toMatchObject({ cached: false });
+      expect(JSON.parse(stdout()).text).toContain("A *point*.");
+      out = [];
+      expect(await run(["fetch", "https://x.test/page", "--offline", "--format", "markdown"])).toBe(0);
+      expect(stdout()).toContain("A *point*.");
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("refuses a --timeout that is not a positive whole number", async () => {
     expect(await run(["fetch", "https://x.test/page", "--timeout", "0"])).toBe(2);
     expect(await run(["fetch", "https://x.test/page", "--timeout", "soon"])).toBe(2);
@@ -497,6 +574,132 @@ describe("fetch argument handling", () => {
   it("does not mistake a flag for the url", async () => {
     expect(await run(["fetch", "--json"])).toBe(2);
     expect(stderr()).toMatch(/usage: webindex fetch/);
+  });
+});
+
+describe("fetch with several URLs", () => {
+  const page = (marker: string) => articlePage(`<p>Marker ${marker}.</p>`);
+  const letter = (url: string) => url.slice(-1);
+  /** A fetch that answers after `delay(url)` ms, counting how many are in flight at once. */
+  const timedFetch = (delay: (url: string) => number, status: (url: string) => number = () => 200) => {
+    const seen = { inFlight: 0, peak: 0 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        seen.peak = Math.max(seen.peak, ++seen.inFlight);
+        await new Promise((r) => setTimeout(r, delay(url)));
+        seen.inFlight--;
+        const code = status(url);
+        return new Response(code === 200 ? page(letter(url)) : "gone", { status: code, headers: { "content-type": "text/html" } });
+      }),
+    );
+    return seen;
+  };
+
+  it("prints each page under its own header, in the order given however they finish", async () => {
+    timedFetch((url) => (url.endsWith("/a") ? 40 : 0));
+    try {
+      expect(await run(["fetch", "https://x.test/a", "https://x.test/b", "https://x.test/c"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    const o = stdout();
+    expect(o.startsWith("==> https://x.test/a <==\n")).toBe(true);
+    const at = (s: string) => o.indexOf(s);
+    expect(at("Marker a")).toBeLessThan(at("\n\n==> https://x.test/b <==\n"));
+    expect(at("Marker b")).toBeLessThan(at("\n\n==> https://x.test/c <==\n"));
+    expect(o).toContain("Marker c");
+    expect(o.match(/^==> /gm)).toHaveLength(3);
+  });
+
+  it("answers --json with an array, one entry per URL in order, the failures included", async () => {
+    timedFetch(
+      () => 0,
+      (url) => (url.endsWith("/b") ? 404 : 200),
+    );
+    try {
+      expect(await run(["fetch", "https://x.test/a", "https://x.test/b", "--json", "--format", "markdown"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    const results = JSON.parse(stdout());
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({ url: "https://x.test/a", status: 200, fullPage: false });
+    expect(results[0].text).toContain("Marker a");
+    expect(results[1]).toMatchObject({ url: "https://x.test/b", status: 404, text: "", chars: 0 });
+    expect(results[1].note).toMatch(/Could not fetch/);
+  });
+
+  it("names each failure on stderr, and succeeds when any page was read", async () => {
+    timedFetch(
+      () => 0,
+      (url) => (url.endsWith("/b") ? 404 : 200),
+    );
+    try {
+      expect(await run(["fetch", "https://x.test/a", "https://x.test/b"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stdout()).toContain("Marker a");
+    expect(stdout()).not.toContain("https://x.test/b");
+    expect(stderr()).toMatch(/nothing readable at https:\/\/x\.test\/b — Could not fetch/);
+  });
+
+  it("fails when every URL failed, naming each", async () => {
+    timedFetch(
+      () => 0,
+      () => 404,
+    );
+    try {
+      expect(await run(["fetch", "https://x.test/a", "https://x.test/b"])).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stdout()).toBe("");
+    expect(stderr()).toMatch(/nothing readable at https:\/\/x\.test\/a/);
+    expect(stderr()).toMatch(/nothing readable at https:\/\/x\.test\/b/);
+    expect(stderr()).toMatch(/none of the 2 URLs/);
+  });
+
+  it.each([
+    [undefined, 4],
+    ["2", 2],
+  ])("keeps at most %s (default 4) in flight", async (width, peak) => {
+    if (width) process.env[envName("FETCH_CONCURRENCY")] = width;
+    const seen = timedFetch(() => 15);
+    try {
+      expect(await run(["fetch", ...["a", "b", "c", "d", "e", "f"].map((l) => `https://x.test/${l}`), "--json"])).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(seen.peak).toBe(peak);
+    expect(JSON.parse(stdout()).map((r: { url: string }) => r.url)).toEqual(["a", "b", "c", "d", "e", "f"].map((l) => `https://x.test/${l}`));
+  });
+
+  it("refuses the whole list, before fetching anything, when one is not an http(s) URL", async () => {
+    const seen = timedFetch(() => 0);
+    try {
+      expect(await run(["fetch", "https://x.test/a", "example.com"])).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(stderr()).toMatch(/fetch needs an http\(s\) URL, got "example\.com"/);
+    expect(seen.peak).toBe(0);
+  });
+
+  it("prints a single page exactly as it always did: no header, an object for --json", async () => {
+    timedFetch(() => 0);
+    try {
+      expect(await run(["fetch", "https://x.test/a"])).toBe(0);
+      expect(stdout()).not.toContain("==>");
+      expect(stdout().startsWith("# Rate limiting\n")).toBe(true);
+      out = [];
+      expect(await run(["fetch", "https://x.test/a", "--json"])).toBe(0);
+      expect(Array.isArray(JSON.parse(stdout()))).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -658,7 +861,6 @@ describe("unknown input", () => {
   });
 
   it.each([
-    [["fetch", "https://a.test/", "https://b.test/"], /unexpected argument "https:\/\/b\.test\/"/],
     [["extract", "a.html", "b.html"], /unexpected argument "b\.html"/],
     [["tables", "https://a.test/", "https://b.test/"], /unexpected argument/],
     [["package", "hono", "express"], /unexpected argument "express"/],
@@ -667,9 +869,9 @@ describe("unknown input", () => {
     [["stack", "path", "extra"], /unexpected argument "extra"/],
     [["doctor", "now"], /unexpected argument "now"/],
   ])("refuses an argument it would otherwise drop or glue onto another: %j", async (argv, message) => {
-    // `fetch a b` fetched a and dropped b; `tables a b` fetched the URL
-    // "a b"; `rank rate limiting --query q` ranked against q and ignored the
-    // words that looked like the question.
+    // `fetch a b` fetched a and dropped b (it fetches both now); `tables a b`
+    // fetched the URL "a b"; `rank rate limiting --query q` ranked against q
+    // and ignored the words that looked like the question.
     expect(await run(argv)).toBe(2);
     expect(stderr()).toMatch(message);
   });
@@ -708,6 +910,29 @@ describe("the MCP tools", () => {
       expect(full.text).toContain("About");
       expect(full.text).toContain("Related reading");
       expect(full.text).toContain("Accept all cookies");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(["webindex_fetch", "webindex_extract"])("%s declares an optional format, text or markdown", (name) => {
+    const tool = adapter.listTools(LATEST_PROTOCOL).find((tool) => tool.name === name)!;
+    expect(tool.inputSchema.properties.format).toMatchObject({ type: "string", enum: ["text", "markdown"] });
+    expect(tool.inputSchema.required).not.toContain("format");
+  });
+
+  it.each(["webindex_fetch", "webindex_extract"])("%s answers in Markdown when asked", async (name) => {
+    const path = join(dir, "page.html");
+    const body = articlePage('<p>See <a href="https://x.test/ref">the reference</a>.</p>');
+    writeFileSync(path, body);
+    installFetchMock(routes([["x.test/page", { body, contentType: "text/html" }]]));
+    try {
+      const args = name === "webindex_fetch" ? { url: "https://x.test/page" } : { path };
+      const markdown = await webindexAdapter().callTool(name, { ...args, format: "markdown" });
+      expect(markdown.text).toContain("See [the reference](https://x.test/ref).");
+      const text = await webindexAdapter().callTool(name, { ...args, format: "text" });
+      expect(text.text).toContain("See the reference.");
+      expect(text).toEqual(await webindexAdapter().callTool(name, args));
     } finally {
       vi.unstubAllGlobals();
     }

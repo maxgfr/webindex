@@ -32,6 +32,7 @@ import { hybridSearch, probeQdrant, qdrantBase } from "./vector.js";
 import { embed } from "./embed.js";
 import { crawlSite } from "./crawl.js";
 import { extractTables, tableToMarkdown } from "./tables.js";
+import { documentBaseUrl, htmlToMarkdown } from "./markdown.js";
 import { fingerprint, hasChanged } from "./changed.js";
 import {
   auditEngineUsage,
@@ -70,6 +71,7 @@ import {
   UsageError,
 } from "./cli-kit.js";
 import { ensureDir, isNoWrite, writeArtifact } from "./no-write.js";
+import { mapLimit } from "./pool.js";
 import type { JsonSchemaProp } from "./mcp/protocol.js";
 import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
@@ -88,9 +90,10 @@ USAGE
                           [--region <cc>|wt] [--engine ddg|ddglite|mojeek|off]
                           [--searxng <base>|off] [--firecrawl <base>|off]
                           [--timeout <ms>]
-  webindex fetch <url> [--json] [--firecrawl <base>|off] [--lang <tag>] [--full-page]
-                       [--cache] [--refresh] [--offline] [--timeout <ms>]
-  webindex extract <file|-> [--json] [--full-page]
+  webindex fetch <url> [<url> …] [--json] [--format text|markdown]
+                       [--firecrawl <base>|off] [--lang <tag>] [--full-page] [--cache]
+                       [--refresh] [--offline] [--timeout <ms>]
+  webindex extract <file|-> [--json] [--format text|markdown] [--full-page]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--dense] [--json]
   webindex repo <ref> [--forge github|gitlab|gitea] [--json]
   webindex issues <ref> [--terms "<words>"] [--limit <n>] [--forge <kind>] [--json]
@@ -141,16 +144,27 @@ COMMANDS
              download filename or the bytes themselves; images, media and
              archives get a note, never their bytes. Uses Firecrawl when
              available, with built-in extraction as fallback. HTML is reduced
-             to main content with consent banners dropped. Caching is opt-in:
-             --cache reuses a fresh copy for the TTL (24 h) and revalidates a
-             stale one with a conditional GET, so an unchanged page costs a
-             304; --refresh re-fetches and rewrites the entry; --offline
-             serves only what the cache holds. --json adds finalUrl (after
-             redirects), canonical, documentType and cached.
+             to main content with consent banners dropped; --full-page keeps
+             the whole page through the built-in reader, navigation, footer and
+             consent banners included. --format markdown writes an HTML page as
+             CommonMark — links and images absolute, code fenced, lists and
+             tables kept — the shape Firecrawl returns (the default, text,
+             flattens all but the headings); PDFs and office documents keep
+             their text either way. Caching is opt-in: --cache reuses a fresh
+             copy for the TTL (24 h) and revalidates a stale one with a
+             conditional GET, so an unchanged page costs a 304; --refresh
+             re-fetches and rewrites the entry; --offline serves only what the
+             cache holds. --json adds finalUrl (after redirects), canonical,
+             documentType and cached. Several URLs are read four at a time
+             (WEBINDEX_FETCH_CONCURRENCY), each printed under a "==> <url> <=="
+             header in the order given, or as one --json array; a URL with
+             nothing readable is named on stderr, and the run fails only when
+             every one of them did.
   extract    Same extraction, on a file already on disk (- reads stdin),
-             recognised by its bytes when its name says otherwise. For both,
-             --full-page keeps the whole HTML page through the built-in reader:
-             navigation, footer and consent banners included.
+             recognised by its bytes when its name says otherwise. --full-page
+             keeps the whole HTML page, navigation and consent banners included;
+             --format markdown writes it as CommonMark, as fetch does. Plain
+             text and documents keep their text either way.
   rank       Order candidate documents against a question — BM25F, then a
              near-duplicate collapse, then MMR so the top says several
              different things. Reads a JSON array of {url,title,text} from
@@ -304,6 +318,7 @@ ENVIRONMENT
   WEBINDEX_NO_ROBOTS     robots and crawl do not consult robots.txt — only on a site you own
   WEBINDEX_ROBOTS_UA     the token robots.txt groups are matched against (default webindex)
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
+  WEBINDEX_FETCH_CONCURRENCY  URLs one fetch keeps in flight, 1-16 (default 4)
   WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
   WEBINDEX_MAX_CRAWL_DELAY_MS the longest robots.txt Crawl-delay a crawl waits out, in ms
                               (default 60000); a site asking for more is not crawled
@@ -361,6 +376,7 @@ export const VALUE_FLAGS = [
   "forge",
   "prefix",
   "extract-root",
+  "format",
 ];
 export const BOOL_FLAGS = [
   "json",
@@ -431,6 +447,13 @@ function fail(msg: string): never {
 function usage(msg: string): never {
   process.stderr.write(`webindex: ${msg}\n`);
   process.exit(EXIT_USAGE);
+}
+
+/** `--format text|markdown`: the shape of an HTML page's text, text by default. */
+function argFormat(args: CommandArgs): "text" | "markdown" {
+  const format = argValue(args, "format") ?? "text";
+  if (format !== "text" && format !== "markdown") throw new UsageError(`--format expects text or markdown, got "${format}"`);
+  return format;
 }
 
 /** `--timeout <ms>`: a positive whole number of milliseconds, or absent for the default. */
@@ -506,6 +529,14 @@ const FORGE_ARG: JsonSchemaProp = {
   enum: [...FORGE_KINDS],
 };
 
+// The optional `format` argument webindex_fetch and webindex_extract share.
+const FORMAT_ARG: JsonSchemaProp = {
+  type: "string",
+  description:
+    "The shape of an HTML page's text: text (default; headings kept as #, the rest flattened) or markdown (CommonMark with absolute links, fenced code, lists and tables — the shape Firecrawl returns). PDFs and office documents keep their text either way.",
+  enum: ["text", "markdown"],
+};
+
 /** Why an httpGet failed: the status a server gave, or — when none answered — what went wrong instead. */
 const fetchFailure = (r: { status: number; error?: string }): string => (r.status ? `status ${r.status}` : (r.error ?? "no answer"));
 
@@ -524,6 +555,7 @@ async function extractLocal(
   path: string,
   fullPage = false,
   given?: Buffer,
+  format: "text" | "markdown" = "text",
 ): Promise<{ text: string; extractor: string; reason?: string; consentDropped: number }> {
   let bytes: Buffer;
   try {
@@ -558,8 +590,12 @@ async function extractLocal(
   // an image, an archive — always has one early. Never print its bytes.
   if (raw.slice(0, 1024).includes("\u0000")) return { text: "", extractor: "none", reason: "binary data, not a text document", consentDropped: 0 };
   const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
-  const text = looksHtml ? htmlToText(fullPage ? raw : extractMainHtml(raw), { fullPage }) : raw;
-  const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text) : { text, dropped: 0 };
+  const markdown = format === "markdown";
+  const main = looksHtml && !fullPage ? extractMainHtml(raw) : raw;
+  // A file has no address of its own to resolve against — only the <base href>
+  // a saved page may carry, and only when that one is absolute.
+  const text = !looksHtml ? raw : markdown ? htmlToMarkdown(main, { fullPage, baseUrl: documentBaseUrl(raw) }) : htmlToText(main, { fullPage });
+  const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text, { markdown }) : { text, dropped: 0 };
   return { text: consent.text, extractor: looksHtml ? "native" : "plain", consentDropped: consent.dropped };
 }
 
@@ -952,6 +988,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
               url: { type: "string", description: "The http(s) URL to fetch." },
               lang: { type: "string", description: "Accept-Language tag, e.g. fr-FR." },
               fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
+              format: FORMAT_ARG,
               timeoutMs: {
                 type: "number",
                 description: "Give up on a silent host after this many ms (default 20000, at most 300000). A timed-out request is not retried.",
@@ -973,6 +1010,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
             properties: {
               path: { type: "string", description: "Absolute path to the file." },
               fullPage: { type: "boolean", description: "Keep the whole page: no main-content isolation, no consent-banner filter." },
+              format: FORMAT_ARG,
             },
             required: ["path"],
           },
@@ -1210,6 +1248,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
           acceptLanguage: args.lang ? String(args.lang) : undefined,
           fullPage,
           stripConsent: !fullPage,
+          format: args.format === "markdown" ? ("markdown" as const) : ("text" as const),
           timeoutMs: toolTimeoutMs(args.timeoutMs),
           signal,
         };
@@ -1265,7 +1304,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
         return { text: trailer.length ? `${body}\n\n---\n${trailer.join("\n")}` : body };
       }
       if (name === "webindex_extract") {
-        const r = await extractLocal(localPath(String(args.path ?? "")), args.fullPage === true);
+        const r = await extractLocal(localPath(String(args.path ?? "")), args.fullPage === true, undefined, args.format === "markdown" ? "markdown" : "text");
         if (!r.text) throw new ToolError(`Nothing readable in that file${r.reason ? ` — ${r.reason}` : ""}.`);
         return { text: `${r.text}\n\n---\nextractor: ${r.extractor}` };
       }
@@ -1485,15 +1524,55 @@ function commandHelp(cmd: string): string {
 }
 
 /**
- * How many bare words a command takes: a query or a text any number, `rank`,
- * `hybrid`, `doctor` and `mcp` none, everything else one — a URL, a file, a
- * reference, an action. A second one used to be dropped (`fetch a b` fetched a)
- * or glued onto the first (`tables a b` fetched the URL "a b"), and the command
- * then succeeded at something other than what was typed.
+ * `fetch` over several URLs: at most `<PREFIX>_FETCH_CONCURRENCY` in flight
+ * (default 4), each page printed under a `==> <url> <==` header as soon as
+ * every page before it is out — in the order given, however they finish — or,
+ * with --json, one array in that order. A URL that yields nothing is named on
+ * stderr; the run fails only when every one of them did, since one dead link
+ * in a reading list is not a failed reading list.
+ */
+async function fetchSeveral<R>(
+  urls: readonly string[],
+  fetchOne: (url: string) => Promise<ExtractResult & { cached?: boolean }>,
+  json: boolean,
+  record: (url: string, r: ExtractResult & { cached?: boolean }) => R,
+): Promise<void> {
+  const results: (ExtractResult & { cached?: boolean })[] = [];
+  let next = 0;
+  let wrote = false;
+  const report = (i: number): void => {
+    const r = results[i]!;
+    if (!r.text) {
+      process.stderr.write(`webindex: nothing readable at ${urls[i]}${r.note ? ` — ${r.note}` : ""}\n`);
+      return;
+    }
+    if (json) return;
+    process.stdout.write(`${wrote ? "\n" : ""}==> ${urls[i]} <==\n${r.text}\n`);
+    wrote = true;
+    if (r.note) process.stderr.write(`  ${r.note}\n`);
+  };
+  await mapLimit(urls, envInt("FETCH_CONCURRENCY", 4, 1, 16), async (url, i) => {
+    results[i] = await fetchOne(url);
+    while (next < urls.length && results[next]) report(next++);
+  });
+  if (json) {
+    const records = results.map((r, i) => record(urls[i]!, r));
+    process.stdout.write(JSON.stringify(records, null, 2) + "\n");
+  }
+  if (results.every((r) => !r.text)) fail(`none of the ${urls.length} URLs had anything readable`);
+}
+
+/**
+ * How many bare words a command takes: a query or a text any number, the URLs
+ * `fetch` reads any number, `rank`, `hybrid`, `doctor` and `mcp` none,
+ * everything else one — a URL, a file, a reference, an action. A second one
+ * used to be dropped (`fetch a b` fetched a, before it took a list) or glued
+ * onto the first (`tables a b` fetched the URL "a b"), and the command then
+ * succeeded at something other than what was typed.
  */
 function positionalLimit(args: CommandArgs): { max: number; hint?: string } {
   const cmd = args.command;
-  if (cmd === "search" || cmd === "embed") return { max: Number.POSITIVE_INFINITY };
+  if (cmd === "search" || cmd === "embed" || cmd === "fetch") return { max: Number.POSITIVE_INFINITY };
   if (cmd === "rank" || cmd === "hybrid") return { max: 0, hint: 'the question goes in --query "<q>"' };
   if (cmd === "doctor" || cmd === "mcp") return { max: 0 };
   if (cmd === "skill") return { max: args.positional[0] === "init" ? 2 : 1 };
@@ -1551,51 +1630,59 @@ async function dispatch(argv: string[]): Promise<void> {
   }
 
   if (cmd === "fetch") {
-    const url = args.positional[0];
-    if (!url) usage("usage: webindex fetch <url>");
-    if (!/^https?:\/\//i.test(url)) fail(`fetch needs an http(s) URL${existsSync(url) ? ` — for a file on disk, \`webindex extract ${url}\`` : ""}`);
+    const urls = args.positional;
+    if (!urls.length) usage("usage: webindex fetch <url> [<url> …]");
+    // Every argument is checked before anything is fetched: a typo in the
+    // tenth URL should not cost the first nine requests and then fail.
+    const bad = urls.find((u) => !/^https?:\/\//i.test(u));
+    if (bad !== undefined) {
+      fail(
+        `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync(bad) ? ` — for a file on disk, \`webindex extract ${bad}\`` : ""}`,
+      );
+    }
     const fullPage = argBool(args, "full-page");
+    const format = argFormat(args);
     const refresh = argBool(args, "refresh");
     const offline = argBool(args, "offline");
     if (refresh && offline) usage("--refresh and --offline contradict each other: one always fetches, the other never does");
     // Set both switches every time, so a value from an earlier call in the same
     // process can never leak into this one.
     setCacheMode({ refresh, offline });
-    const r = await cachedFetchAndExtract(
+    const fetchOpts = {
+      acceptLanguage: argValue(args, "lang"),
+      firecrawl: argValue(args, "firecrawl"),
+      fullPage,
+      stripConsent: !fullPage,
+      format,
+      timeoutMs: argTimeout(args),
+    };
+    const cache = argBool(args, "cache") || refresh;
+    const json = argBool(args, "json");
+    const record = (url: string, r: ExtractResult & { cached?: boolean }) => ({
       url,
-      {
-        acceptLanguage: argValue(args, "lang"),
-        firecrawl: argValue(args, "firecrawl"),
-        fullPage,
-        stripConsent: !fullPage,
-        timeoutMs: argTimeout(args),
-      },
-      argBool(args, "cache") || refresh,
-    );
-    if (argBool(args, "json")) {
-      process.stdout.write(
-        JSON.stringify(
-          {
-            url,
-            // Where the text actually came from — after redirects — and the
-            // address the page gives for itself: what a citation needs.
-            finalUrl: r.finalUrl,
-            canonical: r.canonical,
-            title: r.title,
-            extractor: r.extractor,
-            documentType: r.documentType,
-            status: r.status,
-            cached: r.cached === true,
-            chars: r.text.length,
-            note: r.note,
-            text: r.text,
-            fullPage,
-            consentDropped: r.consentDropped ?? 0,
-          },
-          null,
-          2,
-        ) + "\n",
-      );
+      // Where the text actually came from — after redirects — and the
+      // address the page gives for itself: what a citation needs.
+      finalUrl: r.finalUrl,
+      canonical: r.canonical,
+      title: r.title,
+      extractor: r.extractor,
+      documentType: r.documentType,
+      status: r.status,
+      cached: r.cached === true,
+      chars: r.text.length,
+      note: r.note,
+      text: r.text,
+      fullPage,
+      consentDropped: r.consentDropped ?? 0,
+    });
+    if (urls.length > 1) {
+      await fetchSeveral(urls, (url) => cachedFetchAndExtract(url, fetchOpts, cache), json, record);
+      return;
+    }
+    const url = urls[0] as string;
+    const r = await cachedFetchAndExtract(url, fetchOpts, cache);
+    if (json) {
+      process.stdout.write(JSON.stringify(record(url, r), null, 2) + "\n");
     } else if (r.text) {
       process.stdout.write(r.text + "\n");
       // A prefix cut at the size cap, a document link that served a web page,
@@ -1608,13 +1695,14 @@ async function dispatch(argv: string[]): Promise<void> {
   }
 
   if (cmd === "extract") {
-    const EXTRACT_USAGE = "usage: webindex extract <file|-> [--full-page] [--json]";
+    const EXTRACT_USAGE = "usage: webindex extract <file|-> [--format text|markdown] [--full-page] [--json]";
     const path = args.positional[0];
     if (!path) usage(EXTRACT_USAGE);
     const fullPage = argBool(args, "full-page");
+    const format = argFormat(args);
     // `-` reads stdin, so another tool's output can be extracted without a
     // temp file; its bytes are routed by what they are, having no name.
-    const r = await extractLocal(path, fullPage, path === "-" ? readStdin(EXTRACT_USAGE) : undefined);
+    const r = await extractLocal(path, fullPage, path === "-" ? readStdin(EXTRACT_USAGE) : undefined, format);
     if (argBool(args, "json")) {
       process.stdout.write(
         JSON.stringify(

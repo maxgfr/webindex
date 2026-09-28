@@ -352,6 +352,65 @@ describe("fetchAndExtract", () => {
     expect(fullDespiteConsent.consentDropped).toBe(0);
   });
 
+  describe("format: markdown", () => {
+    const page = (article: string, head = "") =>
+      `<html><head><title>Guide</title>${head}</head><body><nav><a href="/">Home</a> <a href="/about">About</a></nav>` +
+      `<article>${article}</article><footer>Legal</footer></body></html>`;
+    const ARTICLE =
+      `<h1>Rate limiting</h1><p>${"Token buckets smooth bursts. ".repeat(12)}See <a href="../ref/limits">the limits</a>.</p>` +
+      '<ul><li>One</li><li>Two</li></ul><pre><code class="language-sh">curl -i https://api.test/</code></pre>';
+
+    it("reads the main content as Markdown, links absolute against the URL the page came from", async () => {
+      installFetchMock(() => ({ body: page(ARTICLE), contentType: "text/html", url: "https://docs.test/v2/guide/limits" }));
+      const r = await fetchAndExtract("https://docs.test/old", { format: "markdown" });
+      expect(r.text).toContain("# Rate limiting");
+      expect(r.text).toContain("[the limits](https://docs.test/v2/ref/limits)");
+      expect(r.text).toContain("- One\n- Two");
+      expect(r.text).toContain("```sh\ncurl -i https://api.test/\n```");
+      expect(r.text).not.toMatch(/Home|About|Legal/);
+      expect(r).toMatchObject({ title: "Guide", finalUrl: "https://docs.test/v2/guide/limits" });
+    });
+
+    it("resolves against the <base href> the head declares, though isolation cuts the head away", async () => {
+      installFetchMock(() => ({ body: page(ARTICLE, '<base href="https://cdn.test/docs/">'), contentType: "text/html" }));
+      const r = await fetchAndExtract("https://docs.test/guide", { format: "markdown" });
+      expect(r.text).toContain("[the limits](https://cdn.test/ref/limits)");
+    });
+
+    it("leaves the default text output exactly as it was", async () => {
+      installFetchMock(() => ({ body: page(ARTICLE), contentType: "text/html" }));
+      const plain = await fetchAndExtract("https://docs.test/guide");
+      const text = await fetchAndExtract("https://docs.test/guide", { format: "text" });
+      expect(text).toEqual(plain);
+      expect(plain.text).not.toContain("](");
+      expect(plain.text).toContain("See the limits.");
+    });
+
+    it("keeps everything with fullPage, as text does", async () => {
+      installFetchMock(() => ({ body: page(ARTICLE), contentType: "text/html" }));
+      const r = await fetchAndExtract("https://docs.test/guide", { format: "markdown", fullPage: true });
+      expect(r.text).toContain("[Home](https://docs.test/)");
+      expect(r.text).toContain("Legal");
+    });
+
+    it("drops consent-banner lines through their Markdown, never a code block's", async () => {
+      const banner =
+        '<div class="cc"><p>We use cookies to improve your experience.</p><ul><li><a href="#accept">Accept all cookies</a></li><li><a href="/prefs">Manage preferences</a></li></ul></div>';
+      const code = "<pre>// Accept all cookies\nconsent.acceptAll()</pre>";
+      installFetchMock(() => ({ body: page(ARTICLE + banner + code), contentType: "text/html" }));
+      const r = await fetchAndExtract("https://docs.test/guide", { format: "markdown", stripConsent: true });
+      expect(r.text).not.toMatch(/We use cookies|\[Accept all cookies\]|\[Manage preferences\]/);
+      expect(r.consentDropped).toBe(3);
+      expect(r.text).toContain("```\n// Accept all cookies\nconsent.acceptAll()\n```");
+      expect(r.text).toContain("[the limits]");
+    });
+
+    it("keeps a document's text: the format is about HTML", async () => {
+      installFetchMock(() => ({ body: "plain *notes* here", contentType: "text/plain" }));
+      expect((await fetchAndExtract("https://docs.test/notes.txt", { format: "markdown" })).text).toBe("plain *notes* here");
+    });
+  });
+
   it("returns cleaned text + title for an html page", async () => {
     installFetchMock(routes([["example.com", { body: "<title>Doc</title><h1>Hi</h1><p>body text</p>" }]]));
     const r = await fetchAndExtract("https://example.com/x");

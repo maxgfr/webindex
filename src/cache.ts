@@ -73,8 +73,9 @@ function userScoped(name: string): string {
 // A consent-stripped or full-page read is keyed apart as well (the optional
 // `variant`): the built-in reader extracts different text for the same page
 // under each, and whichever setting wrote the entry used to be served to both
-// for the whole TTL. A plain read adds nothing to the key, so its path is what
-// it always was.
+// for the whole TTL. So is a Markdown read of any of them, which is a different
+// document again. A plain text read adds nothing to the key, so its path is
+// what it always was.
 //
 // Entries written under an older key simply miss and get overwritten — no
 // migration needed.
@@ -88,14 +89,25 @@ export function cachePath(url: string, acceptLanguage = "", extractor: CacheName
 // Only the built-in reader applies these: Firecrawl's markdown skips both, and a
 // document has no banner to strip — so only the "native" namespace is split by
 // them (see entryPaths), and one PDF entry serves every kind of request.
-type CacheVariant = "" | "consent" | "full";
-const VARIANTS: readonly CacheVariant[] = ["", "consent", "full"];
+//
+// The output format splits it the same way, and for the same reason: the
+// built-in reader writes the same page as text or as Markdown, while
+// Firecrawl's Markdown and a document's text are one thing either way.
+type CacheRead = "" | "consent" | "full";
+type CacheVariant = CacheRead | "md" | `${Exclude<CacheRead, "">}-md`;
+const TEXT_VARIANTS: readonly CacheVariant[] = ["", "consent", "full"];
+const MARKDOWN_VARIANTS: readonly CacheVariant[] = ["md", "consent-md", "full-md"];
 const PLAIN: readonly CacheVariant[] = [""];
 
-function variantOf(opts: { stripConsent?: boolean; fullPage?: boolean }): CacheVariant {
+function variantOf(opts: { stripConsent?: boolean; fullPage?: boolean; format?: "text" | "markdown" }): CacheVariant {
   // fullPage wins, as it does in fetchAndExtract: it turns the consent filter off.
-  return opts.fullPage ? "full" : opts.stripConsent ? "consent" : "";
+  const read: CacheRead = opts.fullPage ? "full" : opts.stripConsent ? "consent" : "";
+  if (opts.format !== "markdown") return read;
+  return read ? `${read}-md` : "md";
 }
+
+/** The variants that hold the same format as `variant`: the fallback a hole may take, never the other shape. */
+const sameFormat = (variant: CacheVariant): readonly CacheVariant[] => (MARKDOWN_VARIANTS.includes(variant) ? MARKDOWN_VARIANTS : TEXT_VARIANTS);
 
 // The cache-key namespace a fetch made RIGHT NOW would use: Firecrawl when one
 // is configured AND answering (the probe is memoised per process, so this costs
@@ -160,9 +172,13 @@ function readAnyNamespace(
   return best;
 }
 
-/** The requested read of the page if the cache has one, else any read of it — better than a hole. */
+/**
+ * The requested read of the page if the cache has one, else any read of it in
+ * the same format — better than a hole. Not the other format: text handed to a
+ * caller that asked for Markdown is the shape mismatch `format` exists to end.
+ */
 function readAnyCopy(url: string, acceptLanguage: string, variant: CacheVariant): CacheEntry | undefined {
-  return readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, [variant]) ?? readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, VARIANTS);
+  return readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, [variant]) ?? readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, sameFormat(variant));
 }
 
 function ttlMs(): number {
@@ -341,7 +357,16 @@ function touchCache(url: string, entry: CacheEntry, now: number, acceptLanguage 
 // the clock.
 export async function cachedFetchAndExtract(
   url: string,
-  opts: { acceptLanguage?: string; firecrawl?: string; stripConsent?: boolean; fullPage?: boolean; timeoutMs?: number; signal?: AbortSignal } = {},
+  opts: {
+    acceptLanguage?: string;
+    firecrawl?: string;
+    stripConsent?: boolean;
+    fullPage?: boolean;
+    /** "markdown" reads an HTML page as CommonMark; cached apart from its text (see fetchAndExtract). */
+    format?: "text" | "markdown";
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  } = {},
   enabled = false,
   now = Date.now(),
 ): Promise<Extract & { cached?: boolean }> {
