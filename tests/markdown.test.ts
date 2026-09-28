@@ -14,6 +14,15 @@ describe("htmlToMarkdown: blocks", () => {
     expect(md('<h2>\n  Rate <em>limits</em>\n  <a class="headerlink" href="#rate">¶</a>\n</h2><p>x</p>', "https://d.test/")).toBe("## Rate *limits*\n\nx");
   });
 
+  it("keeps a heading's link to its own anchor out of the title, as MDN wraps them", () => {
+    // nearestHeading would otherwise read "[Syntax](https://…#syntax)" as the section.
+    expect(md('<h2 id="syntax"><a href="#syntax">Syntax</a></h2><h3><a href="/elsewhere">Elsewhere</a></h3>', "https://d.test/p")).toBe(
+      "## Syntax\n\n### [Elsewhere](https://d.test/elsewhere)",
+    );
+    // Outside a heading, an in-page link is a table of contents and stays one.
+    expect(md('<p><a href="#syntax">Syntax</a></p>', "https://d.test/p")).toBe("[Syntax](https://d.test/p#syntax)");
+  });
+
   it("ends a heading that never closes at the next block, not at the end of the page", () => {
     expect(md("<h2>Setup<p>Install it first.</p><p>Then run it.</p>")).toBe("## Setup\n\nInstall it first.\n\nThen run it.");
   });
@@ -21,6 +30,11 @@ describe("htmlToMarkdown: blocks", () => {
   it("writes unordered, ordered and nested lists, honouring start and optional </li>", () => {
     const html = '<ul><li>One<li>Two<ul><li>Two a</li><li>Two b</li></ul></li><li>Three</li></ul><ol start="4"><li>Four</li><li>Five</li></ol><p>After.</p>';
     expect(md(html)).toBe("- One\n- Two\n  - Two a\n  - Two b\n- Three\n\n4. Four\n5. Five\n\nAfter.");
+  });
+
+  it("nests a list set straight inside another under the item before it, as a browser shows it", () => {
+    expect(md("<ul><li>a</li><ul><li>b</li><li>c</li></ul><li>d</li></ul>")).toBe("- a\n  - b\n  - c\n- d");
+    expect(md("<ol><li>one</li><ol><li>sub</li></ol></ol>")).toBe("1. one\n   1. sub");
   });
 
   it("indents an item's further paragraphs and blocks under its marker", () => {
@@ -121,6 +135,7 @@ describe("htmlToMarkdown: code blocks", () => {
     ['<div class="highlight-python notranslate"><div class="highlight"><pre>x = 1</pre></div></div>', "python"],
     ['<div class="highlight highlight-source-rust notranslate"><pre>fn main() {}</pre></div>', "rust"],
     ['<pre><code class="hljs language-c++">int x;</code></pre>', "c++"],
+    ['<pre class="brush: js notranslate"><code>map(f)</code></pre>', "js"],
     ['<pre><code class="language-none">plain</code></pre>', ""],
   ])("names the language a highlighter class gives: %s", (html, lang) => {
     expect(md(html).split("\n")[0]).toBe("```" + lang);

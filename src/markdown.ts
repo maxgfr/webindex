@@ -208,7 +208,8 @@ export function htmlToMarkdown(html: string, opts: MarkdownOptions = {}): string
       if (kind === "a") {
         // An <a> inside an open <a> closes it first, as the HTML parser does.
         w.close("a");
-        w.open("a", linkTarget(htmlAttributes(t).get("href"), base));
+        const href = htmlAttributes(t).get("href");
+        w.open("a", linkTarget(href, base), href?.trimStart().startsWith("#"));
       } else w.open(kind);
       continue;
     }
@@ -249,7 +250,7 @@ const INLINE_KIND: Record<string, InlineKind | undefined> = {
 // `first`: nothing written inside it yet. An item's first line carries its
 // marker; a quote's marker is left off the blank line that comes before it.
 type Block =
-  | { kind: "list"; ordered: boolean; next: number; items: number }
+  | { kind: "list"; ordered: boolean; next: number; items: number; last: string }
   | { kind: "item"; marker: string; first: boolean }
   | { kind: "quote"; first: boolean };
 
@@ -259,6 +260,8 @@ interface Frame {
   start: number;
   /** A link's absolute target; absent for an anchor that goes nowhere. */
   href?: string;
+  /** A link to an anchor on this same page. */
+  self?: boolean;
   /** Adds nothing of its own: nested in one of its kind, in code, or past the depth bound. */
   inert?: boolean;
 }
@@ -300,10 +303,10 @@ class Writer {
     }
   }
 
-  open(kind: InlineKind, href?: string): void {
+  open(kind: InlineKind, href?: string, self?: boolean): void {
     if (this.frames.length >= MAX_INLINE_DEPTH) return;
     const inert = (kind === "a" && href === undefined) || this.inCode() || (kind !== "a" && this.frames.some((f) => f.kind === kind));
-    this.frames.push({ kind, start: this.parts.length, ...(href !== undefined ? { href } : {}), ...(inert ? { inert } : {}) });
+    this.frames.push({ kind, start: this.parts.length, ...(href !== undefined ? { href } : {}), ...(self ? { self } : {}), ...(inert ? { inert } : {}) });
   }
 
   /** Close the innermost open `kind`, and whatever opened inside it and never closed. */
@@ -347,10 +350,14 @@ class Writer {
   }
 
   openList(ordered: boolean, start: number): void {
+    const top = this.blocks[this.blocks.length - 1];
+    // A list set straight inside a list, no item round it, belongs to the item
+    // before it — where a browser draws it. That item goes back on the stack.
+    if (top?.kind === "list" && top.items && this.blocks.length + 1 < MAX_BLOCK_DEPTH) this.blocks.push({ kind: "item", marker: top.last, first: false });
     if (!this.room()) return;
     // A list nested in an item follows the item's text with no blank line.
     if (this.blocks[this.blocks.length - 1]?.kind === "item") this.needBlank = false;
-    this.blocks.push({ kind: "list", ordered, next: start, items: 0 });
+    this.blocks.push({ kind: "list", ordered, next: start, items: 0, last: "" });
   }
 
   closeList(): void {
@@ -375,12 +382,13 @@ class Writer {
     else {
       // An item outside any list reads as one of an unordered list.
       if (!this.room()) return;
-      this.blocks.push({ kind: "list", ordered: false, next: 1, items: 0 });
+      this.blocks.push({ kind: "list", ordered: false, next: 1, items: 0, last: "" });
       list = this.blocks.length - 1;
     }
     if (!this.room()) return;
     const owner = this.blocks[list] as Extract<Block, { kind: "list" }>;
     const marker = owner.ordered ? `${owner.next++}. ` : "- ";
+    owner.last = marker;
     this.blocks.push({ kind: "item", marker, first: true });
     // The items of one list sit together. The first keeps the blank line owed
     // to what came before: "4. Four" straight under a line of text continues
@@ -556,6 +564,8 @@ function wrapInline(f: Frame, core: string, inHeading: boolean): string {
     }
     default:
       if (inHeading && PERMALINK_TEXT.test(core)) return "";
+      // A heading's link to its own anchor is a permalink as well: the title is its text.
+      if (inHeading && f.self) return core;
       // Two breaks in a row would end the paragraph inside the brackets.
       return `[${core.replace(/\n{2,}/g, "\n")}](${destination(f.href!)})`;
   }
@@ -659,8 +669,9 @@ export function documentBaseUrl(html: string, pageUrl?: string): string | undefi
 }
 
 // A highlighter's language class: Prism's and highlight.js's `language-x`,
-// prettify's `lang-x`, Sphinx's `highlight-x`, GitHub's `highlight-source-x`.
-const LANGUAGE_CLASS = /(?:^|\s)(?:language|lang|highlight(?:-source)?)-([\w+#.-]+)/i;
+// prettify's `lang-x`, Sphinx's `highlight-x`, GitHub's `highlight-source-x`,
+// SyntaxHighlighter's `brush: x` (MDN's).
+const LANGUAGE_CLASS = /(?:^|\s)(?:(?:language|lang|highlight(?:-source)?)-|brush:\s*)([\w+#.-]+)/i;
 const NO_LANGUAGE = new Set(["none", "nohighlight", "plaintext"]);
 
 /**
