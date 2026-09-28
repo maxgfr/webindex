@@ -1555,14 +1555,10 @@ async function fetchSeveral<R>(
     results[i] = await fetchOne(url);
     while (next < urls.length && results[next]) report(next++);
   });
-  if (json)
-    process.stdout.write(
-      JSON.stringify(
-        results.map((r, i) => record(urls[i]!, r)),
-        null,
-        2,
-      ) + "\n",
-    );
+  if (json) {
+    const records = results.map((r, i) => record(urls[i]!, r));
+    process.stdout.write(JSON.stringify(records, null, 2) + "\n");
+  }
   if (results.every((r) => !r.text)) fail(`none of the ${urls.length} URLs had anything readable`);
 }
 
