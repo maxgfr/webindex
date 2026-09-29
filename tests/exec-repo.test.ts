@@ -937,6 +937,31 @@ describe("cloning, against a real local repository", () => {
     expect(existsSync(join(dir, "README.md"))).toBe(true);
   });
 
+  it("refreshes for a caller who asks while another call is in flight", async () => {
+    // The in-flight call was shared whatever `refresh` said: the refresh
+    // caller got the plain caller's stale tree, and nothing was fetched.
+    const ref = resolveRepo(`file://${origin}`);
+    await ensureClone(ref);
+    writeFileSync(join(origin, "SECOND.md"), "more\n");
+    sh("git", ["-C", origin, "add", "-A"]);
+    sh("git", ["-C", origin, "commit", "-q", "-m", "second"]);
+    const [plain, fresh] = await Promise.all([ensureClone(ref), ensureClone(ref, { refresh: true })]);
+    expect(fresh).toBe(plain);
+    expect(headCommit(fresh)).toBe(headCommit(origin));
+  });
+
+  it("still hands a plain caller the cached tree when a refresh beside it fails", async () => {
+    // ...and in the other order, a caller that never asked for a refresh was
+    // failed by one it happened to overlap.
+    const ref = resolveRepo(`file://${origin}`);
+    const dir = await ensureClone(ref);
+    rmSync(origin, { recursive: true, force: true });
+    const refreshing = ensureClone(ref, { refresh: true });
+    const plain = ensureClone(ref);
+    await expect(refreshing).rejects.toThrow(/refresh failed/);
+    await expect(plain).resolves.toBe(dir);
+  });
+
   it("clones once when several callers ask at the same moment", async () => {
     // Each one used to run its own `git clone` into the same directory; the
     // losers failed, deleted the winner's half-written tree and retried.

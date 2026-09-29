@@ -274,8 +274,20 @@ export async function ensureClone(ref: RepoRef, opts: { refresh?: boolean; branc
   // saw "not cloned yet", each ran `git clone` into the same directory, and the
   // losers deleted the winner's half-written tree before retrying.
   const pending = inflight.get(dir);
-  if (pending) return pending;
-  const work = obtainClone(ref, dir, { refresh: opts.refresh, branch }).finally(() => {
+  if (pending && !opts.refresh) {
+    // A plain caller wants the tree, fresh or not. Joining a refresh that could
+    // not reach the remote, it still gets the cached tree that refresh left
+    // unchanged — what it would have got a moment before, or after.
+    return pending.catch((e: unknown) => {
+      const tree = (e as { cachedTree?: unknown } | undefined)?.cachedTree;
+      return typeof tree === "string" ? tree : Promise.reject(e);
+    });
+  }
+  // A refresh must fetch after it was asked for: the call in flight may have
+  // read the remote before the commit this caller wants, or not fetched at all.
+  // So it runs once that call settles, never in place of it.
+  const run = () => obtainClone(ref, dir, { refresh: opts.refresh, branch });
+  const work = (pending ? pending.then(run, run) : run()).finally(() => {
     if (inflight.get(dir) === work) inflight.delete(dir);
   });
   inflight.set(dir, work);
@@ -323,7 +335,11 @@ async function refreshClone(ref: RepoRef, dir: string, branch: string | undefine
     timeoutMs: fetchTimeoutMs(),
   });
   if (!fetched.ok) {
-    throw new Error(`refresh failed for ${ref.cloneUrl}: ${fetched.stderr.trim() || `exit ${fetched.status}`} (the cached tree at ${dir} is unchanged)`);
+    // `cachedTree` is for a caller that joined this refresh without asking for one.
+    throw Object.assign(
+      new Error(`refresh failed for ${ref.cloneUrl}: ${fetched.stderr.trim() || `exit ${fetched.status}`} (the cached tree at ${dir} is unchanged)`),
+      { cachedTree: dir },
+    );
   }
   const reset = await shAsync("git", ["-C", dir, "reset", "--quiet", "--hard", "FETCH_HEAD"], { timeoutMs: fetchTimeoutMs() });
   if (!reset.ok) throw new Error(`refresh of ${dir} fetched ${ref.cloneUrl} but could not check it out: ${reset.stderr.trim() || `exit ${reset.status}`}`);
