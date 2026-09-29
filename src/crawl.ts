@@ -382,6 +382,14 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
   const width = crawlConcurrency();
   const notes: string[] = [];
   const disallowed: string[] = [];
+  // Each refused URL once. A redirect destination is never `seen`, so a page
+  // redirecting into a refused path and a later link to that path both got here.
+  const refused = new Set<string>();
+  const disallow = (url: string): void => {
+    if (refused.has(url)) return;
+    refused.add(url);
+    disallowed.push(url);
+  };
   const pages: CrawledPage[] = [];
 
   // The crawl's origin, and the part of it the seed names. The origin moves
@@ -466,7 +474,7 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
     }
     const r = await robotsFor(url);
     if (!opts.ignoreRobots && !isAllowed(r, url)) {
-      if (!disallowed.includes(url)) disallowed.push(url);
+      disallow(url);
       return false;
     }
     if (refusesDelay(url, r)) return false;
@@ -636,7 +644,7 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
       const slice = wave.slice(cursor, cursor + (room - batch.length));
       const files = await Promise.all(slice.map((it) => robotsFor(it.url)));
       slice.forEach((item, i) => {
-        if (!opts.ignoreRobots && !isAllowed(files[i]!, item.url)) disallowed.push(item.url);
+        if (!opts.ignoreRobots && !isAllowed(files[i]!, item.url)) disallow(item.url);
         else batch.push(item);
       });
       cursor += slice.length;

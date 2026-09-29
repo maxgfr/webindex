@@ -59,6 +59,8 @@ describe("crawl redirects over HTTP", () => {
       const bodies: Record<string, string> = {
         "/dir/index": '<p>Index page</p><a href="child?a=1&amp;b=2">Child</a>',
         "/links": '<p>Links</p><a href="/outside">out</a>',
+        "/hub": '<p>Hub</p><a href="/jump">jump</a><a href="/x">x</a>',
+        "/x": '<p>X</p><a href="/private">private</a>',
       };
       res.end(bodies[path] ?? "<p>Document content</p>");
     });
@@ -159,6 +161,14 @@ describe("crawl redirects over HTTP", () => {
     const result = await crawlSite(`${base}/dir/index`, { useSitemap: false, delayMs: 0, maxPages: 1, maxDepth: 0 });
     expect(result.pages.map((page) => page.url)).toEqual([`${base}/dir/index`]);
     expect(result.notes.join(" ")).not.toMatch(/did not answer/);
+  });
+
+  it("lists a refused URL once, reached by a redirect and then by a link", async () => {
+    // A redirect destination is never `seen`, so the frontier check listed
+    // /private a second time when a later wave linked to it directly.
+    const result = await crawlSite(`${base}/hub`, { useSitemap: false, delayMs: 0, maxPages: 10, maxDepth: 2 });
+    expect(requests.some((path) => path.endsWith("/private"))).toBe(false);
+    expect(result.disallowed).toEqual([`${base}/private`]);
   });
 
   it("applies robots restrictions to sitemap redirects as well as page redirects", async () => {
