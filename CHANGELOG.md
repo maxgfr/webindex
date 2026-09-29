@@ -2,6 +2,54 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.21.2](https://github.com/maxgfr/webindex/compare/v1.21.1...v1.21.2) (2026-09-29)
+
+
+### Bug Fixes
+
+* **cite:** read no appendix heading inside a code fence ([cd69581](https://github.com/maxgfr/webindex/commit/cd6958168747715a0222001e783694c65793ab10))
+* **cite:** split a group of file:line citations before reading it whole ([72dddb7](https://github.com/maxgfr/webindex/commit/72dddb73e2822ba0d89c765fe193c66259c78c22))
+* **cli:** name NO_NPX, not an ignored engine list, for rungs doctor lists as off ([4260710](https://github.com/maxgfr/webindex/commit/4260710f27d12a6b8c9313c5e36664efccea35f7))
+* **crawl:** ignore a data: or javascript: <base href> when reading links ([218035a](https://github.com/maxgfr/webindex/commit/218035a8f22aadbdd379fbedd5a69de7e5b44842))
+* **crawl:** let a cancel end the per-host politeness wait ([f4b38f1](https://github.com/maxgfr/webindex/commit/f4b38f18dbb0e364c7daff8f3413cdd9e7354ea5))
+* **crawl:** list a robots-refused URL once in `disallowed` ([f5516ab](https://github.com/maxgfr/webindex/commit/f5516ab3a26dfac0b6fa7bbcdaff497ecf2412ba))
+* **crawl:** read a page whose path ends in .js, .css or .map ([216de5f](https://github.com/maxgfr/webindex/commit/216de5f7d50fbf6214864d3e347116cb8cde9cd2))
+* **crawl:** read an Infinity budget or depth as unlimited again ([66254eb](https://github.com/maxgfr/webindex/commit/66254eb9d27abfea697ae2a3338b0a4ac4457959))
+* **doc:** leave an empty ODP slide or ODS sheet unlisted, as OOXML does ([f2f1cb4](https://github.com/maxgfr/webindex/commit/f2f1cb4fb6edb00818d29cf117d79634e027aeb9))
+* **doc:** read a tracked move in a .docx once, where it was moved to ([8105abc](https://github.com/maxgfr/webindex/commit/8105abcc49a40539edb81df650bc9df327694092))
+* **feed:** keep the angle brackets an RSS title escapes once ([c2dc402](https://github.com/maxgfr/webindex/commit/c2dc402f60438f2bcb240b14d9aa231a98215b19))
+* **firecrawl:** do not mark an instance down for this client's own deadline ([8ca9c01](https://github.com/maxgfr/webindex/commit/8ca9c01c6cfdd14439a214223032d485692e856c))
+* **forge:** check every forge redirect against the public-only wall ([0b68726](https://github.com/maxgfr/webindex/commit/0b68726d8f276cdab87bf25e752be1674c911dbd))
+* **forge:** report a secondary rate limit's own wait, not the primary reset ([ead6ed2](https://github.com/maxgfr/webindex/commit/ead6ed26674ea97e868ae22decee570a12ca2603))
+* **forge:** retry forge calls under the shared request policy ([218c3db](https://github.com/maxgfr/webindex/commit/218c3dba9d240279e3aa7cc8b224474264cfb2c3))
+* **forge:** say a token was withheld from an undeclared host, not "set it" ([3d78552](https://github.com/maxgfr/webindex/commit/3d78552c829d685b8b14c532cddffaf0521dec96))
+* **mcp:** accept paths under --extract-root as the operator spelled it ([0073a8e](https://github.com/maxgfr/webindex/commit/0073a8ef2435a75318f270ae890afb5d5e3b0a66))
+* **mcp:** apply the file walls to a forge tool's repo before probing the disk ([663b7cb](https://github.com/maxgfr/webindex/commit/663b7cba037ec501d91b0910471a78e134b991a9))
+* **mcp:** check the served-resource allowlist before touching the disk ([3a20aeb](https://github.com/maxgfr/webindex/commit/3a20aeb0507bce4a7a6479f245badc2c51c50db6))
+* **mcp:** read a relative checkout path against --extract-root ([2a02c21](https://github.com/maxgfr/webindex/commit/2a02c21bacef7e32d0dc368f0cac5d88a4d38e19))
+* **mcp:** stop public-only refusals from naming what a host resolves to ([4911d99](https://github.com/maxgfr/webindex/commit/4911d99aef79c1670fdd4ae71337cb5ee54c1a72))
+* **orchestrate:** give the runbook the widest batch the script hands out ([e1b04bd](https://github.com/maxgfr/webindex/commit/e1b04bdfaf2a9751ef635ef411098545061bcb47))
+* **pdf:** hand cmd.exe one command line for the npx shim (DEP0190) ([5b27873](https://github.com/maxgfr/webindex/commit/5b278730ac3f686eed66532582bb042cddb8fab4))
+* **pdf:** keep the OCR note when the budget reads 0 after the attempt ([f631d3b](https://github.com/maxgfr/webindex/commit/f631d3bdb997c24f63f96cb044b0d3b4e4169e38))
+* **pool:** run a limit that is not a number sequentially, undefined included ([a0c16f5](https://github.com/maxgfr/webindex/commit/a0c16f53696afdd7b79819f8765b87a9dd427f6c))
+* **rank:** end a host where Chinese, Japanese or Thai text runs on ([17d7c5c](https://github.com/maxgfr/webindex/commit/17d7c5c91438001e27fb4e99152403bf8cfa333a))
+* **rank:** order a pool of two by score in diversify ([feec8fd](https://github.com/maxgfr/webindex/commit/feec8fdcd737739c3eeeac4499868cc2ebe8e19b))
+* **rank:** rescale a fused lane's relevance so MMR cannot promote the worst page ([51dfd68](https://github.com/maxgfr/webindex/commit/51dfd68c503ca093bfff9b18083c9ac29b66b26a))
+* **repo:** keep the leading slash of an absolute scp-style remote ([43e8ed7](https://github.com/maxgfr/webindex/commit/43e8ed7d5eb9eaa7a8e40e0c38331a4771ddee32))
+* **repo:** keep www. on a host unless it is a public forge's browser alias ([149b940](https://github.com/maxgfr/webindex/commit/149b9403d7f01207ebd1f31cf6667b1c13867153))
+* **repo:** let a refresh fetch even while another clone call is in flight ([6802f9f](https://github.com/maxgfr/webindex/commit/6802f9f94cf5100767839304a666b47a92872e4e))
+* **repo:** make readable and hashed clone slugs two spaces that cannot meet ([1aa95c5](https://github.com/maxgfr/webindex/commit/1aa95c568c1bad61d18b2aa3d2b6b14244dc0c6f))
+* **robots:** read a robots.txt redirect loop as no file, not as an outage ([7dd14aa](https://github.com/maxgfr/webindex/commit/7dd14aa75cf9bc40f6db47db00790ecbe339a393))
+* **search:** do not sleep out the pause between pages past a budget or a cancel ([c7c474a](https://github.com/maxgfr/webindex/commit/c7c474af0ce7e78978ae886174680dfdd9836117))
+* **search:** report a rung cancelled in flight as not tried, not unreachable ([ee23566](https://github.com/maxgfr/webindex/commit/ee23566ef6453bafd00cbac91d47a215cac08015))
+* **search:** send SearXNG a language its own check accepts ([611768f](https://github.com/maxgfr/webindex/commit/611768fcc7b0422b7d4fc29766256ac75bee9a94))
+* **stack:** refuse a default per-user directory that is a symbolic link ([8e03b41](https://github.com/maxgfr/webindex/commit/8e03b4144f5e6f4c8035cca50b17a6cd966cbaf0))
+
+
+### Performance Improvements
+
+* **repo:** trim slug dashes and file:// slashes in linear time ([8e6c889](https://github.com/maxgfr/webindex/commit/8e6c8897ecf7cdaee4372c3087dff41262eabaed))
+
 ## [1.21.1](https://github.com/maxgfr/webindex/compare/v1.21.0...v1.21.1) (2026-09-29)
 
 
