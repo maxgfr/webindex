@@ -183,6 +183,22 @@ describe("htmlToText", () => {
     expect(htmlToText("<p>before</p><style>.a{content:'<p>not</p>'}")).toBe("before");
   });
 
+  it("takes no <script> or <style> quoted in an attribute for an element", () => {
+    // A main region holds no real </script> — extraction took the scripts out —
+    // so the quoted opener ran to the end of the page and left the half-eaten
+    // <img> behind as prose.
+    const page =
+      '<main><h1>The script element</h1><p>This tutorial explains how scripts load.</p><figure><img src="/diagram.png" alt="Diagram: how a <script> tag blocks parsing"><figcaption>Parsing timeline</figcaption></figure><h2>Async and defer</h2><p>Both download in parallel.</p><h2>Modules</h2><p>Deferred by default.</p></main>';
+    const text = htmlToText(extractMainHtml(page));
+    expect(text).toContain("Parsing timeline\n## Async and defer");
+    expect(text).toContain("## Modules\nDeferred by default.");
+    expect(text).not.toContain("<img");
+    const styled = htmlToText('<p>Before.</p><img alt="a <style> block"><p>After.</p><!-- x -->', { fullPage: true });
+    expect(styled).toBe("Before.\nAfter.");
+    // Nor a comment opener: an attribute's "<!--" hid the prose up to the next "-->".
+    expect(htmlToText('<p title="<!-- note">Kept.</p><!-- real -->')).toBe("Kept.");
+  });
+
   it("puts definition-list terms and descriptions on their own lines", () => {
     expect(htmlToText("<dl><dt>Term</dt><dd>Definition</dd><dt>T2</dt><dd>D2</dd></dl>")).toBe("Term\nDefinition\nT2\nD2");
     expect(htmlToText("<figure><img src=x><figcaption>A cyclist</figcaption></figure>Photo: J. Olsen")).toBe("A cyclist\nPhoto: J. Olsen");
@@ -272,6 +288,20 @@ describe("htmlTitle", () => {
     expect(htmlTitle("<svg><title>icon</title></svg><title>Real</title>")).toBe("Real");
     expect(htmlTitle('<body><svg viewBox="0 0 1 1"><title>Search icon</title></svg><main>x</main></body>')).toBeUndefined();
     expect(htmlTitle("<title>A&nbsp;\n  B</title>")).toBe("A B");
+  });
+
+  it("reads past a <script> written as text in <head>, as a browser does", () => {
+    // Quoted in an attribute or written in the <title>, the opener is text. It
+    // used to pair with the head's real </script> and delete the title and the
+    // canonical in between.
+    const quoted =
+      '<head><meta name="description" content="How the <script> element works"><title>The script element</title><link rel="canonical" href="https://example.com/script"><script src="/app.js"></script></head>';
+    expect(htmlTitle(quoted)).toBe("The script element");
+    expect(htmlCanonicalUrl(quoted)).toBe("https://example.com/script");
+    const titled =
+      '<head><title>How the <script> tag works</title><link rel="canonical" href="https://example.com/script"><script src="/app.js"></script></head>';
+    expect(htmlTitle(titled)).toMatch(/^How the .*tag works$/);
+    expect(htmlCanonicalUrl(titled)).toBe("https://example.com/script");
   });
 
   it("stays linear on a page of unclosed <title> openers", () => {
@@ -678,6 +708,8 @@ describe("HTML scans stay linear on hostile markup", () => {
     ["headings closed only at the very end", `${"<h2>x ".repeat(150_000)}</h2>`],
     ["unclosed <pre> openers", "<pre>x ".repeat(150_000)],
     ["unclosed <script> openers", "<p>a</p><script>x ".repeat(100_000)],
+    ["script openers quoted in attributes", '<img alt="<script>">'.repeat(100_000)],
+    ["unclosed <title> openers", "<title>x ".repeat(150_000)],
     ["adjacent inline elements", "<a>x</a>".repeat(150_000)],
     ["unclosed navigation landmarks", '<div role="navigation"><p>x</p>'.repeat(50_000)],
     ["nested navigation landmarks", `${'<div role="navigation"><div>x'.repeat(20_000)}${"</div>".repeat(40_000)}`],
