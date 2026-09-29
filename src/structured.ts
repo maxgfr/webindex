@@ -175,13 +175,51 @@ const PAGE_TYPES = new Set([
   "MedicalWebPage",
 ]);
 
+// The works a page is written to present: an article or post of any kind, a
+// product, an event, a recipe, a review… They outrank every other type that
+// is not chrome. A template's header organization comes in hundreds of
+// subtypes no chrome list keeps up with — Restaurant and every LocalBusiness,
+// CollegeOrUniversity, GovernmentOrganization — and one of them read first
+// made a news story the university's page, its authors and date lost.
+const WORK_TYPES = new Set([
+  "CreativeWork",
+  "Blog",
+  "Book",
+  "Chapter",
+  "Course",
+  "Dataset",
+  "Game",
+  "Guide",
+  "HowTo",
+  "Legislation",
+  "Movie",
+  "MusicAlbum",
+  "Question",
+  "Recipe",
+  "Report",
+  "SoftwareSourceCode",
+  "Thesis",
+  "VideoGame",
+  "VideoObject",
+  "AudioObject",
+]);
+// The families with many members: NewsArticle and ScholarlyArticle, BlogPosting
+// and JobPosting, MusicEvent, ClaimReview, SoftwareApplication, TVEpisode…
+const WORK_SUFFIX = /(?:Article|Posting|Event|Review|Product|Application|Episode|Series|Recording)$/;
+const isWork = (t: string) => WORK_TYPES.has(t) || WORK_SUFFIX.test(t);
+
 // "https://schema.org/NewsArticle" and "schema:NewsArticle" are NewsArticle.
 const typesOf = (n: Node): string[] => allStrings(n["@type"]).map((t) => t.slice(Math.max(t.lastIndexOf("/"), t.lastIndexOf(":")) + 1));
 
-/** 3 for the thing a page presents (an article, a product, a recipe…), 2 for the page, 1 untyped, 0 site chrome. */
+/**
+ * 4 for the work a page presents (an article, a product, a recipe…), 3 for any
+ * other thing that is not chrome (the business on its own page), 2 for the
+ * page, 1 untyped, 0 site chrome.
+ */
 function rank(n: Node): number {
   const types = typesOf(n);
   if (!types.length) return 1;
+  if (types.some(isWork)) return 4;
   if (types.some((t) => !CHROME_TYPES.has(t) && !PAGE_TYPES.has(t))) return 3;
   return types.some((t) => PAGE_TYPES.has(t)) ? 2 : 0;
 }
@@ -224,10 +262,11 @@ function firstString(v: unknown): string | undefined {
  * JSON-LD wins on conflict: OpenGraph is written for social-preview cards and is
  * routinely stale or templated, while JSON-LD is what the site feeds search
  * engines and tends to be generated from the real record. But only the JSON-LD
- * that describes THIS page: the primary entity is the first node presenting
- * something (an Article, a Product, a Recipe…), else the page node, and only
- * then site chrome. Taking every field from whichever node came first reported
- * a news story as the newspaper's Organization block, titled with its name.
+ * that describes THIS page: the primary entity is the first work the page
+ * presents (an Article, a Product, a Recipe…), else the first other thing
+ * that is not site chrome (a business on its own page), else the page node.
+ * Taking every field from whichever node came first reported a news story as
+ * the newspaper's Organization block, titled with its name.
  *
  * The canonical URL is the page's own `<link rel="canonical">`, then `og:url`,
  * then the JSON-LD `url` — never an `@id`, which is an identifier such as
@@ -302,6 +341,19 @@ export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): Pag
   // Scholarly pages give each author a tag of their own; every one counts.
   const authorKeys = new Set(["article:author", "author", "citation_author", "dc.creator"]);
   for (const [key, v] of entries) if (authorKeys.has(key)) addAuthor(v);
+
+  // A primary that is no work — an organization of a subtype nothing above
+  // names, emitted first — leaves the byline and date to the first other node
+  // outside the chrome that gives them, as every node's fields once merged.
+  if (!primary || rank(primary) < 4) {
+    const read = new Set(sources);
+    const rest = nodes.filter((n) => !read.has(n) && rank(n) > 0);
+    for (const n of rest) {
+      if (out.authors.length) break;
+      for (const a of names(n.author)) addAuthor(a);
+    }
+    set("publishedAt", rest.map((n) => firstString(n.datePublished)).find(Boolean));
+  }
 
   // `<title>` is the last resort — it carries site chrome ("Foo — Example.com")
   // that the structured fields do not.

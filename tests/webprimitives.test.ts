@@ -500,6 +500,39 @@ describe("structured metadata", () => {
     expect(pageMetadata(orgOnly).canonicalUrl).toBeUndefined();
   });
 
+  it("describes the article, not an Organization subtype the site header emits first", () => {
+    // CollegeOrUniversity, Restaurant, GovernmentOrganization… are not in the
+    // chrome list — there are hundreds — and the first of them won the page,
+    // costing the article's authors and date too.
+    const article = {
+      "@type": "NewsArticle",
+      headline: "Researchers find X",
+      author: [{ "@type": "Person", name: "Ann Writer" }],
+      datePublished: "2025-03-01",
+    };
+    const uni = ld({ "@graph": [{ "@type": "CollegeOrUniversity", name: "State University", url: "https://uni.edu" }, article] });
+    const m = pageMetadata(`${uni}<meta property="og:title" content="Researchers find X">`);
+    expect(m).toMatchObject({ type: "NewsArticle", title: "Researchers find X", authors: ["Ann Writer"], publishedAt: "2025-03-01" });
+    expect(m.canonicalUrl).toBeUndefined();
+    const post = { "@type": "BlogPosting", headline: "Spring menu", author: { name: "Chef Bob" }, datePublished: "2024-05-05" };
+    expect(pageMetadata(ld({ "@graph": [{ "@type": ["Restaurant", "Organization"], name: "Chez Bob" }, post] }))).toMatchObject({
+      type: "BlogPosting",
+      title: "Spring menu",
+      authors: ["Chef Bob"],
+      publishedAt: "2024-05-05",
+    });
+    const notice = { "@type": "Article", headline: "Road works", author: "Clerk", datePublished: "2024-01-01" };
+    expect(pageMetadata(ld([{ "@type": "GovernmentOrganization", name: "Town" }, notice]))).toMatchObject({ type: "Article", authors: ["Clerk"] });
+    // An organization's own page is still the organization.
+    expect(pageMetadata(ld({ "@type": "Restaurant", name: "Chez Bob", url: "https://bob.test/" }))).toMatchObject({ type: "Restaurant", title: "Chez Bob" });
+    // A work of a type no list names still gives its author and date when the primary has none.
+    const story = { "@type": "ShortStory", name: "The Lake", author: "Ann", datePublished: "2023-07-07" };
+    expect(pageMetadata(ld([{ "@type": "CollegeOrUniversity", name: "State University" }, story]))).toMatchObject({
+      authors: ["Ann"],
+      publishedAt: "2023-07-07",
+    });
+  });
+
   it("resolves a Yoast @graph's @id references, and never reports an @id as the canonical", () => {
     const graph = {
       "@context": "https://schema.org",
@@ -601,6 +634,13 @@ describe("structured metadata", () => {
     const started = performance.now();
     expect(pageMetadata(`${"<meta ".repeat(40_000)}${'<meta content="x ">'.repeat(20_000)}`).authors).toEqual([]);
     expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  it("picks the primary entity in linear time from a graph of many page nodes", () => {
+    const graph = { "@graph": Array.from({ length: 60_000 }, (_, i) => ({ "@type": "WebPage", name: `P${i}` })) };
+    const started = performance.now();
+    expect(pageMetadata(ld(graph))).toMatchObject({ type: "WebPage", title: "P0", authors: [] });
+    expect(performance.now() - started).toBeLessThan(10_000);
   });
 
   it("keeps a page of author tags in linear time, and a bounded number of them", () => {
