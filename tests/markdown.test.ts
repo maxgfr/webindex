@@ -126,6 +126,14 @@ describe("htmlToMarkdown: inline", () => {
     expect(md('<p><a href="notes (draft">N</a></p>')).toBe("[N](notes%20\\(draft)");
   });
 
+  it("encodes a backslash in a target, which Markdown would read as an escape", () => {
+    // The URL parser keeps '\' in a query or fragment; "\*" in a destination is "*".
+    expect(md('<p><a href="https://a.com/?q=\\*x">l</a></p>')).toBe("[l](https://a.com/?q=%5C*x)");
+    expect(md('<p><a href="#\\_x">f</a> <img src="i\\(1).png" alt="i"></p>', "https://d.test/p")).toBe(
+      "[f](https://d.test/p#%5C_x) ![i](https://d.test/i/(1).png)",
+    );
+  });
+
   it("links every block of a link wrapped round a card", () => {
     const html = '<a href="/post/1"><h3>Post title</h3><p>The excerpt.</p></a>';
     expect(md(html, "https://blog.test/")).toBe("### [Post title](https://blog.test/post/1)\n\n[The excerpt.](https://blog.test/post/1)");

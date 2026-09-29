@@ -696,9 +696,13 @@ function afterControls(s: string): string {
   return s.slice(i);
 }
 
-/** A URL as a Markdown link destination: no raw space or angle bracket, parentheses escaped unless they balance. */
+/**
+ * A URL as a Markdown link destination: no raw space, angle bracket or
+ * backslash (the URL parser keeps one in a query or fragment, and `\*` there
+ * would read as an escaped `*`), parentheses escaped unless they balance.
+ */
 function destination(url: string): string {
-  const d = url.replace(/[ <>]/g, (c) => encodeURIComponent(c));
+  const d = url.replace(/[ <>\\]/g, (c) => encodeURIComponent(c));
   let depth = 0;
   for (const c of d) {
     if (c === "(") depth++;
