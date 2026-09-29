@@ -145,6 +145,24 @@ describe("keywords", () => {
     expect(keywords("Is HTTP/2 multiplexing faster than HTTP/1.1?")).toEqual(expect.arrayContaining(["HTTP/2", "HTTP/1.1", "multiplexing"]));
     // A '+' between words is still a separator.
     expect(keywords("a+b tuning")).toEqual(["tuning"]);
+    expect(keywords("C++20 modules with g++ and F#")).toEqual(["C++20", "modules", "g++", "F#"]);
+  });
+
+  it("reads 'Node 18+' as version 18, which a page writes without the '+'", () => {
+    // The suffix is C++'s and C#'s: after a digit it made "18+" a keyword no
+    // line saying "Node 18" matched, and split the matcher from the ranker.
+    expect(keywords("Does it support Node 18+?")).toEqual(["support", "Node", "18"]);
+    expect([...buildMatcher("Does it support Node 18+?").matchLine("Requires Node 18 or later.")]).toEqual(expect.arrayContaining(["node", "18"]));
+    expect([...buildMatcher("iOS 15+ deployment target").matchLine("Set the deployment target to iOS 15.")]).toContain("15");
+    expect([...buildMatcher("Python 3.10+ typing").matchLine("New in Python 3.10: union types")]).toContain("10");
+    expect(keywords("ES2015+ features").map(foldTerm)).toEqual([...new Set(bm25Tokenize("ES2015+ features", { subtokens: false }))]);
+  });
+
+  it("tokenises a question of hostile '+', '#' and '/' runs in linear time", () => {
+    const question = `${"9".repeat(200_000)}++ ${"a1+#".repeat(50_000)} ${"C++x".repeat(50_000)} ${"a/1.1/".repeat(40_000)}`;
+    const started = performance.now();
+    keywords(question);
+    expect(performance.now() - started).toBeLessThan(10_000);
   });
 
   it("drops 'vs' and German question scaffolding", () => {

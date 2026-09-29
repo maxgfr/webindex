@@ -250,12 +250,14 @@ function extraStopwordSet(extra: readonly string[]): Set<string> {
 // One question token: a run of letters, combining marks, digits and
 // underscores. Splitting on everything else took the subject out of "C++",
 // "C#", ".NET" and "HTTP/2", so a run keeps a trailing `+`/`#` pair (C++, C#,
-// F#, C++20), a `/2` or `/1.1` version, and .NET its leading dot. The marks are
-// part of the word, as bm25Tokenize has them: Devanagari, Thai and Tamil write
-// vowels as combining marks, and splitting at each one left fragments that
-// matched nothing.
+// F#, C++20), a `/2` or `/1.1` version, and .NET its leading dot. The pair
+// follows a letter only: after a digit it is "or later" ("Node 18+", "iOS
+// 15+"), and "18+" matched no line saying "Node 18". The marks are part of the
+// word, as bm25Tokenize has them: Devanagari, Thai and Tamil write vowels as
+// combining marks, and splitting at each one left fragments that matched
+// nothing.
 const TOKEN_RE =
-  /(?<![\p{L}\p{M}\p{N}_])\.net(?![\p{L}\p{M}\p{N}_])|[\p{L}\p{M}\p{N}_]+(?:[+#]{1,2}\d*(?![\p{L}\p{M}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{M}\p{N}_./]))?/giu;
+  /(?<![\p{L}\p{M}\p{N}_])\.net(?![\p{L}\p{M}\p{N}_])|[\p{L}\p{M}\p{N}_]+(?:(?<=\p{L})[+#]{1,2}\d*(?![\p{L}\p{M}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{M}\p{N}_./]))?/giu;
 
 // Chinese and Japanese put no space between words, so a whole clause was one
 // keyword and no page ever matched it. bm25Tokenize reads them as overlapping
