@@ -274,6 +274,56 @@ describe("limits", () => {
     expect(text.split("\n").length).toBe(1004);
   });
 
+  // `<w:tr/>` is seven bytes, and once one far-right cell makes a table 256
+  // columns wide it is a 770-character line of rules. Forty thousand of them
+  // was 25 MB of "|  |  |" from a 1 KB file, and thirty such tables a fatal
+  // out-of-memory: a run of empty rows is kept to one.
+  it("keeps a run of empty table rows to one, in every table and sheet", () => {
+    const wide = `<w:tr>${"<w:tc/>".repeat(255)}<w:tc>${para("x")}</w:tc></w:tr>`;
+    const table = `<w:tbl>${wide}${"<w:tr/>".repeat(40_000)}<w:tr><w:tc>${para("y")}</w:tc></w:tr></w:tbl>`;
+    const file = docx(para("Intro") + table.repeat(30));
+    const t0 = performance.now();
+    const text = officeToText(file)!;
+    expect(performance.now() - t0).toBeLessThan(10_000);
+    const one = `| ${" | ".repeat(255)}x |\n|${" --- |".repeat(256)}\n| ${" | ".repeat(255)} |\n| y | ${" | ".repeat(254)} |`;
+    expect(text).toBe(["Intro", ...Array.from({ length: 30 }, () => one)].join("\n\n"));
+
+    // A workbook naming one sheet of empty rows eight times.
+    const rel = '<Relationship Id="rId1" Type="x/worksheet" Target="sheet1.xml"/>';
+    const sheets = Array.from({ length: 8 }, (_, i) => `<sheet name="S${i}" r:id="rId1"/>`).join("");
+    const xlsx = zip({
+      "xl/workbook.xml": `<workbook xmlns:r="r"><sheets>${sheets}</sheets></workbook>`,
+      "xl/_rels/workbook.xml.rels": `<Relationships>${rel}</Relationships>`,
+      "xl/sheet1.xml": `<worksheet><sheetData><row><c r="A1"><v>1</v></c><c r="IV1"><v>2</v></c></row>${"<row/>".repeat(33_000)}<row><c r="A3"><v>3</v></c></row></sheetData></worksheet>`,
+    });
+    const t1 = performance.now();
+    const sheet = officeToText(xlsx)!;
+    expect(performance.now() - t1).toBeLessThan(10_000);
+    const body = `| 1 | ${" | ".repeat(254)}2 |\n|${" --- |".repeat(256)}\n| ${" | ".repeat(255)} |\n| 3 | ${" | ".repeat(254)} |`;
+    expect(sheet).toBe(Array.from({ length: 8 }, (_, i) => `## S${i}\n\n${body}`).join("\n\n"));
+  });
+
+  // The rules round a cell are output too: one character in the first column
+  // of a 256-wide table is a 770-character line. They are metered for the
+  // whole document, as the text is — not per table, which bounded nothing:
+  // a workbook naming one such sheet a hundred times passed V8's string limit.
+  it("meters table rules for the whole document, not per table", () => {
+    const rows = Array.from({ length: 16_000 }, (_, r) => `<row><c r="A${r + 2}"><v>1</v></c></row>`).join("");
+    const rel = '<Relationship Id="rId1" Type="x/worksheet" Target="sheet1.xml"/>';
+    const sheets = Array.from({ length: 100 }, (_, i) => `<sheet name="S${i}" r:id="rId1"/>`).join("");
+    const xlsx = zip({
+      "xl/workbook.xml": `<workbook xmlns:r="r"><sheets>${sheets}</sheets></workbook>`,
+      "xl/_rels/workbook.xml.rels": `<Relationships>${rel}</Relationships>`,
+      "xl/sheet1.xml": `<worksheet><sheetData><row><c r="A1"><v>a</v></c><c r="IV1"><v>b</v></c></row>${rows}</sheetData></worksheet>`,
+    });
+    const t0 = performance.now();
+    const r = readOffice(xlsx);
+    expect(performance.now() - t0).toBeLessThan(30_000);
+    expect(r.failure).toBeUndefined();
+    expect(r.text!.length).toBeGreaterThan(20 * 1024 * 1024);
+    expect(r.text!.length).toBeLessThanOrEqual(24 * 1024 * 1024);
+  });
+
   // Linear-time guard: every XML walk moves past the next `>`, so neither an
   // unclosed tag nor a flood of unclosed elements costs a rescan.
   it("walks adversarial XML in linear time", () => {

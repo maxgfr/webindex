@@ -301,13 +301,14 @@ keep running through `npx`.
 The office ladder ends in a built-in reader (`officeToText`) for OOXML (`.docx`,
 `.xlsx`, `.pptx`) and OpenDocument (`.odt`, `.ods`, `.odp`): no subprocess, no
 network, so an offline or `WEBINDEX_NO_NPX` run still reads them —
-`WEBINDEX_DOC_ENGINE=builtin` forces it. It returns headings, lists, tables, each
-sheet as a table and each slide with its speaker notes, and it is strict about
-the ZIP it opens: ZIP64, encrypted entries and unknown compression methods are
-refused, and every entry, the whole archive and the text it produces are capped,
-so a decompression bomb costs 64 MB of work, not its full size. Its output passes
-the same garbage gate as every other rung. Legacy `.doc`/`.xls`/`.ppt` and RTF
-still need `anydoc` or Firecrawl.
+`WEBINDEX_DOC_ENGINE=builtin` forces it. It returns headings, lists, tables (a
+run of empty rows as one), each sheet as a table and each slide with its speaker
+notes, and it is strict about the ZIP it opens: ZIP64, encrypted entries and
+unknown compression methods are refused, and every entry, the whole archive and
+the text it produces, table rules included, are capped, so a decompression bomb
+costs 64 MB of work, not its full size. Its output passes the same garbage gate
+as every other rung. Legacy `.doc`/`.xls`/`.ppt` and RTF still need `anydoc` or
+Firecrawl.
 
 A `Retry-After` of up to 5 s is waited out and retried once; a longer one is
 not slept through and not retried early — the call returns at once with the
