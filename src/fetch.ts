@@ -19,6 +19,7 @@ import {
   tagName,
 } from "./html.js";
 import { AMBIGUOUS_TYPES } from "./mime.js";
+import { defaultRetryMs, isPermanentFailure, maxAttempts, RETRY_AFTER_CAP_MS, retryDelayMs } from "./retry.js";
 // `nearestHeading` moved to text.ts — it is a fact about markdown, not about
 // HTTP — and is still exported from the package root, so no consumer sees it move.
 import { buildMatcher, nearestHeading } from "./text.js";
@@ -82,10 +83,6 @@ export function defaultUa(): string {
 // silently zero out a whole high-signal backend (Stack Overflow, GitHub, S2).
 const RETRY_STATUS = new Set([429, 503, 502, 504]);
 
-// Retry policy, tunable via env (keyless, no new CLI surface): attempts and the
-// fixed backoff, clamped to sane bounds.
-const maxAttempts = () => envInt("MAX_ATTEMPTS", 2, 1, 5);
-const defaultRetryMs = () => envInt("RETRY_MS", 600, 0, 5000);
 // How long one attempt may take before it is abandoned, when the caller names
 // no budget of its own: the whole of it — connection, headers and the body
 // download, across redirects — not a silence between two chunks, so a slow but
@@ -182,19 +179,6 @@ export function parseRetryAfter(headers: Headers, capMs = 5000): number | undefi
   return undefined;
 }
 
-// The longest Retry-After a request waits out itself before trying again.
-const RETRY_AFTER_CAP_MS = 5000;
-
-// How long to wait before a retry: the server's Retry-After (seconds or
-// HTTP-date), else a small fixed backoff. Undefined — do not retry — when the
-// server asked for longer than the cap. Retrying after 5 s anyway knowingly
-// sent the request it had been told not to send for an hour; the caller gets
-// the real ask in `retryAfterMs` instead, for a queue (crawlSite) to honour.
-function retryDelayMs(retryAfterMs: number | undefined): number | undefined {
-  if (retryAfterMs === undefined) return defaultRetryMs();
-  return retryAfterMs <= RETRY_AFTER_CAP_MS ? retryAfterMs : undefined;
-}
-
 // Total attempts for a call: the caller's `retries` (extra tries on top of the
 // first) when given, otherwise the env-wide policy. Clamped, because a typo in a
 // retry count should cost one extra request, not a hundred.
@@ -218,30 +202,6 @@ function networkFailure(e: unknown): string {
   const detail = typeof err?.cause?.message === "string" && err.cause.message ? err.cause.message : code;
   if (!detail) return typeof err?.message === "string" ? err.message : String(e);
   return code && !detail.includes(code) ? `${code}: ${detail}` : detail;
-}
-
-// Failures a second attempt a few hundred ms later cannot change: the name does
-// not resolve, the redirect chain loops, the scheme or port is refused, the
-// certificate is wrong. Retrying them doubled the cost for the same answer — a
-// redirect loop was walked twice over, 42 requests to one server. Transient
-// socket errors (ECONNRESET, UND_ERR_SOCKET…) are deliberately absent.
-const PERMANENT_CODES = new Set([
-  "ENOTFOUND",
-  "ERR_INVALID_URL",
-  "ERR_TLS_CERT_ALTNAME_INVALID",
-  "CERT_HAS_EXPIRED",
-  "DEPTH_ZERO_SELF_SIGNED_CERT",
-  "SELF_SIGNED_CERT_IN_CHAIN",
-  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
-  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
-]);
-const PERMANENT_MESSAGE = /redirect count exceeded|scheme must be|unknown scheme|bad port|invalid url|failed to parse url/i;
-
-function isPermanentFailure(e: unknown): boolean {
-  const err = e as NetworkError | undefined;
-  const code = err?.cause?.code ?? err?.code;
-  if (typeof code === "string" && PERMANENT_CODES.has(code)) return true;
-  return [err?.message, err?.cause?.message].some((m) => typeof m === "string" && PERMANENT_MESSAGE.test(m));
 }
 
 /**

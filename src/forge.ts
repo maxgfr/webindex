@@ -1,9 +1,10 @@
 import { resolve } from "node:path";
-import { countFetch, env, envFlag, envInt, envName } from "./brand.js";
+import { countFetch, env, envFlag, envName } from "./brand.js";
 import { have, shAsync } from "./exec.js";
 import { contactUa, parseRetryAfter, readCappedBytes, sleep } from "./fetch.js";
 import { configuredForgeHosts, hostForgeKind, normalizeForgeHost } from "./forge-host.js";
 import { originUrl, type RepoRef, resolveRepo } from "./repo.js";
+import { defaultRetryMs, isPermanentFailure, maxAttempts, retryDelayMs } from "./retry.js";
 import { rankedKeywords } from "./text.js";
 
 // Forge APIs: asking a code host about a repository.
@@ -194,6 +195,8 @@ interface ForgeResponse {
   permanent?: boolean;
   /** The caller's `authorizeUrl` refused a URL — its policy, not the network. */
   refused?: boolean;
+  /** A gateway error's Retry-After, in ms, uncapped: past the cap it is not retried. */
+  retryAfterMs?: number;
 }
 
 // A quota answer looks like a normal failure unless you check for it, and the
@@ -271,9 +274,12 @@ async function forgeGetOnce(
       const location = res.headers.get("location");
       if (REDIRECT_STATUS.has(res.status) && location) {
         await res.body?.cancel().catch(() => {});
-        if (hop >= MAX_REDIRECTS) return { ok: false, status: 0, data: undefined, error: `more than ${MAX_REDIRECTS} redirects from ${url}` };
+        // Both are the chain's own shape, which a second walk only repeats.
+        if (hop >= MAX_REDIRECTS) return { ok: false, status: 0, data: undefined, error: `more than ${MAX_REDIRECTS} redirects from ${url}`, permanent: true };
         const next = new URL(location, target);
-        if (next.protocol !== "https:" && next.protocol !== "http:") return { ok: false, status: 0, data: undefined, error: `redirected to ${next.protocol}` };
+        if (next.protocol !== "https:" && next.protocol !== "http:") {
+          return { ok: false, status: 0, data: undefined, error: `redirected to ${next.protocol}`, permanent: true };
+        }
         if (next.origin !== new URL(target).origin) {
           delete sent.authorization;
           delete sent["private-token"];
@@ -293,32 +299,54 @@ async function forgeGetOnce(
         data = text;
       }
       const quota = !res.ok && limited(res.status, res.headers, data);
-      return { ok: res.ok, status: res.status, data, ...(quota ? { rateLimited: true, resetAt: resetTime(res.headers) } : {}) };
+      const retryAfterMs = RETRY_STATUS.has(res.status) ? parseRetryAfter(res.headers, Number.POSITIVE_INFINITY) : undefined;
+      return {
+        ok: res.ok,
+        status: res.status,
+        data,
+        ...(quota ? { rateLimited: true, resetAt: resetTime(res.headers) } : {}),
+        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      };
     }
   } catch (e) {
-    return { ok: false, status: 0, data: undefined, error: timedOut ? `timed out after ${timeoutMs} ms` : failureText(e), timedOut };
+    if (timedOut) return { ok: false, status: 0, data: undefined, error: `timed out after ${timeoutMs} ms`, timedOut };
+    return { ok: false, status: 0, data: undefined, error: failureText(e), ...(isPermanentFailure(e) ? { permanent: true } : {}) };
   } finally {
     clearTimeout(timer);
   }
 }
 
 /**
- * A forge API GET: JSON, byte-capped, never throwing, and retried at most once —
- * for a gateway error or a dropped connection. A timeout has already spent the
- * whole budget the caller granted, so it is not retried either: a black-holed
- * network costs one timeout per call, not two.
+ * A forge API GET: JSON, byte-capped, never throwing, and retried under the
+ * policy every other request follows (`<PREFIX>_MAX_ATTEMPTS`, one retry by
+ * default) — for a gateway error or a dropped connection only. A timeout has
+ * already spent the whole budget the caller granted, so it is not retried
+ * either: a black-holed network costs one timeout per call, not two.
  */
 async function forgeGet(url: string, kind: ForgeKind, ref: RepoRef, opts: ForgeOptions): Promise<ForgeResponse> {
   const auth = opts.apiBase ? forgeAuthHeaders(kind) : forgeAuthHeaders(kind, ref.host);
   const headers = { "user-agent": contactUa(), accept: kind === "github" ? "application/vnd.github+json" : "application/json", ...auth };
   const tokenVar = auth.authorization ? forgeToken(kind)?.name : undefined;
   const timeoutMs = opts.timeoutMs ?? 15_000;
+  const attempts = maxAttempts();
   let r = await forgeGetOnce(url, headers, timeoutMs, opts.authorizeUrl);
-  if (RETRY_STATUS.has(r.status) || (r.status === 0 && !r.timedOut && !r.permanent)) {
-    await sleep(envInt("RETRY_MS", 600, 0, 5000));
+  for (let attempt = 1; attempt < attempts; attempt++) {
+    const wait = retryWait(r);
+    if (wait === undefined) break;
+    await sleep(wait);
     r = await forgeGetOnce(url, headers, timeoutMs, opts.authorizeUrl);
   }
   return tokenVar ? { ...r, tokenVar } : r;
+}
+
+// How long to wait before asking again, or undefined when asking again cannot
+// change the answer: anything but a gateway error or a dropped connection, a
+// timeout, a failure that is the request's own (an unknown host, a redirect
+// loop, a refused URL), and a gateway that asked for longer than the cap.
+function retryWait(r: ForgeResponse): number | undefined {
+  if (RETRY_STATUS.has(r.status)) return retryDelayMs(r.retryAfterMs);
+  if (r.status === 0 && !r.timedOut && !r.permanent) return defaultRetryMs();
+  return undefined;
 }
 
 const FORGE_NAME: Record<ForgeKind, string> = { github: "GitHub", gitlab: "GitLab", gitea: "Gitea" };

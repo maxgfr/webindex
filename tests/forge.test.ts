@@ -543,6 +543,44 @@ describe("why a forge call failed", () => {
     expect(spy.mock.calls.every(([u]) => String(u).includes("/repos/"))).toBe(true);
   });
 
+  it("retries under the same policy as every other request, and only what a retry can change", async () => {
+    // Forge calls left httpJson and stopped honouring MAX_ATTEMPTS, a Retry-After
+    // past the cap, and the failures a second try only repeats.
+    vi.stubEnv(envName("MAX_ATTEMPTS"), "1");
+    const one = answer(503);
+    expect((await repoFactsResult(REF)).status).toBe(503);
+    expect(one).toHaveBeenCalledTimes(1);
+    vi.stubEnv(envName("MAX_ATTEMPTS"), "3");
+    const three = answer(502);
+    await repoFactsResult(REF);
+    expect(three).toHaveBeenCalledTimes(3);
+    vi.stubEnv(envName("MAX_ATTEMPTS"), "");
+
+    // Asked to come back in an hour: not asked again in 600 ms.
+    const later = answer(503, {}, { "retry-after": "3600" });
+    expect((await repoFactsResult(REF)).note).toMatch(/status 503/);
+    expect(later).toHaveBeenCalledTimes(1);
+    const now = answer(503, {}, { "retry-after": "0" });
+    await repoFactsResult(REF);
+    expect(now).toHaveBeenCalledTimes(2);
+
+    // A redirect loop is walked once, not twice over.
+    const loop = installFetchMock((url) => ({ status: 302, headers: { location: url } }));
+    expect((await repoFactsResult(REF)).note).toMatch(/more than 5 redirects/);
+    expect(loop).toHaveBeenCalledTimes(6);
+    const ftp = installFetchMock(() => ({ status: 302, headers: { location: "ftp://files.example/x" } }));
+    expect((await repoFactsResult(REF)).note).toMatch(/redirected to ftp:/);
+    expect(ftp).toHaveBeenCalledTimes(1);
+
+    // A name that does not resolve will not resolve 600 ms later either.
+    const typo = vi.fn(async (_url: unknown) => {
+      throw new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.github.com"), { code: "ENOTFOUND" }) });
+    });
+    vi.stubGlobal("fetch", typo);
+    expect((await repoFactsResult(REF)).note).toMatch(/ENOTFOUND/);
+    expect(typo).toHaveBeenCalledTimes(1);
+  });
+
   it("spends one timeout on a black-holed network, not one per request", async () => {
     const spy = vi.fn(
       (_input: unknown, init?: RequestInit) =>

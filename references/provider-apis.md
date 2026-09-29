@@ -69,8 +69,10 @@ A quota answer is reported as `rateLimited`, never retried, with `resetAt` when
 the forge says when it ends. Retrying a quota you have already exhausted only
 exhausts it further, and the two failures need opposite handling: "wait" versus
 "this request is wrong". Only a gateway error (502/503/504) or a dropped
-connection gets one more try; a timeout gets none, so a dead network costs one
-timeout per command.
+connection gets one more try (`WEBINDEX_MAX_ATTEMPTS`, as for every request),
+and a gateway that asks, in `Retry-After`, for longer than 5 s gets none. So do
+a timeout, so a dead network costs one timeout per command, and a failure a
+second try only repeats: a host that does not resolve, a redirect loop.
 
 ## When a call fails, it says which failure
 
