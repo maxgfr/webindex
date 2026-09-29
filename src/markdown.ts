@@ -297,6 +297,8 @@ class Writer {
   private needBlank = false;
   /** The list closed last: its container's depth, its kind, and how many lines were written by then. */
   private closedList?: { depth: number; ordered: boolean; alt: boolean; lines: number };
+  /** An emphasis just written that ends in punctuation, whose closing marker a letter pushed next would spoil. */
+  private flanked?: { at: number; marker: string; core: string; start: boolean };
 
   text(raw: string): void {
     // A tag whose quotes never balance is not text; htmlToText drops it too.
@@ -470,6 +472,7 @@ class Writer {
     while (this.frames.length) this.wrap(this.frames.pop()!);
     const text = this.parts.join("");
     this.parts = [];
+    this.flanked = undefined;
     this.pendingSpace = false;
     this.frames = open.map((f) => ({ ...f, start: 0 }));
     const level = this.heading;
@@ -514,6 +517,11 @@ class Writer {
   }
 
   private push(markdown: string): void {
+    const f = this.flanked;
+    this.flanked = undefined;
+    if (f && !this.pendingSpace && f.at === this.parts.length - 1 && FLANK_WORD.test(markdown[0] ?? "")) {
+      this.parts[f.at] = flank(f.marker, f.core, f.start, true);
+    }
     if (this.pendingSpace) this.parts.push(" ");
     this.pendingSpace = false;
     this.parts.push(markdown);
@@ -540,17 +548,27 @@ class Writer {
     if (f.inert) return;
     const trailing = this.pendingSpace;
     this.pendingSpace = false;
+    if (this.flanked && this.flanked.at >= f.start) this.flanked = undefined;
     const content = this.parts.splice(f.start).join("");
     const core = content.trim();
     const lead = content.slice(0, content.length - content.trimStart().length);
     const trail = content.slice(content.trimEnd().length);
     this.whitespace(lead);
     if (core) {
-      const markdown = wrapInline(f, core, this.heading > 0);
+      let markdown = wrapInline(f, core, this.heading > 0);
       // A "!" straight before a link's "[" would turn the link into an image.
       const last = this.parts.length - 1;
       if (f.kind === "a" && markdown && !this.pendingSpace && this.parts[last]?.endsWith("!")) this.parts[last] = `${this.parts[last]!.slice(0, -1)}\\!`;
-      this.push(markdown);
+      // An emphasis's marker against punctuation inside and a letter outside is
+      // not a marker to CommonMark. The letter before is known now; the one
+      // after, only once it is pushed.
+      const marker = f.kind === "em" ? "*" : f.kind === "strong" ? "**" : "";
+      if (marker) {
+        const start = !this.pendingSpace && FLANK_WORD.test(this.parts[last]?.slice(-1) ?? "") && FLANK_PUNCT.test(core[0]!);
+        if (start) markdown = flank(marker, core, true, false);
+        this.push(markdown);
+        if (FLANK_PUNCT.test(core[core.length - 1]!)) this.flanked = { at: this.parts.length - 1, marker, core, start };
+      } else this.push(markdown);
     }
     this.whitespace(trail);
     if (trailing) this.space();
@@ -588,6 +606,37 @@ class Writer {
     this.blockOverflow++;
     return false;
   }
+}
+
+// CommonMark's flanking rules: a marker next to punctuation (or a symbol) on
+// its inner side needs a space or punctuation on its outer side.
+const FLANK_PUNCT = /[\p{P}\p{S}]/u;
+const FLANK_WORD = /[^\s\p{P}\p{S}]/u;
+// The markup an emphasis's text may hold — emphasis, code, a link's brackets
+// — and the escape: punctuation moved across the marker never splits one.
+const MARKUP_CHARS = "\\*`[]";
+
+/**
+ * Emphasis with the text punctuation (and space) at a spoiled edge moved
+ * outside its markers: "**Note:**This" is no emphasis, "**Note**:This" is, and
+ * so is "「**注意**」" where "**「注意」**" between two ideographs was not.
+ * The move stops at markup or an escape; emphasis of nothing but punctuation
+ * is left as its text.
+ */
+function flank(marker: string, core: string, start: boolean, end: boolean): string {
+  // With a link inside, a parenthesis may be its destination's; an image's "!" goes with its "[".
+  const link = core.includes("](");
+  const movable = (i: number) => {
+    const c = core[i]!;
+    if (!(c === " " || FLANK_PUNCT.test(c)) || MARKUP_CHARS.includes(c) || core[i - 1] === "\\") return false;
+    return c === "(" || c === ")" ? !link : !(c === "!" && core[i + 1] === "[");
+  };
+  let from = 0;
+  let to = core.length;
+  if (start) while (from < to && movable(from)) from++;
+  if (end) while (to > from && movable(to - 1)) to--;
+  if (from === to) return core;
+  return `${core.slice(0, from)}${marker}${core.slice(from, to)}${marker}${core.slice(to)}`;
 }
 
 // A permalink's whole text: Sphinx's ¶, a docs theme's # or §, GitHub's icon.

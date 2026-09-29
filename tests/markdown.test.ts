@@ -84,6 +84,19 @@ describe("htmlToMarkdown: inline", () => {
     expect(md("<p>A <em>very</em> <strong>big </strong>deal, <b><i>really</i></b>.</p>")).toBe("A *very* **big** deal, ***really***.");
   });
 
+  it("moves an emphasis's edge punctuation outside its markers when a letter touches them", () => {
+    // "**Note:**This" is not emphasis to CommonMark: a closing marker after
+    // punctuation needs a space or punctuation after it. CJK uses no spaces.
+    expect(md("<p><strong>Note:</strong>This feature is experimental.</p>")).toBe("**Note**:This feature is experimental.");
+    expect(md("<p><strong>注意：</strong>此功能仅在专业版中可用。</p>")).toBe("**注意**：此功能仅在专业版中可用。");
+    expect(md("<p>此<strong>「注意」</strong>功能</p>")).toBe("此「**注意**」功能");
+    expect(md("<p>Le mot <em>«&nbsp;cœur&nbsp;»</em>vient du latin.</p>")).toBe("Le mot *« cœur* »vient du latin.");
+    // Emphasis of nothing but punctuation is its text.
+    expect(md("<p>a<b>:</b>b</p>")).toBe("a:b");
+    // A space or punctuation beside the marker already lets it parse: left as written.
+    expect(md("<p><strong>Note:</strong> This, <em>(x)</em>.</p>")).toBe("**Note:** This, *(x)*.");
+  });
+
   it("adds no markers for an emphasis nested in its own kind", () => {
     expect(md("<p><b>bold <strong>still</strong> bold</b></p>")).toBe("**bold still bold**");
   });
@@ -336,6 +349,8 @@ describe("htmlToMarkdown stays linear on hostile markup", () => {
     ["unclosed blockquotes", "<blockquote>x ".repeat(100_000)],
     ["deep blockquotes, then their closes", `${"<blockquote><p>x</p>".repeat(30_000)}${"</blockquote>".repeat(30_000)}`],
     ["a list above a pile of blockquotes, then stray </li>s", `<ul>${"<blockquote>".repeat(30_000)}${"</li>".repeat(30_000)}`],
+    ["emphasis ending in punctuation against a letter", "<p>" + "a<b>「x:</b>y<i><b>(:</b></i>z".repeat(40_000)],
+    ["one emphasis of punctuation against letters", `<p>a<b>${":".repeat(300_000)}</b>b`],
     ["one emphasis holding thousands of breaks", `<b>${"<br>".repeat(150_000)}x</b>`],
     ["a code span of backticks", `<code>${"`".repeat(300_000)}</code>`],
     ["a pre of whitespace", `<pre>${" ".repeat(300_000)}x${" \n".repeat(100_000)}</pre>`],
