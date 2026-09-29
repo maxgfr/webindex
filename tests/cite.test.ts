@@ -183,6 +183,26 @@ describe("what cannot ground a claim", () => {
     expect(appendixMask(["## Mine", "a", "## Next", "## Mine", "b"], { headings: /^mine$/gi })).toEqual([true, true, false, true, true]);
   });
 
+  it.each([
+    ["an H1", ["```markdown", "# References", "- [S1] x", "```"]],
+    ["an RST section", ["```rst", "References", "----------", "- [S1] x", "```"]],
+    ["a French H2", ["~~~", "## Références", "- [S1] x", "~~~"]],
+  ])("does not start an appendix at %s inside a code fence", (_, sample) => {
+    // A report documenting its own citation format shows an appendix in a
+    // fence. Read as a heading, a level-1 one masked everything to the end of
+    // the report: the claims after the sample vanished and their citations
+    // read as inert.
+    const md = ["# Rate limiting report", "", "Token buckets smooth bursts [S1].", "", ...sample, "", "Bursts past the limit get 429 [S2].", "", "## Sources", "- [S2] a"].join("\n");
+    expect(collectCitations(md, isSource, { exclude: (lines) => appendixMask(lines) })).toEqual({ grounding: ["S1", "S2"], inertOnly: [] });
+  });
+
+  it("does not end an appendix at a heading inside a code fence", () => {
+    const lines = ["## Sources", "- [S1] a", "```", "# Heading", "```", "- [S2] b", "## Next"];
+    expect(appendixMask(lines)).toEqual([true, true, true, true, true, true, false]);
+    // …and a fenced line is no setext underline for the prose above it.
+    expect(appendixMask(["Sources", "```", "---", "```", "Claim [S1]."])).toEqual([false, false, false, false, false]);
+  });
+
   it("ors masks together", () => {
     expect(orMasks([true, false, false], [false, true, false])).toEqual([true, true, false]);
   });

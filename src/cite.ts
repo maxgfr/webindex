@@ -201,9 +201,14 @@ export function appendixMask(lines: readonly string[], opts: { headings?: RegExp
       .replace(/\s+/g, " ");
     return APPENDIX_TITLE.test(folded) || (extra?.test(bare) ?? false);
   };
+  // A report documenting its own citation format shows a "# References" in a
+  // fence. Read as a heading, it started a level-1 appendix that ran to the end
+  // of the report, and every claim after the sample went inert — the case
+  // codeMask exists for. A fenced heading neither starts nor ends one.
+  const code = codeMask(lines);
   let level = 0;
   for (let i = 0; i < lines.length; i++) {
-    const h = headingAt(lines, i);
+    const h = code[i] ? undefined : headingAt(lines, i);
     if (level && h && h.level <= level) level = 0;
     if (!level && h && isAppendix(h.text)) level = h.level;
     mask[i] = level > 0;
