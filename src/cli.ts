@@ -14,6 +14,7 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // URLs through the local keyless stack, turn a URL or a local file into clean
 // text, drive the containers, and serve all of that to an agent over MCP.
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { isIP } from "node:net";
 import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { configure, env, envFlag, envInt, envName } from "./brand.js";
@@ -911,6 +912,20 @@ export interface WebindexToolPolicy {
   noLocalFiles?: boolean;
 }
 
+// The host name a public-only check had to resolve, or undefined when it
+// needed no resolver: a URL that is not http(s), or a literal address.
+function resolvedHost(url: string): string | undefined {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return undefined;
+  const host = u.hostname.startsWith("[") ? u.hostname.slice(1, -1) : u.hostname;
+  return isIP(host) ? undefined : host;
+}
+
 /**
  * webindex's own MCP tools: fetch a URL, extract a file.
  *
@@ -924,7 +939,14 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
   const refuseUrl = async (url: string): Promise<void> => {
     if (!guard) return;
     const why = await publicUrlRefusal(url);
-    if (why) throw new ToolError(`Refused ${url}: ${why} — this server fetches public addresses only.`);
+    if (!why) return;
+    // What a name resolved to, or how resolving it failed, is the view of this
+    // machine's network the wall exists to hide: told "resolves to 10.2.3.4",
+    // any caller could map internal names. So a refusal that needed the
+    // resolver says only that the name is not public; one that did not (a
+    // literal address, a scheme) keeps its reason, which tells nothing new.
+    const host = resolvedHost(url);
+    throw new ToolError(`Refused ${url}: ${host ? `${host} is not a public address, or did not resolve` : why} — this server fetches public addresses only.`);
   };
   const root = policy.extractRoot;
   const localFiles = root !== undefined || !policy.noLocalFiles;

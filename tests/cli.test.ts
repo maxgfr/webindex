@@ -1164,6 +1164,25 @@ describe("the MCP tools", () => {
       expect(spy).not.toHaveBeenCalled();
     });
 
+    it("does not tell a caller what a refused name resolves to", async () => {
+      // "localhost resolves to 127.0.0.1" made the wall a split-horizon DNS
+      // oracle for internal names, which is the view it exists to hide.
+      const guarded = webindexAdapter({ publicOnly: true });
+      for (const [tool, args] of [
+        ["webindex_meta", { url: "http://localhost/" }],
+        ["webindex_repo", { repo: "https://localhost/o/r", forge: "gitea" }],
+      ] as const) {
+        const message = await guarded.callTool(tool, { ...args }).then(
+          () => "",
+          (e: Error) => e.message,
+        );
+        expect(message, tool).toMatch(/localhost is not a public address, or did not resolve — this server fetches public addresses only/);
+        expect(message, tool).not.toMatch(/127\.0\.0\.1|::1|resolves to/);
+      }
+      // A literal address needed no resolver, and says what it is.
+      await expect(guarded.callTool("webindex_meta", { url: "http://10.0.0.1/" })).rejects.toThrow(/10\.0\.0\.1 is not a public address/);
+    });
+
     it("refuses a redirect into a private address, at the hop", async () => {
       // A public page that answers 302 → the metadata endpoint is the classic
       // way round a check made only on the URL a caller sent.
