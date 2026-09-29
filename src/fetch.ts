@@ -579,9 +579,18 @@ export async function httpJson(
     /** Response cap in bytes; over it the transfer is cancelled and the call fails. Default 4 MB. */
     maxBytes?: number;
   } = {},
-): Promise<{ ok: boolean; status: number; data: any; error?: string; bytesRead?: number; truncated?: boolean }> {
+): Promise<{
+  ok: boolean;
+  status: number;
+  data: any;
+  error?: string;
+  bytesRead?: number;
+  truncated?: boolean;
+  /** Set when the call ended on `timeoutMs` — this caller's own deadline, not the server's failure. */
+  timedOut?: boolean;
+}> {
   const attempts = attemptsFor(opts.retries);
-  let last: { ok: boolean; status: number; data: any; error?: string } = { ok: false, status: 0, data: undefined };
+  let last: { ok: boolean; status: number; data: any; error?: string; timedOut?: boolean } = { ok: false, status: 0, data: undefined };
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   for (let attempt = 0; attempt < attempts; attempt++) {
     const ctrl = new AbortController();
@@ -634,7 +643,9 @@ export async function httpJson(
       }
       return result;
     } catch (e) {
-      last = { ok: false, status: 0, data: undefined, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
+      last = timedOut
+        ? { ok: false, status: 0, data: undefined, error: `timed out after ${timeoutMs} ms`, timedOut: true }
+        : { ok: false, status: 0, data: undefined, error: networkFailure(e) };
       if (timedOut || isPermanentFailure(e)) break;
       if (attempt < attempts - 1) await sleep(defaultRetryMs());
     } finally {

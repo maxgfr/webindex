@@ -177,6 +177,10 @@ describe("scrapeViaFirecrawl", () => {
     const body = JSON.parse((call[1] as RequestInit).body as string);
     expect(body).toMatchObject({ formats: ["markdown"], onlyMainContent: true, blockAds: true, removeBase64Images: true });
     expect(body.maxAge).toBeGreaterThan(0);
+    // Firecrawl gives up on a slow page before this client stops waiting (45 s),
+    // so the page's own 408 arrives first: a client-side timeout then means
+    // the instance hung, which is what marks it down.
+    expect(body.timeout).toBe(40_000);
     // never the async job API
     expect(spy.mock.calls.some((c) => String(c[0]).includes("/batch/"))).toBe(false);
   });
@@ -411,7 +415,7 @@ describe("searchViaFirecrawl", () => {
     expect(r.hits).toHaveLength(1);
     expect(r.hits![0]!.url).toBe("https://a.test/1");
     const call = spy.mock.calls.find((c) => String(c[0]).includes("/search"))!;
-    expect(JSON.parse((call[1] as RequestInit).body as string)).toMatchObject({ query: "rate limiting", limit: 5, sources: ["web"], timeout: 30_000 });
+    expect(JSON.parse((call[1] as RequestInit).body as string)).toMatchObject({ query: "rate limiting", limit: 5, sources: ["web"], timeout: 28_000 });
   });
 
   it("explains a disabled instance instead of returning hits", async () => {
@@ -500,6 +504,32 @@ describe("searchViaFirecrawl", () => {
     spy.mockClear();
     await searchViaFirecrawl("x", 5, { firecrawl: base, lang: "es", region: "419" });
     expect(bodyOf(spy, "/search")).not.toHaveProperty("country"); // not a country code
+  });
+
+  it("does not mark an instance down because the caller's own budget ran out", async () => {
+    // A budgeted search caps its request's timeout; that expiry is the budget
+    // running out, not an outage. Marked down, the instance was skipped by
+    // every search and every fetch in the process for 30 s, and fetches fell
+    // back to the built-in extractor.
+    const base = nextBase();
+    const posts: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((u: string, init?: RequestInit) => {
+        const url = String(u);
+        if (init?.method === "POST") posts.push(new URL(url).pathname);
+        if (url.includes("/search"))
+          return new Promise((_, reject) =>
+            init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" }))),
+          );
+        const body = url.includes("/scrape") ? JSON.stringify(SCRAPE_FIXTURE) : '{"message":"Firecrawl API"}';
+        return Promise.resolve(new Response(body, { status: 200, headers: { "content-type": "application/json" } }));
+      }),
+    );
+    const r = await searchViaFirecrawl("x", 5, { firecrawl: base, budgetMs: 30 });
+    expect(r.why).toMatch(/timed out after 30 ms/);
+    expect((await scrapeViaFirecrawl("https://x.test/a", { firecrawl: base })).data).toBeTruthy();
+    expect(posts).toEqual(["/v2/search", "/v2/scrape"]);
   });
 
   it("marks an instance that stopped answering down", async () => {
