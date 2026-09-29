@@ -6,7 +6,7 @@ import { docFormatForUrl } from "./doc.js";
 import { firecrawlBase, firecrawlIsExplicit, probeFirecrawl } from "./firecrawl.js";
 import { canonicalizeUrl, domainOf, fnv1a64 } from "./url.js";
 import { isNoWrite, writeFileAtomic } from "./no-write.js";
-import { brand, countFetch, env, envInt } from "./brand.js";
+import { brand, countFetch, env, envInt, envName } from "./brand.js";
 
 // Opt-in on-disk fetch cache (--cache). The in-process hydrate cache only spans
 // ONE gather; the deep tier fans out N separate `gather` processes (one per
@@ -279,7 +279,7 @@ function entryPaths(url: string, acceptLanguage: string, extractor: CacheNamespa
 // refetch into a 304. Still undefined for missing / corrupt / empty-text
 // entries, which carry nothing worth revalidating.
 function readCache(url: string, acceptLanguage = "", extractor: CacheNamespace = "native", variant: CacheVariant = ""): CacheEntry | undefined {
-  if (!openCacheDir(false).dir) return undefined;
+  if (!entryDir(false)) return undefined;
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
   if (!existsSync(meta)) return undefined;
   try {
@@ -311,7 +311,7 @@ function writeCache(url: string, res: Extract, now: number, acceptLanguage = "",
   // field (`truncated`) and restated when the entry is served.
   const { text, note: _note, ...rest } = res as CacheEntry;
   const write = () => {
-    if (!openCacheDir(true).dir) return; // refused: the run goes on uncached
+    if (!entryDir(true)) return; // refused: the run goes on uncached
     // Body first: a reader that catches the pair mid-write sees either the old
     // metadata (pointing at a body that is at worst the new one for the same
     // URL) or no metadata at all. The reverse order can publish metadata for a
@@ -408,6 +408,21 @@ function mkdirPrivate(p: string): void {
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
   }
+}
+
+// Each refusal is announced once per process, as an unknown ladder rung is:
+// a run that asked for the cache and silently got none would read as a cache
+// that never fills.
+const announced = new Set<string>();
+
+/** The directory entries are read from and written to, announcing a refusal. */
+function entryDir(create: boolean): string | undefined {
+  const { dir, refused } = openCacheDir(create);
+  if (refused && !announced.has(refused)) {
+    announced.add(refused);
+    process.emitWarning(`the fetch cache is not used: ${refused}. Remove it, or set ${envName("CACHE_DIR")} to a directory only you can write.`);
+  }
+  return dir;
 }
 
 /**

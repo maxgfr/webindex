@@ -514,6 +514,7 @@ describe("the default cache directory", () => {
     configure({ ...brand(), cacheDir: undefined });
   });
   afterEach(() => {
+    vi.restoreAllMocks();
     if (SETUP_TMPDIR === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = SETUP_TMPDIR;
     rmSync(tmp, { recursive: true, force: true });
@@ -531,10 +532,16 @@ describe("the default cache directory", () => {
 
   const refusesIt = async (planted: string, why: RegExp) => {
     const spy = installFetchMock(() => PAGE);
+    const warn = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
     const res = await cachedFetchAndExtract(URL, {}, true, 1500);
+    await cachedFetchAndExtract(URL, {}, true, 1600);
+    // Said once, naming the directory and the way out — not once per entry.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(why);
+    expect(String(warn.mock.calls[0]![0])).toContain(envName("CACHE_DIR"));
     expect(res.cached).toBeUndefined();
     expect(res.text).toContain("token buckets");
-    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledTimes(2); // neither served from what was planted
     const stats = cacheStats(1500);
     expect(stats.entries).toBe(0);
     expect(stats.refused).toMatch(why);
