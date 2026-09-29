@@ -586,6 +586,23 @@ describe("externalHosts", () => {
     expect(hosts).toEqual(new Set(["xn--mller-kva.de", "evil.test", "b.test"]));
   });
 
+  it.each([
+    ["更多信息请访问https://www.example.org获取。", "example.org"],
+    ["詳細はhttps://docs.example.jpを参照してください", "docs.example.jp"],
+    ["ดูที่https://example.co.thครับ", "example.co.th"],
+    ["Смотрите https://example.comздесь", "example.com"],
+  ])("ends the host where text written without a space runs on: %s", (text, host) => {
+    // The host class takes any script, for an IDN, and ran on into the next
+    // word: "example.org获取" was punycoded into a top-level label.
+    expect(externalHosts("https://self.test/", text)).toEqual(new Set([host]));
+  });
+
+  it("still reads a Unicode host that is not glued to anything", () => {
+    expect(externalHosts("https://self.test/", "https://müller.de/x https://пример.рф/ https://bücher.example/ https://例え.jp/")).toEqual(
+      new Set(["xn--mller-kva.de", "xn--e1afmkfd.xn--p1ai", "xn--bcher-kva.example", "xn--r8jz45g.jp"]),
+    );
+  });
+
   it("stays linear on a long run of host characters", () => {
     const started = performance.now();
     externalHosts("https://example.com/a", `https://${"a.".repeat(50_000)} https://${"x@".repeat(20_000)} ${"https://".repeat(20_000)}`);

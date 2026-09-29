@@ -795,6 +795,21 @@ function jaccardSorted(a: Int32Array, b: Int32Array): number {
 // "müller.de" to "m", and "https://user@evil.test" read as host "user".
 const URL_IN_TEXT = /https?:\/\/(?:[^\s/@?#]+@)?[\p{L}\p{N}.-]+/giu;
 
+// Chinese, Japanese and Thai put no space between a URL and the next word, so
+// a host class that must take any script ran on into it: "访问https://
+// www.example.org获取" read as host "www.example.org获取", punycoded into a
+// top-level label. A last label that starts in ASCII and turns non-ASCII is
+// that glue — a top-level label is one or the other — so the host ends there.
+// A single-label host is left alone: nothing marks where it would end.
+function unglued(match: string): string {
+  const hostStart = Math.max(match.indexOf("//") + 2, match.lastIndexOf("@") + 1);
+  const dot = match.lastIndexOf(".");
+  if (dot <= hostStart) return match;
+  const label = match.slice(dot + 1);
+  const turn = label.search(/[\u0080-\uffff]/);
+  return turn > 0 && /^[A-Za-z0-9]/.test(label) ? match.slice(0, dot + 1 + turn) : match;
+}
+
 /**
  * The hosts a text links out to, excluding its own domain and `www.` noise.
  *
@@ -807,7 +822,7 @@ export function externalHosts(url: string, text: string): Set<string> {
   const out = new Set<string>();
   for (const m of text.match(URL_IN_TEXT) ?? []) {
     // A sentence's final period is not part of the host: "see https://mdn.io."
-    const h = trimTrailing(domainOf(trimTrailing(m, ".")), ".").replace(/^www\./, "");
+    const h = trimTrailing(domainOf(unglued(trimTrailing(m, "."))), ".").replace(/^www\./, "");
     if (h && h !== self) out.add(h);
   }
   return out;
