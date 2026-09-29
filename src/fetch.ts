@@ -1446,6 +1446,9 @@ const JUNK_PATTERNS: [RegExp, string, "strong" | "weak"][] = [
   // Akamai's and Cloudflare's denials carry an incident reference; without one
   // the phrase is as likely a permission-error article.
   [/\baccess denied\b[\s\S]{0,300}?(\breference #|\bray id\b|\bpermission to access\b)/i, "anti-bot interstitial", "strong"],
+  // Cloudflare's WAF block page. Its "Attention Required!" is the <title>,
+  // which extraction drops, so the body's own wording has to carry it.
+  [/\bsorry, you have been blocked\b|\byou are unable to access\b[\s\S]{0,300}?\bray id\b/i, "anti-bot interstitial", "strong"],
   [/\baccess denied\b|\benable cookies\b/i, "anti-bot interstitial", "weak"],
   // FR / DE (the locale layer targets non-EN markets)
   [/\bnous utilisons des cookies\b|\baccepter (tous )?les cookies\b|\bactiver javascript\b/i, "cookie/consent wall (fr)", "strong"],
