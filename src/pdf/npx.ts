@@ -188,16 +188,37 @@ export function skipNpxHint(): string {
   return `set ${envName("NO_NPX")}=1 to skip the rungs that install through npx`;
 }
 
+// Lines of stderr that are not the tool's account of the failure: npm's
+// chatter, Node's warnings, and the frame of its uncaught-exception banner —
+// the caret under the quoted source line, the stack, the version footer.
+const NOISE_RE = /^(?:npm (?:warn|WARN|notice)\b|\(node:\d+\)|\(Use `node --|\^+$|at\s|Node\.js v\d)/;
+// Where the banner starts: the throw site, `file:///…/pdf-inspector.mjs:125`.
+const THROW_SITE_RE = /^(?:file:\/\/|\/|[A-Za-z]:\\)\S*:\d+$/;
+const ERROR_LINE_RE = /^\w*error\b/i;
+// An absolute path — POSIX, Windows, or a file: URL — but not the path of a
+// URL (the lookbehind): cut to its file name, since the rest names the user's
+// home and npm cache, in notes that end up in dossiers and MCP responses.
+const PATH_RE = /(?<![\w:/.\\])(?:file:\/\/\/?(?:[A-Za-z]:)?|[A-Za-z]:(?=\\))?(?:[/\\][^\s/\\:'"()]+)+/g;
+
 /**
- * The tool's own account of a failure, under its name: the first line of
- * stderr that is not npm's chatter, capped — else the exit status. A tool that
- * already names itself (`anydoc: unsupported input…`) is not named twice.
+ * The tool's own account of a failure, under its name: the first error line
+ * of its stderr, else its first line that is not noise, capped and with paths
+ * cut to their file names — else the exit status. A tool that already names
+ * itself (`anydoc: unsupported input…`) is not named twice.
  */
 export function failureDetail(tool: string, r: RunResult): string {
-  const line = (r.stderr ?? "")
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .find((l) => l && !/^npm (?:warn|WARN|notice)\b/.test(l));
-  const detail = (line ?? r.error ?? "failed").slice(0, 200);
+  const lines: string[] = [];
+  let source = false; // the source line Node quotes under a throw site
+  let props = false; // the error's own properties, `{ code: … }` after its stack
+  for (const raw of (r.stderr ?? "").split(/\r?\n/)) {
+    const l = raw.trim();
+    if (source) source = false;
+    else if (props) props = l !== "}";
+    else if (THROW_SITE_RE.test(l)) source = true;
+    else if (l.startsWith("at ") && l.endsWith("{")) props = true;
+    else if (l && !NOISE_RE.test(l)) lines.push(l);
+  }
+  const line = lines.find((l) => ERROR_LINE_RE.test(l)) ?? lines[0];
+  const detail = (line ?? r.error ?? "failed").replace(PATH_RE, (p) => p.slice(Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")) + 1)).slice(0, 200);
   return detail.startsWith(`${tool}:`) ? detail : `${tool}: ${detail}`;
 }
