@@ -44,6 +44,19 @@ describe("per-host politeness", () => {
     expect([a, b, c]).toEqual([0, 50, 100]);
   });
 
+  it("ends a wait early when its signal aborts, and says how long it actually waited", async () => {
+    await awaitHostSlot("https://a.test/1", 20_000);
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 20);
+    const started = performance.now();
+    const waited = await awaitHostSlot("https://a.test/2", 20_000, Date.now(), ctrl.signal);
+    // ~20 ms locally.
+    expect(performance.now() - started).toBeLessThan(3000);
+    expect(waited).toBeLessThan(3000);
+    // An aborted signal waits for nothing.
+    expect(await awaitHostSlot("https://a.test/3", 20_000, Date.now(), ctrl.signal)).toBe(0);
+  });
+
   it("never makes one host wait on another", async () => {
     await awaitHostSlot("https://a.test/1", 500, 0);
     expect(await awaitHostSlot("https://b.test/1", 500, 0)).toBe(0);
@@ -117,6 +130,13 @@ describe("linksFrom", () => {
     // A relative base resolves against the page; a broken one is ignored.
     expect(linksFrom('<base href="../up/"><a href="x">x</a>', "https://a.test/a/b/page")).toEqual(["https://a.test/a/up/x"]);
     expect(linksFrom('<base href="http://[bad"><a href="x">x</a>', "https://a.test/a/page")).toEqual(["https://a.test/a/x"]);
+  });
+
+  it.each(["javascript:void(0)", "data:text/html,x", "JavaScript:;"])("ignores a <base href> of %s, as a browser does", (base) => {
+    // Taken as the base, it made every relative link fail to resolve, and the
+    // crawl never followed the page's own links.
+    const html = `<base href="${base}"><a href="/about">a</a><a href="docs/intro">b</a><a href="https://other.test/x">c</a>`;
+    expect(linksFrom(html, "https://ex.test/blog/post")).toEqual(["https://ex.test/about", "https://ex.test/blog/docs/intro", "https://other.test/x"]);
   });
 
   it("does not follow links that are commented out or live in a script", () => {
@@ -308,6 +328,37 @@ describe("crawlSite", () => {
     expect(r.pending).toEqual(expect.arrayContaining(["https://s.test/a", "https://s.test/b"]));
     expect(r.notes.join(" ")).toMatch(/cancelled/);
   });
+
+  it("stops at once when its signal aborts during a politeness wait", async () => {
+    // Each worker sat out its claimed Crawl-delay slot and only then saw the
+    // cancel: width × delay after the abort, minutes at a 60 s Crawl-delay,
+    // with an MCP tool slot held for all of it.
+    const spy = site({ "https://s.test/": '<p>root</p><a href="/a">a</a><a href="/b">b</a><a href="/c">c</a><a href="/d">d</a>' });
+    const ctrl = new AbortController();
+    let abortedAt = 0;
+    const r = await crawlSite("https://s.test/", {
+      maxPages: 10,
+      maxDepth: 1,
+      useSitemap: false,
+      delayMs: 20_000,
+      signal: ctrl.signal,
+      onPage: (p) => {
+        if (p.depth === 0)
+          setTimeout(() => {
+            abortedAt = performance.now();
+            ctrl.abort();
+          }, 50);
+      },
+    });
+    // ~5 ms locally; the uncancelled wait is 80 s.
+    expect(performance.now() - abortedAt).toBeLessThan(3000);
+    const pages = spy.mock.calls.map((c) => String(c[0])).filter((u) => !/robots|sitemap/.test(u));
+    expect(pages).toEqual(["https://s.test/"]);
+    expect(r.pending).toEqual(["https://s.test/a", "https://s.test/b", "https://s.test/c", "https://s.test/d"]);
+    expect(r.disallowed).toEqual([]);
+    expect(r.notes.join(" ")).toMatch(/cancelled/);
+    expect(r.notes.join(" ")).not.toMatch(/refused by|outside the crawl origin/);
+  }, 10_000);
 });
 
 describe("crawlSite concurrency", () => {
@@ -529,6 +580,31 @@ describe("crawlSite request ceiling", () => {
     expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/"]);
     expect(r.notes.join(" ")).not.toMatch(/NaN/);
   });
+
+  it("reads an Infinity budget or depth as unlimited, not as the default", async () => {
+    // Only NaN was meant to fall back. Infinity is a number, and a caller who
+    // passes it asked for no ceiling: it silently became depth 2 and 20 pages,
+    // and at depth 2 the result read as a site that ended there.
+    installFetchMock((url) => {
+      if (url.includes("robots.txt") || url.includes("sitemap")) return { status: 404, body: "" };
+      const chain = /\/d(\d+)$/.exec(url);
+      if (chain) return html(`<p>d${chain[1]}</p><a href="/d${Number(chain[1]) + 1}">next</a>`);
+      if (url === "https://s.test/") return html('<p>root</p><a href="/d1">next</a>');
+      return undefined;
+    });
+    const deep = await crawlSite("https://s.test/", { maxDepth: Number.POSITIVE_INFINITY, maxPages: 5, useSitemap: false, delayMs: 0 });
+    expect(deep.pages.map((p) => p.depth)).toEqual([0, 1, 2, 3, 4]);
+
+    installFetchMock((url) => {
+      if (url.includes("robots.txt") || url.includes("sitemap")) return { status: 404, body: "" };
+      if (url === "https://s.test/") return html(Array.from({ length: 30 }, (_, i) => `<a href="/p${i}">${i}</a>`).join(""));
+      return html("<p>leaf</p>");
+    });
+    const wide = await crawlSite("https://s.test/", { maxPages: Number.POSITIVE_INFINITY, maxDepth: 1, useSitemap: false, delayMs: 0 });
+    expect(wide.pages).toHaveLength(31);
+    expect(wide.pending).toEqual([]);
+    expect(wide.notes.join(" ")).not.toMatch(/Infinity|budget/);
+  });
 });
 
 describe("crawlSite redirects", () => {
@@ -697,6 +773,23 @@ describe("crawlSite scope", () => {
     // Still links the page has; just not pages to read.
     expect(r.pages[0]!.links).toContain("https://s.test/archive.zip");
     expect(r.notes.join(" ")).toMatch(/skipped 4 link\(s\) to images, media, fonts or archives/);
+  });
+
+  it("reads a page whose path ends like a script or a stylesheet", async () => {
+    // /wiki/Node.js and github.com/vercel/next.js are HTML pages. An <a href>
+    // is almost never a script or a stylesheet, so skipping .js/.css saved
+    // nothing and dropped real pages, under a note calling them images.
+    const asked: string[] = [];
+    installFetchMock((url) => {
+      if (url.includes("robots.txt") || url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+      asked.push(new URL(url).pathname);
+      if (url === "https://s.test/") return html('<a href="/wiki/Node.js">n</a><a href="/vercel/next.js">x</a><a href="/blog/why-i-left.css">c</a>');
+      return html("<p>a page</p>");
+    });
+    const r = await crawlSite("https://s.test/", { maxPages: 10, maxDepth: 1, useSitemap: false, delayMs: 0 });
+    expect(asked).toEqual(["/", "/wiki/Node.js", "/vercel/next.js", "/blog/why-i-left.css"]);
+    expect(r.pages).toHaveLength(4);
+    expect(r.notes.join(" ")).not.toMatch(/skipped/);
   });
 
   /** /docs/ links to two pages of its own; the sitemap lists the shop, and one docs page. */

@@ -462,9 +462,16 @@ function wordText(xml: string, budget: Budget, styles?: Map<string, string>): st
   let fallback = 0;
   // <w:tabs> holds the paragraph's tab STOPS, not tab characters.
   let tabStops = 0;
+  // A tracked move's source keeps its text in ordinary w:t runs (ECMA-376
+  // §17.13.5.22), not in delText, and w:moveTo holds it again where it went:
+  // read here, every moved sentence came out twice. The paragraphs and tables
+  // round it are still tracked, so one the move emptied is dropped as empty. A
+  // self-closing <w:moveFrom/> in a paragraph mark's rPr opens and closes at
+  // once, and moveFromRangeStart/End are other names.
+  let moved = 0;
 
   const add = (p: Paragraph | undefined, s: string) => {
-    if (p && budget.take(s.length)) p.text += s;
+    if (p && !moved && budget.take(s.length)) p.text += s;
   };
   // A finished paragraph or table goes to the innermost open cell, else out.
   const emit = (block: string) => {
@@ -481,7 +488,8 @@ function wordText(xml: string, budget: Budget, styles?: Map<string, string>): st
       if (fallback) return;
       const p = paragraphs[paragraphs.length - 1];
       const table = tables[tables.length - 1];
-      if (n === "p") paragraphs.push({ text: "", prefix: "" });
+      if (n === "moveFrom") moved++;
+      else if (n === "p") paragraphs.push({ text: "", prefix: "" });
       else if (n === "t") inText++;
       else if (n === "tab" && !tabStops) add(p, "\t");
       else if (n === "br" || n === "cr") add(p, "\n");
@@ -504,7 +512,8 @@ function wordText(xml: string, budget: Budget, styles?: Map<string, string>): st
       if (n === "tabs") tabStops = Math.max(0, tabStops - 1);
       if (fallback) return;
       const table = tables[tables.length - 1];
-      if (n === "t") inText = Math.max(0, inText - 1);
+      if (n === "moveFrom") moved = Math.max(0, moved - 1);
+      else if (n === "t") inText = Math.max(0, inText - 1);
       else if (n === "p") {
         const p = paragraphs.pop();
         // An empty list item or heading is not a bare "-" or "#".
@@ -832,7 +841,8 @@ const ODF_ASIDES = new Set(["text:note", "office:annotation", "text:tracked-chan
 function openDocumentText(xml: string, budget: Budget): string {
   const blocks: string[] = [];
   const paragraphs: Paragraph[] = [];
-  const tables: (Table & { repeatRow: number; repeatCell: number })[] = [];
+  // `heading`: where a sheet's "## <name>" went in blocks, for a top-level table.
+  const tables: (Table & { repeatRow: number; repeatCell: number; heading?: number })[] = [];
   let skip = 0; // inside one of ODF_ASIDES
   let listItem = false;
   let spreadsheet = false;
@@ -880,8 +890,8 @@ function openDocumentText(xml: string, budget: Budget): string {
       else if (name === "draw:frame" && (titleFrame || attr(attrs, "presentation:class") === "title")) titleFrame++;
       else if (name === "table:table") {
         const sheet = attr(attrs, "table:name");
-        tables.push({ rows: [], repeatRow: 1, repeatCell: 1 });
-        if (sheet && spreadsheet) blocks.push(`## ${sheet}`);
+        const heading = sheet && spreadsheet && !tables.length ? blocks.push(`## ${sheet}`) - 1 : undefined;
+        tables.push({ rows: [], repeatRow: 1, repeatCell: 1, ...(heading !== undefined ? { heading } : {}) });
       } else if (name === "table:table-row" && table) {
         table.row = [];
         table.repeatRow = repeat(attrs, "table:number-rows-repeated");
@@ -920,11 +930,17 @@ function openDocumentText(xml: string, budget: Budget): string {
       } else if (name === "table:table") {
         const done = tables.pop();
         if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows, budget));
+        // A sheet with nothing in it goes unlisted, as the .xlsx reader leaves
+        // it out: its heading was the last thing written.
+        if (done?.heading !== undefined && blocks.length === done.heading + 1) blocks.length = done.heading;
       } else if (name === "draw:frame" && titleFrame) titleFrame--;
       else if (name === "presentation:notes") inNotes = Math.max(0, inNotes - 1);
       else if (name === "draw:page" && heading >= 0) {
         if (title.length) blocks[heading] = `## Slide ${slide}: ${title.join(" ")}`;
         if (notes.length) blocks.push(`Notes: ${notes.join(" ")}`);
+        // An empty slide — no title, text or notes — goes unlisted, as the
+        // .pptx reader leaves it out; the next one keeps its number by position.
+        if (!title.length && !notes.length && blocks.length === heading + 1) blocks.length = heading;
         heading = -1;
       }
     },

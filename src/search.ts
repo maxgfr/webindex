@@ -1,7 +1,7 @@
 import { brand, env, envName } from "./brand.js";
 import { httpGet, pageDelayMs, sleep } from "./fetch.js";
 import { firecrawlBase, ProbeMemo, searchViaFirecrawl, type FirecrawlHit } from "./firecrawl.js";
-import { acceptLanguageHeader, baseLang } from "./locale.js";
+import { acceptLanguageHeader, searxngLanguage } from "./locale.js";
 import { canonicalizeUrl } from "./url.js";
 import { isKeylessEngine, KEYLESS_ENGINES, keylessEngines, searchViaKeyless, unknownEngines, type EngineResult, type KeylessEngine } from "./engines.js";
 
@@ -79,7 +79,8 @@ export type SearchRung = "searxng" | "firecrawl" | KeylessEngine;
  * - `unreachable`: nothing answered — not running, no connection, timed out;
  * - `error`: something answered, but not with results — an error status, an
  *   empty or unreadable page, a request the backend rejected;
- * - `disabled`: switched off; `not-tried`: the cascade stopped before it.
+ * - `disabled`: switched off; `not-tried`: the cascade stopped before it
+ *   answered — out of budget, or cancelled, even with its request in flight.
  */
 export type RungOutcome = "hits" | "empty" | "throttled" | "blocked" | "unreachable" | "error" | "disabled" | "not-tried";
 
@@ -194,7 +195,8 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
   const pages = Math.max(1, opts.pages ?? 1);
   const limit = Math.max(1, opts.limit ?? 10);
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
-  const language = searxngLanguage(opts);
+  // The only locale knob SearXNG has, so an explicit region rides on it.
+  const language = searxngLanguage(opts.lang, opts.region);
   const root = `${base}/search?q=${encodeURIComponent(query)}&format=json&safesearch=1` + (language ? `&language=${encodeURIComponent(language)}` : "");
 
   const notes: string[] = [];
@@ -226,6 +228,11 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
       signal: opts.signal,
     });
     if (!r.ok) {
+      // Abandoned by the caller's signal (httpGet's own word for it): nothing
+      // was learned about SearXNG, which "unreachable" would say is down.
+      if (p === 0 && !r.status && r.error === "cancelled") {
+        return rungResult("searxng", "not-tried", [], ["SearXNG did not get to answer: the search was cancelled."]);
+      }
       if (p === 0) {
         failed = r.status === 429 || r.status === 503 ? "throttled" : r.status === 0 ? "unreachable" : "error";
         notes.push(
@@ -273,7 +280,12 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
       if (hits.length >= limit) break;
     }
     if (hits.length === before) break; // a page that added nothing new ends it
-    if (p < pages - 1 && pageDelayMs()) await sleep(pageDelayMs());
+    if (p < pages - 1) {
+      // Not slept out past the budget or a cancel, only to stop right after.
+      const pause = pageDelayMs();
+      if (opts.signal?.aborted || Date.now() + pause >= deadline - spentSlackMs(opts.timeoutMs)) break;
+      if (pause) await sleep(pause, opts.signal);
+    }
   }
 
   if (suspended.size) {
@@ -283,16 +295,6 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
   // An empty list from throttled upstreams is a refusal, not an answer.
   const outcome: RungOutcome = hits.length ? "hits" : (failed ?? (suspended.size ? "throttled" : "empty"));
   return rungResult("searxng", outcome, hits, notes);
-}
-
-// SearXNG's `language`: the only locale knob it has, so an explicit region
-// rides on it ("fr" + "ca" → "fr-CA"; `wt` names no country). A region alone
-// does not pick a language for the caller.
-function searxngLanguage(opts: SearchOptions): string | undefined {
-  if (!opts.lang) return undefined;
-  const region = opts.region?.trim().toLowerCase();
-  if (!region) return opts.lang;
-  return region === "wt" ? baseLang(opts.lang) : `${baseLang(opts.lang)}-${region.toUpperCase()}`;
 }
 
 // When the caller's overall budget runs out, as a Date.now() instant.
@@ -329,6 +331,7 @@ const answered = (outcome: RungOutcome) => outcome === "hits" || outcome === "em
 // What a keyless engine's result says in the cascade's vocabulary.
 function keylessOutcome(r: EngineResult): RungOutcome {
   if (r.hits.length) return "hits";
+  if (r.stopped) return "not-tried";
   if (r.answered) return "empty";
   if (r.blocked) return "blocked";
   if (r.throttled) return "throttled";
@@ -424,7 +427,7 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
       if (!r.answered && r.note) notes.push(r.note);
     }
   }
-  if (!hits.length) notes.push(closingNote(rungs));
+  if (!hits.length) notes.push(closingNote(rungs, opts.signal?.aborted === true));
   return { hits, notes, rungs, searched: rungs.some((r) => answered(r.outcome)) };
 }
 
@@ -460,12 +463,14 @@ function firecrawlOutcome(fc: { hits?: unknown[]; status?: number }): RungOutcom
  * converts a refusal into a finding about the world); or something answered
  * and found nothing.
  */
-function closingNote(rungs: RungReport[]): string {
+function closingNote(rungs: RungReport[], cancelled: boolean): string {
   const cli = brand().cli;
   if (rungs.every((r) => r.outcome === "disabled")) {
     return `No search backend was enabled — SearXNG and Firecrawl are off and no keyless engine is selected, so nothing was searched. Set ${envName("ENGINES")} to a list of ${KEYLESS_ENGINES.join(", ")}, or run \`${cli} stack up\`.`;
   }
   if (rungs.some((r) => answered(r.outcome))) return `No results from any engine. \`${cli} stack up\` starts SearXNG and Firecrawl locally.`;
+  // The caller stopped it: "try again later" is advice for an outage.
+  if (cancelled) return "The search was cancelled before any engine answered — nothing was searched.";
   const keyless = rungs.filter((r) => isKeylessEngine(r.rung));
   if (keyless.length && keyless.every((r) => r.outcome === "blocked")) {
     return `Every keyless engine blocked this client (${keyless.map((r) => r.rung).join(", ")}) — nothing was searched, which is not the same as nothing being there. Try again later, or run \`${cli} stack up\` for a local SearXNG.`;

@@ -255,10 +255,14 @@ export function runbookMd<T>(
       return;
     }
     if (emission) {
+      // The widest batch the script really hands out, not the batch size: a
+      // phase collapsed into one agent gives it every item, however small the
+      // batch size is.
       const batches = phaseBatches(ph, emission, smallWorklist);
+      const widest = batches.reduce((w, b) => Math.max(w, b.length), 0);
       lines.push(
         `Fan out: \`Workflow({ scriptPath: "${join(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
-        `(${batches.length} agent(s) of at most ${emission.batchSize} item(s), contract \`agents/${emission.role}.md\`).`,
+        `(${batches.length} agent(s) of at most ${widest} item(s), contract \`agents/${emission.role}.md\`).`,
         ``,
         `Sequentially instead: play \`agents/${emission.role}.md\` yourself over ${shq(ph.ids.join(","))}.`,
         ``,

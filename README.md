@@ -13,7 +13,7 @@ brew install maxgfr/tap/webindex
 
 ## Everything it does
 
-Three surfaces over one engine: **328 library exports**, **27 CLI commands**, **16 MCP
+Three surfaces over one engine: **329 library exports**, **27 CLI commands**, **16 MCP
 tools**. Nothing below needs an API key, and every optional helper degrades to a note
 rather than an error.
 
@@ -91,7 +91,7 @@ default, and one out of range is clamped to it.
 | `WEBINDEX_PAGE_DELAY_MS` | pause between two result pages of one engine (default 350) |
 | `WEBINDEX_TIMEOUT_MS` | how long a request may take, connection and body download included, before it is abandoned, not retried (default 20000; `--timeout` overrides it) |
 | `WEBINDEX_MAX_ATTEMPTS`, `WEBINDEX_RETRY_MS` | attempts per request (default 2, at most 5) and the back-off before a retry (default 600 ms) |
-| `WEBINDEX_POLITE_DELAY_MS` | floor between two requests to one host (default 400) |
+| `WEBINDEX_POLITE_DELAY_MS` | floor between two requests a `crawl` makes to one host (default 400); a robots.txt `Crawl-delay` wins. `fetch` does not pace a host |
 | `WEBINDEX_UA` | the browser User-Agent sent to sites |
 | `WEBINDEX_CACHE_DIR` | where the fetch cache — and the materialised container stack, in `compose/` — live (default `<tmp>/webindex-<uid>/cache`, private to you) |
 | `WEBINDEX_CACHE_TTL_HOURS`, `WEBINDEX_CACHE_TTL_MS` | how long a cached page stays fresh (default 24 h; hours may be fractional) |
@@ -105,7 +105,7 @@ default, and one out of range is clamped to it.
 | `WEBINDEX_NO_ROBOTS` | `robots` and `crawl` do not consult robots.txt — only right on a site you own |
 | `WEBINDEX_ROBOTS_UA` | the user-agent token robots.txt groups are matched against (default `webindex`) |
 | `WEBINDEX_CRAWL_CONCURRENCY` | pages a crawl keeps in flight, 1–16 (default 4); one host still departs single-file |
-| `WEBINDEX_FETCH_CONCURRENCY` | URLs one `fetch` keeps in flight when it is given several, 1–16 (default 4) |
+| `WEBINDEX_FETCH_CONCURRENCY` | URLs one `fetch` keeps in flight when it is given several, 1–16 (default 4) — several on one host included |
 | `WEBINDEX_MAX_CRAWL_DELAY_MS` | the longest robots.txt `Crawl-delay` a crawl waits out (default 60000); a site asking for more is not crawled |
 | `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_TOKEN`, `GITEA_TOKEN` | optional forge tokens (`WEBINDEX_GITHUB_TOKEN`, `WEBINDEX_GITLAB_TOKEN`, `WEBINDEX_GITEA_TOKEN` win over them); each goes only to its own forge's host |
 | `WEBINDEX_FORGE_HOSTS` | self-hosted forges, e.g. `salsa.debian.org=gitlab,git.corp=github`: each is queried as that forge and receives that forge's token |
@@ -131,8 +131,9 @@ Homebrew cellar, a global npm install or a vendored bundle alike.
 
 A compose file is something docker runs with root's rights, so before each
 action the written files are read back, and every directory from the cache root
-down must be yours, no symbolic link, and not writable by anyone else; otherwise
-the command refuses and says which path failed. With the docker client installed
+down (for the default cache, from the per-user `<tmp>/webindex-<uid>` down) must
+be yours, no symbolic link, and not writable by anyone else; otherwise the
+command refuses and says which path failed. With the docker client installed
 but no daemon answering, every action says so and exits 1 rather than reporting
 a status or blaming the image pull.
 
@@ -227,8 +228,8 @@ reader of `~/.ssh`. So there are walls, each opt-in:
 
 | Flag or variable | What it does |
 |---|---|
-| `--public-only` (`WEBINDEX_PUBLIC_ONLY=1`) | Every URL tool refuses a target that is, or resolves to, a loopback, private, link-local, CGNAT, unique-local or reserved address — IPv4 carried inside IPv6 included — and checks again at every redirect, robots.txt, sitemap and crawl hop. A guarded fetch skips Firecrawl (which fetches on its own) and the on-disk cache (which unguarded runs share). A self-hosted forge must resolve publicly unless it is declared in `WEBINDEX_FORGE_HOSTS`. It does not stop a resolver that answers this check and the fetch differently (DNS rebinding). |
-| `--extract-root <dir>` (`WEBINDEX_EXTRACT_ROOT`) | `webindex_extract`, and a repository named by a local path, read only under `<dir>`; a relative path is read from it, and symlinks are resolved before the check. |
+| `--public-only` (`WEBINDEX_PUBLIC_ONLY=1`) | Every URL tool refuses a target that is, or resolves to, a loopback, private, link-local, CGNAT, unique-local or reserved address — IPv4 carried inside IPv6 included — and checks again at every redirect, robots.txt, sitemap and crawl hop. A guarded fetch skips Firecrawl (which fetches on its own) and the on-disk cache (which unguarded runs share). A self-hosted forge must resolve publicly unless it is declared in `WEBINDEX_FORGE_HOSTS`, and a forge's redirects are checked like any other's — a declared forge's once they leave its own origin. It does not stop a resolver that answers this check and the fetch differently (DNS rebinding). |
+| `--extract-root <dir>` (`WEBINDEX_EXTRACT_ROOT`) | `webindex_extract`, and a repository named by a local path, read only under `<dir>`; a relative path, a file's or a checkout's, is read from it, and symlinks are resolved before the check. A path outside is refused the same way whether or not it exists. |
 | `WEBINDEX_MCP_TOKEN` | Over HTTP, answer only requests carrying `Authorization: Bearer <token>` — configure the client to send that header; the startup message prints the `claude mcp add` line that does. |
 
 `--allow-remote` turns the first two on by default: public addresses only
@@ -326,7 +327,9 @@ own site (`https`, `www`).
 It uses local extraction so a remote browser cannot bypass those checks.
 Library callers can supply the same asynchronous `authorizeUrl` check to
 `httpGet`, `fetchAndExtract`, `fetchSitemap`, and `fetchRobots`. Authorization
-and politeness waits do not consume the HTTP network timeout budget.
+and politeness waits do not consume the HTTP network timeout budget. The forge
+calls take it too, as `ForgeOptions.authorizeUrl`: it approves the API URL and
+every redirect the forge client follows, inside that call's one timeout.
 
 ## What is deliberately out of scope
 

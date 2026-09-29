@@ -66,11 +66,16 @@ over MCP).
 ## Quotas
 
 A quota answer is reported as `rateLimited`, never retried, with `resetAt` when
-the forge says when it ends. Retrying a quota you have already exhausted only
+the forge says when it ends: its `Retry-After` when it sends one, else the
+quota's own reset. GitHub's secondary limits send `Retry-After` beside headers
+that still describe the primary quota, and the note calls them a secondary
+limit, not a spent quota. Retrying a quota you have already exhausted only
 exhausts it further, and the two failures need opposite handling: "wait" versus
 "this request is wrong". Only a gateway error (502/503/504) or a dropped
-connection gets one more try; a timeout gets none, so a dead network costs one
-timeout per command.
+connection gets one more try (`WEBINDEX_MAX_ATTEMPTS`, as for every request),
+and a gateway that asks, in `Retry-After`, for longer than 5 s gets none. So do
+a timeout, so a dead network costs one timeout per command, and a failure a
+second try only repeats: a host that does not resolve, a redirect loop.
 
 ## When a call fails, it says which failure
 
@@ -105,6 +110,11 @@ has named the host itself, so the token goes there too.
 
 Every token travels in the `Authorization` header — GitLab's as a Bearer — and is
 dropped the moment a redirect leaves the API's origin.
+
+A caller's `authorizeUrl` (in `ForgeOptions`, the hook `httpGet` takes) approves
+the API URL and every redirect before it is requested; a refusal comes back as a
+failed call, not retried. The MCP server's public-only wall passes one, so a
+public forge host cannot redirect a forge tool into a private address.
 
 ## Getting the source itself
 

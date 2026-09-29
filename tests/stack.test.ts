@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { chmodSync, lchownSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -415,6 +415,49 @@ describe("stackControl", () => {
         else process.env.TMPDIR = saved;
         rmSync(tmp, { recursive: true, force: true });
       }
+    });
+
+    it("refuses a default per-user directory that is a symbolic link", () => {
+      // Nobody chose <tmp>/<brand>-<uid>, so nobody vouched for a link there:
+      // another user can plant it pointing at a directory the caller owns —
+      // every check below it then passes — and, owning the link in a sticky
+      // /tmp, re-point it between the check and docker reading the file.
+      if (typeof process.getuid !== "function") return;
+      const tmp = mkdtempSync(join(tmpdir(), "wi-stack-tmp-"));
+      const mine = mkdtempSync(join(tmpdir(), "wi-stack-mine-"));
+      const saved = process.env.TMPDIR;
+      process.env.TMPDIR = tmp;
+      delete process.env[envName("CACHE_DIR")];
+      configure({ name: "webindex-tests", envPrefix: "WEBINDEX_TEST", cli: "webindex-tests" });
+      try {
+        const perUser = join(tmp, `webindex-tests-${process.getuid()}`);
+        symlinkSync(mine, perUser);
+        // As root the link can belong to someone else, as the attacker's would.
+        if (process.getuid() === 0) lchownSync(perUser, 4242, 4242);
+        const { calls, deps } = fake();
+        const r = stackControl("searxng", "status", deps);
+        expect(r.code).toBe(1);
+        expect(r.message).toMatch(/refusing to run docker.*symbolic link/);
+        expect(calls.filter((c) => c.includes("compose"))).toEqual([]);
+      } finally {
+        if (saved === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = saved;
+        rmSync(tmp, { recursive: true, force: true });
+        rmSync(mine, { recursive: true, force: true });
+      }
+    });
+
+    it("still follows a cache dir the caller named through a symbolic link", () => {
+      // `<PREFIX>_CACHE_DIR=~/.cache/x` where x is a link the caller made is a
+      // choice, and the walk ends at it.
+      withCacheDir((dir) => {
+        mkdirSync(join(dir, "real"));
+        symlinkSync(join(dir, "real"), join(dir, "link"));
+        process.env[envName("CACHE_DIR")] = join(dir, "link");
+        const { calls, deps } = fake();
+        expect(stackControl("searxng", "status", deps).code).toBe(0);
+        expect(argvOf(calls, "ps")).toBeDefined();
+      });
     });
   });
 

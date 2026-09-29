@@ -81,15 +81,33 @@ export function resetOcrTools(): void {
  * rung, to stop asking for the rest of the process.
  */
 export async function ocrPdf(bytes: Buffer): Promise<string | undefined> {
-  if (ocrBudgetLeft() <= 0) return undefined;
+  const r = await ocrAttempt(bytes);
+  return "text" in r ? r.text : undefined;
+}
+
+/**
+ * What one OCR attempt came to: the text, or which kind of nothing — declined
+ * before converting (the budget was spent, or the tools are missing), or a
+ * conversion that ran and failed on this document.
+ *
+ * The ladder cannot tell those apart after the fact. The slot is reserved
+ * before converting, so the budget reads 0 after a failure on the LAST slot
+ * just as it does after a scan a concurrent one declined — and one of them is
+ * this document's fault while the other is the run's.
+ */
+export type OcrAttempt = { text: string } | { declined: "budget" | "tools" } | { failed: true };
+
+/** {@link ocrPdf}, saying why there is no text. Internal to the ladder. */
+export async function ocrAttempt(bytes: Buffer): Promise<OcrAttempt> {
+  if (ocrBudgetLeft() <= 0) return { declined: "budget" };
   const { copyablePdf, tesseract } = await ocrTools();
-  if (!copyablePdf || !tesseract) return undefined;
+  if (!copyablePdf || !tesseract) return { declined: "tools" };
   // Reserved here, synchronously, once the document is known to be attempted.
   // Counted after the conversion instead, every concurrent scan passed the
   // check above while the first was still converting — and pool.ts and a crawl
   // run documents concurrently, which is exactly when the cap matters. A rung
   // skipped for a missing binary returned above and costs nothing.
-  if (ocrBudgetLeft() <= 0) return undefined;
+  if (ocrBudgetLeft() <= 0) return { declined: "budget" };
   spent++;
 
   const dir = mkdtempSync(join(tmpdir(), `${brand().name}-ocr-`));
@@ -108,13 +126,16 @@ export async function ocrPdf(bytes: Buffer): Promise<string | undefined> {
     // might reach reads EOF and takes the default instead of hanging.
     const r = await runWithInput("copyable-pdf", ["-o", output, "-m", "-l", lang, input], Buffer.alloc(0), envInt("OCR_TIMEOUT_MS", DEFAULT_TIMEOUT_MS));
     // Not attempted after all: the binary vanished since the probe. Refunded.
-    if (r.error === "not installed") spent = Math.max(0, spent - 1);
-    if (!r.ok) return undefined;
+    if (r.error === "not installed") {
+      spent = Math.max(0, spent - 1);
+      return { declined: "tools" };
+    }
+    if (!r.ok) return { failed: true };
 
     const md = output.replace(/\.pdf$/, ".md");
-    return existsSync(md) ? readFileSync(md, "utf8") : undefined;
+    return existsSync(md) ? { text: readFileSync(md, "utf8") } : { failed: true };
   } catch {
-    return undefined; // a rung must never take the run down
+    return { failed: true }; // a rung must never take the run down
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

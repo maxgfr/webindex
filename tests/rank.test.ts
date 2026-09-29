@@ -478,9 +478,21 @@ describe("diversify", () => {
     expect(out[0]!.url).toBe("https://a.test/");
   });
 
-  it("is a passthrough on pools too small to reorder", () => {
+  it("orders a pool too small to diversify by score, best first", () => {
+    // It was a passthrough, so a two-item pool came back in the caller's
+    // order: a zero-score item could lead, against the relevant-first and
+    // best-leads guarantees every larger pool keeps. Greedy MMR on two items
+    // is a score sort anyway.
     const items = [src("https://a.test/", 0.1, ""), src("https://b.test/", 0.9, "")];
-    expect(diversify(items, () => new Set()).map((i) => i.url)).toEqual(items.map((i) => i.url));
+    expect(diversify(items, () => new Set()).map((i) => i.url)).toEqual(["https://b.test/", "https://a.test/"]);
+    const pair = [src("https://zero.test/", 0, ""), src("https://hit.test/", 1, "")];
+    expect(diversify(pair, () => new Set()).map((i) => i.url)).toEqual(["https://hit.test/", "https://zero.test/"]);
+    expect(diversify(pair, () => new Set(), 0.75, { window: 1 }).map((i) => i.url)).toEqual(["https://hit.test/", "https://zero.test/"]);
+    // A tie breaks by code unit, as it does in a larger pool.
+    const tie = [src("https://b.test/", 0.5, ""), src("https://a.test/", 0.5, "")];
+    expect(diversify(tie, () => new Set()).map((i) => i.url)).toEqual(["https://a.test/", "https://b.test/"]);
+    expect(diversify([src("https://one.test/", 0, "")], () => new Set()).map((i) => i.url)).toEqual(["https://one.test/"]);
+    expect(diversify([], () => new Set())).toEqual([]);
   });
 
   it("never ranks a matched document below one that matched nothing", () => {
@@ -584,6 +596,23 @@ describe("externalHosts", () => {
   it("reads a Unicode host whole and skips a userinfo prefix", () => {
     const hosts = externalHosts("https://example.com/a", "https://müller.de/x et https://user@evil.test/ puis https://user:pw@b.test");
     expect(hosts).toEqual(new Set(["xn--mller-kva.de", "evil.test", "b.test"]));
+  });
+
+  it.each([
+    ["更多信息请访问https://www.example.org获取。", "example.org"],
+    ["詳細はhttps://docs.example.jpを参照してください", "docs.example.jp"],
+    ["ดูที่https://example.co.thครับ", "example.co.th"],
+    ["Смотрите https://example.comздесь", "example.com"],
+  ])("ends the host where text written without a space runs on: %s", (text, host) => {
+    // The host class takes any script, for an IDN, and ran on into the next
+    // word: "example.org获取" was punycoded into a top-level label.
+    expect(externalHosts("https://self.test/", text)).toEqual(new Set([host]));
+  });
+
+  it("still reads a Unicode host that is not glued to anything", () => {
+    expect(externalHosts("https://self.test/", "https://müller.de/x https://пример.рф/ https://bücher.example/ https://例え.jp/")).toEqual(
+      new Set(["xn--mller-kva.de", "xn--e1afmkfd.xn--p1ai", "xn--bcher-kva.example", "xn--r8jz45g.jp"]),
+    );
   });
 
   it("stays linear on a long run of host characters", () => {

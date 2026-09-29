@@ -671,6 +671,18 @@ export function excerptWindows(
   return out;
 }
 
+// `s` without its leading and trailing dashes. By hand, not /^-+|-+$/g: that
+// pattern retries its trailing branch at every dash of a run that does not end
+// the string, so a slug of a prompt-supplied name with a long dash run in it
+// took seconds (quadratic).
+function trimDashes(s: string): string {
+  let start = 0;
+  let end = s.length;
+  while (start < end && s.charCodeAt(start) === 45) start++;
+  while (end > start && s.charCodeAt(end - 1) === 45) end--;
+  return s.slice(start, end);
+}
+
 /**
  * Turn an arbitrary identifier into a filesystem-safe slug —
  * `github.com/expressjs/express` → `github.com-expressjs-express`.
@@ -697,7 +709,7 @@ export function slugify(input: string, opts: { max?: number; fallback?: string }
     .replace(/^https?:\/\//, "")
     .replace(/^git@/, "")
     .replace(/\.git$/, "");
-  const s = normalized.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  const s = trimDashes(normalized.replace(/[^a-z0-9._-]+/g, "-"));
   if (!/[\u0080-\uffff]/.test(normalized) && s.length <= max) return s || (opts.fallback ?? "");
   const tag = fnv1a64(normalized).toString(16).padStart(16, "0").slice(0, 8);
   const head = s.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");

@@ -683,6 +683,62 @@ describe("a search is bounded in time", () => {
       expect(r.hits).toEqual([]);
     }
   });
+
+  it("does not sleep out the pause between pages past its budget or a cancel", async () => {
+    // The pause ran in full and only then did the loop see it had to stop:
+    // up to 5 s past the budget, and past a cancel, to send nothing.
+    vi.stubEnv(envName("PAGE_DELAY_MS"), "5000");
+    const spy = installFetchMock(() => ({ body: DDG_LITE }));
+    let t0 = performance.now();
+    const budgeted = await searchViaKeyless("ddglite", "x", { pages: 3, limit: 50, budgetMs: 300 });
+    expect(performance.now() - t0).toBeLessThan(2500);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(budgeted.hits).toHaveLength(3);
+
+    spy.mockClear();
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 50);
+    t0 = performance.now();
+    const cancelled = await searchViaKeyless("ddglite", "x", { pages: 3, limit: 50, signal: ctrl.signal });
+    // ~50 ms locally; the uncut pause is 5 s.
+    expect(performance.now() - t0).toBeLessThan(2500);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(cancelled.hits).toHaveLength(3);
+  });
+
+  it("reports a rung cancelled in flight as not tried, not as unreachable", async () => {
+    // `unreachable` says the backend is down, and `rungs` is what a caller
+    // reads to decide which ones are; one that cancelled learned nothing about
+    // them, and was told to try again later.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (u: string, init?: RequestInit) => {
+        if (String(u).endsWith("/healthz")) return new Response("OK");
+        return new Promise<Response>((_resolve, reject) =>
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError"))),
+        );
+      }),
+    );
+    const cancelIn = (ms: number) => {
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), ms);
+      return ctrl.signal;
+    };
+    const engine = await searchViaKeyless("ddglite", "x", { signal: cancelIn(20) });
+    expect(engine).toMatchObject({ hits: [], stopped: true });
+    expect(engine.note).toMatch(/cancelled/);
+    for (const opts of [
+      { searxng: "http://sx-cancelled.test", engines: [] },
+      { searxng: "off", engines: ["ddglite" as const] },
+    ]) {
+      const r = await search("x", { ...opts, firecrawl: "off", signal: cancelIn(20) });
+      const outcomes = r.rungs!.filter((x) => x.outcome !== "disabled").map((x) => x.outcome);
+      expect(outcomes).toEqual(["not-tried"]);
+      expect(r.notes.join(" ")).toMatch(/cancelled/);
+      expect(r.notes.join(" ")).not.toMatch(/unreachable|Try again later/);
+      expect(r.searched).toBe(false);
+    }
+  });
 });
 
 describe("the notes name the switch the user actually threw", () => {

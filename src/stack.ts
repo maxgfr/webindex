@@ -363,16 +363,21 @@ function untrustedStack(): string | undefined {
   // can predict and create first, and whoever owns that can swap the whole
   // cache directory inside it — so the walk ends there instead.
   const root = resolve(cacheDir());
-  const top = (env("CACHE_DIR") ?? brand().cacheDir) ? root : dirname(root);
+  const chosen = !!(env("CACHE_DIR") ?? brand().cacheDir);
+  const top = chosen ? root : dirname(root);
   const paths = new Set<string>();
   for (const a of assets) {
     for (let p = resolve(a.path); p !== top && p !== dirname(p); p = dirname(p)) paths.add(p);
   }
   for (const p of [top, ...paths]) {
     try {
-      // The top may be reached through a link of the caller's own choosing
-      // (`<PREFIX>_CACHE_DIR=~/.cache/x`); below it, nothing may be.
-      const st = p === top ? statSync(p) : lstatSync(p);
+      // A top the caller chose may be reached through a link of their own
+      // making (`<PREFIX>_CACHE_DIR=~/.cache/x`); below it, nothing may be. The
+      // default top was chosen by nobody: a link there is one anyone could have
+      // planted pointing into a directory the caller owns — every check below
+      // it would then pass — and, owning that link in a sticky temp dir, still
+      // re-point after this check.
+      const st = p === top && chosen ? statSync(p) : lstatSync(p);
       if (st.isSymbolicLink()) return `${p} is a symbolic link`;
       if (st.uid !== uid) return `${p} belongs to another user`;
       // Owned is not enough when anyone may write it: in a world-writable

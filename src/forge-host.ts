@@ -10,12 +10,16 @@ import type { ForgeKind } from "./forge.js";
 
 const KINDS: ReadonlySet<string> = new Set(["github", "gitlab", "gitea"]);
 
-/** A host as a forge knows it: lower-case, and without the `www.` a browser adds. */
+// The public forges whose `www.` host is only a browser's alias of the forge.
+// Anywhere else `www.example.org` and `example.org` are two DNS names — maybe
+// two machines, with two ssh host keys — and a clone must go to the one named.
+const WWW_ALIASED: ReadonlySet<string> = new Set(["github.com", "gitlab.com", "codeberg.org", "bitbucket.org"]);
+
+/** A host as a forge knows it: lower-case, and without the `www.` a browser adds to a public forge's name. */
 export function normalizeForgeHost(host: string): string {
-  return host
-    .trim()
-    .toLowerCase()
-    .replace(/^www\./, "");
+  const h = host.trim().toLowerCase();
+  const bare = h.replace(/^www\./, "");
+  return WWW_ALIASED.has(bare) ? bare : h;
 }
 
 /**

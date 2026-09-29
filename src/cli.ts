@@ -14,7 +14,8 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // URLs through the local keyless stack, turn a URL or a local file into clean
 // text, drive the containers, and serve all of that to an agent over MCP.
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, extname, join, relative, resolve } from "node:path";
+import { isIP } from "node:net";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { configure, env, envFlag, envInt, envName } from "./brand.js";
 import { decodeLocal } from "./charset.js";
@@ -22,6 +23,7 @@ import { ENGINE_VERSION } from "./version.js";
 import { DOC_EXTRACTORS, docFormatForUrl, extractDocument, enabledDocExtractors, sniffDocument } from "./doc.js";
 import { enabledExtractors, extractPdf, ocrBudgetLeft, ocrTools, PDF_EXTRACTORS } from "./pdf.js";
 import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./pdf/exec.js";
+import { enginesFromEnv } from "./pdf/ladder.js";
 import { npxCacheState } from "./pdf/npx.js";
 import { have } from "./exec.js";
 import { type ExtractResult, extractMainHtml, fetchAndExtract, htmlToText, httpGet, httpJson, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
@@ -318,8 +320,9 @@ ENVIRONMENT
   WEBINDEX_NO_ROBOTS     robots and crawl do not consult robots.txt — only on a site you own
   WEBINDEX_ROBOTS_UA     the token robots.txt groups are matched against (default webindex)
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
-  WEBINDEX_FETCH_CONCURRENCY  URLs one fetch keeps in flight, 1-16 (default 4)
-  WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
+  WEBINDEX_FETCH_CONCURRENCY  URLs one fetch keeps in flight, 1-16 (default 4), one host's included
+  WEBINDEX_POLITE_DELAY_MS    floor between two requests a crawl makes to one host, in ms
+                              (default 400); a robots.txt Crawl-delay wins
   WEBINDEX_MAX_CRAWL_DELAY_MS the longest robots.txt Crawl-delay a crawl waits out, in ms
                               (default 60000); a site asking for more is not crawled
   WEBINDEX_PUBLIC_ONLY   set to make every \`mcp\` run --public-only
@@ -688,6 +691,8 @@ const MMR_WINDOW = 100;
  * documents' own `score`, and with `dense` the embedding lane `hybridSearch`
  * computes. Without the dense lane nothing here reads meaning, so a document
  * sharing no term with the question stays at zero whatever its own score says.
+ * A fused score is the fusion rescaled over the matching documents — 1 for the
+ * best, 0.01 for the weakest — so it orders the pool but is not a ratio.
  */
 async function rankDocuments(question: string, docs: RankInput[], opts: { limit?: number; dense?: boolean } = {}): Promise<RankResult> {
   const { limit } = opts;
@@ -720,12 +725,28 @@ async function rankDocuments(question: string, docs: RankInput[], opts: { limit?
   if (lanes.length) {
     const k = envInt("RRF_K", 60);
     const lexical = competitionRanks(raw);
-    relevance = raw.map((s, i) => {
+    const fused = raw.map((s, i) => {
       if (!dense && !(s > 0)) return 0;
-      let fused = 1 / (k + lexical[i]!);
-      for (const lane of lanes) if (lane[i] !== undefined) fused += 1 / (k + lane[i]!);
-      return fused;
+      let f = 1 / (k + lexical[i]!);
+      for (const lane of lanes) if (lane[i] !== undefined) f += 1 / (k + lane[i]!);
+      return f;
     });
+    // A reciprocal-rank sum over n documents spans only (1 + lanes)/(k + n) to
+    // (1 + lanes)/(k + 1). Divided by the pool max, every matching document
+    // landed between ~0.86 and 1, the gap between the best and the worst was
+    // smaller than MMR's diversity penalty, and a page last in every lane was
+    // ranked second. Rescaled between the weakest and the best matching
+    // document, the order is the same but the relevance spans the range MMR
+    // weighs against similarity; the weakest keeps a sliver above zero, so it
+    // still reads as matched and stays ahead of the documents that did not.
+    let lo = Number.POSITIVE_INFINITY;
+    let hi = 0;
+    for (const f of fused) {
+      if (f > 0 && f < lo) lo = f;
+      if (f > hi) hi = f;
+    }
+    const floor = 0.01;
+    relevance = fused.map((f) => (!(f > 0) ? 0 : hi > lo ? floor + ((1 - floor) * (f - lo)) / (hi - lo) : 1));
   }
   if (!dense && index.queryTerms.length && raw.every((s) => !(s > 0))) {
     notes.push("no document contains any term of the question — the order is not a relevance ranking.");
@@ -911,6 +932,20 @@ export interface WebindexToolPolicy {
   noLocalFiles?: boolean;
 }
 
+// The host name a public-only check had to resolve, or undefined when it
+// needed no resolver: a URL that is not http(s), or a literal address.
+function resolvedHost(url: string): string | undefined {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return undefined;
+  const host = u.hostname.startsWith("[") ? u.hostname.slice(1, -1) : u.hostname;
+  return isIP(host) ? undefined : host;
+}
+
 /**
  * webindex's own MCP tools: fetch a URL, extract a file.
  *
@@ -924,7 +959,14 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
   const refuseUrl = async (url: string): Promise<void> => {
     if (!guard) return;
     const why = await publicUrlRefusal(url);
-    if (why) throw new ToolError(`Refused ${url}: ${why} — this server fetches public addresses only.`);
+    if (!why) return;
+    // What a name resolved to, or how resolving it failed, is the view of this
+    // machine's network the wall exists to hide: told "resolves to 10.2.3.4",
+    // any caller could map internal names. So a refusal that needed the
+    // resolver says only that the name is not public; one that did not (a
+    // literal address, a scheme) keeps its reason, which tells nothing new.
+    const host = resolvedHost(url);
+    throw new ToolError(`Refused ${url}: ${host ? `${host} is not a public address, or did not resolve` : why} — this server fetches public addresses only.`);
   };
   const root = policy.extractRoot;
   const localFiles = root !== undefined || !policy.noLocalFiles;
@@ -938,12 +980,45 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
       throw new ToolError((e as Error).message);
     }
   };
+  // The ref a forge tool was named, with the file policy applied BEFORE the
+  // filesystem is asked anything. resolveRepo asks first whether the string
+  // is a directory, and the wall ran only when it was: an existing directory
+  // got the wall's refusal, a missing one "does not name a repository", and a
+  // caller could map the machine. Under a policy, a path (absolute, `./`,
+  // `../`, `~`) goes to the wall whether or not it exists; anything else is a
+  // checkout only when the root holds it, and otherwise a remote, read without
+  // a probe. A relative name is the root's, as it is for webindex_extract.
+  const repoRef = (raw: string, kind: { kind?: ForgeKind }): RepoRef => {
+    if (root === undefined && localFiles) return resolveRepo(raw, kind);
+    const named = raw.trim();
+    if (isAbsolute(named) || /^(?:\.{1,2}|~)(?:[\\/]|$)/.test(named)) return resolveRepo(localPath(named), kind);
+    if (named && root !== undefined) {
+      try {
+        const under = confinePath(root, named);
+        if (statSync(under).isDirectory()) return resolveRepo(under, kind);
+      } catch {
+        /* not a checkout under the root: a remote */
+      }
+    }
+    return resolveRepo(named, { ...kind, local: false });
+  };
   // A forge host a caller named, where the operator did not: under the
-  // public-only policy it must resolve publicly like any URL. The forge client
-  // follows its own redirects, so this is checked once, on the API base.
+  // public-only policy it must resolve publicly like any URL. Checked here on
+  // the API base, for a refusal that says why before anything is sent.
   const refuseForgeHost = async (ref: RepoRef, kind: ForgeKind | undefined): Promise<void> => {
     if (!guard || configuredForgeHosts().has(normalizeForgeHost(ref.host))) return;
     await refuseUrl(apiBase(ref, kind ? { kind } : {}));
+  };
+  // ...and at every redirect after it, which the forge client follows by hand,
+  // out of `fetch`'s sight: a public host answering 302 → 169.254.169.254 was
+  // otherwise followed, and the metadata answer's fields came back to the
+  // caller. A host the operator declared is trusted on its own origin — a
+  // renamed repository redirects there — and nowhere else.
+  const forgeGuard = (ref: RepoRef, kind: ForgeKind | undefined): ((url: string) => Promise<boolean>) | undefined => {
+    if (!guard) return undefined;
+    if (!configuredForgeHosts().has(normalizeForgeHost(ref.host))) return guard;
+    const own = new URL(apiBase(ref, kind ? { kind } : {})).origin;
+    return async (url) => new URL(url).origin === own || (await guard(url));
   };
   return {
     version: ENGINE_VERSION,
@@ -1343,13 +1418,12 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
         const kind = forge ? { kind: forge } : {};
         // A local checkout is read (its origin remote) before anything else, so
         // the file policy is applied before forgeRef runs git in it.
-        const parsed = resolveRepo(raw, kind);
-        if (parsed.isLocal) localPath(resolve(raw.trim()));
-        const ref = forgeRef(parsed, kind);
+        const ref = forgeRef(repoRef(raw, kind), kind);
         if (ref.host === "generic") throw new ToolError(`"${raw}" does not name a repository.`);
         await refuseForgeHost(ref, forge);
         const limit = typeof args.limit === "number" ? args.limit : undefined;
-        const opts = { ...(limit ? { limit } : {}), ...(forge ? { kind: forge } : {}) };
+        const authorizeUrl = forgeGuard(ref, forge);
+        const opts = { ...(limit ? { limit } : {}), ...(forge ? { kind: forge } : {}), ...(authorizeUrl ? { authorizeUrl } : {}) };
         if (name === "webindex_repo") {
           const { facts: f, note } = await repoFactsResult(ref, opts);
           if (!f) throw new ToolError(note ?? `Could not read ${ref.webUrl ?? ref.raw}.`);
@@ -2423,9 +2497,12 @@ async function dispatch(argv: string[]): Promise<void> {
       return "built-in";
     };
     // The ladder in the order it runs, then the rungs the environment switched
-    // off, with the variable that did it.
+    // off, with the variable that did it. An engine list is to blame only when
+    // the ladder honoured it: one naming no known rung is warned about and
+    // ignored, and then NO_NPX is what took the npx rungs away.
     const rungRows = (all: readonly string[], enabled: readonly string[], engineVar: string) => {
-      const why = env(engineVar)?.trim() ? `${envName(engineVar)}=${env(engineVar)!.trim()}` : envName("NO_NPX");
+      const honoured = enginesFromEnv(engineVar, all) !== undefined;
+      const why = honoured ? `${envName(engineVar)}=${env(engineVar)!.trim()}` : envName("NO_NPX");
       return [
         ...enabled.map((id) => ({ id, enabled: true, state: rungState(id) })),
         ...all.filter((id) => !enabled.includes(id)).map((id) => ({ id, enabled: false, state: `off (${why})` })),

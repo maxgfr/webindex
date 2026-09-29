@@ -831,6 +831,40 @@ describe("feeds", () => {
     expect(atom.items[0]).toMatchObject({ title: "Atom one", summary: "Use <b> for bold" });
   });
 
+  it("keeps the angle brackets an RSS title escapes once, as text", () => {
+    // Most generators escape a title once, as text: `Box&lt;T&gt;` is Box<T>.
+    // Read as HTML after decoding, the <T> was stripped as a tag and the
+    // title lost its words. Only a title that looks like markup — a close tag
+    // or an entity, and nothing but HTML elements — is read as HTML.
+    const f = parseFeed(`<rss><channel><title>Notes on &lt;dialog&gt; and Box&lt;T&gt;</title>
+      <item><title>Understanding Box&lt;T&gt; in Rust</title><link>https://ex.test/1</link></item>
+      <item><title>The &lt;dialog&gt; element</title><link>https://ex.test/2</link></item>
+      <item><title>if a &lt;b and c&gt; d</title><link>https://ex.test/3</link></item>
+      <item><title>Vec&lt;String&gt; vs &amp;str</title><link>https://ex.test/4</link></item>
+      <item><title>Tom &amp; Jerry</title><link>https://ex.test/5</link></item>
+      <item><title>Tom &amp;amp; Jerry</title><link>https://ex.test/6</link></item>
+      <item><title>&lt;Widget&gt;x&lt;/Widget&gt;</title><link>https://ex.test/7</link></item></channel></rss>`)!;
+    expect(f.title).toBe("Notes on <dialog> and Box<T>");
+    expect(f.items.map((i) => i.title)).toEqual([
+      "Understanding Box<T> in Rust",
+      "The <dialog> element",
+      "if a <b and c> d",
+      "Vec<String> vs &str",
+      "Tom & Jerry",
+      "Tom & Jerry",
+      "<Widget>x</Widget>",
+    ]);
+  });
+
+  it("decides whether a title is markup in linear time", () => {
+    const started = performance.now();
+    for (const run of ["&lt;/a".repeat(40_000), `&amp;${"a".repeat(200_000)}`, "&lt;b".repeat(40_000), `&lt;/em&gt;${"&lt;x".repeat(40_000)}`]) {
+      expect(parseFeed(`<rss><channel><item><title>${run}</title></item></channel></rss>`)?.items).toHaveLength(1);
+    }
+    // ~150 ms locally.
+    expect(performance.now() - started).toBeLessThan(10_000);
+  });
+
   it("keeps the text around a CDATA section, and a section split to carry `]]>`", () => {
     const f = parseFeed(`<rss><channel><item><title><![CDATA[Mixed ]]> tail</title><link>https://ex.test/1</link>
       <description>A <![CDATA[<i>cdata</i>]]> and plain</description></item>

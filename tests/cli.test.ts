@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -780,6 +780,32 @@ describe("doctor", () => {
     expect(s).toContain(`anydoc         off (${envName("DOC_ENGINE")}=none)`);
     expect(s).toMatch(/pdf rungs {3}firecrawl/);
   });
+
+  it("does not blame an engine list the ladder ignored", async () => {
+    // A list naming no known rung is warned about and ignored — the full
+    // ladder runs, minus what NO_NPX removed — so NO_NPX is what switched the
+    // npx rungs off, not the list.
+    process.env[envName("FIRECRAWL")] = "off";
+    process.env[envName("NO_NPX")] = "1";
+    process.env[envName("PDF_ENGINE")] = "bogus";
+    process.env[envName("DOC_ENGINE")] = " , ";
+    const warn = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    try {
+      expect(await run(["doctor"])).toBe(0);
+      const [pdfRows, docRows] = stdout().split("doc rungs");
+      expect(pdfRows).toContain(`pdf-inspector  off (${envName("NO_NPX")})`);
+      expect(pdfRows).toContain(`anydoc         off (${envName("NO_NPX")})`);
+      expect(docRows).toContain(`anydoc         off (${envName("NO_NPX")})`);
+      expect(stdout()).not.toMatch(/_(?:PDF|DOC)_ENGINE=/);
+      out.length = 0;
+      expect(await run(["doctor", "--json"])).toBe(0);
+      const j = JSON.parse(stdout());
+      expect(j.rungs.pdf).toContainEqual({ id: "anydoc", enabled: false, state: `off (${envName("NO_NPX")})` });
+      expect(j.rungs.doc).toContainEqual({ id: "anydoc", enabled: false, state: `off (${envName("NO_NPX")})` });
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe("unknown input", () => {
@@ -1164,6 +1190,25 @@ describe("the MCP tools", () => {
       expect(spy).not.toHaveBeenCalled();
     });
 
+    it("does not tell a caller what a refused name resolves to", async () => {
+      // "localhost resolves to 127.0.0.1" made the wall a split-horizon DNS
+      // oracle for internal names, which is the view it exists to hide.
+      const guarded = webindexAdapter({ publicOnly: true });
+      for (const [tool, args] of [
+        ["webindex_meta", { url: "http://localhost/" }],
+        ["webindex_repo", { repo: "https://localhost/o/r", forge: "gitea" }],
+      ] as const) {
+        const message = await guarded.callTool(tool, { ...args }).then(
+          () => "",
+          (e: Error) => e.message,
+        );
+        expect(message, tool).toMatch(/localhost is not a public address, or did not resolve — this server fetches public addresses only/);
+        expect(message, tool).not.toMatch(/127\.0\.0\.1|::1|resolves to/);
+      }
+      // A literal address needed no resolver, and says what it is.
+      await expect(guarded.callTool("webindex_meta", { url: "http://10.0.0.1/" })).rejects.toThrow(/10\.0\.0\.1 is not a public address/);
+    });
+
     it("refuses a redirect into a private address, at the hop", async () => {
       // A public page that answers 302 → the metadata endpoint is the classic
       // way round a check made only on the URL a caller sent.
@@ -1186,6 +1231,39 @@ describe("the MCP tools", () => {
       await expect(guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/group/project" })).rejects.not.toThrow(/not a public address/);
     });
 
+    it("refuses a forge's redirect into a private address, at the hop", async () => {
+      // The forge client follows its redirects by hand, so checking the API base
+      // alone let a public host's 302 walk every forge tool into the metadata
+      // endpoint, and the answer's fields came back to the caller.
+      const spy = installFetchMock((url) =>
+        url.startsWith("https://93.184.216.34/")
+          ? { status: 302, headers: { location: "http://169.254.169.254/latest/meta-data/iam/" } }
+          : { body: JSON.stringify([{ name: "LEAKED", title: "LEAKED", body: "credentials", description: "LEAKED" }]), contentType: "application/json" },
+      );
+      const guarded = webindexAdapter({ publicOnly: true });
+      for (const tool of ["webindex_repo", "webindex_issues", "webindex_releases", "webindex_tags"]) {
+        await expect(guarded.callTool(tool, { repo: "https://93.184.216.34/o/r", forge: "gitea" }), tool).rejects.toThrow(
+          /not authorized: http:\/\/169\.254\.169\.254/,
+        );
+      }
+      expect(spy.mock.calls.map(([u]) => String(u)).filter((u) => u.includes("169.254."))).toEqual([]);
+    });
+
+    it("follows a declared private forge's redirects within it, and no further", async () => {
+      // The operator vouched for the host, and a renamed repository answers
+      // with a redirect to its own origin — but not for wherever it points next.
+      process.env[envName("FORGE_HOSTS")] = "10.1.2.3=gitea";
+      const spy = installFetchMock((url) => {
+        if (url.startsWith("https://10.1.2.3/api/v1/repos/old/")) return { status: 301, headers: { location: "https://10.1.2.3/api/v1/repos/new/name" } };
+        if (url.startsWith("https://10.1.2.3/api/v1/repos/away/")) return { status: 302, headers: { location: "http://169.254.169.254/latest/" } };
+        return { body: JSON.stringify({ full_name: "new/name" }), contentType: "application/json" };
+      });
+      const guarded = webindexAdapter({ publicOnly: true });
+      expect(JSON.parse((await guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/old/name" })).text)).toMatchObject({ fullName: "new/name" });
+      await expect(guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/away/name" })).rejects.toThrow(/not authorized: http:\/\/169\.254\.169\.254/);
+      expect(spy.mock.calls.map(([u]) => String(u)).filter((u) => u.includes("169.254."))).toEqual([]);
+    });
+
     it("reads files only under --extract-root, relative paths against it, symlinks checked", async () => {
       const root = join(dir, "served");
       mkdirSync(root);
@@ -1200,6 +1278,18 @@ describe("the MCP tools", () => {
       expect(decl.inputSchema.properties.path!.description).toContain(root);
     });
 
+    it("reads an absolute path under a root named through a symlink", async () => {
+      // The root is advertised as given; its real path is where the files are.
+      const real = join(dir, "real");
+      mkdirSync(real);
+      writeFileSync(join(real, "note.md"), "inside the root");
+      const link = join(dir, "link");
+      symlinkSync(real, link);
+      const confined = webindexAdapter({ extractRoot: link });
+      expect((await confined.callTool("webindex_extract", { path: join(link, "note.md") })).text).toContain("inside the root");
+      await expect(confined.callTool("webindex_extract", { path: join(link, "..", "secret.md") })).rejects.toThrow(/outside/);
+    });
+
     it("offers no file tool at all when local files are off, and reads no local checkout", async () => {
       const closed = webindexAdapter({ noLocalFiles: true });
       expect(closed.listTools(LATEST_PROTOCOL).map((t) => t.name)).not.toContain("webindex_extract");
@@ -1211,6 +1301,82 @@ describe("the MCP tools", () => {
       const root = join(dir, "served");
       mkdirSync(root);
       await expect(webindexAdapter({ extractRoot: root }).callTool("webindex_repo", { repo: dir })).rejects.toThrow(/outside/);
+    });
+
+    it("answers the forge tools the same about a directory that exists and one that does not", async () => {
+      // The filesystem was asked first: an existing directory got the wall's
+      // refusal, a missing one "does not name a repository" — a map of the
+      // machine for anyone who can call the tool.
+      const root = join(dir, "served");
+      mkdirSync(root);
+      const refusal = async (policy: Parameters<typeof webindexAdapter>[0], repo: string) => {
+        try {
+          await webindexAdapter(policy).callTool("webindex_tags", { repo });
+        } catch (e) {
+          return (e as Error).message.replace(repo, "<repo>");
+        }
+        throw new Error(`${repo} was not refused`);
+      };
+      // `tests` exists in the working directory the server runs in; the second does not.
+      const pairs: [string, string][] = [
+        [dir, join(dir, "no-such-dir")],
+        ["tests", "no-such-dir-here"],
+        ["./tests", "./no-such-dir-here"],
+      ];
+      for (const policy of [{ noLocalFiles: true }, { extractRoot: root }]) {
+        for (const [there, missing] of pairs) {
+          expect(await refusal(policy, there), `${JSON.stringify(policy)} ${there}`).toBe(await refusal(policy, missing));
+        }
+      }
+    });
+
+    it("reads a repository path relative to --extract-root, as it reads a file", async () => {
+      const root = join(dir, "served");
+      const checkout = join(root, "myrepo");
+      mkdirSync(checkout, { recursive: true });
+      execFileSync("git", ["-C", checkout, "init", "-q"]);
+      execFileSync("git", ["-C", checkout, "remote", "add", "origin", "https://github.com/o/checked-out.git"]);
+      const seen: string[] = [];
+      installFetchMock((url) => {
+        seen.push(url);
+        return { body: JSON.stringify({ full_name: url.split("/repos/")[1] }), contentType: "application/json" };
+      });
+      const confined = webindexAdapter({ extractRoot: root });
+      for (const repo of ["myrepo", "./myrepo", checkout]) {
+        expect(JSON.parse((await confined.callTool("webindex_repo", { repo })).text), repo).toMatchObject({ fullName: "o/checked-out" });
+      }
+      // The shorthand still means GitHub when the root holds no such directory.
+      expect(JSON.parse((await confined.callTool("webindex_repo", { repo: "o/r" })).text)).toMatchObject({ fullName: "o/r" });
+      expect(seen.at(-1)).toBe("https://api.github.com/repos/o/r");
+    });
+
+    it("reads a relative checkout path against --extract-root, as it reads a file", async () => {
+      // The forge tools resolved it against the server's cwd, so a checkout
+      // under the root was "not a repository" unless named absolutely.
+      const root = join(dir, "served");
+      mkdirSync(join(root, "r1"), { recursive: true });
+      execFileSync("git", ["-C", join(root, "r1"), "init", "-q"]);
+      execFileSync("git", ["-C", join(root, "r1"), "remote", "add", "origin", "https://github.com/maxgfr/webindex.git"]);
+      mkdirSync(join(dir, "elsewhere"));
+      const seen: string[] = [];
+      installFetchMock((url) => {
+        seen.push(url);
+        return { body: JSON.stringify({ full_name: "maxgfr/webindex" }), contentType: "application/json" };
+      });
+      try {
+        const confined = webindexAdapter({ extractRoot: root });
+        const r = JSON.parse((await confined.callTool("webindex_repo", { repo: "r1" })).text);
+        expect(r.ref).toMatchObject({ host: "github.com", owner: "maxgfr", repo: "webindex" });
+        expect(seen[0]).toBe("https://api.github.com/repos/maxgfr/webindex");
+        // Relative to the root still may not climb out of it…
+        await expect(confined.callTool("webindex_repo", { repo: "../elsewhere" })).rejects.toThrow(/outside/);
+        // …and a shorthand naming no directory under it is still a forge slug.
+        seen.length = 0;
+        await confined.callTool("webindex_repo", { repo: "a/b" });
+        expect(seen[0]).toBe("https://api.github.com/repos/a/b");
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
   });
 
@@ -1479,6 +1645,82 @@ describe("rank", () => {
     expect(ranked.map((r) => r.url)).toEqual(["https://b.test/2", "https://a.test/1", "https://c.test/3"]);
     expect(ranked[0]!.score).toBe(1);
     expect(ranked[2]!.score).toBe(0);
+  });
+
+  // Seven pages on one topic, close enough to each other that diversity has
+  // something to demote, and one that shares a single word with the question.
+  const ON_TOPIC = [
+    [
+      "Token bucket rate limiter explained",
+      "A token bucket rate limiter refills tokens at a fixed rate. Each request takes a token from the bucket; when the bucket is empty the limiter rejects the request.",
+    ],
+    [
+      "Implementing a rate limiter with token buckets",
+      "To implement a rate limiter, keep a token bucket per client. Refill the bucket at the configured rate and allow bursts up to capacity.",
+    ],
+    [
+      "Rate limiting algorithms compared",
+      "Fixed window, sliding window, leaky bucket and token bucket are common rate limiting algorithms. The token bucket limiter permits bursts.",
+    ],
+    [
+      "Distributed rate limiter design",
+      "A distributed rate limiter stores token bucket state in Redis. Each node decrements the bucket atomically; the limiter refills tokens.",
+    ],
+    ["Token bucket in Go", "The golang.org/x/time/rate package implements a token bucket limiter. You configure the rate and the bucket burst."],
+    [
+      "API gateway rate limits",
+      "API gateways enforce rate limits with a token bucket per key. When the bucket runs out of tokens the gateway limiter responds with 429.",
+    ],
+    [
+      "Tuning a token bucket limiter",
+      "Tuning the limiter means choosing the rate and the bucket capacity. A larger bucket absorbs bursts; a lower rate protects the backend.",
+    ],
+  ].map(([title, text], i) => ({ url: `https://on${i}.test/`, title, text, score: 0.95 - i * 0.05 }));
+  const OFF_TOPIC = {
+    url: "https://weak.test/",
+    title: "Ice bucket challenge",
+    text: "The ice bucket challenge was a viral charity campaign where people poured a bucket of ice water over their heads.",
+    score: 0.2,
+  };
+
+  it("keeps a page that is last in every lane at the bottom when a lane is fused", async () => {
+    // Every fused value is an RRF sum between 2/(k+n) and 2/(k+1). Divided by
+    // the pool max, every matching page landed between 0.86 and 1, the
+    // relevance gap was smaller than MMR's diversity penalty, and the page last
+    // by BM25F AND by its engine's score was ranked second.
+    // Whichever way the engine orders the on-topic pages among themselves.
+    const reversed = ON_TOPIC.map((d, i) => ({ ...d, score: 0.65 + i * 0.05 }));
+    for (const pool of [
+      [...ON_TOPIC, OFF_TOPIC],
+      [...reversed, OFF_TOPIC],
+    ]) {
+      out = [];
+      await run(["rank", "--query", "token bucket rate limiter", "--docs", withDocs(JSON.stringify(pool)), "--json"]);
+      const ranked = JSON.parse(stdout()).ranked as { url: string; score: number }[];
+      const at = ranked.findIndex((r) => r.url === OFF_TOPIC.url);
+      expect(at).toBeGreaterThanOrEqual(ranked.length - 2);
+      expect(ranked[0]!.score).toBe(1);
+      expect(ranked[at]!.score).toBeLessThan(0.5);
+    }
+  });
+
+  it("keeps a page that is last in every lane at the bottom with --dense", async () => {
+    resetOllamaProbe();
+    process.env[envName("OLLAMA")] = "http://ol.test";
+    installFetchMock((url, init) => {
+      if (url.includes("/api/tags")) return { status: 200, body: "{}", contentType: "application/json" };
+      const input = JSON.parse(String(init?.body)).input as string[];
+      const vec = (t: string) => (/Ice bucket/.test(t) ? [0, 1] : [1, 0]);
+      return { status: 200, body: JSON.stringify({ embeddings: input.map(vec) }), contentType: "application/json" };
+    });
+    const pool = [...ON_TOPIC, OFF_TOPIC].map(({ score: _, ...d }) => d);
+    await run(["rank", "--query", "token bucket rate limiter", "--docs", withDocs(JSON.stringify(pool)), "--dense", "--json"]);
+    const j = JSON.parse(stdout());
+    expect(j.note).toBeUndefined();
+    const ranked = j.ranked as { url: string; score: number }[];
+    const at = ranked.findIndex((r) => r.url === OFF_TOPIC.url);
+    expect(at).toBeGreaterThanOrEqual(ranked.length - 2);
+    expect(ranked[at]!.score).toBeLessThan(0.5);
   });
 
   it("warns when no document contains any term of the question", async () => {

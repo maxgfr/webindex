@@ -24,7 +24,9 @@
 export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   // Math.max(1, NaN) is NaN, which started no workers and resolved to an
   // array of holes without calling fn once — a wrong answer, not an error.
-  const width = Number.isNaN(limit) ? 1 : Math.max(1, Math.floor(limit));
+  // From plain JS an unset option (`undefined`) or a string lands here too,
+  // and Number.isNaN is false for both.
+  const width = typeof limit !== "number" || Number.isNaN(limit) ? 1 : Math.max(1, Math.floor(limit));
   if (items.length <= 1 || width === 1) {
     const out: R[] = [];
     for (let i = 0; i < items.length; i++) out.push(await fn(items[i]!, i));

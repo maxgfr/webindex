@@ -1,9 +1,10 @@
 import { resolve } from "node:path";
-import { countFetch, env, envFlag, envInt, envName } from "./brand.js";
+import { countFetch, env, envFlag, envName } from "./brand.js";
 import { have, shAsync } from "./exec.js";
 import { contactUa, parseRetryAfter, readCappedBytes, sleep } from "./fetch.js";
 import { configuredForgeHosts, hostForgeKind, normalizeForgeHost } from "./forge-host.js";
 import { originUrl, type RepoRef, resolveRepo } from "./repo.js";
+import { defaultRetryMs, isPermanentFailure, maxAttempts, retryDelayMs } from "./retry.js";
 import { rankedKeywords } from "./text.js";
 
 // Forge APIs: asking a code host about a repository.
@@ -67,6 +68,15 @@ export interface ForgeOptions {
    * `false` keeps a search to exactly one request.
    */
   relax?: boolean;
+  /**
+   * Approve each URL before it is requested — the API URL and every redirect it
+   * leads to — as `httpGet`'s hook of the same name does. A refusal is a failed
+   * answer (status 0, "URL not authorized") and is not retried. The client
+   * follows its redirects itself, so this is the only place a caller sees where
+   * they go: a public-only server needs it, or a public host's 302 walks the
+   * client into the machine's own network.
+   */
+  authorizeUrl?: (url: string) => Promise<boolean>;
 }
 
 /**
@@ -179,8 +189,16 @@ interface ForgeResponse {
   rateLimited?: boolean;
   /** When that quota resets, as the forge stated it. */
   resetAt?: string;
+  /** Whether the quota itself is spent, or the refusal is a secondary limit; unknown when the forge does not say. */
+  quota?: "spent" | "left";
   /** The variable whose token went out with the request, if one did. */
   tokenVar?: string;
+  /** A failure a second try would only repeat: not retried. */
+  permanent?: boolean;
+  /** The caller's `authorizeUrl` refused a URL — its policy, not the network. */
+  refused?: boolean;
+  /** A gateway error's Retry-After, in ms, uncapped: past the cap it is not retried. */
+  retryAfterMs?: number;
 }
 
 // A quota answer looks like a normal failure unless you check for it, and the
@@ -190,13 +208,25 @@ function limited(status: number, headers: Headers, data: unknown): boolean {
   return status === 403 && (headers.get("x-ratelimit-remaining") === "0" || /rate limit/i.test(JSON.stringify(data ?? "")));
 }
 
-// GitHub and Gitea state the reset as epoch seconds in `x-ratelimit-reset`,
-// GitLab in `ratelimit-reset`; anything may send `retry-after` instead.
+// When a limited request may be sent again. `retry-after` first, when there is
+// one: it answers for THIS refusal, while GitHub's secondary limits send it
+// beside `x-ratelimit-*` headers that still describe the primary quota —
+// thousands left, and a reset up to an hour away. Then the quota's own reset:
+// epoch seconds in `x-ratelimit-reset` (GitHub, Gitea) or `ratelimit-reset`
+// (GitLab).
 function resetTime(headers: Headers): string | undefined {
-  const epoch = Number(headers.get("x-ratelimit-reset") ?? headers.get("ratelimit-reset"));
-  if (Number.isFinite(epoch) && epoch > 0) return new Date(epoch * 1000).toISOString();
   const wait = parseRetryAfter(headers, Number.POSITIVE_INFINITY);
-  return wait === undefined ? undefined : new Date(Date.now() + wait).toISOString();
+  if (wait !== undefined) return new Date(Date.now() + wait).toISOString();
+  const epoch = Number(headers.get("x-ratelimit-reset") ?? headers.get("ratelimit-reset"));
+  return Number.isFinite(epoch) && epoch > 0 ? new Date(epoch * 1000).toISOString() : undefined;
+}
+
+// Whether the quota itself is spent, as the headers say: "spent", "left" (the
+// refusal is a secondary limit on how fast requests arrive), or unknown.
+function quotaState(headers: Headers): "spent" | "left" | undefined {
+  const remaining = headers.get("x-ratelimit-remaining") ?? headers.get("ratelimit-remaining");
+  if (remaining === null || remaining.trim() === "" || !Number.isFinite(Number(remaining))) return undefined;
+  return Number(remaining) <= 0 ? "spent" : "left";
 }
 
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
@@ -216,12 +246,32 @@ function failureText(e: unknown): string {
   return code && !detail.includes(code) ? `${code}: ${detail}` : detail;
 }
 
+// A URL the caller's authorizer refused, or could not judge, as the failed
+// answer this client returns instead of throwing.
+async function refusal(authorize: ((url: string) => Promise<boolean>) | undefined, url: string): Promise<ForgeResponse | undefined> {
+  if (!authorize) return undefined;
+  let error: string | undefined;
+  try {
+    if (!(await authorize(url))) error = `URL not authorized: ${url}`;
+  } catch (e) {
+    error = `URL authorization failed for ${url}: ${(e as Error).message}`;
+  }
+  return error === undefined ? undefined : { ok: false, status: 0, data: undefined, error, permanent: true, refused: true };
+}
+
 // One GET, following redirects BY HAND so a credential never outlives its
 // origin. `fetch` decides for itself which headers survive a cross-origin hop,
 // and older runtimes kept them all; here every header that can carry a secret is
 // dropped the moment the target changes origin, whatever the runtime. One
-// timeout covers the whole chain.
-async function forgeGetOnce(url: string, headers: Record<string, string>, timeoutMs: number): Promise<ForgeResponse> {
+// timeout covers the whole chain. `authorize` approves the first URL and every
+// hop before it is requested: following by hand means `fetch` never sees the
+// chain, so nothing else can.
+async function forgeGetOnce(
+  url: string,
+  headers: Record<string, string>,
+  timeoutMs: number,
+  authorize?: (url: string) => Promise<boolean>,
+): Promise<ForgeResponse> {
   const ctrl = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -232,13 +282,18 @@ async function forgeGetOnce(url: string, headers: Record<string, string>, timeou
   let target = url;
   try {
     for (let hop = 0; ; hop++) {
+      const refused = await refusal(authorize, target);
+      if (refused) return refused;
       const res = await fetch(target, { headers: sent, redirect: "manual", signal: ctrl.signal });
       const location = res.headers.get("location");
       if (REDIRECT_STATUS.has(res.status) && location) {
         await res.body?.cancel().catch(() => {});
-        if (hop >= MAX_REDIRECTS) return { ok: false, status: 0, data: undefined, error: `more than ${MAX_REDIRECTS} redirects from ${url}` };
+        // Both are the chain's own shape, which a second walk only repeats.
+        if (hop >= MAX_REDIRECTS) return { ok: false, status: 0, data: undefined, error: `more than ${MAX_REDIRECTS} redirects from ${url}`, permanent: true };
         const next = new URL(location, target);
-        if (next.protocol !== "https:" && next.protocol !== "http:") return { ok: false, status: 0, data: undefined, error: `redirected to ${next.protocol}` };
+        if (next.protocol !== "https:" && next.protocol !== "http:") {
+          return { ok: false, status: 0, data: undefined, error: `redirected to ${next.protocol}`, permanent: true };
+        }
         if (next.origin !== new URL(target).origin) {
           delete sent.authorization;
           delete sent["private-token"];
@@ -258,32 +313,54 @@ async function forgeGetOnce(url: string, headers: Record<string, string>, timeou
         data = text;
       }
       const quota = !res.ok && limited(res.status, res.headers, data);
-      return { ok: res.ok, status: res.status, data, ...(quota ? { rateLimited: true, resetAt: resetTime(res.headers) } : {}) };
+      const retryAfterMs = RETRY_STATUS.has(res.status) ? parseRetryAfter(res.headers, Number.POSITIVE_INFINITY) : undefined;
+      return {
+        ok: res.ok,
+        status: res.status,
+        data,
+        ...(quota ? { rateLimited: true, resetAt: resetTime(res.headers), quota: quotaState(res.headers) } : {}),
+        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      };
     }
   } catch (e) {
-    return { ok: false, status: 0, data: undefined, error: timedOut ? `timed out after ${timeoutMs} ms` : failureText(e), timedOut };
+    if (timedOut) return { ok: false, status: 0, data: undefined, error: `timed out after ${timeoutMs} ms`, timedOut };
+    return { ok: false, status: 0, data: undefined, error: failureText(e), ...(isPermanentFailure(e) ? { permanent: true } : {}) };
   } finally {
     clearTimeout(timer);
   }
 }
 
 /**
- * A forge API GET: JSON, byte-capped, never throwing, and retried at most once —
- * for a gateway error or a dropped connection. A timeout has already spent the
- * whole budget the caller granted, so it is not retried either: a black-holed
- * network costs one timeout per call, not two.
+ * A forge API GET: JSON, byte-capped, never throwing, and retried under the
+ * policy every other request follows (`<PREFIX>_MAX_ATTEMPTS`, one retry by
+ * default) — for a gateway error or a dropped connection only. A timeout has
+ * already spent the whole budget the caller granted, so it is not retried
+ * either: a black-holed network costs one timeout per call, not two.
  */
 async function forgeGet(url: string, kind: ForgeKind, ref: RepoRef, opts: ForgeOptions): Promise<ForgeResponse> {
   const auth = opts.apiBase ? forgeAuthHeaders(kind) : forgeAuthHeaders(kind, ref.host);
   const headers = { "user-agent": contactUa(), accept: kind === "github" ? "application/vnd.github+json" : "application/json", ...auth };
   const tokenVar = auth.authorization ? forgeToken(kind)?.name : undefined;
   const timeoutMs = opts.timeoutMs ?? 15_000;
-  let r = await forgeGetOnce(url, headers, timeoutMs);
-  if (RETRY_STATUS.has(r.status) || (r.status === 0 && !r.timedOut)) {
-    await sleep(envInt("RETRY_MS", 600, 0, 5000));
-    r = await forgeGetOnce(url, headers, timeoutMs);
+  const attempts = maxAttempts();
+  let r = await forgeGetOnce(url, headers, timeoutMs, opts.authorizeUrl);
+  for (let attempt = 1; attempt < attempts; attempt++) {
+    const wait = retryWait(r);
+    if (wait === undefined) break;
+    await sleep(wait);
+    r = await forgeGetOnce(url, headers, timeoutMs, opts.authorizeUrl);
   }
   return tokenVar ? { ...r, tokenVar } : r;
+}
+
+// How long to wait before asking again, or undefined when asking again cannot
+// change the answer: anything but a gateway error or a dropped connection, a
+// timeout, a failure that is the request's own (an unknown host, a redirect
+// loop, a refused URL), and a gateway that asked for longer than the cap.
+function retryWait(r: ForgeResponse): number | undefined {
+  if (RETRY_STATUS.has(r.status)) return retryDelayMs(r.retryAfterMs);
+  if (r.status === 0 && !r.timedOut && !r.permanent) return defaultRetryMs();
+  return undefined;
 }
 
 const FORGE_NAME: Record<ForgeKind, string> = { github: "GitHub", gitlab: "GitLab", gitea: "Gitea" };
@@ -308,13 +385,24 @@ interface Failure {
 function failure(r: ForgeResponse, forge: ForgeKind, ref: RepoRef, action: string, opts: ForgeOptions): Failure {
   const host = ref.host;
   const tokenVar = TOKEN_VARS[forge][0]!;
+  // Whether a token would go to this host at all. A token the user did set is
+  // WITHHELD from a host nobody declared (see TOKEN_HOSTS), so "set it" is
+  // advice that changes nothing: declaring the host is what sends it.
+  const declared = !!opts.apiBase || tokenHostAllowed(forge, host);
+  const withheld = !r.tokenVar && !declared ? forgeToken(forge)?.name : undefined;
+  const declare = `${envName("FORGE_HOSTS")}=${host}=${forge}`;
+  const withheldNote = withheld ? `${withheld} is set, but is only sent to hosts listed in ${envName("FORGE_HOSTS")}: declare this one with ${declare}` : "";
+  const authAdvice = withheldNote || (declared ? `set ${tokenVar}` : `declare the host with ${declare} and set ${tokenVar}`);
   if (r.rateLimited) {
     const when = r.resetAt ? ` until ${r.resetAt}` : "";
-    const advice = r.tokenVar
-      ? `the quota for ${r.tokenVar} is spent`
-      : opts.apiBase || tokenHostAllowed(forge, host)
-        ? `set ${tokenVar} to raise the anonymous quota`
-        : `list ${host} in ${envName("FORGE_HOSTS")} and set ${tokenVar} to raise the anonymous quota`;
+    // A secondary limit is on how fast requests arrive, with quota to spare:
+    // "spent" would send the reader to wait out an hour, or for a new token.
+    const advice =
+      r.quota === "left"
+        ? `a secondary limit on how fast requests arrive; the quota${r.tokenVar ? ` for ${r.tokenVar}` : ""} is not spent`
+        : r.tokenVar
+          ? `the quota for ${r.tokenVar} is spent`
+          : `${authAdvice} to raise the anonymous quota`;
     return {
       note: `${FORGE_NAME[forge]} rate-limited this request${when} — ${advice}.`,
       status: r.status,
@@ -322,6 +410,9 @@ function failure(r: ForgeResponse, forge: ForgeKind, ref: RepoRef, action: strin
       ...(r.resetAt ? { resetAt: r.resetAt } : {}),
     };
   }
+  // The caller's own wall, not the network: "network error" would send the
+  // reader looking at the wrong machine.
+  if (r.refused) return { note: `${action} refused: ${r.error}.`, status: 0 };
   if (r.status === 0) {
     let apiHost = host;
     try {
@@ -333,13 +424,13 @@ function failure(r: ForgeResponse, forge: ForgeKind, ref: RepoRef, action: strin
   }
   const why =
     r.status === 404
-      ? `no such repository on ${host}, or it is private`
+      ? `no such repository on ${host}, or it is private${withheldNote ? ` — ${withheldNote}` : ""}`
       : r.status === 401
         ? r.tokenVar
           ? `${host} rejected ${r.tokenVar} — refresh it, or unset it to read public repositories anonymously`
-          : `${host} requires authentication — set ${tokenVar}`
+          : `${host} requires authentication — ${authAdvice}`
         : r.status === 403
-          ? `${host} refused access${r.tokenVar ? ` — ${r.tokenVar} may lack the scope this needs` : ""}`
+          ? `${host} refused access${r.tokenVar ? ` — ${r.tokenVar} may lack the scope this needs` : withheldNote ? ` — ${withheldNote}` : ""}`
           : r.status === 422 && forge === "github"
             ? "GitHub cannot search that repository — it does not exist, or it is private"
             : r.status >= 500

@@ -328,7 +328,11 @@ describe("the runbook", () => {
     orchestrateRun(run, ENGINE, DEFS, contracts, { smallWorklist: 10 });
     const script = readFileSync(join(run, "orchestration", "verify.workflow.mjs"), "utf8");
     expect(JSON.parse(/const BATCHES = (\[.*?\])\n/s.exec(script)![1]!)).toHaveLength(1);
-    expect(readFileSync(join(run, "orchestration", "RUNBOOK.md"), "utf8")).toContain("(1 agent(s)");
+    const rb = readFileSync(join(run, "orchestration", "RUNBOOK.md"), "utf8");
+    expect(rb).toContain("(1 agent(s)");
+    // …and that one agent is handed all ten, not the batch size of eight.
+    expect(rb).toContain("(1 agent(s) of at most 10 item(s)");
+    expect(rb).not.toContain("at most 8 item(s)");
   });
 
   it("carries the skill's own preamble above the phases", () => {

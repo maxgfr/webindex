@@ -28,10 +28,14 @@ export const FIRECRAWL_DEFAULT_BASE = "http://localhost:3002";
 // milliseconds (connection refused), and a blackholed host at most this.
 const PROBE_TIMEOUT_MS = 2000;
 // A scrape drives a real browser, so it needs a far longer budget than a plain
-// httpGet. Firecrawl is also told to give up at the same point (`timeout` in the
-// request body) so it doesn't keep working on a page we stopped waiting for.
+// httpGet. Firecrawl is also told to give up (`timeout` in the request body) so
+// it doesn't keep working on a page we stopped waiting for — and to give up
+// FIRST, by SERVER_MARGIN_MS: at the same instant, the client aborted a few ms
+// before the instance's own 408 for one slow page arrived, and a page that was
+// merely slow read as the whole instance gone.
 const SCRAPE_TIMEOUT_MS = 45_000;
 const SEARCH_TIMEOUT_MS = 30_000;
+const SERVER_MARGIN_MS = { scrape: 5_000, search: 2_000 };
 // Firecrawl's own server-side page cache: `maxAge` lets it serve a page it
 // already scraped within this window instead of re-driving the browser. Matches
 // the on-disk fetch cache's 24h TTL (see src/cache.ts).
@@ -202,7 +206,7 @@ async function postJson(
   path: string,
   body: (prefix: string) => unknown,
   opts: { timeoutMs: number; retries?: number },
-): Promise<{ ok: boolean; status: number; data: any; error?: string }> {
+): Promise<{ ok: boolean; status: number; data: any; error?: string; timedOut?: boolean }> {
   const req = { timeoutMs: opts.timeoutMs, retries: opts.retries, headers: authHeaders() };
   const prefix = apiPrefix(base);
   const first = await httpJson("POST", `${base}${prefix}${path}`, body(prefix), req);
@@ -329,16 +333,17 @@ export async function scrapeViaFirecrawl(url: string, opts: FirecrawlOptions = {
       blockAds: true,
       removeBase64Images: true,
       maxAge: SCRAPE_MAX_AGE_MS,
-      timeout: SCRAPE_TIMEOUT_MS,
+      timeout: SCRAPE_TIMEOUT_MS - SERVER_MARGIN_MS.scrape,
     }),
     // No retry: the built-in extractor is the fallback, and a second attempt
     // at a browser render that just failed doubles the wait for nothing.
     { timeoutMs: SCRAPE_TIMEOUT_MS, retries: 0 },
   );
   if (!r.ok) {
-    // No status at all is the instance going away (a timeout, a dropped
-    // connection), not this page failing: without marking it, every
-    // remaining page of a crawl paid the full timeout again.
+    // No status at all is the instance going away (a dropped connection, or
+    // no answer even past the deadline it was given), not this page failing:
+    // without marking it, every remaining page of a crawl paid the full
+    // timeout again.
     if (!r.status) markFirecrawlDown(base);
     const why = r.status ? `status ${r.status}` : (r.error ?? "no response");
     return { why: `Firecrawl could not scrape ${url} (${why}) — fell back to the built-in extractor.` };
@@ -393,15 +398,26 @@ export async function searchViaFirecrawl(
     base,
     "/search",
     // `sources` is v2's; v1's strict schema rejects any key it does not know.
-    // `timeout` tells Firecrawl to stop when we do: its own default is 60 s,
-    // double the time this client waits.
-    (prefix) => ({ query, limit: n, ...locale, timeout: timeoutMs, ...(prefix === "/v2" ? { sources: ["web"] } : {}) }),
+    // `timeout` tells Firecrawl to stop just before we do: its own default is
+    // 60 s, double the time this client waits.
+    (prefix) => ({
+      query,
+      limit: n,
+      ...locale,
+      timeout: Math.max(1000, timeoutMs - SERVER_MARGIN_MS.search),
+      ...(prefix === "/v2" ? { sources: ["web"] } : {}),
+    }),
     // No retry: this is the cascade's last rung, and a second attempt at an
     // instance that just failed or throttled us doubles the wait for nothing.
     { timeoutMs, retries: 0 },
   );
   if (!r.ok) {
-    if (!r.status) markFirecrawlDown(base);
+    // A timeout the caller's budget cut short is that budget running out, not
+    // an outage — the reason a cancel is kept away from this rung. Marked down,
+    // the instance was skipped by every search and every fetch in the process
+    // for 30 s, and JS-rendered pages lost their text.
+    const budgetRanOut = r.timedOut === true && timeoutMs < SEARCH_TIMEOUT_MS;
+    if (!r.status && !budgetRanOut) markFirecrawlDown(base);
     const reason = serverReason(r.data);
     const why =
       r.status === 429 || r.status === 503

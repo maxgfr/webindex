@@ -31,7 +31,10 @@ export interface Robots {
   crawlDelayMs?: number;
   /** Every `Sitemap:` line — they are file-level, not per-group. */
   sitemaps: string[];
-  /** True when there was no file to read (a 4xx, or an empty one), which means "allowed". */
+  /**
+   * True when there was no file to read (a 4xx, an empty one, or redirects
+   * that loop or leave HTTP), which means "allowed".
+   */
   absent: boolean;
   /** The status robots.txt answered with; 0 when no answer came. Absent when it was never requested. */
   status?: number;
@@ -262,14 +265,14 @@ export function resetRobotsCache(): void {
 async function readRobots(origin: string, authorize: UrlAuthorizer | undefined): Promise<Robots> {
   // A redirect our own policy refused is not the server failing: the spec lets
   // a crawler that will not follow a redirect treat the file as unavailable.
+  // Always through an authorizer, policy or none, so every redirect is
+  // followed by httpGet's own loop, which says when a chain led nowhere.
   let refused = false;
-  const authorizeUrl =
-    authorize &&
-    (async (u: string) => {
-      const ok = await authorize(u);
-      if (!ok) refused = true;
-      return ok;
-    });
+  const authorizeUrl = async (u: string) => {
+    const ok = authorize ? await authorize(u) : true;
+    if (!ok) refused = true;
+    return ok;
+  };
   const r = await httpGet(`${origin}/robots.txt`, { accept: "text/plain", timeoutMs: 5000, maxBytes: 512 * 1024, authorizeUrl });
   if (r.ok) {
     // RFC 9309 §2.5 asks for at least the first 500 KiB of a larger file. The
@@ -284,7 +287,11 @@ async function readRobots(origin: string, authorize: UrlAuthorizer | undefined):
   // MUST then assume complete disallow — this is the enumerating caller's
   // answer, and treating an erroring origin as permission is what the RFC
   // forbids. `fetch` never asks, so a citation still does not depend on it.
-  if (!refused && (r.status === 0 || r.status === 429 || r.status >= 500)) {
+  // A redirect chain that loops, or leaves for another scheme, is neither: the
+  // server answered every time, and more than five redirects MAY be read as
+  // unavailable (§2.3.1.2). Read as unreachable, one loop stopped a crawl
+  // before its seed with a note saying the file "did not answer".
+  if (!refused && !r.redirectFailed && (r.status === 0 || r.status === 429 || r.status >= 500)) {
     return { rules: [{ allow: false, path: "/" }], sitemaps: [], absent: false, status: r.status, unreachable: true };
   }
   return { ...EMPTY, status: r.status };

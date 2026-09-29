@@ -24,6 +24,7 @@ import { decodeEntities, type ExtractResult, fetchAndExtract, sleep } from "./fe
 import { fetchSitemap, type Sitemap } from "./feed.js";
 import { mapLimit } from "./pool.js";
 import { dropElements, htmlAttributes, RAW_TEXT_ELEMENTS } from "./html.js";
+import { documentBaseUrl } from "./markdown.js";
 import { fetchRobots, isAllowed, type Robots } from "./robots.js";
 import { canonicalizeUrl } from "./url.js";
 
@@ -44,8 +45,8 @@ export function resetHostSchedule(): void {
 // warning, so a site asking for a very long wait would get none at all.
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
-async function sleepFor(ms: number): Promise<void> {
-  for (let left = ms; left > 0; left -= MAX_TIMER_MS) await sleep(Math.min(left, MAX_TIMER_MS));
+async function sleepFor(ms: number, signal?: AbortSignal): Promise<void> {
+  for (let left = ms; left > 0 && !signal?.aborted; left -= MAX_TIMER_MS) await sleep(Math.min(left, MAX_TIMER_MS), signal);
 }
 
 /**
@@ -91,8 +92,12 @@ function hostOf(url: string): string {
  *
  * Different hosts never wait on each other: the whole point is to keep
  * concurrency high across a candidate list while staying single-file per site.
+ *
+ * `signal` ends the wait early, and the caller must then not send: the slot
+ * stays claimed, which errs on the polite side, and the time returned is the
+ * time actually waited.
  */
-export async function awaitHostSlot(url: string, delayMs: number = hostDelayMs(), now: number = Date.now()): Promise<number> {
+export async function awaitHostSlot(url: string, delayMs: number = hostDelayMs(), now: number = Date.now(), signal?: AbortSignal): Promise<number> {
   const host = hostOf(url);
   if (!host) return 0;
   const spaced = delayMs > 0;
@@ -103,8 +108,10 @@ export async function awaitHostSlot(url: string, delayMs: number = hostDelayMs()
     const free = spaced ? Math.max(nextFree.get(host) ?? 0, hold) : hold;
     const wait = Math.max(0, free - t);
     if (spaced) nextFree.set(host, Math.max(free, t) + delayMs);
-    if (wait === 0) return waited;
-    await sleepFor(wait);
+    if (wait === 0 || signal?.aborted) return waited;
+    const started = Date.now();
+    await sleepFor(wait, signal);
+    if (signal?.aborted) return waited + Math.min(wait, Math.max(0, Date.now() - started));
     waited += wait;
     t = Date.now();
     if ((holdUntil.get(host) ?? 0) <= t) return waited;
@@ -142,7 +149,10 @@ export interface CrawlOptions {
    * their own, one per origin and a few documents.
    */
   maxRequests?: number;
-  /** How many links deep to follow. The seed is depth 0. */
+  /**
+   * How many links deep to follow. The seed is depth 0. On every ceiling here,
+   * `Infinity` is no ceiling and a value that is not a number is the default.
+   */
   maxDepth?: number;
   /**
    * Leave the crawl's origin. Off by default — a crawl that wanders is not a
@@ -202,12 +212,12 @@ export interface CrawlResult {
   notes: string[];
 }
 
-// The opening tags that carry a page's links, and the one that says what they
-// are relative to. Quote-aware, and linear for the reason TAG_RE in html.ts is:
-// an unquoted run stops at `<` as well as `>`, so each opener is one short look.
-// `<a\b[^>]*?\bhref…` rescanned to the end of the page from every `<a` start
-// on a page of unclosed ones — 400 KB of `<a x` took ten seconds of CPU.
-const LINK_TAG_RE = /<(a|area|base)(?=[\s/>])[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/gi;
+// The opening tags that carry a page's links. Quote-aware, and linear for the
+// reason TAG_RE in html.ts is: an unquoted run stops at `<` as well as `>`, so
+// each opener is one short look. `<a\b[^>]*?\bhref…` rescanned to the end of
+// the page from every `<a` start on a page of unclosed ones — 400 KB of `<a x`
+// took ten seconds of CPU.
+const LINK_TAG_RE = /<(a|area)(?=[\s/>])[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/gi;
 
 // Anchors that are not on the page: inside a script's strings, a style, an
 // inert <template>. Comments go in the same pass (see dropElements).
@@ -221,26 +231,15 @@ const INERT_ELEMENTS = ["script", "style", "template"];
  * HTML that minifiers emit everywhere, and a `data-href` is not an `href`.
  */
 export function linksFrom(html: string, baseUrl: string): string[] {
-  let base = baseUrl;
-  let sawBase = false;
+  // The first <base href> sets the document's base, wherever it sits relative
+  // to the links — the rule the Markdown writer reads it by, so a data: or
+  // javascript: base is ignored here too. Taken as the base, it made every
+  // relative link fail to resolve and the crawl never followed the page.
+  const base = documentBaseUrl(html, baseUrl) ?? baseUrl;
   const hrefs: string[] = [];
   for (const m of dropElements(html, INERT_ELEMENTS, RAW_TEXT_ELEMENTS).matchAll(LINK_TAG_RE)) {
     const href = htmlAttributes(m[0]).get("href");
-    if (href === undefined) continue;
-    const raw = decodeEntities(href).trim();
-    if (m[1]!.toLowerCase() !== "base") {
-      hrefs.push(raw);
-      continue;
-    }
-    // The first <base href> sets the document's base, wherever it sits
-    // relative to the links, and is itself resolved against the page's URL.
-    if (sawBase) continue;
-    sawBase = true;
-    try {
-      base = new URL(raw, baseUrl).href;
-    } catch {
-      /* a base we cannot resolve leaves the page's own URL in charge */
-    }
+    if (href !== undefined) hrefs.push(decodeEntities(href).trim());
   }
 
   const out: string[] = [];
@@ -317,11 +316,14 @@ function sectionOf(url: string): string {
   return last && !last.includes(".") ? `${path}/` : path.slice(0, cut + 1);
 }
 
-// Links a crawl never spends a request on: images, media, fonts, archives,
-// executables, stylesheets and scripts are not pages, and at best cost a
-// request to learn so. PDFs and office documents are documents, and stay.
+// Links a crawl never spends a request on: images, media, fonts, archives and
+// executables are not pages, and at best cost a request to learn so. PDFs and
+// office documents are documents, and stay. So do paths ending in .js, .css or
+// .map: these come from <a href>, which a script or a stylesheet almost never
+// is, while /wiki/Node.js and github.com/vercel/next.js are pages — skipping
+// them saved nothing and dropped real ones. A real script costs one request.
 const NOT_A_PAGE_RE =
-  /\.(?:png|jpe?g|gif|webp|avif|bmp|ico|svg|tiff?|heic|mp3|m4a|aac|ogg|oga|opus|wav|flac|mp4|m4v|mov|avi|wmv|mkv|webm|woff2?|ttf|otf|eot|zip|gz|tgz|bz2|xz|7z|rar|tar|dmg|iso|exe|msi|apk|deb|rpm|css|js|mjs|map)$/i;
+  /\.(?:png|jpe?g|gif|webp|avif|bmp|ico|svg|tiff?|heic|mp3|m4a|aac|ogg|oga|opus|wav|flac|mp4|m4v|mov|avi|wmv|mkv|webm|woff2?|ttf|otf|eot|zip|gz|tgz|bz2|xz|7z|rar|tar|dmg|iso|exe|msi|apk|deb|rpm)$/i;
 
 /**
  * How many pages a crawl keeps in flight at once (`<PREFIX>_CRAWL_CONCURRENCY`,
@@ -337,9 +339,13 @@ interface Frontier {
   depth: number;
 }
 
-/** A whole number from a caller's option, or the default when it is absent or not a number. */
+/**
+ * A whole number from a caller's option, or the default when it is absent or
+ * not a number. Infinity is a number — the caller asked for no ceiling — and
+ * stays one: read as absent, it quietly became the default.
+ */
 function whole(n: number | undefined, fallback: number, min: number): number {
-  return n !== undefined && Number.isFinite(n) ? Math.max(min, Math.floor(n)) : fallback;
+  return typeof n === "number" && !Number.isNaN(n) ? Math.max(min, Math.floor(n)) : fallback;
 }
 
 const seconds = (ms: number) => `${ms / 1000} s`;
@@ -376,6 +382,14 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
   const width = crawlConcurrency();
   const notes: string[] = [];
   const disallowed: string[] = [];
+  // Each refused URL once. A redirect destination is never `seen`, so a page
+  // redirecting into a refused path and a later link to that path both got here.
+  const refused = new Set<string>();
+  const disallow = (url: string): void => {
+    if (refused.has(url)) return;
+    refused.add(url);
+    disallowed.push(url);
+  };
   const pages: CrawledPage[] = [];
 
   // The crawl's origin, and the part of it the seed names. The origin moves
@@ -450,6 +464,9 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
   // robots-refused page. Delays apply to the destination host as well. The
   // seed's own redirects may leave the origin: they are what settles it.
   const authorizeHop = async (url: string, seedHop: boolean): Promise<boolean> => {
+    // Cancelled: nothing more is sent, and nothing is judged — fetchOne reads
+    // the refusal under an aborted signal as a page left pending.
+    if (opts.signal?.aborted) return false;
     if (!(await permitted(url))) return false;
     if (!seedHop && !inScope(url)) {
       notes.push(`${url}: destination is outside the crawl origin.`);
@@ -457,12 +474,15 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
     }
     const r = await robotsFor(url);
     if (!opts.ignoreRobots && !isAllowed(r, url)) {
-      if (!disallowed.includes(url)) disallowed.push(url);
+      disallow(url);
       return false;
     }
     if (refusesDelay(url, r)) return false;
-    await awaitHostSlot(url, delayFor(r));
-    return true;
+    // The politeness wait is the long one — width × Crawl-delay — and a
+    // worker that slept it out before noticing the cancel kept a cancelled
+    // crawl pending for minutes.
+    await awaitHostSlot(url, delayFor(r), Date.now(), opts.signal);
+    return !opts.signal?.aborted;
   };
   const authorizeUrl = (url: string) => authorizeHop(url, false);
   const authorizeSeed = (url: string) => authorizeHop(url, true);
@@ -624,7 +644,7 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
       const slice = wave.slice(cursor, cursor + (room - batch.length));
       const files = await Promise.all(slice.map((it) => robotsFor(it.url)));
       slice.forEach((item, i) => {
-        if (!opts.ignoreRobots && !isAllowed(files[i]!, item.url)) disallowed.push(item.url);
+        if (!opts.ignoreRobots && !isAllowed(files[i]!, item.url)) disallow(item.url);
         else batch.push(item);
       });
       cursor += slice.length;
