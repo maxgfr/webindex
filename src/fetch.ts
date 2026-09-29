@@ -137,6 +137,22 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// A wait that ends early when `signal` aborts. By hand, like the signal link in
+// httpGet: timers/promises' own signal option rejects rather than resolves, and
+// the caller only wants to stop waiting.
+function sleepUnlessAborted(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(t);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const t = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
 /**
  * A rate-limit signal: an explicit 429, or a 403 whose remaining-quota header is
  * zero — which is how GitHub's unauthenticated APIs report throttling. Worth
@@ -510,7 +526,8 @@ export async function httpGet(
       if (wait !== undefined) {
         last = result;
         if (wait > 0) opts.onBackOff?.(result.url, wait);
-        await sleep(wait);
+        // A cancel during the wait ends it, and the loop's first check answers it.
+        await sleepUnlessAborted(wait, opts.signal);
         continue;
       }
       return result;
@@ -521,7 +538,7 @@ export async function httpGet(
       // silent for that long rarely answers a second time: retrying it made the
       // real worst case attempts × timeout, twice what the caller asked for.
       if (timedOut || isPermanentFailure(e)) break;
-      if (attempt < attempts - 1) await sleep(defaultRetryMs());
+      if (attempt < attempts - 1) await sleepUnlessAborted(defaultRetryMs(), opts.signal);
     } finally {
       clearTimeout(t);
       opts.signal?.removeEventListener("abort", onCancel);

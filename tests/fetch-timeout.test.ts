@@ -5,6 +5,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { envName } from "../src/brand.js";
 import { cachedFetchAndExtract } from "../src/cache.js";
 import { fetchAndExtract, httpGet, httpJson } from "../src/fetch.js";
+import { installFetchMock } from "./fetchmock.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -81,6 +82,32 @@ describe("cancellation", () => {
     const r = await pending;
     expect(r).toMatchObject({ ok: false, status: 0, error: "cancelled" });
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops waiting out a back-off the moment the caller cancels", async () => {
+    // Asked to come back in 3 s, the cancelled call held its caller — an MCP
+    // cancellation, a crawl worker — for the whole wait before noticing.
+    const spy = installFetchMock(() => ({ status: 503, body: "busy", headers: { "retry-after": "3" } }));
+    vi.stubEnv(envName("MAX_ATTEMPTS"), "3");
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 20);
+    const started = performance.now();
+    expect(await httpGet("https://busy.test/x", { signal: ctrl.signal })).toMatchObject({ ok: false, status: 0, error: "cancelled" });
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    // The plain back-off between attempts, too.
+    vi.stubEnv(envName("RETRY_MS"), "3000");
+    const failing = vi.fn(async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }) });
+    });
+    vi.stubGlobal("fetch", failing);
+    const again = new AbortController();
+    setTimeout(() => again.abort(), 20);
+    const restarted = performance.now();
+    expect(await httpGet("https://busy.test/y", { signal: again.signal })).toMatchObject({ error: "cancelled" });
+    expect(performance.now() - restarted).toBeLessThan(2000);
+    expect(failing).toHaveBeenCalledTimes(1);
   });
 
   it("sends nothing at all for a signal that has already aborted", async () => {
