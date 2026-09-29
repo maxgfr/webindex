@@ -440,7 +440,8 @@ async function repinSkill(root, config) {
 
 // src/cli.ts
 import { existsSync as existsSync7, readFileSync as readFileSync13, realpathSync as realpathSync3, statSync as statSync6 } from "fs";
-import { basename as basename4, extname, join as join15, relative as relative4, resolve as resolve7 } from "path";
+import { isIP as isIP2 } from "net";
+import { basename as basename4, extname, isAbsolute as isAbsolute3, join as join15, relative as relative4, resolve as resolve7 } from "path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL } from "url";
 
 // src/mime.ts
@@ -770,11 +771,8 @@ function runWithInput(cmd, args, input, timeoutMs, opts = {}) {
       const bin = binaryName(cmd);
       const viaShell = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(bin);
       const quote = (s) => `"${s.replace(/"/g, '""')}"`;
-      child = spawn2(viaShell ? quote(bin) : bin, viaShell ? args.map(quote) : args, {
-        stdio: ["pipe", "pipe", "pipe"],
-        ...viaShell ? { shell: true, windowsHide: true } : {},
-        ...opts.env ? { env: opts.env } : {}
-      });
+      const common = { stdio: ["pipe", "pipe", "pipe"], ...opts.env ? { env: opts.env } : {} };
+      child = viaShell ? spawn2([bin, ...args].map(quote).join(" "), { ...common, shell: true, windowsHide: true }) : spawn2(bin, args, common);
     } catch (e) {
       resolve8({ ok: false, stdout: "", error: e.message });
       return;
@@ -1370,11 +1368,11 @@ async function ocrTools() {
   return toolsProbe;
 }
 var toolsProbe;
-async function ocrPdf(bytes) {
-  if (ocrBudgetLeft() <= 0) return void 0;
+async function ocrAttempt(bytes) {
+  if (ocrBudgetLeft() <= 0) return { declined: "budget" };
   const { copyablePdf, tesseract } = await ocrTools();
-  if (!copyablePdf || !tesseract) return void 0;
-  if (ocrBudgetLeft() <= 0) return void 0;
+  if (!copyablePdf || !tesseract) return { declined: "tools" };
+  if (ocrBudgetLeft() <= 0) return { declined: "budget" };
   spent++;
   const dir = mkdtempSync(join7(tmpdir(), `${brand().name}-ocr-`));
   try {
@@ -1383,12 +1381,15 @@ async function ocrPdf(bytes) {
     writeFileSync3(input, bytes);
     const lang = env("OCR_LANG") || DEFAULT_LANG;
     const r = await runWithInput("copyable-pdf", ["-o", output, "-m", "-l", lang, input], Buffer.alloc(0), envInt("OCR_TIMEOUT_MS", DEFAULT_TIMEOUT_MS));
-    if (r.error === "not installed") spent = Math.max(0, spent - 1);
-    if (!r.ok) return void 0;
+    if (r.error === "not installed") {
+      spent = Math.max(0, spent - 1);
+      return { declined: "tools" };
+    }
+    if (!r.ok) return { failed: true };
     const md = output.replace(/\.pdf$/, ".md");
-    return existsSync(md) ? readFileSync7(md, "utf8") : void 0;
+    return existsSync(md) ? { text: readFileSync7(md, "utf8") } : { failed: true };
   } catch {
-    return void 0;
+    return { failed: true };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1433,11 +1434,9 @@ async function viaPdftotext(bytes) {
   return r.error === "not installed" ? { unavailable: true } : { failure: failureDetail("pdftotext", r) };
 }
 async function viaOcr(bytes) {
-  const text = await ocrPdf(bytes);
-  if (text !== void 0) return { text };
-  const { copyablePdf, tesseract } = await ocrTools();
-  if (!copyablePdf || !tesseract) return { unavailable: true };
-  if (ocrBudgetLeft() <= 0) return {};
+  const r = await ocrAttempt(bytes);
+  if ("text" in r) return { text: r.text };
+  if ("declined" in r) return r.declined === "tools" ? { unavailable: true } : { budgetSpent: true };
   return { failure: "ocr: the conversion failed on this document" };
 }
 async function runRung(id, bytes, opts) {
@@ -1468,6 +1467,7 @@ async function extractPdf(bytes, opts = {}) {
     else if (got.failure) failures.push(got.failure);
     if (got.hint) hints.add(got.hint);
   };
+  const budgetSpent = `scanned PDF, and this run's OCR budget is spent (raise ${envName("OCR_MAX")})`;
   for (const id of enabledExtractors(opts.engines)) {
     const known = dead.get(id);
     if (known) {
@@ -1475,11 +1475,15 @@ async function extractPdf(bytes, opts = {}) {
       continue;
     }
     if (id === "ocr" && ocrBudgetLeft() <= 0) {
-      lastReason = `scanned PDF, and this run's OCR budget is spent (raise ${envName("OCR_MAX")})`;
+      lastReason = budgetSpent;
       continue;
     }
     const got = await runRung(id, bytes, opts);
     if (got.text === void 0) {
+      if (got.budgetSpent) {
+        lastReason = budgetSpent;
+        continue;
+      }
       if (got.unavailable) dead.set(id, got);
       noteFailure(id, got);
       continue;
@@ -1805,8 +1809,9 @@ function wordText(xml, budget, styles) {
   let inText = 0;
   let fallback = 0;
   let tabStops = 0;
+  let moved = 0;
   const add = (p, s) => {
-    if (p && budget.take(s.length)) p.text += s;
+    if (p && !moved && budget.take(s.length)) p.text += s;
   };
   const emit = (block) => {
     const table = tables[tables.length - 1];
@@ -1821,7 +1826,8 @@ function wordText(xml, budget, styles) {
       if (fallback) return;
       const p = paragraphs[paragraphs.length - 1];
       const table = tables[tables.length - 1];
-      if (n === "p") paragraphs.push({ text: "", prefix: "" });
+      if (n === "moveFrom") moved++;
+      else if (n === "p") paragraphs.push({ text: "", prefix: "" });
       else if (n === "t") inText++;
       else if (n === "tab" && !tabStops) add(p, "	");
       else if (n === "br" || n === "cr") add(p, "\n");
@@ -1844,7 +1850,8 @@ function wordText(xml, budget, styles) {
       if (n === "tabs") tabStops = Math.max(0, tabStops - 1);
       if (fallback) return;
       const table = tables[tables.length - 1];
-      if (n === "t") inText = Math.max(0, inText - 1);
+      if (n === "moveFrom") moved = Math.max(0, moved - 1);
+      else if (n === "t") inText = Math.max(0, inText - 1);
       else if (n === "p") {
         const p = paragraphs.pop();
         if (p?.text.trim()) emit(table?.cell ? p.text.trim() : p.prefix ? p.prefix + p.text.trim() : p.text.trimEnd());
@@ -2163,8 +2170,8 @@ function openDocumentText(xml, budget) {
       else if (name === "draw:frame" && (titleFrame || attr(attrs, "presentation:class") === "title")) titleFrame++;
       else if (name === "table:table") {
         const sheet = attr(attrs, "table:name");
-        tables.push({ rows: [], repeatRow: 1, repeatCell: 1 });
-        if (sheet && spreadsheet) blocks.push(`## ${sheet}`);
+        const heading2 = sheet && spreadsheet && !tables.length ? blocks.push(`## ${sheet}`) - 1 : void 0;
+        tables.push({ rows: [], repeatRow: 1, repeatCell: 1, ...heading2 !== void 0 ? { heading: heading2 } : {} });
       } else if (name === "table:table-row" && table) {
         table.row = [];
         table.repeatRow = repeat(attrs, "table:number-rows-repeated");
@@ -2201,11 +2208,13 @@ function openDocumentText(xml, budget) {
       } else if (name === "table:table") {
         const done = tables.pop();
         if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows, budget));
+        if (done?.heading !== void 0 && blocks.length === done.heading + 1) blocks.length = done.heading;
       } else if (name === "draw:frame" && titleFrame) titleFrame--;
       else if (name === "presentation:notes") inNotes = Math.max(0, inNotes - 1);
       else if (name === "draw:page" && heading >= 0) {
         if (title.length) blocks[heading] = `## Slide ${slide}: ${title.join(" ")}`;
         if (notes.length) blocks.push(`Notes: ${notes.join(" ")}`);
+        if (!title.length && !notes.length && blocks.length === heading + 1) blocks.length = heading;
         heading = -1;
       }
     },
@@ -2588,6 +2597,32 @@ var HIDDEN_ELEMENTS = ["script", "style", "noscript", "head", "svg", "template",
 var CHROME_ELEMENTS = ["nav", "footer"];
 var RAW_TEXT_ELEMENTS = /* @__PURE__ */ new Set(["script", "style"]);
 
+// src/retry.ts
+var maxAttempts = () => envInt("MAX_ATTEMPTS", 2, 1, 5);
+var defaultRetryMs = () => envInt("RETRY_MS", 600, 0, 5e3);
+var RETRY_AFTER_CAP_MS = 5e3;
+function retryDelayMs(retryAfterMs) {
+  if (retryAfterMs === void 0) return defaultRetryMs();
+  return retryAfterMs <= RETRY_AFTER_CAP_MS ? retryAfterMs : void 0;
+}
+var PERMANENT_CODES = /* @__PURE__ */ new Set([
+  "ENOTFOUND",
+  "ERR_INVALID_URL",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "CERT_HAS_EXPIRED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"
+]);
+var PERMANENT_MESSAGE = /redirect count exceeded|scheme must be|unknown scheme|bad port|invalid url|failed to parse url/i;
+function isPermanentFailure(e) {
+  const err = e;
+  const code = err?.cause?.code ?? err?.code;
+  if (typeof code === "string" && PERMANENT_CODES.has(code)) return true;
+  return [err?.message, err?.cause?.message].some((m) => typeof m === "string" && PERMANENT_MESSAGE.test(m));
+}
+
 // src/url.ts
 var TRACKING_PARAMS = /^(utm_|fbclid$|gclid$|gclsrc$|dclid$|msclkid$|yclid$|twclid$|ttclid$|li_fat_id$|mkt_tok$|_gl$|mc_|ref_src$|ref_url$|spm$|_hsenc$|_hsmi$|igshid$|igsh$)/i;
 var SHARE_SI_HOSTS = /(^|\.)(youtube\.com|youtu\.be|spotify\.com)$/;
@@ -2963,10 +2998,17 @@ function subtokens(raw) {
   }
   return out;
 }
+function trimDashes(s) {
+  let start = 0;
+  let end = s.length;
+  while (start < end && s.charCodeAt(start) === 45) start++;
+  while (end > start && s.charCodeAt(end - 1) === 45) end--;
+  return s.slice(start, end);
+}
 function slugify(input, opts = {}) {
   const max = opts.max ?? 120;
   const normalized = input.toLowerCase().replace(/^https?:\/\//, "").replace(/^git@/, "").replace(/\.git$/, "");
-  const s = normalized.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  const s = trimDashes(normalized.replace(/[^a-z0-9._-]+/g, "-"));
   if (!/[\u0080-\uffff]/.test(normalized) && s.length <= max) return s || (opts.fallback ?? "");
   const tag = fnv1a64(normalized).toString(16).padStart(16, "0").slice(0, 8);
   const head = s.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");
@@ -3780,6 +3822,13 @@ function ddgRegion(lang, region) {
   const l = baseLang(lang);
   return DDG_KL[`${l}-${r}`] ?? DDG_KL[l] ?? `${REGION_ALIASES[r] ?? r}-${DDG_LANG_ALIASES[l] ?? l}`;
 }
+function searxngLanguage(lang, region) {
+  if (!lang?.trim()) return void 0;
+  const t = parseTag(lang);
+  if (!/^[a-z]{2,3}$/.test(t.lang)) return void 0;
+  const country = region?.trim() ? region.trim().toLowerCase() : t.region ?? (t.script ? SCRIPT_COUNTRY[`${t.lang}-${t.script}`] : void 0);
+  return country && /^[a-z]{2}$/.test(country) && country !== NO_REGION ? `${t.lang}-${country.toUpperCase()}` : t.lang;
+}
 function acceptLanguageHeader(lang, region) {
   const l = baseLang(lang);
   const r = resolveRegion(lang, region);
@@ -3794,6 +3843,7 @@ var FIRECRAWL_DEFAULT_BASE = "http://localhost:3002";
 var PROBE_TIMEOUT_MS = 2e3;
 var SCRAPE_TIMEOUT_MS = 45e3;
 var SEARCH_TIMEOUT_MS = 3e4;
+var SERVER_MARGIN_MS = { scrape: 5e3, search: 2e3 };
 var SCRAPE_MAX_AGE_MS = 24 * 60 * 60 * 1e3;
 function firecrawlBase(opts = {}) {
   const raw = (opts.firecrawl ?? env("FIRECRAWL") ?? FIRECRAWL_DEFAULT_BASE).trim();
@@ -3924,7 +3974,7 @@ async function scrapeViaFirecrawl(url, opts = {}) {
       blockAds: true,
       removeBase64Images: true,
       maxAge: SCRAPE_MAX_AGE_MS,
-      timeout: SCRAPE_TIMEOUT_MS
+      timeout: SCRAPE_TIMEOUT_MS - SERVER_MARGIN_MS.scrape
     }),
     // No retry: the built-in extractor is the fallback, and a second attempt
     // at a browser render that just failed doubles the wait for nothing.
@@ -3957,15 +4007,22 @@ async function searchViaFirecrawl(query, limit, opts = {}) {
     base,
     "/search",
     // `sources` is v2's; v1's strict schema rejects any key it does not know.
-    // `timeout` tells Firecrawl to stop when we do: its own default is 60 s,
-    // double the time this client waits.
-    (prefix) => ({ query, limit: n, ...locale, timeout: timeoutMs, ...prefix === "/v2" ? { sources: ["web"] } : {} }),
+    // `timeout` tells Firecrawl to stop just before we do: its own default is
+    // 60 s, double the time this client waits.
+    (prefix) => ({
+      query,
+      limit: n,
+      ...locale,
+      timeout: Math.max(1e3, timeoutMs - SERVER_MARGIN_MS.search),
+      ...prefix === "/v2" ? { sources: ["web"] } : {}
+    }),
     // No retry: this is the cascade's last rung, and a second attempt at an
     // instance that just failed or throttled us doubles the wait for nothing.
     { timeoutMs, retries: 0 }
   );
   if (!r.ok) {
-    if (!r.status) markFirecrawlDown(base);
+    const budgetRanOut = r.timedOut === true && timeoutMs < SEARCH_TIMEOUT_MS;
+    if (!r.status && !budgetRanOut) markFirecrawlDown(base);
     const reason = serverReason(r.data);
     const why = r.status === 429 || r.status === 503 ? `rate-limited (HTTP ${r.status})` : !r.status ? `unreachable (${r.error ?? "no response"})` : (
       // It answered: a 4xx is this request refused (a bad field, a key a
@@ -3993,14 +4050,12 @@ function defaultUa() {
   return brand().defaultUa === "contact" ? contactUa() : browserUa();
 }
 var RETRY_STATUS = /* @__PURE__ */ new Set([429, 503, 502, 504]);
-var maxAttempts = () => envInt("MAX_ATTEMPTS", 2, 1, 5);
-var defaultRetryMs = () => envInt("RETRY_MS", 600, 0, 5e3);
 var defaultTimeoutMs2 = () => envInt("TIMEOUT_MS", 2e4, 1e3, 3e5);
 function pageDelayMs() {
   return envInt("PAGE_DELAY_MS", 350, 0, 5e3);
 }
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+function sleep(ms, signal) {
+  return signal ? sleepUnlessAborted(ms, signal) : new Promise((r) => setTimeout(r, ms));
 }
 function sleepUnlessAborted(ms, signal) {
   return new Promise((resolve8) => {
@@ -4027,11 +4082,6 @@ function parseRetryAfter(headers, capMs = 5e3) {
   if (Number.isFinite(when)) return Math.min(Math.max(0, when - Date.now()), capMs);
   return void 0;
 }
-var RETRY_AFTER_CAP_MS = 5e3;
-function retryDelayMs(retryAfterMs) {
-  if (retryAfterMs === void 0) return defaultRetryMs();
-  return retryAfterMs <= RETRY_AFTER_CAP_MS ? retryAfterMs : void 0;
-}
 function attemptsFor(retries) {
   return retries === void 0 ? maxAttempts() : Math.min(4, Math.max(0, Math.trunc(retries))) + 1;
 }
@@ -4041,23 +4091,6 @@ function networkFailure(e) {
   const detail = typeof err?.cause?.message === "string" && err.cause.message ? err.cause.message : code;
   if (!detail) return typeof err?.message === "string" ? err.message : String(e);
   return code && !detail.includes(code) ? `${code}: ${detail}` : detail;
-}
-var PERMANENT_CODES = /* @__PURE__ */ new Set([
-  "ENOTFOUND",
-  "ERR_INVALID_URL",
-  "ERR_TLS_CERT_ALTNAME_INVALID",
-  "CERT_HAS_EXPIRED",
-  "DEPTH_ZERO_SELF_SIGNED_CERT",
-  "SELF_SIGNED_CERT_IN_CHAIN",
-  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
-  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"
-]);
-var PERMANENT_MESSAGE = /redirect count exceeded|scheme must be|unknown scheme|bad port|invalid url|failed to parse url/i;
-function isPermanentFailure(e) {
-  const err = e;
-  const code = err?.cause?.code ?? err?.code;
-  if (typeof code === "string" && PERMANENT_CODES.has(code)) return true;
-  return [err?.message, err?.cause?.message].some((m) => typeof m === "string" && PERMANENT_MESSAGE.test(m));
 }
 async function readCappedBytes(res, max) {
   const reader = res.body?.getReader?.();
@@ -4112,7 +4145,9 @@ var namesDocument = (filename) => filename !== void 0 && (PDF_URL_RE.test(filena
 var REDIRECT_STATUS = /* @__PURE__ */ new Set([301, 302, 303, 307, 308]);
 async function authorizedGet(url, init, authorize) {
   let target = url;
-  const fail2 = (error) => ({ failure: { ok: false, status: 0, body: "", contentType: "", url: target, error } });
+  const fail2 = (error, redirectFailed) => ({
+    failure: { ok: false, status: 0, body: "", contentType: "", url: target, error, ...redirectFailed ? { redirectFailed } : {} }
+  });
   const headers = { ...init.headers };
   for (let redirects = 0; ; redirects++) {
     try {
@@ -4125,10 +4160,10 @@ async function authorizedGet(url, init, authorize) {
     if (!REDIRECT_STATUS.has(response.status) || !location) return { response };
     await response.body?.cancel().catch(() => {
     });
-    if (redirects >= 20) return fail2("Too many redirects (maximum 20)");
+    if (redirects >= 20) return fail2("Too many redirects (maximum 20)", true);
     try {
       const next = new URL(location, target);
-      if (!/^https?:$/.test(next.protocol)) return fail2(`Unsupported redirect protocol: ${next.protocol}`);
+      if (!/^https?:$/.test(next.protocol)) return fail2(`Unsupported redirect protocol: ${next.protocol}`, true);
       if (next.origin !== new URL(target).origin) {
         delete headers.authorization;
         delete headers.cookie;
@@ -4136,7 +4171,7 @@ async function authorizedGet(url, init, authorize) {
       }
       target = next.href;
     } catch {
-      return fail2(`Invalid redirect URL from ${target}`);
+      return fail2(`Invalid redirect URL from ${target}`, true);
     }
   }
 }
@@ -4241,7 +4276,16 @@ async function httpGet(url, opts = {}) {
       return result;
     } catch (e) {
       if (!timedOut && opts.signal?.aborted) return cancelled();
-      last = { ok: false, status: 0, body: "", contentType: "", url, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
+      const error = timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e);
+      last = {
+        ok: false,
+        status: 0,
+        body: "",
+        contentType: "",
+        url,
+        error,
+        ...!timedOut && /redirect count exceeded/i.test(error) ? { redirectFailed: true } : {}
+      };
       if (timedOut || isPermanentFailure(e)) break;
       if (attempt < attempts - 1) await sleepUnlessAborted(defaultRetryMs(), opts.signal);
     } finally {
@@ -4299,7 +4343,7 @@ async function httpJson(method, url, body, opts = {}) {
       }
       return result;
     } catch (e) {
-      last = { ok: false, status: 0, data: void 0, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
+      last = timedOut ? { ok: false, status: 0, data: void 0, error: `timed out after ${timeoutMs} ms`, timedOut: true } : { ok: false, status: 0, data: void 0, error: networkFailure(e) };
       if (timedOut || isPermanentFailure(e)) break;
       if (attempt < attempts - 1) await sleep(defaultRetryMs());
     } finally {
@@ -5387,14 +5431,15 @@ function untrustedStack() {
   const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
   if (uid === void 0) return void 0;
   const root = resolve(cacheDir());
-  const top = env("CACHE_DIR") ?? brand().cacheDir ? root : dirname2(root);
+  const chosen = !!(env("CACHE_DIR") ?? brand().cacheDir);
+  const top = chosen ? root : dirname2(root);
   const paths = /* @__PURE__ */ new Set();
   for (const a of assets) {
     for (let p = resolve(a.path); p !== top && p !== dirname2(p); p = dirname2(p)) paths.add(p);
   }
   for (const p of [top, ...paths]) {
     try {
-      const st = p === top ? statSync2(p) : lstatSync2(p);
+      const st = p === top && chosen ? statSync2(p) : lstatSync2(p);
       if (st.isSymbolicLink()) return `${p} is a symbolic link`;
       if (st.uid !== uid) return `${p} belongs to another user`;
       if (st.mode & 2 && !(st.isDirectory() && st.mode & 512)) return `${p} is writable by anyone`;
@@ -5546,7 +5591,7 @@ ${up.stderr}` : ""}`, code: 1 };
 
 // src/pool.ts
 async function mapLimit(items, limit, fn) {
-  const width = Number.isNaN(limit) ? 1 : Math.max(1, Math.floor(limit));
+  const width = typeof limit !== "number" || Number.isNaN(limit) ? 1 : Math.max(1, Math.floor(limit));
   if (items.length <= 1 || width === 1) {
     const out = [];
     for (let i = 0; i < items.length; i++) out.push(await fn(items[i], i));
@@ -5920,8 +5965,8 @@ function dedupeNearDuplicates(items, opts = {}) {
   return { items: kept.map((k) => k.it), dropped: dups.length, duplicates: dups.map((d) => ({ url: d.url, of: d.cluster.it.url })) };
 }
 function diversify(items, tokensOf, lambda = 0.75, opts = {}) {
-  if (items.length <= 2) return [...items];
   const sorted = [...items].sort((a, b) => b.score - a.score || byCodeUnit(a.url, b.url));
+  if (sorted.length <= 2) return sorted;
   const window = opts.window !== void 0 && opts.window > 0 ? Math.floor(opts.window) : sorted.length;
   if (window >= sorted.length) return mmr(sorted, tokensOf, lambda);
   return [...window > 2 ? mmr(sorted.slice(0, window), tokensOf, lambda) : sorted.slice(0, window), ...sorted.slice(window)];
@@ -6140,12 +6185,20 @@ function tagText(block, ...names) {
   }
   return void 0;
 }
+var HTML_ELEMENTS = /* @__PURE__ */ new Set([...BLOCK_TAGS, ...INLINE_TAGS, "br", "hr", "img", "h1", "h2", "h3", "h4", "h5", "h6"]);
+function looksLikeHtml(text) {
+  if (!/<\/[A-Za-z]\w*>/.test(text) && !/&#?\w+;/.test(text)) return false;
+  for (const m of text.matchAll(/<\/?([A-Za-z]\w*)/g)) if (!HTML_ELEMENTS.has(m[1].toLowerCase())) return false;
+  return true;
+}
 function proseText(block, atom, ...names) {
   for (const name of names) {
     const el = elements(block, name, 1)[0];
     if (!el) continue;
-    const type = htmlAttributes(el.attrs).get("type")?.toLowerCase() ?? (atom ? "text" : "html");
-    const text = type === "xhtml" ? fragmentText2(el.inner) : type === "text" || type === "text/plain" ? collapse2(xmlText(el.inner)) : fragmentText2(xmlText(el.inner));
+    const declared = htmlAttributes(el.attrs).get("type")?.toLowerCase();
+    const decoded = declared === "xhtml" ? "" : xmlText(el.inner);
+    const type = declared ?? (atom ? "text" : name === "title" && !looksLikeHtml(decoded) ? "text" : "html");
+    const text = type === "xhtml" ? fragmentText2(el.inner) : type === "text" || type === "text/plain" ? collapse2(decoded) : fragmentText2(decoded);
     if (text) return text;
   }
   return void 0;
@@ -6547,18 +6600,18 @@ var cache = /* @__PURE__ */ new Map();
 var guardedCaches = /* @__PURE__ */ new WeakMap();
 async function readRobots(origin, authorize) {
   let refused = false;
-  const authorizeUrl = authorize && (async (u) => {
-    const ok = await authorize(u);
+  const authorizeUrl = async (u) => {
+    const ok = authorize ? await authorize(u) : true;
     if (!ok) refused = true;
     return ok;
-  });
+  };
   const r = await httpGet(`${origin}/robots.txt`, { accept: "text/plain", timeoutMs: 5e3, maxBytes: 512 * 1024, authorizeUrl });
   if (r.ok) {
     const body = r.truncated ? r.body.slice(0, Math.max(r.body.lastIndexOf("\n"), r.body.lastIndexOf("\r")) + 1) : r.body;
     if (!body.trim()) return { ...EMPTY, status: r.status };
     return { ...parseRobots(body, env("ROBOTS_UA") ?? brand().name), status: r.status };
   }
-  if (!refused && (r.status === 0 || r.status === 429 || r.status >= 500)) {
+  if (!refused && !r.redirectFailed && (r.status === 0 || r.status === 429 || r.status >= 500)) {
     return { rules: [{ allow: false, path: "/" }], sitemaps: [], absent: false, status: r.status, unreachable: true };
   }
   return { ...EMPTY, status: r.status };
@@ -6590,8 +6643,8 @@ async function fetchRobots(url, opts = {}) {
 var nextFree = /* @__PURE__ */ new Map();
 var holdUntil = /* @__PURE__ */ new Map();
 var MAX_TIMER_MS = 2 ** 31 - 1;
-async function sleepFor(ms) {
-  for (let left = ms; left > 0; left -= MAX_TIMER_MS) await sleep(Math.min(left, MAX_TIMER_MS));
+async function sleepFor(ms, signal) {
+  for (let left = ms; left > 0 && !signal?.aborted; left -= MAX_TIMER_MS) await sleep(Math.min(left, MAX_TIMER_MS), signal);
 }
 function hostDelayMs() {
   return envInt("POLITE_DELAY_MS", 400, 0, 5e3);
@@ -6606,7 +6659,7 @@ function hostOf(url) {
     return "";
   }
 }
-async function awaitHostSlot(url, delayMs = hostDelayMs(), now = Date.now()) {
+async function awaitHostSlot(url, delayMs = hostDelayMs(), now = Date.now(), signal) {
   const host = hostOf(url);
   if (!host) return 0;
   const spaced = delayMs > 0;
@@ -6617,8 +6670,10 @@ async function awaitHostSlot(url, delayMs = hostDelayMs(), now = Date.now()) {
     const free = spaced ? Math.max(nextFree.get(host) ?? 0, hold) : hold;
     const wait = Math.max(0, free - t);
     if (spaced) nextFree.set(host, Math.max(free, t) + delayMs);
-    if (wait === 0) return waited;
-    await sleepFor(wait);
+    if (wait === 0 || signal?.aborted) return waited;
+    const started = Date.now();
+    await sleepFor(wait, signal);
+    if (signal?.aborted) return waited + Math.min(wait, Math.max(0, Date.now() - started));
     waited += wait;
     t = Date.now();
     if ((holdUntil.get(host) ?? 0) <= t) return waited;
@@ -6629,26 +6684,14 @@ function backOffHost(url, ms, now = Date.now()) {
   if (!host || !(ms > 0)) return;
   holdUntil.set(host, Math.max(holdUntil.get(host) ?? 0, now + ms));
 }
-var LINK_TAG_RE = /<(a|area|base)(?=[\s/>])[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/gi;
+var LINK_TAG_RE = /<(a|area)(?=[\s/>])[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/gi;
 var INERT_ELEMENTS = ["script", "style", "template"];
 function linksFrom(html, baseUrl) {
-  let base = baseUrl;
-  let sawBase = false;
+  const base = documentBaseUrl(html, baseUrl) ?? baseUrl;
   const hrefs = [];
   for (const m of dropElements(html, INERT_ELEMENTS, RAW_TEXT_ELEMENTS).matchAll(LINK_TAG_RE)) {
     const href = htmlAttributes(m[0]).get("href");
-    if (href === void 0) continue;
-    const raw = decodeEntities(href).trim();
-    if (m[1].toLowerCase() !== "base") {
-      hrefs.push(raw);
-      continue;
-    }
-    if (sawBase) continue;
-    sawBase = true;
-    try {
-      base = new URL(raw, baseUrl).href;
-    } catch {
-    }
+    if (href !== void 0) hrefs.push(decodeEntities(href).trim());
   }
   const out = [];
   const seen = /* @__PURE__ */ new Set();
@@ -6709,12 +6752,12 @@ function sectionOf(url) {
   const last = path.slice(cut + 1);
   return last && !last.includes(".") ? `${path}/` : path.slice(0, cut + 1);
 }
-var NOT_A_PAGE_RE = /\.(?:png|jpe?g|gif|webp|avif|bmp|ico|svg|tiff?|heic|mp3|m4a|aac|ogg|oga|opus|wav|flac|mp4|m4v|mov|avi|wmv|mkv|webm|woff2?|ttf|otf|eot|zip|gz|tgz|bz2|xz|7z|rar|tar|dmg|iso|exe|msi|apk|deb|rpm|css|js|mjs|map)$/i;
+var NOT_A_PAGE_RE = /\.(?:png|jpe?g|gif|webp|avif|bmp|ico|svg|tiff?|heic|mp3|m4a|aac|ogg|oga|opus|wav|flac|mp4|m4v|mov|avi|wmv|mkv|webm|woff2?|ttf|otf|eot|zip|gz|tgz|bz2|xz|7z|rar|tar|dmg|iso|exe|msi|apk|deb|rpm)$/i;
 function crawlConcurrency() {
   return envInt("CRAWL_CONCURRENCY", 4, 1, 16);
 }
 function whole(n, fallback, min) {
-  return n !== void 0 && Number.isFinite(n) ? Math.max(min, Math.floor(n)) : fallback;
+  return typeof n === "number" && !Number.isNaN(n) ? Math.max(min, Math.floor(n)) : fallback;
 }
 var seconds = (ms) => `${ms / 1e3} s`;
 async function crawlSite(seed, opts = {}) {
@@ -6726,6 +6769,12 @@ async function crawlSite(seed, opts = {}) {
   const width = crawlConcurrency();
   const notes = [];
   const disallowed = [];
+  const refused = /* @__PURE__ */ new Set();
+  const disallow = (url) => {
+    if (refused.has(url)) return;
+    refused.add(url);
+    disallowed.push(url);
+  };
   const pages = [];
   const seedOrigin = originOf(seed);
   if (!seedOrigin) return { pages, pending: [], disallowed, notes: [`${seed} is not a URL.`] };
@@ -6773,6 +6822,7 @@ async function crawlSite(seed, opts = {}) {
   if (!opts.ignoreRobots && robots.unreachable) return { pages, pending: [seed], disallowed, notes: [...notes, unreachable(seedOrigin, robots)] };
   if (refusesDelay(seed, robots)) return { pages, pending: [seed], disallowed, notes };
   const authorizeHop = async (url, seedHop) => {
+    if (opts.signal?.aborted) return false;
     if (!await permitted(url)) return false;
     if (!seedHop && !inScope(url)) {
       notes.push(`${url}: destination is outside the crawl origin.`);
@@ -6780,12 +6830,12 @@ async function crawlSite(seed, opts = {}) {
     }
     const r = await robotsFor(url);
     if (!opts.ignoreRobots && !isAllowed(r, url)) {
-      if (!disallowed.includes(url)) disallowed.push(url);
+      disallow(url);
       return false;
     }
     if (refusesDelay(url, r)) return false;
-    await awaitHostSlot(url, delayFor(r));
-    return true;
+    await awaitHostSlot(url, delayFor(r), Date.now(), opts.signal);
+    return !opts.signal?.aborted;
   };
   const authorizeUrl = (url) => authorizeHop(url, false);
   const authorizeSeed = (url) => authorizeHop(url, true);
@@ -6898,7 +6948,7 @@ async function crawlSite(seed, opts = {}) {
       const slice = wave.slice(cursor, cursor + (room - batch.length));
       const files = await Promise.all(slice.map((it) => robotsFor(it.url)));
       slice.forEach((item, i) => {
-        if (!opts.ignoreRobots && !isAllowed(files[i], item.url)) disallowed.push(item.url);
+        if (!opts.ignoreRobots && !isAllowed(files[i], item.url)) disallow(item.url);
         else batch.push(item);
       });
       cursor += slice.length;
@@ -7633,7 +7683,7 @@ async function searchViaKeyless(engine, query, opts = {}) {
   for (let p = 0; p < pages && hits.length < limit; p++) {
     if (opts.signal?.aborted || Date.now() >= deadline - spentSlackMs(opts.budgetMs)) {
       if (p > 0) break;
-      return { hits: [], note: `${spec.label} was not asked: ${opts.signal?.aborted ? "the search was cancelled" : "no time was left"}.` };
+      return { hits: [], note: `${spec.label} was not asked: ${opts.signal?.aborted ? "the search was cancelled" : "no time was left"}.`, stopped: true };
     }
     const r = await httpGet(url, {
       accept: "text/html",
@@ -7644,6 +7694,7 @@ async function searchViaKeyless(engine, query, opts = {}) {
     });
     if (!r.ok || !r.body.trim()) {
       if (p > 0) break;
+      if (!r.status && r.error === "cancelled") return { hits: [], note: `${spec.label} did not get to answer: the search was cancelled.`, stopped: true };
       if (r.ok) return { hits: [], note: `${spec.label} returned an empty page (HTTP ${r.status}).`, status: r.status };
       const { throttled, why } = throttleReason(r.status, r.error);
       return { hits: [], note: `${spec.label} ${why}.`, throttled, ...r.status === 403 ? { blocked: true } : {}, status: r.status };
@@ -7671,7 +7722,9 @@ async function searchViaKeyless(engine, query, opts = {}) {
     const next = spec.next ? spec.next(r.body, q, kl, p) : spec.url(q, p + 1, kl, locale);
     if (!next) break;
     url = next;
-    if (pageDelayMs()) await sleep(pageDelayMs());
+    const pause = pageDelayMs();
+    if (opts.signal?.aborted || Date.now() + pause >= deadline - spentSlackMs(opts.budgetMs)) break;
+    if (pause) await sleep(pause, opts.signal);
   }
   return hits.length ? { hits, answered: true } : { hits: [], note: `${spec.label} returned no results.`, answered: true };
 }
@@ -7721,7 +7774,7 @@ async function searchViaSearxng(query, opts = {}) {
   const pages = Math.max(1, opts.pages ?? 1);
   const limit = Math.max(1, opts.limit ?? 10);
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
-  const language = searxngLanguage(opts);
+  const language = searxngLanguage(opts.lang, opts.region);
   const root = `${base}/search?q=${encodeURIComponent(query)}&format=json&safesearch=1` + (language ? `&language=${encodeURIComponent(language)}` : "");
   const notes = [];
   const seen = /* @__PURE__ */ new Set();
@@ -7743,6 +7796,9 @@ async function searchViaSearxng(query, opts = {}) {
       signal: opts.signal
     });
     if (!r.ok) {
+      if (p === 0 && !r.status && r.error === "cancelled") {
+        return rungResult("searxng", "not-tried", [], ["SearXNG did not get to answer: the search was cancelled."]);
+      }
       if (p === 0) {
         failed2 = r.status === 429 || r.status === 503 ? "throttled" : r.status === 0 ? "unreachable" : "error";
         notes.push(
@@ -7786,7 +7842,11 @@ async function searchViaSearxng(query, opts = {}) {
       if (hits.length >= limit) break;
     }
     if (hits.length === before) break;
-    if (p < pages - 1 && pageDelayMs()) await sleep(pageDelayMs());
+    if (p < pages - 1) {
+      const pause = pageDelayMs();
+      if (opts.signal?.aborted || Date.now() + pause >= deadline - spentSlackMs2(opts.timeoutMs)) break;
+      if (pause) await sleep(pause, opts.signal);
+    }
   }
   if (suspended.size) {
     notes.push(`SearXNG upstreams throttled: ${[...suspended].map(([e, why]) => `${e} (${why})`).join(", ")} \u2014 fewer results than usual, not an empty web.`);
@@ -7794,12 +7854,6 @@ async function searchViaSearxng(query, opts = {}) {
   if (!hits.length && !notes.length) notes.push("SearXNG returned no results.");
   const outcome = hits.length ? "hits" : failed2 ?? (suspended.size ? "throttled" : "empty");
   return rungResult("searxng", outcome, hits, notes);
-}
-function searxngLanguage(opts) {
-  if (!opts.lang) return void 0;
-  const region = opts.region?.trim().toLowerCase();
-  if (!region) return opts.lang;
-  return region === "wt" ? baseLang(opts.lang) : `${baseLang(opts.lang)}-${region.toUpperCase()}`;
 }
 function budgetDeadline(opts) {
   return opts.timeoutMs !== void 0 && opts.timeoutMs > 0 ? Date.now() + opts.timeoutMs : Number.POSITIVE_INFINITY;
@@ -7820,6 +7874,7 @@ function report(rung, outcome, hits = 0, note) {
 var answered = (outcome) => outcome === "hits" || outcome === "empty";
 function keylessOutcome(r) {
   if (r.hits.length) return "hits";
+  if (r.stopped) return "not-tried";
   if (r.answered) return "empty";
   if (r.blocked) return "blocked";
   if (r.throttled) return "throttled";
@@ -7879,7 +7934,7 @@ async function search(query, opts = {}) {
       if (!r.answered && r.note) notes.push(r.note);
     }
   }
-  if (!hits.length) notes.push(closingNote(rungs));
+  if (!hits.length) notes.push(closingNote(rungs, opts.signal?.aborted === true));
   return { hits, notes, rungs, searched: rungs.some((r) => answered(r.outcome)) };
 }
 var limitOf = (opts) => Math.max(1, opts.limit ?? 10);
@@ -7901,12 +7956,13 @@ function firecrawlOutcome(fc) {
   if (fc.status === 0) return "unreachable";
   return fc.status === 429 || fc.status === 503 ? "throttled" : "error";
 }
-function closingNote(rungs) {
+function closingNote(rungs, cancelled) {
   const cli = brand().cli;
   if (rungs.every((r) => r.outcome === "disabled")) {
     return `No search backend was enabled \u2014 SearXNG and Firecrawl are off and no keyless engine is selected, so nothing was searched. Set ${envName("ENGINES")} to a list of ${KEYLESS_ENGINES.join(", ")}, or run \`${cli} stack up\`.`;
   }
   if (rungs.some((r) => answered(r.outcome))) return `No results from any engine. \`${cli} stack up\` starts SearXNG and Firecrawl locally.`;
+  if (cancelled) return "The search was cancelled before any engine answered \u2014 nothing was searched.";
   const keyless = rungs.filter((r) => isKeylessEngine(r.rung));
   if (keyless.length && keyless.every((r) => r.outcome === "blocked")) {
     return `Every keyless engine blocked this client (${keyless.map((r) => r.rung).join(", ")}) \u2014 nothing was searched, which is not the same as nothing being there. Try again later, or run \`${cli} stack up\` for a local SearXNG.`;
@@ -8164,8 +8220,11 @@ import { basename as basename2, join as join13, resolve as resolve3 } from "path
 
 // src/forge-host.ts
 var KINDS = /* @__PURE__ */ new Set(["github", "gitlab", "gitea"]);
+var WWW_ALIASED = /* @__PURE__ */ new Set(["github.com", "gitlab.com", "codeberg.org", "bitbucket.org"]);
 function normalizeForgeHost(host) {
-  return host.trim().toLowerCase().replace(/^www\./, "");
+  const h = host.trim().toLowerCase();
+  const bare = h.replace(/^www\./, "");
+  return WWW_ALIASED.has(bare) ? bare : h;
 }
 function configuredForgeHosts() {
   const out = /* @__PURE__ */ new Map();
@@ -8190,7 +8249,7 @@ function hostForgeKind(host) {
 // src/repo.ts
 function resolveRepo(raw, opts = {}) {
   const trimmed = raw.trim();
-  if (trimmed) {
+  if (trimmed && opts.local !== false) {
     const asPath = resolve3(trimmed);
     if (existsSync5(asPath) && statSync4(asPath).isDirectory()) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename2(asPath)}-${asPath}`)}` };
@@ -8215,7 +8274,7 @@ function resolveRepo(raw, opts = {}) {
   const url = /^([a-z][a-z0-9+.-]*):\/\/(?:([^@/]+)@)?([^/:?#]+)(?::(\d+))?\/(.+)$/i.exec(trimmed);
   const hostPath = /^([a-z0-9.-]+\.[a-z]{2,})\/(.+)$/i.exec(trimmed);
   if (scp) {
-    transport = { kind: "scp", user: scp[1] };
+    transport = { kind: "scp", user: scp[1], absolute: scp[3].startsWith("/") };
     host = scp[2];
     rest = scp[3];
   } else if (url) {
@@ -8242,7 +8301,7 @@ function resolveRepo(raw, opts = {}) {
   const path = segments.join("/");
   const repo = segments[segments.length - 1];
   const owner = segments.length > 1 ? segments.slice(0, -1).join("/") : void 0;
-  const cloneUrl = transport.kind === "scp" ? `${transport.user}@${host}:${path}.git` : transport.kind === "url" ? `${transport.scheme}://${transport.userinfo ? `${transport.userinfo}@` : ""}${host}${transport.port ? `:${transport.port}` : ""}/${path}.git` : `https://${host}/${path}.git`;
+  const cloneUrl = transport.kind === "scp" ? `${transport.user}@${host}:${transport.absolute ? "/" : ""}${path}.git` : transport.kind === "url" ? `${transport.scheme}://${transport.userinfo ? `${transport.userinfo}@` : ""}${host}${transport.port ? `:${transport.port}` : ""}/${path}.git` : `https://${host}/${path}.git`;
   return {
     raw: trimmed,
     host,
@@ -8256,14 +8315,23 @@ function resolveRepo(raw, opts = {}) {
 }
 function filePath(url) {
   const file = /^file:\/\/(\/.*)$/.exec(url);
-  return file ? file[1].replace(/\.git$/, "").replace(/\/+$/, "") : void 0;
+  return file ? trimRuns(file[1].replace(/\.git$/, ""), "/", false) : void 0;
 }
+function trimRuns(s, ch, start = true) {
+  const code = ch.charCodeAt(0);
+  let a = 0;
+  let b = s.length;
+  while (start && a < b && s.charCodeAt(a) === code) a++;
+  while (b > a && s.charCodeAt(b - 1) === code) b--;
+  return s.slice(a, b);
+}
+var fold = (k) => trimRuns(k.replace(/[^a-z0-9._-]+/g, "-"), "-");
+var sha256Hex = (k) => createHash3("sha256").update(k).digest("hex");
 function repoSlug(key) {
   const k = key.toLowerCase();
-  const slug = slugify(k);
-  const folded = k.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  if (/^[a-z0-9._/]+$/.test(k) || slug !== folded) return slug;
-  return `${slugify(k, { max: 111 })}-${createHash3("sha256").update(k).digest("hex").slice(0, 8)}`;
+  const folded = fold(k);
+  if (/^[a-z0-9._/]+$/.test(k) && slugify(k) === folded) return folded;
+  return `${folded.slice(0, 105).replace(/-+$/, "") || "repo"}--${sha256Hex(k).slice(0, 12)}`;
 }
 var DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
 var TWO_SEGMENT_HOSTS = /* @__PURE__ */ new Set(["bitbucket.org"]);
@@ -8336,10 +8404,15 @@ function limited(status, headers, data) {
   return status === 403 && (headers.get("x-ratelimit-remaining") === "0" || /rate limit/i.test(JSON.stringify(data ?? "")));
 }
 function resetTime(headers) {
-  const epoch = Number(headers.get("x-ratelimit-reset") ?? headers.get("ratelimit-reset"));
-  if (Number.isFinite(epoch) && epoch > 0) return new Date(epoch * 1e3).toISOString();
   const wait = parseRetryAfter(headers, Number.POSITIVE_INFINITY);
-  return wait === void 0 ? void 0 : new Date(Date.now() + wait).toISOString();
+  if (wait !== void 0) return new Date(Date.now() + wait).toISOString();
+  const epoch = Number(headers.get("x-ratelimit-reset") ?? headers.get("ratelimit-reset"));
+  return Number.isFinite(epoch) && epoch > 0 ? new Date(epoch * 1e3).toISOString() : void 0;
+}
+function quotaState(headers) {
+  const remaining = headers.get("x-ratelimit-remaining") ?? headers.get("ratelimit-remaining");
+  if (remaining === null || remaining.trim() === "" || !Number.isFinite(Number(remaining))) return void 0;
+  return Number(remaining) <= 0 ? "spent" : "left";
 }
 var REDIRECT_STATUS2 = /* @__PURE__ */ new Set([301, 302, 303, 307, 308]);
 var RETRY_STATUS2 = /* @__PURE__ */ new Set([502, 503, 504]);
@@ -8352,7 +8425,17 @@ function failureText(e) {
   if (!detail) return typeof err?.message === "string" ? err.message : String(e);
   return code && !detail.includes(code) ? `${code}: ${detail}` : detail;
 }
-async function forgeGetOnce(url, headers, timeoutMs) {
+async function refusal(authorize, url) {
+  if (!authorize) return void 0;
+  let error;
+  try {
+    if (!await authorize(url)) error = `URL not authorized: ${url}`;
+  } catch (e) {
+    error = `URL authorization failed for ${url}: ${e.message}`;
+  }
+  return error === void 0 ? void 0 : { ok: false, status: 0, data: void 0, error, permanent: true, refused: true };
+}
+async function forgeGetOnce(url, headers, timeoutMs, authorize) {
   const ctrl = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -8363,14 +8446,18 @@ async function forgeGetOnce(url, headers, timeoutMs) {
   let target = url;
   try {
     for (let hop = 0; ; hop++) {
+      const refused = await refusal(authorize, target);
+      if (refused) return refused;
       const res = await fetch(target, { headers: sent, redirect: "manual", signal: ctrl.signal });
       const location = res.headers.get("location");
       if (REDIRECT_STATUS2.has(res.status) && location) {
         await res.body?.cancel().catch(() => {
         });
-        if (hop >= MAX_REDIRECTS) return { ok: false, status: 0, data: void 0, error: `more than ${MAX_REDIRECTS} redirects from ${url}` };
+        if (hop >= MAX_REDIRECTS) return { ok: false, status: 0, data: void 0, error: `more than ${MAX_REDIRECTS} redirects from ${url}`, permanent: true };
         const next = new URL(location, target);
-        if (next.protocol !== "https:" && next.protocol !== "http:") return { ok: false, status: 0, data: void 0, error: `redirected to ${next.protocol}` };
+        if (next.protocol !== "https:" && next.protocol !== "http:") {
+          return { ok: false, status: 0, data: void 0, error: `redirected to ${next.protocol}`, permanent: true };
+        }
         if (next.origin !== new URL(target).origin) {
           delete sent.authorization;
           delete sent["private-token"];
@@ -8390,10 +8477,18 @@ async function forgeGetOnce(url, headers, timeoutMs) {
         data = text;
       }
       const quota = !res.ok && limited(res.status, res.headers, data);
-      return { ok: res.ok, status: res.status, data, ...quota ? { rateLimited: true, resetAt: resetTime(res.headers) } : {} };
+      const retryAfterMs = RETRY_STATUS2.has(res.status) ? parseRetryAfter(res.headers, Number.POSITIVE_INFINITY) : void 0;
+      return {
+        ok: res.ok,
+        status: res.status,
+        data,
+        ...quota ? { rateLimited: true, resetAt: resetTime(res.headers), quota: quotaState(res.headers) } : {},
+        ...retryAfterMs !== void 0 ? { retryAfterMs } : {}
+      };
     }
   } catch (e) {
-    return { ok: false, status: 0, data: void 0, error: timedOut ? `timed out after ${timeoutMs} ms` : failureText(e), timedOut };
+    if (timedOut) return { ok: false, status: 0, data: void 0, error: `timed out after ${timeoutMs} ms`, timedOut };
+    return { ok: false, status: 0, data: void 0, error: failureText(e), ...isPermanentFailure(e) ? { permanent: true } : {} };
   } finally {
     clearTimeout(timer);
   }
@@ -8403,20 +8498,33 @@ async function forgeGet(url, kind, ref, opts) {
   const headers = { "user-agent": contactUa(), accept: kind === "github" ? "application/vnd.github+json" : "application/json", ...auth };
   const tokenVar = auth.authorization ? forgeToken(kind)?.name : void 0;
   const timeoutMs = opts.timeoutMs ?? 15e3;
-  let r = await forgeGetOnce(url, headers, timeoutMs);
-  if (RETRY_STATUS2.has(r.status) || r.status === 0 && !r.timedOut) {
-    await sleep(envInt("RETRY_MS", 600, 0, 5e3));
-    r = await forgeGetOnce(url, headers, timeoutMs);
+  const attempts = maxAttempts();
+  let r = await forgeGetOnce(url, headers, timeoutMs, opts.authorizeUrl);
+  for (let attempt = 1; attempt < attempts; attempt++) {
+    const wait = retryWait(r);
+    if (wait === void 0) break;
+    await sleep(wait);
+    r = await forgeGetOnce(url, headers, timeoutMs, opts.authorizeUrl);
   }
   return tokenVar ? { ...r, tokenVar } : r;
+}
+function retryWait(r) {
+  if (RETRY_STATUS2.has(r.status)) return retryDelayMs(r.retryAfterMs);
+  if (r.status === 0 && !r.timedOut && !r.permanent) return defaultRetryMs();
+  return void 0;
 }
 var FORGE_NAME = { github: "GitHub", gitlab: "GitLab", gitea: "Gitea" };
 function failure(r, forge, ref, action, opts) {
   const host = ref.host;
   const tokenVar = TOKEN_VARS[forge][0];
+  const declared = !!opts.apiBase || tokenHostAllowed(forge, host);
+  const withheld = !r.tokenVar && !declared ? forgeToken(forge)?.name : void 0;
+  const declare = `${envName("FORGE_HOSTS")}=${host}=${forge}`;
+  const withheldNote = withheld ? `${withheld} is set, but is only sent to hosts listed in ${envName("FORGE_HOSTS")}: declare this one with ${declare}` : "";
+  const authAdvice = withheldNote || (declared ? `set ${tokenVar}` : `declare the host with ${declare} and set ${tokenVar}`);
   if (r.rateLimited) {
     const when = r.resetAt ? ` until ${r.resetAt}` : "";
-    const advice = r.tokenVar ? `the quota for ${r.tokenVar} is spent` : opts.apiBase || tokenHostAllowed(forge, host) ? `set ${tokenVar} to raise the anonymous quota` : `list ${host} in ${envName("FORGE_HOSTS")} and set ${tokenVar} to raise the anonymous quota`;
+    const advice = r.quota === "left" ? `a secondary limit on how fast requests arrive; the quota${r.tokenVar ? ` for ${r.tokenVar}` : ""} is not spent` : r.tokenVar ? `the quota for ${r.tokenVar} is spent` : `${authAdvice} to raise the anonymous quota`;
     return {
       note: `${FORGE_NAME[forge]} rate-limited this request${when} \u2014 ${advice}.`,
       status: r.status,
@@ -8424,6 +8532,7 @@ function failure(r, forge, ref, action, opts) {
       ...r.resetAt ? { resetAt: r.resetAt } : {}
     };
   }
+  if (r.refused) return { note: `${action} refused: ${r.error}.`, status: 0 };
   if (r.status === 0) {
     let apiHost = host;
     try {
@@ -8432,7 +8541,7 @@ function failure(r, forge, ref, action, opts) {
     }
     return { note: `${action} failed: network error reaching ${apiHost} \u2014 ${r.error ?? "no response"}.`, status: 0 };
   }
-  const why = r.status === 404 ? `no such repository on ${host}, or it is private` : r.status === 401 ? r.tokenVar ? `${host} rejected ${r.tokenVar} \u2014 refresh it, or unset it to read public repositories anonymously` : `${host} requires authentication \u2014 set ${tokenVar}` : r.status === 403 ? `${host} refused access${r.tokenVar ? ` \u2014 ${r.tokenVar} may lack the scope this needs` : ""}` : r.status === 422 && forge === "github" ? "GitHub cannot search that repository \u2014 it does not exist, or it is private" : r.status >= 500 ? `${host} is unavailable` : r.error ?? `${host} answered with an error`;
+  const why = r.status === 404 ? `no such repository on ${host}, or it is private${withheldNote ? ` \u2014 ${withheldNote}` : ""}` : r.status === 401 ? r.tokenVar ? `${host} rejected ${r.tokenVar} \u2014 refresh it, or unset it to read public repositories anonymously` : `${host} requires authentication \u2014 ${authAdvice}` : r.status === 403 ? `${host} refused access${r.tokenVar ? ` \u2014 ${r.tokenVar} may lack the scope this needs` : withheldNote ? ` \u2014 ${withheldNote}` : ""}` : r.status === 422 && forge === "github" ? "GitHub cannot search that repository \u2014 it does not exist, or it is private" : r.status >= 500 ? `${host} is unavailable` : r.error ?? `${host} answered with an error`;
   return { note: `${action} failed (status ${r.status}): ${why}.`, status: r.status };
 }
 function failed(r, forge, ref, action, opts) {
@@ -9047,6 +9156,10 @@ function readResource(uri, moduleDir) {
   const rel = uri.slice(URI_SCHEME.length);
   if (!rel) throw new ResourceError("empty resource path");
   const target = resolve5(root, rel);
+  const served = relative2(root, target).split(sep).join("/");
+  if (served !== "SKILL.md" && !/^references\/[^/]+\.md$/.test(served)) {
+    throw new ResourceError(`not a resource this server serves: ${uri} (resources/list names them)`);
+  }
   const rootReal = realpathSync(root);
   let targetReal;
   try {
@@ -9058,10 +9171,6 @@ function readResource(uri, moduleDir) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
   if (!statSync5(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
-  const served = relative2(root, target).split(sep).join("/");
-  if (served !== "SKILL.md" && !/^references\/[^/]+\.md$/.test(served)) {
-    throw new ResourceError(`not a resource this server serves: ${uri} (resources/list names them)`);
-  }
   return { uri, mimeType: "text/markdown", text: readFileSync12(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
@@ -9390,9 +9499,9 @@ async function runStdioServer(adapter, opts = {}) {
         continue;
       }
       if (Array.isArray(parsed)) {
-        const refusal = batchRefusal(parsed, negotiated);
-        if (refusal) {
-          send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: refusal } });
+        const refusal2 = batchRefusal(parsed, negotiated);
+        if (refusal2) {
+          send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: refusal2 } });
           continue;
         }
         const batch = parsed;
@@ -9538,9 +9647,9 @@ async function route(req, res, adapter, opts) {
     return;
   }
   if (Array.isArray(parsed)) {
-    const refusal = batchRefusal(parsed, declared);
-    if (refusal) {
-      sendJson(res, 400, { jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: refusal } }, origin);
+    const refusal2 = batchRefusal(parsed, declared);
+    if (refusal2) {
+      sendJson(res, 400, { jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: refusal2 } }, origin);
       return;
     }
   }
@@ -9733,21 +9842,22 @@ function publicUrlsOnly(lookup2) {
   return async (url) => await publicUrlRefusal(url, lookup2) === void 0;
 }
 function confinePath(root, requested) {
+  const rootLex = resolve6(root);
   const rootReal = realpathSync2(root);
-  const inside = (p) => {
-    const rel = relative3(rootReal, p);
+  const under = (base, p) => {
+    const rel = relative3(base, p);
     return !isAbsolute2(rel) && rel !== ".." && !rel.startsWith(`..${sep2}`);
   };
-  const outside = new Error(`${requested} is outside ${rootReal}, the only directory this server reads files from`);
-  const target = resolve6(rootReal, requested);
-  if (!inside(target)) throw outside;
+  const outside = new Error(`${requested} is outside ${rootLex}, the only directory this server reads files from`);
+  const target = resolve6(rootLex, requested);
+  if (!under(rootLex, target) && !under(rootReal, target)) throw outside;
   let real;
   try {
     real = realpathSync2(target);
   } catch {
-    throw new Error(`no such file under ${rootReal}: ${requested}`);
+    throw new Error(`no such file under ${rootLex}: ${requested}`);
   }
-  if (!inside(real)) throw outside;
+  if (!under(rootReal, real)) throw outside;
   return real;
 }
 
@@ -9991,8 +10101,9 @@ ENVIRONMENT
   WEBINDEX_NO_ROBOTS     robots and crawl do not consult robots.txt \u2014 only on a site you own
   WEBINDEX_ROBOTS_UA     the token robots.txt groups are matched against (default webindex)
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
-  WEBINDEX_FETCH_CONCURRENCY  URLs one fetch keeps in flight, 1-16 (default 4)
-  WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
+  WEBINDEX_FETCH_CONCURRENCY  URLs one fetch keeps in flight, 1-16 (default 4), one host's included
+  WEBINDEX_POLITE_DELAY_MS    floor between two requests a crawl makes to one host, in ms
+                              (default 400); a robots.txt Crawl-delay wins
   WEBINDEX_MAX_CRAWL_DELAY_MS the longest robots.txt Crawl-delay a crawl waits out, in ms
                               (default 60000); a site asking for more is not crawled
   WEBINDEX_PUBLIC_ONLY   set to make every \`mcp\` run --public-only
@@ -10240,12 +10351,20 @@ async function rankDocuments(question, docs, opts = {}) {
   if (lanes.length) {
     const k = envInt("RRF_K", 60);
     const lexical = competitionRanks(raw);
-    relevance = raw.map((s, i) => {
+    const fused = raw.map((s, i) => {
       if (!dense && !(s > 0)) return 0;
-      let fused = 1 / (k + lexical[i]);
-      for (const lane of lanes) if (lane[i] !== void 0) fused += 1 / (k + lane[i]);
-      return fused;
+      let f = 1 / (k + lexical[i]);
+      for (const lane of lanes) if (lane[i] !== void 0) f += 1 / (k + lane[i]);
+      return f;
     });
+    let lo = Number.POSITIVE_INFINITY;
+    let hi = 0;
+    for (const f of fused) {
+      if (f > 0 && f < lo) lo = f;
+      if (f > hi) hi = f;
+    }
+    const floor = 0.01;
+    relevance = fused.map((f) => !(f > 0) ? 0 : hi > lo ? floor + (1 - floor) * (f - lo) / (hi - lo) : 1);
   }
   if (!dense && index.queryTerms.length && raw.every((s) => !(s > 0))) {
     notes.push("no document contains any term of the question \u2014 the order is not a relevance ranking.");
@@ -10366,12 +10485,25 @@ function withPolicy(policy, tools) {
     })
   );
 }
+function resolvedHost(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return void 0;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return void 0;
+  const host = u.hostname.startsWith("[") ? u.hostname.slice(1, -1) : u.hostname;
+  return isIP2(host) ? void 0 : host;
+}
 function webindexAdapter(policy = {}) {
   const guard = policy.publicOnly ? publicUrlsOnly() : void 0;
   const refuseUrl = async (url) => {
     if (!guard) return;
     const why = await publicUrlRefusal(url);
-    if (why) throw new ToolError(`Refused ${url}: ${why} \u2014 this server fetches public addresses only.`);
+    if (!why) return;
+    const host = resolvedHost(url);
+    throw new ToolError(`Refused ${url}: ${host ? `${host} is not a public address, or did not resolve` : why} \u2014 this server fetches public addresses only.`);
   };
   const root = policy.extractRoot;
   const localFiles = root !== void 0 || !policy.noLocalFiles;
@@ -10384,9 +10516,28 @@ function webindexAdapter(policy = {}) {
       throw new ToolError(e.message);
     }
   };
+  const repoRef = (raw, kind) => {
+    if (root === void 0 && localFiles) return resolveRepo(raw, kind);
+    const named = raw.trim();
+    if (isAbsolute3(named) || /^(?:\.{1,2}|~)(?:[\\/]|$)/.test(named)) return resolveRepo(localPath(named), kind);
+    if (named && root !== void 0) {
+      try {
+        const under = confinePath(root, named);
+        if (statSync6(under).isDirectory()) return resolveRepo(under, kind);
+      } catch {
+      }
+    }
+    return resolveRepo(named, { ...kind, local: false });
+  };
   const refuseForgeHost = async (ref, kind) => {
     if (!guard || configuredForgeHosts().has(normalizeForgeHost(ref.host))) return;
     await refuseUrl(apiBase(ref, kind ? { kind } : {}));
+  };
+  const forgeGuard = (ref, kind) => {
+    if (!guard) return void 0;
+    if (!configuredForgeHosts().has(normalizeForgeHost(ref.host))) return guard;
+    const own = new URL(apiBase(ref, kind ? { kind } : {})).origin;
+    return async (url) => new URL(url).origin === own || await guard(url);
   };
   return {
     version: ENGINE_VERSION,
@@ -10739,13 +10890,12 @@ extractor: ${r.extractor}` };
         if (forge !== void 0 && !isForgeKind(forge)) throw new InvalidParamsError(`\`forge\` must be one of: ${FORGE_KINDS.join(", ")}`);
         const raw = String(args.repo ?? "");
         const kind = forge ? { kind: forge } : {};
-        const parsed = resolveRepo(raw, kind);
-        if (parsed.isLocal) localPath(resolve7(raw.trim()));
-        const ref = forgeRef(parsed, kind);
+        const ref = forgeRef(repoRef(raw, kind), kind);
         if (ref.host === "generic") throw new ToolError(`"${raw}" does not name a repository.`);
         await refuseForgeHost(ref, forge);
         const limit = typeof args.limit === "number" ? args.limit : void 0;
-        const opts = { ...limit ? { limit } : {}, ...forge ? { kind: forge } : {} };
+        const authorizeUrl = forgeGuard(ref, forge);
+        const opts = { ...limit ? { limit } : {}, ...forge ? { kind: forge } : {}, ...authorizeUrl ? { authorizeUrl } : {} };
         if (name === "webindex_repo") {
           const { facts: f, note } = await repoFactsResult(ref, opts);
           if (!f) throw new ToolError(note ?? `Could not read ${ref.webUrl ?? ref.raw}.`);
@@ -11693,7 +11843,8 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
       return "built-in";
     };
     const rungRows = (all, enabled, engineVar) => {
-      const why = env(engineVar)?.trim() ? `${envName(engineVar)}=${env(engineVar).trim()}` : envName("NO_NPX");
+      const honoured = enginesFromEnv(engineVar, all) !== void 0;
+      const why = honoured ? `${envName(engineVar)}=${env(engineVar).trim()}` : envName("NO_NPX");
       return [
         ...enabled.map((id) => ({ id, enabled: true, state: rungState(id) })),
         ...all.filter((id) => !enabled.includes(id)).map((id) => ({ id, enabled: false, state: `off (${why})` }))
