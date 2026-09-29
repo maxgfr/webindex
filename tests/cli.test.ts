@@ -1481,6 +1481,61 @@ describe("rank", () => {
     expect(ranked[2]!.score).toBe(0);
   });
 
+  // Seven pages on one topic, close enough to each other that diversity has
+  // something to demote, and one that shares a single word with the question.
+  const ON_TOPIC = [
+    ["Token bucket rate limiter explained", "A token bucket rate limiter refills tokens at a fixed rate. Each request takes a token from the bucket; when the bucket is empty the limiter rejects the request."],
+    ["Implementing a rate limiter with token buckets", "To implement a rate limiter, keep a token bucket per client. Refill the bucket at the configured rate and allow bursts up to capacity."],
+    ["Rate limiting algorithms compared", "Fixed window, sliding window, leaky bucket and token bucket are common rate limiting algorithms. The token bucket limiter permits bursts."],
+    ["Distributed rate limiter design", "A distributed rate limiter stores token bucket state in Redis. Each node decrements the bucket atomically; the limiter refills tokens."],
+    ["Token bucket in Go", "The golang.org/x/time/rate package implements a token bucket limiter. You configure the rate and the bucket burst."],
+    ["API gateway rate limits", "API gateways enforce rate limits with a token bucket per key. When the bucket runs out of tokens the gateway limiter responds with 429."],
+    ["Tuning a token bucket limiter", "Tuning the limiter means choosing the rate and the bucket capacity. A larger bucket absorbs bursts; a lower rate protects the backend."],
+  ].map(([title, text], i) => ({ url: `https://on${i}.test/`, title, text, score: 0.95 - i * 0.05 }));
+  const OFF_TOPIC = {
+    url: "https://weak.test/",
+    title: "Ice bucket challenge",
+    text: "The ice bucket challenge was a viral charity campaign where people poured a bucket of ice water over their heads.",
+    score: 0.2,
+  };
+
+  it("keeps a page that is last in every lane at the bottom when a lane is fused", async () => {
+    // Every fused value is an RRF sum between 2/(k+n) and 2/(k+1). Divided by
+    // the pool max, every matching page landed between 0.86 and 1, the
+    // relevance gap was smaller than MMR's diversity penalty, and the page last
+    // by BM25F AND by its engine's score was ranked second.
+    // Whichever way the engine orders the on-topic pages among themselves.
+    const reversed = ON_TOPIC.map((d, i) => ({ ...d, score: 0.65 + i * 0.05 }));
+    for (const pool of [[...ON_TOPIC, OFF_TOPIC], [...reversed, OFF_TOPIC]]) {
+      out = [];
+      await run(["rank", "--query", "token bucket rate limiter", "--docs", withDocs(JSON.stringify(pool)), "--json"]);
+      const ranked = JSON.parse(stdout()).ranked as { url: string; score: number }[];
+      const at = ranked.findIndex((r) => r.url === OFF_TOPIC.url);
+      expect(at).toBeGreaterThanOrEqual(ranked.length - 2);
+      expect(ranked[0]!.score).toBe(1);
+      expect(ranked[at]!.score).toBeLessThan(0.5);
+    }
+  });
+
+  it("keeps a page that is last in every lane at the bottom with --dense", async () => {
+    resetOllamaProbe();
+    process.env[envName("OLLAMA")] = "http://ol.test";
+    installFetchMock((url, init) => {
+      if (url.includes("/api/tags")) return { status: 200, body: "{}", contentType: "application/json" };
+      const input = JSON.parse(String(init?.body)).input as string[];
+      const vec = (t: string) => (/Ice bucket/.test(t) ? [0, 1] : [1, 0]);
+      return { status: 200, body: JSON.stringify({ embeddings: input.map(vec) }), contentType: "application/json" };
+    });
+    const pool = [...ON_TOPIC, OFF_TOPIC].map(({ score: _, ...d }) => d);
+    await run(["rank", "--query", "token bucket rate limiter", "--docs", withDocs(JSON.stringify(pool)), "--dense", "--json"]);
+    const j = JSON.parse(stdout());
+    expect(j.note).toBeUndefined();
+    const ranked = j.ranked as { url: string; score: number }[];
+    const at = ranked.findIndex((r) => r.url === OFF_TOPIC.url);
+    expect(at).toBeGreaterThanOrEqual(ranked.length - 2);
+    expect(ranked[at]!.score).toBeLessThan(0.5);
+  });
+
   it("warns when no document contains any term of the question", async () => {
     // The order is then the URL tie-break, which a bare exit 0 passed off as a ranking.
     expect(await run(["rank", "--query", "quantum chromodynamics", "--docs", withDocs(DOCS), "--json"])).toBe(0);
