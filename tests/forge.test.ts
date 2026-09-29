@@ -213,7 +213,7 @@ describe("slugify", () => {
     const a = resolveRepo("file:///srv/git/项目").slug;
     const b = resolveRepo("file:///srv/git/文档").slug;
     expect(a).not.toBe(b);
-    expect(a).toMatch(/^file-srv-git-[0-9a-f]{8}$/);
+    expect(a).toMatch(/^file-srv-git--[0-9a-f]{12}$/);
     const long = `/srv/${"x".repeat(130)}`;
     expect(resolveRepo(`file://${long}/alpha`).slug).not.toBe(resolveRepo(`file://${long}/beta`).slug);
     expect(slugify("x".repeat(200)).length).toBe(120);

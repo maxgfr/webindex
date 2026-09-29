@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -830,6 +831,19 @@ describe("cloning, against a real local repository", () => {
     expect(resolveRepo("gitlab.com/g/sub/p").slug).not.toBe(resolveRepo("gitlab.com/g-sub/p").slug);
     // A name slugify keeps exactly stays readable and unsuffixed.
     expect(resolveRepo("github.com/expressjs/express").slug).toBe("github.com-expressjs-express");
+    // ...and can never spell a hashed slug: a readable path ending in the right
+    // eight hex characters used to reproduce another repository's exactly.
+    const victim = "gitlab.com/foo-bar/proj";
+    const sha8 = createHash("sha256").update(victim).digest("hex").slice(0, 8);
+    expect(resolveRepo(`https://${victim}`).slug).not.toBe(resolveRepo(`https://gitlab.com/foo/bar/proj/${sha8}`).slug);
+    // Nor can a key slugify had to cut, hash or strip: `x.git` lost its `.git`.
+    expect(resolveRepo("https://gitlab.com/o/x.git.git").slug).not.toBe(resolveRepo("https://gitlab.com/o/x").slug);
+    const long = `gitlab.com/${"g/".repeat(60)}p`;
+    const slugs = [`https://${long}`, `https://${long.replace("g/g", "g-g")}`, "https://gitlab.com/o/x.git.git", "file:///srv/git/项目"].map(
+      (s) => resolveRepo(s).slug,
+    );
+    for (const s of slugs) expect(s.length, s).toBeLessThanOrEqual(120);
+    expect(new Set(slugs).size).toBe(slugs.length);
 
     const parent = mkdtempSync(join(tmpdir(), "wi-twins-"));
     try {
@@ -865,6 +879,18 @@ describe("cloning, against a real local repository", () => {
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
+  });
+
+  it("keeps using a clone made under the 1.21.0 slug when its origin is this repository", async () => {
+    // That release suffixed a hyphenated key with eight hex characters, which a
+    // readable key could spell; the slug moved again, and its clones must not
+    // all be fetched a second time.
+    const ref = resolveRepo(`file://${origin}`);
+    const k = origin.toLowerCase();
+    const v121 = join(cacheDir, `file-${slugify(k, { max: 111 })}-${createHash("sha256").update(k).digest("hex").slice(0, 8)}`);
+    expect(v121).not.toBe(join(cacheDir, ref.slug));
+    sh("git", ["clone", "-q", "--depth", "1", ref.cloneUrl!, v121]);
+    expect(await ensureClone(ref)).toBe(v121);
   });
 
   it("clones a named branch beside the default one, not in place of it", async () => {

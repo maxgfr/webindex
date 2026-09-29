@@ -173,39 +173,46 @@ function filePath(url: string): string | undefined {
   return file ? file[1]!.replace(/\.git$/, "").replace(/\/+$/, "") : undefined;
 }
 
+// A key as slugify spells it before cutting or hashing anything: every run of
+// characters it does not keep becomes one "-".
+const fold = (k: string): string => k.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+const sha256Hex = (k: string): string => createHash("sha256").update(k).digest("hex");
+
 /**
  * The cache key for a repository path — one directory per repository.
  *
- * `slugify` folds "/" and "-" into the same "-", so `a-b/c` and `a/b-c` — two
- * repositories, possibly one of them a squatter's — got one slug, and the
- * second was handed the first one's checkout. A key slugify renders exactly (no
- * "-", nothing else it folds) keeps its readable slug; when slugify already had
- * to hash (non-ASCII, over-long), that hash covers the whole key; any other key
- * gets a hash of its exact spelling, so the fold can no longer merge two.
+ * `slugify` folds "/" and "-" into the same "-", strips a `.git`, and cuts or
+ * hashes what it cannot render, so two repositories — one of them possibly a
+ * squatter's — could get one slug, and the second was handed the first one's
+ * checkout. So the slugs come in two spaces that cannot meet. A key slugify
+ * renders exactly (nothing folded but "/", nothing cut, hashed or stripped)
+ * keeps its readable slug, which never holds "--": such a key has no "-", and a
+ * run of "/" folds to one. Every other key is a readable prefix, "--", and a
+ * hash of its exact spelling. The 1.21.0 suffix was one "-" and eight hex
+ * characters, which a readable path ending in those eight could spell exactly.
  */
 function repoSlug(key: string): string {
   const k = key.toLowerCase();
-  const slug = slugify(k);
-  const folded = k.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  if (/^[a-z0-9._/]+$/.test(k) || slug !== folded) return slug;
-  return `${slugify(k, { max: 111 })}-${createHash("sha256").update(k).digest("hex").slice(0, 8)}`;
+  const folded = fold(k);
+  if (/^[a-z0-9._/]+$/.test(k) && slugify(k) === folded) return folded;
+  return `${folded.slice(0, 105).replace(/-+$/, "") || "repo"}--${sha256Hex(k).slice(0, 12)}`;
 }
 
 /**
- * The slug a clone of `ref` was stored under before `repoSlug`, when it differs
- * — so an existing checkout is found again rather than orphaned and re-fetched.
+ * The slugs earlier releases stored a clone of `ref` under, where they differ
+ * from its own — so an existing checkout is found again rather than orphaned and
+ * re-fetched: plain `slugify` before 1.21.0, then 1.21.0's eight-hex suffix.
+ * One is adopted only when its origin says it is this repository.
  */
-function legacySlug(ref: RepoRef): string | undefined {
+function legacySlugs(ref: RepoRef): string[] {
   const p = ref.cloneUrl ? filePath(ref.cloneUrl) : undefined;
-  const old =
-    ref.host === "file"
-      ? p === undefined
-        ? undefined
-        : `file-${slugify(p)}`
-      : ref.repo
-        ? slugify(`${ref.host}/${[ref.owner, ref.repo].filter(Boolean).join("/")}`)
-        : undefined;
-  return old && old !== ref.slug ? old : undefined;
+  const key = ref.host === "file" ? p : ref.repo ? `${ref.host}/${[ref.owner, ref.repo].filter(Boolean).join("/")}` : undefined;
+  if (key === undefined) return [];
+  const k = key.toLowerCase();
+  const before = slugify(k);
+  const v121 = /^[a-z0-9._/]+$/.test(k) || before !== fold(k) ? before : `${slugify(k, { max: 111 })}-${sha256Hex(k).slice(0, 8)}`;
+  const prefix = ref.host === "file" ? "file-" : "";
+  return [...new Set([before, v121])].map((s) => `${prefix}${s}`).filter((s) => s !== ref.slug);
 }
 
 // A dot segment, spelled as a URL parser will read it: `%2e` is a dot to WHATWG
@@ -286,13 +293,17 @@ function branchSlug(branch: string): string {
 async function obtainClone(ref: RepoRef, dir: string, opts: { refresh?: boolean; branch?: string }): Promise<string> {
   let target = dir;
   if (!existsSync(join(dir, ".git")) && !opts.branch) {
-    // A clone made under the slug this repository had before `repoSlug` is
-    // still this repository's — when its origin says so. One whose origin names
-    // another repository is exactly the collision the new slug exists to end.
-    const old = legacySlug(ref);
-    const legacy = old ? join(repoCacheRoot(), old) : undefined;
-    const origin = legacy && existsSync(join(legacy, ".git")) ? originUrl(legacy) : undefined;
-    if (legacy && origin && resolveRepo(origin).slug === ref.slug) target = legacy;
+    // A clone made under a slug this repository had before is still this
+    // repository's — when its origin says so. One whose origin names another
+    // repository is exactly the collision the new slug exists to end.
+    for (const old of legacySlugs(ref)) {
+      const legacy = join(repoCacheRoot(), old);
+      const origin = existsSync(join(legacy, ".git")) ? originUrl(legacy) : undefined;
+      if (origin && resolveRepo(origin).slug === ref.slug) {
+        target = legacy;
+        break;
+      }
+    }
   }
   if (existsSync(join(target, ".git"))) return opts.refresh ? refreshClone(ref, target, opts.branch) : target;
   return freshClone(ref, dir, opts.branch);
