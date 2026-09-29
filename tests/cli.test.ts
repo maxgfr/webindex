@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1231,6 +1231,18 @@ describe("the MCP tools", () => {
       await expect(confined.callTool("webindex_extract", { path: "../secret.md" })).rejects.toThrow(/outside/);
       const decl = confined.listTools(LATEST_PROTOCOL).find((t) => t.name === "webindex_extract")!;
       expect(decl.inputSchema.properties.path!.description).toContain(root);
+    });
+
+    it("reads an absolute path under a root named through a symlink", async () => {
+      // The root is advertised as given; its real path is where the files are.
+      const real = join(dir, "real");
+      mkdirSync(real);
+      writeFileSync(join(real, "note.md"), "inside the root");
+      const link = join(dir, "link");
+      symlinkSync(real, link);
+      const confined = webindexAdapter({ extractRoot: link });
+      expect((await confined.callTool("webindex_extract", { path: join(link, "note.md") })).text).toContain("inside the root");
+      await expect(confined.callTool("webindex_extract", { path: join(link, "..", "secret.md") })).rejects.toThrow(/outside/);
     });
 
     it("offers no file tool at all when local files are off, and reads no local checkout", async () => {
