@@ -140,6 +140,15 @@ describe("extractMainHtml (readability-lite)", () => {
     expect(text).not.toContain("Sidebar page 7");
   });
 
+  it.each(['<DIV ROLE="main">', '<div role="Main">', "<div ROLE=main>", '<section Role="main">'])("reads %s as role=main, as HTML's case rules do", (open) => {
+    const sidebar = Array.from({ length: 60 }, (_, i) => `<li><a href="/p${i}">Sidebar page ${i}</a></li>`).join("");
+    const close = open.startsWith("<section") ? "</section>" : "</DIV>";
+    const html = `<div class="sidebar"><ul>${sidebar}</ul></div>${open}<h1>API reference</h1><p>${"The client exposes a single request method. ".repeat(30)}</p>${close}`;
+    const text = htmlToText(extractMainHtml(html));
+    expect(text).toContain("API reference");
+    expect(text).not.toContain("Sidebar page 7");
+  });
+
   it("does not take navigation for content because its class starts with main-", () => {
     const html = `<div class="main-nav">${"<a>Section link</a> ".repeat(80)}</div><main-nav>${"<a>Custom nav link</a> ".repeat(80)}</main-nav><div class="entry-content"><p>${"Entry prose about lanes. ".repeat(30)}</p></div>`;
     const text = htmlToText(extractMainHtml(html));

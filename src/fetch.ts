@@ -929,7 +929,10 @@ const visibleLength = (h: string) =>
 // Discourse and many CMS themes mark it this way instead of with <main>.
 const ROLE_MAIN = /\srole\s*=\s*["']?main(?=["'\s/>])/i;
 // The element names that carry it on this page, so each can be balanced by name.
-const ROLE_MAIN_TAG = /<([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>])[^<>]*\srole\s*=\s*["']?main(?=["'\s/>])/g;
+// Case-blind, as ROLE_MAIN and dropLandmarks already are: attribute names are
+// in HTML, so `<DIV ROLE="main">` found no tag to balance and the page fell
+// through to a weaker tier, sidebar and all.
+const ROLE_MAIN_TAG = /<([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>])[^<>]*\srole\s*=\s*["']?main(?=["'\s/>])/gi;
 
 // Words in an id or class that mark a content container, and words that mark
 // the chrome around one. `entry-content` and `main-outlet` are content;
