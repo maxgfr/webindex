@@ -97,7 +97,10 @@ export function resolveRepo(raw: string, opts: { kind?: ForgeKind } = {}): RepoR
   // How the clone URL is rebuilt: an http(s) or ssh remote keeps its transport
   // (userinfo and port included — a private repository may be reachable no
   // other way), the scp form keeps its user, and anything else becomes https.
-  let transport: { kind: "scp"; user: string } | { kind: "url"; scheme: "http" | "https" | "ssh"; userinfo?: string; port?: string } | { kind: "https" };
+  let transport:
+    | { kind: "scp"; user: string; absolute: boolean }
+    | { kind: "url"; scheme: "http" | "https" | "ssh"; userinfo?: string; port?: string }
+    | { kind: "https" };
   let host: string;
   let rest: string; // everything after the host, not yet normalised
 
@@ -108,7 +111,9 @@ export function resolveRepo(raw: string, opts: { kind?: ForgeKind } = {}): RepoR
   const hostPath = /^([a-z0-9.-]+\.[a-z]{2,})\/(.+)$/i.exec(trimmed);
 
   if (scp) {
-    transport = { kind: "scp", user: scp[1]! };
+    // An absolute path (`git@host:/srv/git/p.git`) is not the same path read
+    // from the ssh user's home (`git@host:srv/git/p.git`): the "/" is kept.
+    transport = { kind: "scp", user: scp[1]!, absolute: scp[3]!.startsWith("/") };
     host = scp[2]!;
     rest = scp[3]!;
   } else if (url) {
@@ -145,7 +150,7 @@ export function resolveRepo(raw: string, opts: { kind?: ForgeKind } = {}): RepoR
 
   const cloneUrl =
     transport.kind === "scp"
-      ? `${transport.user}@${host}:${path}.git`
+      ? `${transport.user}@${host}:${transport.absolute ? "/" : ""}${path}.git`
       : transport.kind === "url"
         ? `${transport.scheme}://${transport.userinfo ? `${transport.userinfo}@` : ""}${host}${transport.port ? `:${transport.port}` : ""}/${path}.git`
         : `https://${host}/${path}.git`;

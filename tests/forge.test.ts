@@ -155,6 +155,16 @@ describe("resolveRepo", () => {
     });
     // git:// has no auth to keep; https is the transport that works everywhere.
     expect(resolveRepo("git://github.com/a/b.git").cloneUrl).toBe("https://github.com/a/b.git");
+    // An absolute scp path is another repository than the same path read from
+    // the ssh user's home: dropping its "/" cloned the wrong one, or none.
+    expect(resolveRepo("git@server.example:/srv/git/project.git")).toMatchObject({
+      host: "server.example",
+      repo: "project",
+      cloneUrl: "git@server.example:/srv/git/project.git",
+    });
+    expect(resolveRepo("alice@server.example:/home/alice/repos/proj.git").cloneUrl).toBe("alice@server.example:/home/alice/repos/proj.git");
+    expect(resolveRepo("git@server.example:srv/git/project.git").cloneUrl).toBe("git@server.example:srv/git/project.git");
+    expect(resolveRepo("git@server.example:~/proj.git").cloneUrl).toBe("git@server.example:~/proj.git");
   });
 
   it("parses adversarial identifiers in linear time", () => {
