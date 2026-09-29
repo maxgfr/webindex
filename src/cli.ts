@@ -307,12 +307,12 @@ ENVIRONMENT
                          texts per embedding request (16), requests in flight (4)
   WEBINDEX_QDRANT_UPSERT_BATCH  points per upsert request (default 256)
   WEBINDEX_RRF_K         the fusion constant rank and hybrid use (default 60)
-  WEBINDEX_TIMEOUT_MS    how long a request may stay silent before it is abandoned,
-                         not retried (default 20000; --timeout overrides it per call)
+  WEBINDEX_TIMEOUT_MS    how long a request may take, body download included, before
+                         it is abandoned, not retried (default 20000; --timeout overrides it per call)
   WEBINDEX_MAX_ATTEMPTS, WEBINDEX_RETRY_MS
                          attempts per request (default 2, at most 5), back-off before a retry (600)
   WEBINDEX_CACHE_DIR     where the fetch cache lives, and the stack in compose/
-                         (default <tmp>/webindex-<uid>/cache)
+                         (default <tmp>/webindex-<uid>/cache, private to you)
   WEBINDEX_CACHE_TTL_HOURS  how long a cached page stays fresh (default 24; fractions allowed)
   WEBINDEX_NO_WRITE      write nothing: no cache entry, no eviction
   WEBINDEX_NO_ROBOTS     robots and crawl do not consult robots.txt — only on a site you own
@@ -991,7 +991,8 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
               format: FORMAT_ARG,
               timeoutMs: {
                 type: "number",
-                description: "Give up on a silent host after this many ms (default 20000, at most 300000). A timed-out request is not retried.",
+                description:
+                  "How long the request may take, connection and body download included, before it is abandoned, in ms (default 20000, at most 300000). A timed-out request is not retried.",
               },
               cache: {
                 type: "boolean",
@@ -2012,6 +2013,8 @@ async function dispatch(argv: string[]): Promise<void> {
         `  size     ${mb(s.bytes)}`,
         `  ttl      ${Math.round(s.ttlMs / 1000)}s`,
         ...(s.oldest ? [`  oldest   ${s.oldest}`, `  newest   ${s.newest}`] : []),
+        // Otherwise a refused directory reads as an empty cache that never fills.
+        ...(s.refused ? [`  unused   ${s.refused}: remove it, or set ${envName("CACHE_DIR")} to a directory only you can write`] : []),
       ].join("\n") + "\n",
     );
     return;

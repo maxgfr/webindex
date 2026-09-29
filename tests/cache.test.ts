@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Env names resolve through the brand, exactly as the engine resolves them.
 import { brand, configure, envName } from "../src/brand.js";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, chownSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { cacheClean, cacheDir, cacheStats, cachedFetchAndExtract, cachePath, setCacheMode, resetCacheMode } from "../src/cache.js";
+import { ensureComposeMaterialized } from "../src/stack.js";
 import { installFetchMock } from "./fetchmock.js";
 
 describe("cache writes", () => {
@@ -495,5 +496,125 @@ describe("cache introspection and eviction", () => {
     process.env[envName("CACHE_TTL_HOURS")] = "soon";
     expect(cacheStats().ttlMs).toBe(24 * 3600_000);
     delete process.env[envName("CACHE_TTL_HOURS")];
+  });
+});
+
+describe("the default cache directory", () => {
+  // `<tmp>/<brand>-<uid>/cache` is a name any other user of the machine can
+  // predict and create first. Pre-created world-writable, with an entry planted
+  // at the path cachePath computes, it served that user's text as the page —
+  // `cached: true` — and handed them every page cached after it.
+  const SETUP_TMPDIR = process.env.TMPDIR;
+  const hasUids = typeof process.getuid === "function";
+  let tmp: string;
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "us-tmp-"));
+    process.env.TMPDIR = tmp;
+    delete process.env[envName("CACHE_DIR")];
+    configure({ ...brand(), cacheDir: undefined });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (SETUP_TMPDIR === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = SETUP_TMPDIR;
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const plantEntry = () => writeFileSync(cachePath(URL), JSON.stringify({ finalUrl: URL, status: 200, text: "ATTACKER TEXT", cachedAt: 1000 }));
+  const plant = (mode: number): string => {
+    const planted = cacheDir();
+    mkdirSync(planted, { recursive: true });
+    chmodSync(dirname(planted), mode);
+    chmodSync(planted, mode);
+    plantEntry();
+    return planted;
+  };
+
+  const refusesIt = async (planted: string, why: RegExp) => {
+    const spy = installFetchMock(() => PAGE);
+    const warn = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    const res = await cachedFetchAndExtract(URL, {}, true, 1500);
+    await cachedFetchAndExtract(URL, {}, true, 1600);
+    // Said once, naming the directory and the way out — not once per entry.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(why);
+    expect(String(warn.mock.calls[0]![0])).toContain(envName("CACHE_DIR"));
+    expect(res.cached).toBeUndefined();
+    expect(res.text).toContain("token buckets");
+    expect(spy).toHaveBeenCalledTimes(2); // neither served from what was planted
+    const stats = cacheStats(1500);
+    expect(stats.entries).toBe(0);
+    expect(stats.refused).toMatch(why);
+    expect(cacheClean(true, 1500)).toBe(0);
+    expect(readdirSync(planted)).toHaveLength(1); // nothing written, nothing removed
+    setCacheMode({ offline: true });
+    const offline = await cachedFetchAndExtract(URL, {}, true, 1500);
+    expect(offline.text).toBe("");
+    expect(offline.note).toMatch(why);
+  };
+
+  it.runIf(hasUids)("creates it private to the caller, and uses it", async () => {
+    const spy = installFetchMock(() => PAGE);
+    await cachedFetchAndExtract(URL, {}, true, 1000);
+    expect(statSync(cacheDir()).mode & 0o777).toBe(0o700);
+    expect(statSync(dirname(cacheDir())).mode & 0o777).toBe(0o700);
+    expect(await cachedFetchAndExtract(URL, {}, true, 1500)).toMatchObject({ cached: true });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(cacheStats(1500).refused).toBeUndefined();
+  });
+
+  it.runIf(hasUids)("makes one of the caller's own that others may read private", async () => {
+    // What 1.21 created under the common umask: 0755, every cached page
+    // readable by every user of the machine.
+    mkdirSync(cacheDir(), { recursive: true, mode: 0o755 });
+    chmodSync(dirname(cacheDir()), 0o755);
+    installFetchMock(() => PAGE);
+    await cachedFetchAndExtract(URL, {}, true, 1000);
+    expect(statSync(cacheDir()).mode & 0o777).toBe(0o700);
+    expect(statSync(dirname(cacheDir())).mode & 0o777).toBe(0o700);
+    expect(await cachedFetchAndExtract(URL, {}, true, 1500)).toMatchObject({ cached: true });
+  });
+
+  it.runIf(hasUids)("is created private by the stack too, when the stack gets there first", async () => {
+    // `stack up` writes compose/ inside it; under a umask of 002 the directories
+    // it made were group-writable, and the cache then refused its own home.
+    const umask = process.umask(0o002);
+    try {
+      ensureComposeMaterialized();
+    } finally {
+      process.umask(umask);
+    }
+    expect(statSync(dirname(cacheDir())).mode & 0o777).toBe(0o700);
+    expect(statSync(cacheDir()).mode & 0o777).toBe(0o700);
+    expect(cacheStats().refused).toBeUndefined();
+  });
+
+  it.runIf(hasUids)("serves nothing from one other users may write", async () => {
+    await refusesIt(plant(0o777), /writable by other users/);
+  });
+
+  it.runIf(hasUids)("serves nothing through a symbolic link in its place", async () => {
+    const elsewhere = mkdtempSync(join(tmp, "elsewhere-"));
+    mkdirSync(dirname(cacheDir()), { recursive: true, mode: 0o700 });
+    symlinkSync(elsewhere, cacheDir());
+    plantEntry();
+    await refusesIt(cacheDir(), /symbolic link/);
+  });
+
+  it.runIf(hasUids)("creates nothing through a symbolic link planted above it", async () => {
+    // `mkdir -p` follows it, and made `cache` wherever the link pointed.
+    const elsewhere = mkdtempSync(join(tmp, "elsewhere-"));
+    symlinkSync(elsewhere, dirname(cacheDir()));
+    installFetchMock(() => PAGE);
+    expect((await cachedFetchAndExtract(URL, {}, true, 1000)).cached).toBeUndefined();
+    expect(readdirSync(elsewhere)).toEqual([]);
+    expect(cacheStats(1000).refused).toMatch(/symbolic link/);
+  });
+
+  it.runIf(process.getuid?.() === 0)("serves nothing from one another user created", async () => {
+    const planted = plant(0o700);
+    chownSync(dirname(planted), 12345, 12345);
+    chownSync(planted, 12345, 12345);
+    await refusesIt(planted, /belongs to another user/);
   });
 });

@@ -176,11 +176,37 @@ describe("htmlToText", () => {
     expect(htmlToText("<pre>code</pre><p>\u00000\u0000</p>")).toBe("code\n�0�");
   });
 
+  it("keeps a <pre> set inside a heading on the heading's line", () => {
+    // Its placeholder was pulled onto the heading line, where nothing restored
+    // it: raw NULs in the text, and the code gone.
+    expect(htmlToText("<h2>Install<pre>npm i webindex</pre></h2><p>Then run it.</p>")).toBe("## Install npm i webindex\nThen run it.");
+    expect(htmlToText("<h2>Heading with <pre>inline pre</pre> text</h2>")).toBe("## Heading with inline pre text");
+    expect(htmlToText("<h2>Two<pre>a\n  b</pre></h2>")).toBe("## Two a b");
+    // Decoded once, as the block always is: its text is not markup a second time.
+    expect(htmlToText("<h2>Escaping<pre>&amp;lt;b&amp;gt; &lt;i&gt;</pre></h2>")).toBe("## Escaping &lt;b&gt; <i>");
+  });
+
   it("drops an unclosed script or style to the end of the page, as a browser does", () => {
     // A page cut by the response cap inside a __NEXT_DATA__ blob used to hand
     // back megabytes of raw JSON as prose.
     expect(htmlToText("<p>before</p><script>var x = '<p>not</p>';")).toBe("before");
     expect(htmlToText("<p>before</p><style>.a{content:'<p>not</p>'}")).toBe("before");
+  });
+
+  it("takes no <script> or <style> quoted in an attribute for an element", () => {
+    // A main region holds no real </script> — extraction took the scripts out —
+    // so the quoted opener ran to the end of the page and left the half-eaten
+    // <img> behind as prose.
+    const page =
+      '<main><h1>The script element</h1><p>This tutorial explains how scripts load.</p><figure><img src="/diagram.png" alt="Diagram: how a <script> tag blocks parsing"><figcaption>Parsing timeline</figcaption></figure><h2>Async and defer</h2><p>Both download in parallel.</p><h2>Modules</h2><p>Deferred by default.</p></main>';
+    const text = htmlToText(extractMainHtml(page));
+    expect(text).toContain("Parsing timeline\n## Async and defer");
+    expect(text).toContain("## Modules\nDeferred by default.");
+    expect(text).not.toContain("<img");
+    const styled = htmlToText('<p>Before.</p><img alt="a <style> block"><p>After.</p><!-- x -->', { fullPage: true });
+    expect(styled).toBe("Before.\nAfter.");
+    // Nor a comment opener: an attribute's "<!--" hid the prose up to the next "-->".
+    expect(htmlToText('<p title="<!-- note">Kept.</p><!-- real -->')).toBe("Kept.");
   });
 
   it("puts definition-list terms and descriptions on their own lines", () => {
@@ -272,6 +298,20 @@ describe("htmlTitle", () => {
     expect(htmlTitle("<svg><title>icon</title></svg><title>Real</title>")).toBe("Real");
     expect(htmlTitle('<body><svg viewBox="0 0 1 1"><title>Search icon</title></svg><main>x</main></body>')).toBeUndefined();
     expect(htmlTitle("<title>A&nbsp;\n  B</title>")).toBe("A B");
+  });
+
+  it("reads past a <script> written as text in <head>, as a browser does", () => {
+    // Quoted in an attribute or written in the <title>, the opener is text. It
+    // used to pair with the head's real </script> and delete the title and the
+    // canonical in between.
+    const quoted =
+      '<head><meta name="description" content="How the <script> element works"><title>The script element</title><link rel="canonical" href="https://example.com/script"><script src="/app.js"></script></head>';
+    expect(htmlTitle(quoted)).toBe("The script element");
+    expect(htmlCanonicalUrl(quoted)).toBe("https://example.com/script");
+    const titled =
+      '<head><title>How the <script> tag works</title><link rel="canonical" href="https://example.com/script"><script src="/app.js"></script></head>';
+    expect(htmlTitle(titled)).toMatch(/^How the .*tag works$/);
+    expect(htmlCanonicalUrl(titled)).toBe("https://example.com/script");
   });
 
   it("stays linear on a page of unclosed <title> openers", () => {
@@ -589,6 +629,48 @@ describe("fetchAndExtract routes on what the bytes are", () => {
     expect(r.text.length).toBe(4 * 1024 * 1024);
   });
 
+  it("downloads no more of a body declared too large than it could ever use", async () => {
+    // Media declared over the cap is thrown away whatever arrives, and an
+    // ambiguous body declared over the document cap can only be read as text:
+    // they were read to the 4 MB and the 16 MB cap before being discarded.
+    const declared = { "content-length": String(200 * 1024 * 1024) };
+    const CHUNK = 256 * 1024;
+    let produced = 0;
+    const count = (n: number) => void (produced += n);
+    installFetchMock(() => ({ bytes: Buffer.alloc(6 * 1024 * 1024), contentType: "video/mp4", headers: declared, chunkSize: CHUNK, onPull: count }));
+    const video = await fetchAndExtract("https://x.test/clip");
+    expect(video.text).toBe("");
+    expect(video.note).toMatch(/too large/);
+    expect(produced).toBe(0);
+
+    produced = 0;
+    installFetchMock(() => ({
+      bytes: Buffer.alloc(20 * 1024 * 1024),
+      contentType: "application/octet-stream",
+      headers: declared,
+      chunkSize: CHUNK,
+      onPull: count,
+    }));
+    const blob = await fetchAndExtract("https://x.test/blob");
+    expect(blob.text).toBe("");
+    expect(blob.note).toMatch(/binary data/);
+    expect(produced).toBeLessThanOrEqual(4 * 1024 * 1024 + CHUNK);
+
+    // Still read as text, to the text cap, when that is what it is.
+    produced = 0;
+    installFetchMock(() => ({
+      bytes: Buffer.alloc(20 * 1024 * 1024, 0x61),
+      contentType: "application/octet-stream",
+      headers: declared,
+      chunkSize: CHUNK,
+      onPull: count,
+    }));
+    const log = await fetchAndExtract("https://x.test/log");
+    expect(log).toMatchObject({ truncated: true });
+    expect(log.text.length).toBe(4 * 1024 * 1024);
+    expect(produced).toBeLessThanOrEqual(4 * 1024 * 1024 + CHUNK);
+  });
+
   it.each([
     ["image/png", Buffer.from("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10", "latin1")],
     ["video/mp4", Buffer.from("\x00\x00\x00\x18ftypmp42", "latin1")],
@@ -677,7 +759,10 @@ describe("HTML scans stay linear on hostile markup", () => {
     ["unclosed <h2> openers", "<h2>x ".repeat(150_000)],
     ["headings closed only at the very end", `${"<h2>x ".repeat(150_000)}</h2>`],
     ["unclosed <pre> openers", "<pre>x ".repeat(150_000)],
+    ["a heading holding thousands of <pre> blocks", `<h2>${"<pre>x</pre>".repeat(50_000)}</h2>`],
     ["unclosed <script> openers", "<p>a</p><script>x ".repeat(100_000)],
+    ["script openers quoted in attributes", '<img alt="<script>">'.repeat(100_000)],
+    ["unclosed <title> openers", "<title>x ".repeat(150_000)],
     ["adjacent inline elements", "<a>x</a>".repeat(150_000)],
     ["unclosed navigation landmarks", '<div role="navigation"><p>x</p>'.repeat(50_000)],
     ["nested navigation landmarks", `${'<div role="navigation"><div>x'.repeat(20_000)}${"</div>".repeat(40_000)}`],

@@ -18,6 +18,7 @@ import {
   TAG_RE,
   tagName,
 } from "./html.js";
+import { AMBIGUOUS_TYPES } from "./mime.js";
 // `nearestHeading` moved to text.ts — it is a fact about markdown, not about
 // HTTP — and is still exported from the package root, so no consumer sees it move.
 import { buildMatcher, nearestHeading } from "./text.js";
@@ -85,8 +86,10 @@ const RETRY_STATUS = new Set([429, 503, 502, 504]);
 // fixed backoff, clamped to sane bounds.
 const maxAttempts = () => envInt("MAX_ATTEMPTS", 2, 1, 5);
 const defaultRetryMs = () => envInt("RETRY_MS", 600, 0, 5000);
-// How long one request may stay silent before it is abandoned, when the caller
-// names no budget of its own. A timed-out attempt is not retried (see httpGet),
+// How long one attempt may take before it is abandoned, when the caller names
+// no budget of its own: the whole of it — connection, headers and the body
+// download, across redirects — not a silence between two chunks, so a slow but
+// steady host is cut off too. A timed-out attempt is not retried (see httpGet),
 // so this is also the worst case a hung host costs.
 const defaultTimeoutMs = () => envInt("TIMEOUT_MS", 20_000, 1000, 300_000);
 
@@ -134,6 +137,22 @@ export interface HttpResult {
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// A wait that ends early when `signal` aborts. By hand, like the signal link in
+// httpGet: timers/promises' own signal option rejects rather than resolves, and
+// the caller only wants to stop waiting.
+function sleepUnlessAborted(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(t);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const t = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 }
 
 /**
@@ -278,22 +297,6 @@ const DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 function isBinaryDocument(contentType: string): boolean {
   return /application\/pdf/i.test(contentType) || docFormatForContentType(contentType) !== undefined;
 }
-
-// Content types that say nothing about the body. Download routes answer these
-// for PDFs and office files as often as for anything else, so for them the
-// bytes decide (see sniffDocument). `application/zip` is here because every
-// .docx, .xlsx and .odt is one.
-const AMBIGUOUS_TYPES = new Set([
-  "",
-  "application/octet-stream",
-  "binary/octet-stream",
-  "application/x-download",
-  "application/force-download",
-  "application/download",
-  "application/unknown",
-  "application/zip",
-  "application/x-zip-compressed",
-]);
 
 const mimeOf = (contentType: string): string => contentType.split(";")[0]!.trim().toLowerCase();
 
@@ -466,17 +469,24 @@ export async function httpGet(
       // the text cap and then refused as incomplete.
       const namedDocument = isBinaryDocument(meta.contentType) || namesDocument(filename);
       const ambiguous = AMBIGUOUS_TYPES.has(mime);
-      const max = opts.maxBytes ?? (namedDocument || ambiguous ? opts.maxDocumentBytes : undefined) ?? DEFAULT_MAX_RESPONSE_BYTES;
+      const declared = Number(res.headers.get("content-length"));
+      const documentCap = namedDocument || ambiguous ? opts.maxDocumentBytes : undefined;
+      // Declared past the document cap, an ambiguous body cannot be a whole
+      // document, and a prefix of one is only ever read as text: the text cap
+      // is all of it worth downloading, not the 16 MB the document cap allows.
+      const pastDocumentCap = !namedDocument && documentCap !== undefined && declared > documentCap;
+      const max = opts.maxBytes ?? (pastDocumentCap ? Math.min(documentCap, DEFAULT_MAX_RESPONSE_BYTES) : documentCap) ?? DEFAULT_MAX_RESPONSE_BYTES;
 
       // Refuse a body the server has already declared too big, before a single
-      // byte of it is read, when its prefix is useless: a document, or the
+      // byte of it is read, when its prefix is useless: a document, media that
+      // is never text (fetchAndExtract discards it whatever arrives), or the
       // answer to a Range request (declared that large, the range was ignored
       // and the prefix is not the part asked for). Not retried: the size will
       // be the same next time. Any other text body reads its capped prefix
       // below, exactly as it does when the same bytes arrive chunked — whether
       // a long article is readable must not depend on a Content-Length.
-      const declared = Number(res.headers.get("content-length"));
-      const prefixUseless = opts.binary || namedDocument || Object.keys(opts.headers ?? {}).some((k) => k.toLowerCase() === "range");
+      const prefixUseless =
+        opts.binary || namedDocument || NON_TEXT_TYPE_RE.test(mime) || Object.keys(opts.headers ?? {}).some((k) => k.toLowerCase() === "range");
       if (Number.isFinite(declared) && declared > max && prefixUseless) {
         ctrl.abort();
         return { ok: false, status: res.status, body: "", bytesRead: 0, truncated: true, ...meta, error: `response too large: ${declared} bytes > ${max} cap` };
@@ -525,7 +535,8 @@ export async function httpGet(
       if (wait !== undefined) {
         last = result;
         if (wait > 0) opts.onBackOff?.(result.url, wait);
-        await sleep(wait);
+        // A cancel during the wait ends it, and the loop's first check answers it.
+        await sleepUnlessAborted(wait, opts.signal);
         continue;
       }
       return result;
@@ -536,7 +547,7 @@ export async function httpGet(
       // silent for that long rarely answers a second time: retrying it made the
       // real worst case attempts × timeout, twice what the caller asked for.
       if (timedOut || isPermanentFailure(e)) break;
-      if (attempt < attempts - 1) await sleep(defaultRetryMs());
+      if (attempt < attempts - 1) await sleepUnlessAborted(defaultRetryMs(), opts.signal);
     } finally {
       clearTimeout(t);
       opts.signal?.removeEventListener("abort", onCancel);
@@ -682,6 +693,20 @@ function preSlotIndex(line: string): number | undefined {
   const i = Number(line.slice(1, -1));
   return Number.isInteger(i) ? i : undefined;
 }
+// The same placeholder folded INTO a line: a <pre> inside a heading, which
+// flattenHeadings keeps to its one `## text` line. Restored there, on that
+// line, rather than inside flattenHeadings — the block's text is already
+// decoded, and the entity and tag passes after it would decode it again.
+function restoreInlinePre(line: string, blocks: readonly string[]): string {
+  // Split on NUL: the odd pieces are block indices, the even ones the line.
+  const parts = line.split(NUL);
+  let out = parts[0]!;
+  for (let i = 1; i < parts.length; i += 2) {
+    const code = (blocks[Number(parts[i])] ?? "").replace(/\s+/g, " ").trim();
+    out += ` ${code} ${parts[i + 1] ?? ""}`;
+  }
+  return out.replace(/ {2,}/g, " ").trim();
+}
 
 /**
  * Every `<pre>…</pre>` replaced by a placeholder line, its text kept aside
@@ -790,7 +815,8 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
     .map((l) => {
       const t = l.trim();
       const slot = preSlotIndex(t);
-      return slot === undefined ? t : (pre[slot] ?? t);
+      if (slot !== undefined) return pre[slot] ?? t;
+      return t.includes(NUL) ? restoreInlinePre(t, pre) : t;
     })
     .filter((l) => l.length > 0)
     .join("\n");
@@ -903,7 +929,10 @@ const visibleLength = (h: string) =>
 // Discourse and many CMS themes mark it this way instead of with <main>.
 const ROLE_MAIN = /\srole\s*=\s*["']?main(?=["'\s/>])/i;
 // The element names that carry it on this page, so each can be balanced by name.
-const ROLE_MAIN_TAG = /<([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>])[^<>]*\srole\s*=\s*["']?main(?=["'\s/>])/g;
+// Case-blind, as ROLE_MAIN and dropLandmarks already are: attribute names are
+// in HTML, so `<DIV ROLE="main">` found no tag to balance and the page fell
+// through to a weaker tier, sidebar and all.
+const ROLE_MAIN_TAG = /<([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>])[^<>]*\srole\s*=\s*["']?main(?=["'\s/>])/gi;
 
 // Words in an id or class that mark a content container, and words that mark
 // the chrome around one. `entry-content` and `main-outlet` are content;
@@ -1430,6 +1459,9 @@ const JUNK_PATTERNS: [RegExp, string, "strong" | "weak"][] = [
   // Akamai's and Cloudflare's denials carry an incident reference; without one
   // the phrase is as likely a permission-error article.
   [/\baccess denied\b[\s\S]{0,300}?(\breference #|\bray id\b|\bpermission to access\b)/i, "anti-bot interstitial", "strong"],
+  // Cloudflare's WAF block page. Its "Attention Required!" is the <title>,
+  // which extraction drops, so the body's own wording has to carry it.
+  [/\bsorry, you have been blocked\b|\byou are unable to access\b[\s\S]{0,300}?\bray id\b/i, "anti-bot interstitial", "strong"],
   [/\baccess denied\b|\benable cookies\b/i, "anti-bot interstitial", "weak"],
   // FR / DE (the locale layer targets non-EN markets)
   [/\bnous utilisons des cookies\b|\baccepter (tous )?les cookies\b|\bactiver javascript\b/i, "cookie/consent wall (fr)", "strong"],

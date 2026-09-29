@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,7 +10,7 @@ import { createServer, ToolError } from "../src/mcp/server.js";
 import { LATEST_PROTOCOL } from "../src/mcp/protocol.js";
 import { STACK_SERVICES } from "../src/stack.js";
 import { installFetchMock, routes } from "./fetchmock.js";
-import { envName } from "../src/brand.js";
+import { configure, envName } from "../src/brand.js";
 import { resetOllamaProbe } from "../src/embed.js";
 import { resetCacheMode } from "../src/cache.js";
 import { resetHaveCache } from "../src/exec.js";
@@ -1306,6 +1306,23 @@ describe("the fetch cache", () => {
     process.env[envName("CACHE_DIR")] = join(dir, "empty-cache");
     expect(await run(["cache", "status"])).toBe(0);
     expect(stdout()).toMatch(/entries\s+0 \(0 fresh, 0 stale\)/);
+  });
+
+  it.runIf(typeof process.getuid === "function")("says why it does not use a default directory other users may write", async () => {
+    const saved = process.env.TMPDIR;
+    process.env.TMPDIR = dir;
+    delete process.env[envName("CACHE_DIR")];
+    configure({ name: "webindex-tests", envPrefix: "WEBINDEX_TEST", cli: "webindex-tests" });
+    const planted = join(dir, `webindex-tests-${process.getuid!()}`);
+    mkdirSync(join(planted, "cache"), { recursive: true });
+    chmodSync(planted, 0o777);
+    try {
+      expect(await run(["cache", "status"])).toBe(0);
+      expect(stdout()).toContain(`unused   ${planted} is writable by other users: remove it, or set WEBINDEX_TEST_CACHE_DIR`);
+    } finally {
+      if (saved === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = saved;
+    }
   });
 
   it("emits machine-readable stats with --json", async () => {

@@ -143,6 +143,44 @@ describe("character encoding", () => {
     expect(decodeBody(cut, "text/html").startsWith("café au lait — déjà vu ")).toBe(true);
   });
 
+  it("keeps a UTF-8 page UTF-8 when one stray byte sits mid-body", () => {
+    // An excerpt cut mid-character by a CMS, one pasted Latin-1 byte: the rest
+    // of the page is UTF-8, and the whole of it turned into cp1252 mojibake.
+    const utf8 = (s: string) => Buffer.from(s, "utf8");
+    const page = Buffer.concat([utf8('<meta charset="utf-8"><title>Café</title><p>Crème — “q” caf'), Buffer.from([0xc3]), utf8(" déjà</p>")]);
+    for (const text of [decodeBody(page, "text/html"), decodeBody(page, ""), decodeLocal(page)]) {
+      expect(text).toContain("<title>Café</title>");
+      expect(text).toContain("Crème — “q” caf� déjà");
+      expect(text).not.toContain("Ã");
+    }
+    // Latin-1 that happens to hold one valid UTF-8 pair is still Latin-1.
+    const latin = Buffer.from("Â© Une réponse déjà validée", "latin1");
+    expect(decodeBody(latin, "text/html")).toBe("Â© Une réponse déjà validée");
+    expect(decodeLocal(latin)).toBe("Â© Une réponse déjà validée");
+  });
+
+  it("honours a <meta charset> in every body the extractor may read as HTML", () => {
+    // S3 serves an object uploaded without a type as binary/octet-stream, and
+    // fetchAndExtract reads it as HTML; its declared cp1251 went unread.
+    const cyrillic = Buffer.from([
+      ...Buffer.from('<meta charset="windows-1251"><title>'),
+      0xcf,
+      0xf0,
+      0xe8,
+      0xe2,
+      0xe5,
+      0xf2,
+      0x20,
+      0xec,
+      0xe8,
+      0xf0, // Привет мир
+      ...Buffer.from("</title>"),
+    ]);
+    for (const type of ["binary/octet-stream", "application/x-download", "application/unknown", "application/octet-stream", "text/html"]) {
+      expect(decodeBody(cyrillic, type)).toContain("<title>Привет мир</title>");
+    }
+  });
+
   it("honours the XML declaration's encoding when the header names none", async () => {
     const xml = Buffer.from('<?xml version="1.0" encoding="ISO-8859-1"?><rss><channel><title>Résumé à jour</title></channel></rss>', "latin1");
     expect(decodeBody(xml, "application/rss+xml")).toContain("Résumé à jour");

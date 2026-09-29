@@ -388,7 +388,10 @@ function untrustedStack(): string | undefined {
 function writeIfChanged(path: string, content: string): void {
   try {
     if (existsSync(path) && readFileSync(path, "utf8") === content) return;
-    mkdirSync(dirname(path), { recursive: true });
+    // Private, like the fetch cache it sits in: the first run may be this one,
+    // and a default cache directory other users may write is one the cache
+    // refuses (see openCacheDir in cache.ts).
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     writeFileSync(path, content);
   } catch {
     /* best-effort — composeControl surfaces docker errors if the path is unusable */

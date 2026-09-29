@@ -192,6 +192,14 @@ describe("htmlToMarkdown: what is not the page", () => {
     expect(md("<p>Kept</p><script>var x = '<p>no</p>';</script><style>p{}</style><template><p>no</p></template><!-- <p>no</p> -->")).toBe("Kept");
   });
 
+  it("takes no <script> quoted in an attribute for one, and keeps the page after it", () => {
+    // With no real </script> after it, the quoted opener ran to the end of the
+    // page and left the half-eaten <img> behind.
+    const html =
+      '<h1>Scripts</h1><figure><img src="/d.png" alt="how a <script> tag works"><figcaption>Timeline</figcaption></figure><h2>Defer</h2><p>Later.</p>';
+    expect(md(html, "https://d.test/")).toBe("# Scripts\n\n![how a \\<script> tag works](https://d.test/d.png)\n\nTimeline\n\n## Defer\n\nLater.");
+  });
+
   it("drops navigation, footers and chrome landmarks unless fullPage", () => {
     const html = '<nav><a href="/">Home</a></nav><div role="navigation">Crumbs</div><p>Body</p><footer>Legal</footer>';
     expect(md(html)).toBe("Body");
@@ -259,6 +267,7 @@ describe("htmlToMarkdown stays linear on hostile markup", () => {
     ["a '<' in prose with no '>' after it", "<p>" + "if a<b then ".repeat(80_000)],
     ["unclosed comment openers", "<!-- x ".repeat(150_000)],
     ["an unterminated attribute quote per tag", '<a title="x '.repeat(80_000)],
+    ["script openers quoted in attributes", '<img alt="<script>">'.repeat(100_000)],
     ["unclosed <h2> openers", "<h2>x ".repeat(150_000)],
     ["headings closed only at the very end", `${"<h2>x ".repeat(150_000)}</h2>`],
     ["unclosed <pre> openers", "<pre>x ".repeat(150_000)],
