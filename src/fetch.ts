@@ -18,6 +18,7 @@ import {
   TAG_RE,
   tagName,
 } from "./html.js";
+import { AMBIGUOUS_TYPES } from "./mime.js";
 // `nearestHeading` moved to text.ts — it is a fact about markdown, not about
 // HTTP — and is still exported from the package root, so no consumer sees it move.
 import { buildMatcher, nearestHeading } from "./text.js";
@@ -278,22 +279,6 @@ const DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 function isBinaryDocument(contentType: string): boolean {
   return /application\/pdf/i.test(contentType) || docFormatForContentType(contentType) !== undefined;
 }
-
-// Content types that say nothing about the body. Download routes answer these
-// for PDFs and office files as often as for anything else, so for them the
-// bytes decide (see sniffDocument). `application/zip` is here because every
-// .docx, .xlsx and .odt is one.
-const AMBIGUOUS_TYPES = new Set([
-  "",
-  "application/octet-stream",
-  "binary/octet-stream",
-  "application/x-download",
-  "application/force-download",
-  "application/download",
-  "application/unknown",
-  "application/zip",
-  "application/x-zip-compressed",
-]);
 
 const mimeOf = (contentType: string): string => contentType.split(";")[0]!.trim().toLowerCase();
 

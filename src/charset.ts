@@ -17,6 +17,8 @@
 // gave an em dash on one Node version and a raw control character on another.
 // See CP1252_C1 below.
 
+import { AMBIGUOUS_TYPES } from "./mime.js";
+
 /** A BOM is authoritative — it beats every declaration. */
 function bomEncoding(bytes: Buffer): { encoding: string; skip: number } | undefined {
   if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return { encoding: "utf-8", skip: 3 };
@@ -110,9 +112,11 @@ function charsetFromXmlDeclaration(bytes: Buffer): string | undefined {
 
 const isUtf8Label = (label: string | undefined) => label === "utf-8" || label === "utf8";
 
-// The MIME types whose body may declare its own encoding in markup. Anything
-// else (text/plain, JSON, CSS…) that shows `<meta charset>` is only quoting one.
-const SNIFFABLE_MIME = new Set(["", "text/html", "application/xhtml+xml", "application/octet-stream"]);
+// The MIME types whose body may declare its own encoding in markup: HTML, and
+// every type that says nothing about its body, which fetchAndExtract reads as
+// HTML when it looks like HTML. Anything else (text/plain, JSON, CSS…) that
+// shows `<meta charset>` is only quoting one.
+const SNIFFABLE_MIME: ReadonlySet<string> = new Set(["text/html", "application/xhtml+xml", ...AMBIGUOUS_TYPES]);
 
 /** UTF-8 when the bytes are valid UTF-8, Windows-1252 when they are not. */
 function decodeUtf8OrCp1252(bytes: Buffer): string {
