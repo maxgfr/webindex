@@ -132,6 +132,13 @@ describe("linksFrom", () => {
     expect(linksFrom('<base href="http://[bad"><a href="x">x</a>', "https://a.test/a/page")).toEqual(["https://a.test/a/x"]);
   });
 
+  it.each(["javascript:void(0)", "data:text/html,x", "JavaScript:;"])("ignores a <base href> of %s, as a browser does", (base) => {
+    // Taken as the base, it made every relative link fail to resolve, and the
+    // crawl never followed the page's own links.
+    const html = `<base href="${base}"><a href="/about">a</a><a href="docs/intro">b</a><a href="https://other.test/x">c</a>`;
+    expect(linksFrom(html, "https://ex.test/blog/post")).toEqual(["https://ex.test/about", "https://ex.test/blog/docs/intro", "https://other.test/x"]);
+  });
+
   it("does not follow links that are commented out or live in a script", () => {
     const html = '<!-- <a href="/old-admin">old</a> --><script>var s = \'<a href="/in-script">\';</script><a href="/live">live</a>';
     expect(linksFrom(html, "https://a.test/")).toEqual(["https://a.test/live"]);

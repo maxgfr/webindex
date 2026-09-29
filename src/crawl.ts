@@ -24,6 +24,7 @@ import { decodeEntities, type ExtractResult, fetchAndExtract, sleep } from "./fe
 import { fetchSitemap, type Sitemap } from "./feed.js";
 import { mapLimit } from "./pool.js";
 import { dropElements, htmlAttributes, RAW_TEXT_ELEMENTS } from "./html.js";
+import { documentBaseUrl } from "./markdown.js";
 import { fetchRobots, isAllowed, type Robots } from "./robots.js";
 import { canonicalizeUrl } from "./url.js";
 
@@ -211,12 +212,12 @@ export interface CrawlResult {
   notes: string[];
 }
 
-// The opening tags that carry a page's links, and the one that says what they
-// are relative to. Quote-aware, and linear for the reason TAG_RE in html.ts is:
-// an unquoted run stops at `<` as well as `>`, so each opener is one short look.
-// `<a\b[^>]*?\bhref…` rescanned to the end of the page from every `<a` start
-// on a page of unclosed ones — 400 KB of `<a x` took ten seconds of CPU.
-const LINK_TAG_RE = /<(a|area|base)(?=[\s/>])[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/gi;
+// The opening tags that carry a page's links. Quote-aware, and linear for the
+// reason TAG_RE in html.ts is: an unquoted run stops at `<` as well as `>`, so
+// each opener is one short look. `<a\b[^>]*?\bhref…` rescanned to the end of
+// the page from every `<a` start on a page of unclosed ones — 400 KB of `<a x`
+// took ten seconds of CPU.
+const LINK_TAG_RE = /<(a|area)(?=[\s/>])[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/gi;
 
 // Anchors that are not on the page: inside a script's strings, a style, an
 // inert <template>. Comments go in the same pass (see dropElements).
@@ -230,26 +231,15 @@ const INERT_ELEMENTS = ["script", "style", "template"];
  * HTML that minifiers emit everywhere, and a `data-href` is not an `href`.
  */
 export function linksFrom(html: string, baseUrl: string): string[] {
-  let base = baseUrl;
-  let sawBase = false;
+  // The first <base href> sets the document's base, wherever it sits relative
+  // to the links — the rule the Markdown writer reads it by, so a data: or
+  // javascript: base is ignored here too. Taken as the base, it made every
+  // relative link fail to resolve and the crawl never followed the page.
+  const base = documentBaseUrl(html, baseUrl) ?? baseUrl;
   const hrefs: string[] = [];
   for (const m of dropElements(html, INERT_ELEMENTS, RAW_TEXT_ELEMENTS).matchAll(LINK_TAG_RE)) {
     const href = htmlAttributes(m[0]).get("href");
-    if (href === undefined) continue;
-    const raw = decodeEntities(href).trim();
-    if (m[1]!.toLowerCase() !== "base") {
-      hrefs.push(raw);
-      continue;
-    }
-    // The first <base href> sets the document's base, wherever it sits
-    // relative to the links, and is itself resolved against the page's URL.
-    if (sawBase) continue;
-    sawBase = true;
-    try {
-      base = new URL(raw, baseUrl).href;
-    } catch {
-      /* a base we cannot resolve leaves the page's own URL in charge */
-    }
+    if (href !== undefined) hrefs.push(decodeEntities(href).trim());
   }
 
   const out: string[] = [];
