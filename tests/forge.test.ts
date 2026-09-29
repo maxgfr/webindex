@@ -551,6 +551,33 @@ describe("why a forge call failed", () => {
     expect(again).toHaveBeenCalledTimes(1);
   });
 
+  it("tells a secondary limit from a spent quota, and reports the wait it asked for", async () => {
+    // GitHub's secondary limits answer with Retry-After while the x-ratelimit-*
+    // headers still describe the primary quota: thousands left, reset up to an
+    // hour away. That hour was reported, and the quota called spent.
+    vi.stubEnv("GITHUB_TOKEN", "ghp_OK");
+    const primaryReset = Math.floor(Date.now() / 1000) + 3000;
+    answer(
+      403,
+      { message: "You have exceeded a secondary rate limit. Please wait a few minutes before you try again." },
+      { "retry-after": "60", "x-ratelimit-remaining": "4987", "x-ratelimit-reset": String(primaryReset) },
+    );
+    const before = Date.now();
+    const r = await repoFactsResult(REF);
+    expect(r).toMatchObject({ status: 403, rateLimited: true });
+    const wait = Date.parse(r.resetAt!) - before;
+    expect(wait).toBeGreaterThanOrEqual(59_000);
+    expect(wait).toBeLessThan(120_000);
+    expect(r.note).not.toMatch(/is spent/);
+    expect(r.note).toMatch(/secondary/);
+
+    // Spent is spent: the reset header is the answer, and the note says so.
+    answer(403, { message: "API rate limit exceeded" }, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(primaryReset) });
+    const spent = await repoFactsResult(REF);
+    expect(spent.resetAt).toBe(new Date(primaryReset * 1000).toISOString());
+    expect(spent.note).toMatch(/the quota for GITHUB_TOKEN is spent/);
+  });
+
   it("says a network error is one, with its cause, instead of 'status 0'", async () => {
     const spy = vi.fn(async (_url: unknown) => {
       throw new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED 10.0.0.1:443"), { code: "ECONNREFUSED" }) });

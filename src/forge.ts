@@ -189,6 +189,8 @@ interface ForgeResponse {
   rateLimited?: boolean;
   /** When that quota resets, as the forge stated it. */
   resetAt?: string;
+  /** Whether the quota itself is spent, or the refusal is a secondary limit; unknown when the forge does not say. */
+  quota?: "spent" | "left";
   /** The variable whose token went out with the request, if one did. */
   tokenVar?: string;
   /** A failure a second try would only repeat: not retried. */
@@ -206,13 +208,25 @@ function limited(status: number, headers: Headers, data: unknown): boolean {
   return status === 403 && (headers.get("x-ratelimit-remaining") === "0" || /rate limit/i.test(JSON.stringify(data ?? "")));
 }
 
-// GitHub and Gitea state the reset as epoch seconds in `x-ratelimit-reset`,
-// GitLab in `ratelimit-reset`; anything may send `retry-after` instead.
+// When a limited request may be sent again. `retry-after` first, when there is
+// one: it answers for THIS refusal, while GitHub's secondary limits send it
+// beside `x-ratelimit-*` headers that still describe the primary quota —
+// thousands left, and a reset up to an hour away. Then the quota's own reset:
+// epoch seconds in `x-ratelimit-reset` (GitHub, Gitea) or `ratelimit-reset`
+// (GitLab).
 function resetTime(headers: Headers): string | undefined {
-  const epoch = Number(headers.get("x-ratelimit-reset") ?? headers.get("ratelimit-reset"));
-  if (Number.isFinite(epoch) && epoch > 0) return new Date(epoch * 1000).toISOString();
   const wait = parseRetryAfter(headers, Number.POSITIVE_INFINITY);
-  return wait === undefined ? undefined : new Date(Date.now() + wait).toISOString();
+  if (wait !== undefined) return new Date(Date.now() + wait).toISOString();
+  const epoch = Number(headers.get("x-ratelimit-reset") ?? headers.get("ratelimit-reset"));
+  return Number.isFinite(epoch) && epoch > 0 ? new Date(epoch * 1000).toISOString() : undefined;
+}
+
+// Whether the quota itself is spent, as the headers say: "spent", "left" (the
+// refusal is a secondary limit on how fast requests arrive), or unknown.
+function quotaState(headers: Headers): "spent" | "left" | undefined {
+  const remaining = headers.get("x-ratelimit-remaining") ?? headers.get("ratelimit-remaining");
+  if (remaining === null || remaining.trim() === "" || !Number.isFinite(Number(remaining))) return undefined;
+  return Number(remaining) <= 0 ? "spent" : "left";
 }
 
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
@@ -304,7 +318,7 @@ async function forgeGetOnce(
         ok: res.ok,
         status: res.status,
         data,
-        ...(quota ? { rateLimited: true, resetAt: resetTime(res.headers) } : {}),
+        ...(quota ? { rateLimited: true, resetAt: resetTime(res.headers), quota: quotaState(res.headers) } : {}),
         ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
       };
     }
@@ -381,7 +395,14 @@ function failure(r: ForgeResponse, forge: ForgeKind, ref: RepoRef, action: strin
   const authAdvice = withheldNote || (declared ? `set ${tokenVar}` : `declare the host with ${declare} and set ${tokenVar}`);
   if (r.rateLimited) {
     const when = r.resetAt ? ` until ${r.resetAt}` : "";
-    const advice = r.tokenVar ? `the quota for ${r.tokenVar} is spent` : `${authAdvice} to raise the anonymous quota`;
+    // A secondary limit is on how fast requests arrive, with quota to spare:
+    // "spent" would send the reader to wait out an hour, or for a new token.
+    const advice =
+      r.quota === "left"
+        ? `a secondary limit on how fast requests arrive; the quota${r.tokenVar ? ` for ${r.tokenVar}` : ""} is not spent`
+        : r.tokenVar
+          ? `the quota for ${r.tokenVar} is spent`
+          : `${authAdvice} to raise the anonymous quota`;
     return {
       note: `${FORGE_NAME[forge]} rate-limited this request${when} — ${advice}.`,
       status: r.status,

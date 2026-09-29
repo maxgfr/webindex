@@ -66,7 +66,10 @@ over MCP).
 ## Quotas
 
 A quota answer is reported as `rateLimited`, never retried, with `resetAt` when
-the forge says when it ends. Retrying a quota you have already exhausted only
+the forge says when it ends: its `Retry-After` when it sends one, else the
+quota's own reset. GitHub's secondary limits send `Retry-After` beside headers
+that still describe the primary quota, and the note calls them a secondary
+limit, not a spent quota. Retrying a quota you have already exhausted only
 exhausts it further, and the two failures need opposite handling: "wait" versus
 "this request is wrong". Only a gateway error (502/503/504) or a dropped
 connection gets one more try (`WEBINDEX_MAX_ATTEMPTS`, as for every request),
