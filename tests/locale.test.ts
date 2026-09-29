@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveRegion, ddgRegion, acceptLanguageHeader, baseLang } from "../src/locale.js";
+import { resolveRegion, ddgRegion, acceptLanguageHeader, baseLang, searxngLanguage } from "../src/locale.js";
 
 describe("baseLang", () => {
   it("lowercases and strips the region subtag", () => {
@@ -170,5 +170,27 @@ describe("acceptLanguageHeader", () => {
   });
   it("does not duplicate English for an English search", () => {
     expect(acceptLanguageHeader("en")).toBe("en-US,en;q=0.9");
+  });
+});
+
+describe("searxngLanguage", () => {
+  it("names only what SearXNG's own check accepts", () => {
+    // SearXNG answers 400 to anything outside ^[a-z]{2,3}(-[a-zA-Z]{2})?$.
+    expect(searxngLanguage("fr_FR")).toBe("fr-FR");
+    expect(searxngLanguage("zh-Hant-TW")).toBe("zh-TW");
+    expect(searxngLanguage("zh-Hans")).toBe("zh-CN");
+    expect(searxngLanguage("es-419")).toBe("es");
+    expect(searxngLanguage("EN-US")).toBe("en-US");
+    expect(searxngLanguage("fil")).toBe("fil");
+    expect(searxngLanguage("x-klingon")).toBeUndefined();
+  });
+
+  it("carries an explicit two-letter region, and no default country", () => {
+    expect(searxngLanguage("fr", "CA")).toBe("fr-CA");
+    expect(searxngLanguage("fr-FR", "wt")).toBe("fr");
+    expect(searxngLanguage("fr", "419")).toBe("fr");
+    expect(searxngLanguage("fr")).toBe("fr");
+    expect(searxngLanguage("en")).toBe("en");
+    expect(searxngLanguage(undefined, "ca")).toBeUndefined();
   });
 });

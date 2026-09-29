@@ -158,6 +158,22 @@ export function ddgRegion(lang: string | undefined, region?: string): string {
   return DDG_KL[`${l}-${r}`] ?? DDG_KL[l] ?? `${REGION_ALIASES[r] ?? r}-${DDG_LANG_ALIASES[l] ?? l}`;
 }
 
+// SearXNG's `language` parameter, or undefined for none. SearXNG answers HTTP
+// 400 to any value outside ^[a-z]{2,3}(-[a-zA-Z]{2})?$, so the forms the other
+// knobs understand — `fr_FR`, `zh-Hant-TW`, `es-419`, `EN-US` — made the first
+// rung fail. The country is an explicit region, else the tag's own, else the
+// one its script implies (zh-Hant → zh-TW); never the language's default, so a
+// bare `fr` stays `fr`. A region that is not a two-letter country (`419`, `wt`)
+// leaves the language alone. No language, no parameter: a region alone does not
+// choose one for the caller.
+export function searxngLanguage(lang: string | undefined, region?: string): string | undefined {
+  if (!lang?.trim()) return undefined;
+  const t = parseTag(lang);
+  if (!/^[a-z]{2,3}$/.test(t.lang)) return undefined;
+  const country = region?.trim() ? region.trim().toLowerCase() : (t.region ?? (t.script ? SCRIPT_COUNTRY[`${t.lang}-${t.script}`] : undefined));
+  return country && /^[a-z]{2}$/.test(country) && country !== NO_REGION ? `${t.lang}-${country.toUpperCase()}` : t.lang;
+}
+
 // An RFC-7231 Accept-Language header biased to the target language, with English
 // as a low-priority fallback (so a page with no localized copy still returns
 // something). e.g. "de-DE,de;q=0.9,en;q=0.5"; for English: "en-US,en;q=0.9".

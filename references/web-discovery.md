@@ -99,7 +99,9 @@ one it implies (`fr` → France, `et` → Estonia, `zh-Hant` → Taiwan), and
 `--region wt` asks for no region at all. Each rung is told in its own terms:
 DuckDuckGo's `kl` uses its own region list (`kr-kr`, `tw-tzh`, `xl-es`,
 `ct-ca` — an unrecognised `kl` is silently ignored), Mojeek gets language and
-region preferences (`lb`/`rb`), SearXNG a `language` like `fr-CA`, Firecrawl
-`lang` and `country`, and every request an `Accept-Language`. Full tags
-(`zh-Hant-TW`, `es-419`) and the POSIX spelling (`fr_FR`) are understood.
+region preferences (`lb`/`rb`), SearXNG a `language` like `fr-CA` (only a
+two-letter country rides on it: `es-419` is sent as `es`, since SearXNG
+rejects anything else with a 400), Firecrawl `lang` and `country`, and every
+request an `Accept-Language`. Full tags (`zh-Hant-TW`, `es-419`) and the POSIX
+spelling (`fr_FR`) are understood.
 `webindex_search` takes `region` too, and `pages` up to 5.
