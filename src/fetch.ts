@@ -86,8 +86,10 @@ const RETRY_STATUS = new Set([429, 503, 502, 504]);
 // fixed backoff, clamped to sane bounds.
 const maxAttempts = () => envInt("MAX_ATTEMPTS", 2, 1, 5);
 const defaultRetryMs = () => envInt("RETRY_MS", 600, 0, 5000);
-// How long one request may stay silent before it is abandoned, when the caller
-// names no budget of its own. A timed-out attempt is not retried (see httpGet),
+// How long one attempt may take before it is abandoned, when the caller names
+// no budget of its own: the whole of it — connection, headers and the body
+// download, across redirects — not a silence between two chunks, so a slow but
+// steady host is cut off too. A timed-out attempt is not retried (see httpGet),
 // so this is also the worst case a hung host costs.
 const defaultTimeoutMs = () => envInt("TIMEOUT_MS", 20_000, 1000, 300_000);
 
