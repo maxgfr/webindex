@@ -91,7 +91,7 @@ default, and one out of range is clamped to it.
 | `WEBINDEX_PAGE_DELAY_MS` | pause between two result pages of one engine (default 350) |
 | `WEBINDEX_TIMEOUT_MS` | how long a request may take, connection and body download included, before it is abandoned, not retried (default 20000; `--timeout` overrides it) |
 | `WEBINDEX_MAX_ATTEMPTS`, `WEBINDEX_RETRY_MS` | attempts per request (default 2, at most 5) and the back-off before a retry (default 600 ms) |
-| `WEBINDEX_POLITE_DELAY_MS` | floor between two requests to one host (default 400) |
+| `WEBINDEX_POLITE_DELAY_MS` | floor between two requests a `crawl` makes to one host (default 400); a robots.txt `Crawl-delay` wins. `fetch` does not pace a host |
 | `WEBINDEX_UA` | the browser User-Agent sent to sites |
 | `WEBINDEX_CACHE_DIR` | where the fetch cache — and the materialised container stack, in `compose/` — live (default `<tmp>/webindex-<uid>/cache`, private to you) |
 | `WEBINDEX_CACHE_TTL_HOURS`, `WEBINDEX_CACHE_TTL_MS` | how long a cached page stays fresh (default 24 h; hours may be fractional) |
@@ -105,7 +105,7 @@ default, and one out of range is clamped to it.
 | `WEBINDEX_NO_ROBOTS` | `robots` and `crawl` do not consult robots.txt — only right on a site you own |
 | `WEBINDEX_ROBOTS_UA` | the user-agent token robots.txt groups are matched against (default `webindex`) |
 | `WEBINDEX_CRAWL_CONCURRENCY` | pages a crawl keeps in flight, 1–16 (default 4); one host still departs single-file |
-| `WEBINDEX_FETCH_CONCURRENCY` | URLs one `fetch` keeps in flight when it is given several, 1–16 (default 4) |
+| `WEBINDEX_FETCH_CONCURRENCY` | URLs one `fetch` keeps in flight when it is given several, 1–16 (default 4) — several on one host included |
 | `WEBINDEX_MAX_CRAWL_DELAY_MS` | the longest robots.txt `Crawl-delay` a crawl waits out (default 60000); a site asking for more is not crawled |
 | `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_TOKEN`, `GITEA_TOKEN` | optional forge tokens (`WEBINDEX_GITHUB_TOKEN`, `WEBINDEX_GITLAB_TOKEN`, `WEBINDEX_GITEA_TOKEN` win over them); each goes only to its own forge's host |
 | `WEBINDEX_FORGE_HOSTS` | self-hosted forges, e.g. `salsa.debian.org=gitlab,git.corp=github`: each is queried as that forge and receives that forge's token |

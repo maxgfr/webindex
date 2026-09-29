@@ -319,8 +319,9 @@ ENVIRONMENT
   WEBINDEX_NO_ROBOTS     robots and crawl do not consult robots.txt — only on a site you own
   WEBINDEX_ROBOTS_UA     the token robots.txt groups are matched against (default webindex)
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
-  WEBINDEX_FETCH_CONCURRENCY  URLs one fetch keeps in flight, 1-16 (default 4)
-  WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
+  WEBINDEX_FETCH_CONCURRENCY  URLs one fetch keeps in flight, 1-16 (default 4), one host's included
+  WEBINDEX_POLITE_DELAY_MS    floor between two requests a crawl makes to one host, in ms
+                              (default 400); a robots.txt Crawl-delay wins
   WEBINDEX_MAX_CRAWL_DELAY_MS the longest robots.txt Crawl-delay a crawl waits out, in ms
                               (default 60000); a site asking for more is not crawled
   WEBINDEX_PUBLIC_ONLY   set to make every \`mcp\` run --public-only
