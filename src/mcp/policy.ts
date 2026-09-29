@@ -163,22 +163,28 @@ export function publicUrlsOnly(lookup?: HostLookup): (url: string) => Promise<bo
  * says the same about /etc/passwd as about a file that does not exist, instead
  * of answering "is it there?" — and on the realpath, so a symlink inside the
  * root cannot lead out of it.
+ *
+ * The first check takes the root as the operator spelled it as well as its real
+ * path: that spelling is the one the server advertises, and it often runs
+ * through a symlink (macOS's /tmp is /private/tmp). Accepting both is safe
+ * because the realpath check alone decides what may be read.
  */
 export function confinePath(root: string, requested: string): string {
+  const rootLex = resolve(root);
   const rootReal = realpathSync(root);
-  const inside = (p: string) => {
-    const rel = relative(rootReal, p);
+  const under = (base: string, p: string) => {
+    const rel = relative(base, p);
     return !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`);
   };
-  const outside = new Error(`${requested} is outside ${rootReal}, the only directory this server reads files from`);
-  const target = resolve(rootReal, requested);
-  if (!inside(target)) throw outside;
+  const outside = new Error(`${requested} is outside ${rootLex}, the only directory this server reads files from`);
+  const target = resolve(rootLex, requested);
+  if (!under(rootLex, target) && !under(rootReal, target)) throw outside;
   let real: string;
   try {
     real = realpathSync(target);
   } catch {
-    throw new Error(`no such file under ${rootReal}: ${requested}`);
+    throw new Error(`no such file under ${rootLex}: ${requested}`);
   }
-  if (!inside(real)) throw outside;
+  if (!under(rootReal, real)) throw outside;
   return real;
 }

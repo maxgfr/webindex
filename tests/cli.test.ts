@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1164,6 +1164,25 @@ describe("the MCP tools", () => {
       expect(spy).not.toHaveBeenCalled();
     });
 
+    it("does not tell a caller what a refused name resolves to", async () => {
+      // "localhost resolves to 127.0.0.1" made the wall a split-horizon DNS
+      // oracle for internal names, which is the view it exists to hide.
+      const guarded = webindexAdapter({ publicOnly: true });
+      for (const [tool, args] of [
+        ["webindex_meta", { url: "http://localhost/" }],
+        ["webindex_repo", { repo: "https://localhost/o/r", forge: "gitea" }],
+      ] as const) {
+        const message = await guarded.callTool(tool, { ...args }).then(
+          () => "",
+          (e: Error) => e.message,
+        );
+        expect(message, tool).toMatch(/localhost is not a public address, or did not resolve — this server fetches public addresses only/);
+        expect(message, tool).not.toMatch(/127\.0\.0\.1|::1|resolves to/);
+      }
+      // A literal address needed no resolver, and says what it is.
+      await expect(guarded.callTool("webindex_meta", { url: "http://10.0.0.1/" })).rejects.toThrow(/10\.0\.0\.1 is not a public address/);
+    });
+
     it("refuses a redirect into a private address, at the hop", async () => {
       // A public page that answers 302 → the metadata endpoint is the classic
       // way round a check made only on the URL a caller sent.
@@ -1186,6 +1205,39 @@ describe("the MCP tools", () => {
       await expect(guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/group/project" })).rejects.not.toThrow(/not a public address/);
     });
 
+    it("refuses a forge's redirect into a private address, at the hop", async () => {
+      // The forge client follows its redirects by hand, so checking the API base
+      // alone let a public host's 302 walk every forge tool into the metadata
+      // endpoint, and the answer's fields came back to the caller.
+      const spy = installFetchMock((url) =>
+        url.startsWith("https://93.184.216.34/")
+          ? { status: 302, headers: { location: "http://169.254.169.254/latest/meta-data/iam/" } }
+          : { body: JSON.stringify([{ name: "LEAKED", title: "LEAKED", body: "credentials", description: "LEAKED" }]), contentType: "application/json" },
+      );
+      const guarded = webindexAdapter({ publicOnly: true });
+      for (const tool of ["webindex_repo", "webindex_issues", "webindex_releases", "webindex_tags"]) {
+        await expect(guarded.callTool(tool, { repo: "https://93.184.216.34/o/r", forge: "gitea" }), tool).rejects.toThrow(
+          /not authorized: http:\/\/169\.254\.169\.254/,
+        );
+      }
+      expect(spy.mock.calls.map(([u]) => String(u)).filter((u) => u.includes("169.254."))).toEqual([]);
+    });
+
+    it("follows a declared private forge's redirects within it, and no further", async () => {
+      // The operator vouched for the host, and a renamed repository answers
+      // with a redirect to its own origin — but not for wherever it points next.
+      process.env[envName("FORGE_HOSTS")] = "10.1.2.3=gitea";
+      const spy = installFetchMock((url) => {
+        if (url.startsWith("https://10.1.2.3/api/v1/repos/old/")) return { status: 301, headers: { location: "https://10.1.2.3/api/v1/repos/new/name" } };
+        if (url.startsWith("https://10.1.2.3/api/v1/repos/away/")) return { status: 302, headers: { location: "http://169.254.169.254/latest/" } };
+        return { body: JSON.stringify({ full_name: "new/name" }), contentType: "application/json" };
+      });
+      const guarded = webindexAdapter({ publicOnly: true });
+      expect(JSON.parse((await guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/old/name" })).text)).toMatchObject({ fullName: "new/name" });
+      await expect(guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/away/name" })).rejects.toThrow(/not authorized: http:\/\/169\.254\.169\.254/);
+      expect(spy.mock.calls.map(([u]) => String(u)).filter((u) => u.includes("169.254."))).toEqual([]);
+    });
+
     it("reads files only under --extract-root, relative paths against it, symlinks checked", async () => {
       const root = join(dir, "served");
       mkdirSync(root);
@@ -1200,6 +1252,18 @@ describe("the MCP tools", () => {
       expect(decl.inputSchema.properties.path!.description).toContain(root);
     });
 
+    it("reads an absolute path under a root named through a symlink", async () => {
+      // The root is advertised as given; its real path is where the files are.
+      const real = join(dir, "real");
+      mkdirSync(real);
+      writeFileSync(join(real, "note.md"), "inside the root");
+      const link = join(dir, "link");
+      symlinkSync(real, link);
+      const confined = webindexAdapter({ extractRoot: link });
+      expect((await confined.callTool("webindex_extract", { path: join(link, "note.md") })).text).toContain("inside the root");
+      await expect(confined.callTool("webindex_extract", { path: join(link, "..", "secret.md") })).rejects.toThrow(/outside/);
+    });
+
     it("offers no file tool at all when local files are off, and reads no local checkout", async () => {
       const closed = webindexAdapter({ noLocalFiles: true });
       expect(closed.listTools(LATEST_PROTOCOL).map((t) => t.name)).not.toContain("webindex_extract");
@@ -1211,6 +1275,53 @@ describe("the MCP tools", () => {
       const root = join(dir, "served");
       mkdirSync(root);
       await expect(webindexAdapter({ extractRoot: root }).callTool("webindex_repo", { repo: dir })).rejects.toThrow(/outside/);
+    });
+
+    it("answers the forge tools the same about a directory that exists and one that does not", async () => {
+      // The filesystem was asked first: an existing directory got the wall's
+      // refusal, a missing one "does not name a repository" — a map of the
+      // machine for anyone who can call the tool.
+      const root = join(dir, "served");
+      mkdirSync(root);
+      const refusal = async (policy: Parameters<typeof webindexAdapter>[0], repo: string) => {
+        try {
+          await webindexAdapter(policy).callTool("webindex_tags", { repo });
+        } catch (e) {
+          return (e as Error).message.replace(repo, "<repo>");
+        }
+        throw new Error(`${repo} was not refused`);
+      };
+      // `tests` exists in the working directory the server runs in; the second does not.
+      const pairs: [string, string][] = [
+        [dir, join(dir, "no-such-dir")],
+        ["tests", "no-such-dir-here"],
+        ["./tests", "./no-such-dir-here"],
+      ];
+      for (const policy of [{ noLocalFiles: true }, { extractRoot: root }]) {
+        for (const [there, missing] of pairs) {
+          expect(await refusal(policy, there), `${JSON.stringify(policy)} ${there}`).toBe(await refusal(policy, missing));
+        }
+      }
+    });
+
+    it("reads a repository path relative to --extract-root, as it reads a file", async () => {
+      const root = join(dir, "served");
+      const checkout = join(root, "myrepo");
+      mkdirSync(checkout, { recursive: true });
+      execFileSync("git", ["-C", checkout, "init", "-q"]);
+      execFileSync("git", ["-C", checkout, "remote", "add", "origin", "https://github.com/o/checked-out.git"]);
+      const seen: string[] = [];
+      installFetchMock((url) => {
+        seen.push(url);
+        return { body: JSON.stringify({ full_name: url.split("/repos/")[1] }), contentType: "application/json" };
+      });
+      const confined = webindexAdapter({ extractRoot: root });
+      for (const repo of ["myrepo", "./myrepo", checkout]) {
+        expect(JSON.parse((await confined.callTool("webindex_repo", { repo })).text), repo).toMatchObject({ fullName: "o/checked-out" });
+      }
+      // The shorthand still means GitHub when the root holds no such directory.
+      expect(JSON.parse((await confined.callTool("webindex_repo", { repo: "o/r" })).text)).toMatchObject({ fullName: "o/r" });
+      expect(seen.at(-1)).toBe("https://api.github.com/repos/o/r");
     });
   });
 

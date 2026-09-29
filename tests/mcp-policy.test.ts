@@ -144,4 +144,21 @@ describe("confinePath", () => {
     const { root } = tree();
     expect(() => confinePath(root, "docs/missing.txt")).toThrow(/no such file/);
   });
+
+  it("takes a path under the root as the operator spelled it, when that spelling runs through a symlink", () => {
+    // macOS's /tmp is /private/tmp, and $TMPDIR is under /var → /private/var:
+    // the absolute paths the server advertised were refused as outside it.
+    const { base, root } = tree();
+    const link = join(base, "link");
+    symlinkSync(root, link);
+    expect(confinePath(link, join(link, "docs", "a.txt"))).toBe(join(root, "docs", "a.txt"));
+    expect(confinePath(link, "docs/a.txt")).toBe(join(root, "docs", "a.txt"));
+    expect(confinePath(link, join(root, "docs", "a.txt"))).toBe(join(root, "docs", "a.txt"));
+    // The wall itself is unchanged, and names the root as it was given.
+    expect(() => confinePath(link, join(link, "..", "secret.txt"))).toThrow(new RegExp(`outside ${link}`));
+    expect(() => confinePath(link, "../secret.txt")).toThrow(/outside/);
+    expect(() => confinePath(link, join(link, "docs", "escape.txt"))).toThrow(/outside/);
+    expect(() => confinePath(link, join(base, "secret.txt"))).toThrow(/outside/);
+    expect(() => confinePath(link, join(link, "missing.txt"))).toThrow(new RegExp(`no such file under ${link}`));
+  });
 });

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -830,6 +831,19 @@ describe("cloning, against a real local repository", () => {
     expect(resolveRepo("gitlab.com/g/sub/p").slug).not.toBe(resolveRepo("gitlab.com/g-sub/p").slug);
     // A name slugify keeps exactly stays readable and unsuffixed.
     expect(resolveRepo("github.com/expressjs/express").slug).toBe("github.com-expressjs-express");
+    // ...and can never spell a hashed slug: a readable path ending in the right
+    // eight hex characters used to reproduce another repository's exactly.
+    const victim = "gitlab.com/foo-bar/proj";
+    const sha8 = createHash("sha256").update(victim).digest("hex").slice(0, 8);
+    expect(resolveRepo(`https://${victim}`).slug).not.toBe(resolveRepo(`https://gitlab.com/foo/bar/proj/${sha8}`).slug);
+    // Nor can a key slugify had to cut, hash or strip: `x.git` lost its `.git`.
+    expect(resolveRepo("https://gitlab.com/o/x.git.git").slug).not.toBe(resolveRepo("https://gitlab.com/o/x").slug);
+    const long = `gitlab.com/${"g/".repeat(60)}p`;
+    const slugs = [`https://${long}`, `https://${long.replace("g/g", "g-g")}`, "https://gitlab.com/o/x.git.git", "file:///srv/git/项目"].map(
+      (s) => resolveRepo(s).slug,
+    );
+    for (const s of slugs) expect(s.length, s).toBeLessThanOrEqual(120);
+    expect(new Set(slugs).size).toBe(slugs.length);
 
     const parent = mkdtempSync(join(tmpdir(), "wi-twins-"));
     try {
@@ -865,6 +879,18 @@ describe("cloning, against a real local repository", () => {
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
+  });
+
+  it("keeps using a clone made under the 1.21.0 slug when its origin is this repository", async () => {
+    // That release suffixed a hyphenated key with eight hex characters, which a
+    // readable key could spell; the slug moved again, and its clones must not
+    // all be fetched a second time.
+    const ref = resolveRepo(`file://${origin}`);
+    const k = origin.toLowerCase();
+    const v121 = join(cacheDir, `file-${slugify(k, { max: 111 })}-${createHash("sha256").update(k).digest("hex").slice(0, 8)}`);
+    expect(v121).not.toBe(join(cacheDir, ref.slug));
+    sh("git", ["clone", "-q", "--depth", "1", ref.cloneUrl!, v121]);
+    expect(await ensureClone(ref)).toBe(v121);
   });
 
   it("clones a named branch beside the default one, not in place of it", async () => {
@@ -909,6 +935,31 @@ describe("cloning, against a real local repository", () => {
     rmSync(origin, { recursive: true, force: true });
     await expect(ensureClone(ref, { refresh: true })).rejects.toThrow(/refresh failed for .*unchanged/s);
     expect(existsSync(join(dir, "README.md"))).toBe(true);
+  });
+
+  it("refreshes for a caller who asks while another call is in flight", async () => {
+    // The in-flight call was shared whatever `refresh` said: the refresh
+    // caller got the plain caller's stale tree, and nothing was fetched.
+    const ref = resolveRepo(`file://${origin}`);
+    await ensureClone(ref);
+    writeFileSync(join(origin, "SECOND.md"), "more\n");
+    sh("git", ["-C", origin, "add", "-A"]);
+    sh("git", ["-C", origin, "commit", "-q", "-m", "second"]);
+    const [plain, fresh] = await Promise.all([ensureClone(ref), ensureClone(ref, { refresh: true })]);
+    expect(fresh).toBe(plain);
+    expect(headCommit(fresh)).toBe(headCommit(origin));
+  });
+
+  it("still hands a plain caller the cached tree when a refresh beside it fails", async () => {
+    // ...and in the other order, a caller that never asked for a refresh was
+    // failed by one it happened to overlap.
+    const ref = resolveRepo(`file://${origin}`);
+    const dir = await ensureClone(ref);
+    rmSync(origin, { recursive: true, force: true });
+    const refreshing = ensureClone(ref, { refresh: true });
+    const plain = ensureClone(ref);
+    await expect(refreshing).rejects.toThrow(/refresh failed/);
+    await expect(plain).resolves.toBe(dir);
   });
 
   it("clones once when several callers ask at the same moment", async () => {

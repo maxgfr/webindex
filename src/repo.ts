@@ -57,19 +57,22 @@ const historyTimeoutMs = () => envInt("GIT_HISTORY_TIMEOUT_MS", 300_000, 1000);
  * `host/owner/repo`, and the bare `owner/repo` shorthand (which means GitHub).
  * A URL copied from a browser names its repository, not the page within it.
  * `opts.kind` says which forge a self-hosted host runs, where its name does not.
+ * `opts.local: false` reads the string as a remote only, without asking the
+ * filesystem whether it names a directory — for a caller (a server others can
+ * reach) whose answer must not say what exists on the machine.
  *
  * An unrecognisable seed becomes a `generic` ref with NO synthesised clone URL.
  * That matters: minting `https://github.com/<free text>.git` would turn "some
  * words the user typed" into a plausible-looking URL that 404s later, far from
  * where the mistake was made.
  */
-export function resolveRepo(raw: string, opts: { kind?: ForgeKind } = {}): RepoRef {
+export function resolveRepo(raw: string, opts: { kind?: ForgeKind; local?: boolean } = {}): RepoRef {
   const trimmed = raw.trim();
 
   // A local directory wins, so a caller can point at a checkout they already
   // have and stay offline. Guarded on non-empty: `resolve("")` is the current
   // working directory, and an empty seed must not silently mean "here".
-  if (trimmed) {
+  if (trimmed && opts.local !== false) {
     const asPath = resolve(trimmed);
     if (existsSync(asPath) && statSync(asPath).isDirectory()) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename(asPath)}-${asPath}`)}` };
@@ -97,7 +100,10 @@ export function resolveRepo(raw: string, opts: { kind?: ForgeKind } = {}): RepoR
   // How the clone URL is rebuilt: an http(s) or ssh remote keeps its transport
   // (userinfo and port included — a private repository may be reachable no
   // other way), the scp form keeps its user, and anything else becomes https.
-  let transport: { kind: "scp"; user: string } | { kind: "url"; scheme: "http" | "https" | "ssh"; userinfo?: string; port?: string } | { kind: "https" };
+  let transport:
+    | { kind: "scp"; user: string; absolute: boolean }
+    | { kind: "url"; scheme: "http" | "https" | "ssh"; userinfo?: string; port?: string }
+    | { kind: "https" };
   let host: string;
   let rest: string; // everything after the host, not yet normalised
 
@@ -108,7 +114,9 @@ export function resolveRepo(raw: string, opts: { kind?: ForgeKind } = {}): RepoR
   const hostPath = /^([a-z0-9.-]+\.[a-z]{2,})\/(.+)$/i.exec(trimmed);
 
   if (scp) {
-    transport = { kind: "scp", user: scp[1]! };
+    // An absolute path (`git@host:/srv/git/p.git`) is not the same path read
+    // from the ssh user's home (`git@host:srv/git/p.git`): the "/" is kept.
+    transport = { kind: "scp", user: scp[1]!, absolute: scp[3]!.startsWith("/") };
     host = scp[2]!;
     rest = scp[3]!;
   } else if (url) {
@@ -145,7 +153,7 @@ export function resolveRepo(raw: string, opts: { kind?: ForgeKind } = {}): RepoR
 
   const cloneUrl =
     transport.kind === "scp"
-      ? `${transport.user}@${host}:${path}.git`
+      ? `${transport.user}@${host}:${transport.absolute ? "/" : ""}${path}.git`
       : transport.kind === "url"
         ? `${transport.scheme}://${transport.userinfo ? `${transport.userinfo}@` : ""}${host}${transport.port ? `:${transport.port}` : ""}/${path}.git`
         : `https://${host}/${path}.git`;
@@ -165,42 +173,61 @@ export function resolveRepo(raw: string, opts: { kind?: ForgeKind } = {}): RepoR
 /** The repository path of a `file:///path(.git)` remote, or undefined for anything else. */
 function filePath(url: string): string | undefined {
   const file = /^file:\/\/(\/.*)$/.exec(url);
-  return file ? file[1]!.replace(/\.git$/, "").replace(/\/+$/, "") : undefined;
+  return file ? trimRuns(file[1]!.replace(/\.git$/, ""), "/", false) : undefined;
 }
+
+// `s` without `ch` at either end. By hand: /^-+|-+$/g and /\/+$/ retry at every
+// character of a run that does not end the string, so a prompt-supplied name
+// with a long run of dashes or slashes took seconds (quadratic).
+function trimRuns(s: string, ch: string, start = true): string {
+  const code = ch.charCodeAt(0);
+  let a = 0;
+  let b = s.length;
+  while (start && a < b && s.charCodeAt(a) === code) a++;
+  while (b > a && s.charCodeAt(b - 1) === code) b--;
+  return s.slice(a, b);
+}
+
+// A key as slugify spells it before cutting or hashing anything: every run of
+// characters it does not keep becomes one "-".
+const fold = (k: string): string => trimRuns(k.replace(/[^a-z0-9._-]+/g, "-"), "-");
+const sha256Hex = (k: string): string => createHash("sha256").update(k).digest("hex");
 
 /**
  * The cache key for a repository path — one directory per repository.
  *
- * `slugify` folds "/" and "-" into the same "-", so `a-b/c` and `a/b-c` — two
- * repositories, possibly one of them a squatter's — got one slug, and the
- * second was handed the first one's checkout. A key slugify renders exactly (no
- * "-", nothing else it folds) keeps its readable slug; when slugify already had
- * to hash (non-ASCII, over-long), that hash covers the whole key; any other key
- * gets a hash of its exact spelling, so the fold can no longer merge two.
+ * `slugify` folds "/" and "-" into the same "-", strips a `.git`, and cuts or
+ * hashes what it cannot render, so two repositories — one of them possibly a
+ * squatter's — could get one slug, and the second was handed the first one's
+ * checkout. So the slugs come in two spaces that cannot meet. A key slugify
+ * renders exactly (nothing folded but "/", nothing cut, hashed or stripped)
+ * keeps its readable slug, which never holds "--": such a key has no "-", and a
+ * run of "/" folds to one. Every other key is a readable prefix, "--", and a
+ * hash of its exact spelling. The 1.21.0 suffix was one "-" and eight hex
+ * characters, which a readable path ending in those eight could spell exactly.
  */
 function repoSlug(key: string): string {
   const k = key.toLowerCase();
-  const slug = slugify(k);
-  const folded = k.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  if (/^[a-z0-9._/]+$/.test(k) || slug !== folded) return slug;
-  return `${slugify(k, { max: 111 })}-${createHash("sha256").update(k).digest("hex").slice(0, 8)}`;
+  const folded = fold(k);
+  if (/^[a-z0-9._/]+$/.test(k) && slugify(k) === folded) return folded;
+  return `${folded.slice(0, 105).replace(/-+$/, "") || "repo"}--${sha256Hex(k).slice(0, 12)}`;
 }
 
 /**
- * The slug a clone of `ref` was stored under before `repoSlug`, when it differs
- * — so an existing checkout is found again rather than orphaned and re-fetched.
+ * The slugs earlier releases stored a clone of `ref` under, where they differ
+ * from its own — so an existing checkout is found again rather than orphaned and
+ * re-fetched: plain `slugify` before 1.21.0, then 1.21.0's eight-hex suffix.
+ * One is adopted only when its origin says it is this repository.
  */
-function legacySlug(ref: RepoRef): string | undefined {
+function legacySlugs(ref: RepoRef): string[] {
   const p = ref.cloneUrl ? filePath(ref.cloneUrl) : undefined;
-  const old =
-    ref.host === "file"
-      ? p === undefined
-        ? undefined
-        : `file-${slugify(p)}`
-      : ref.repo
-        ? slugify(`${ref.host}/${[ref.owner, ref.repo].filter(Boolean).join("/")}`)
-        : undefined;
-  return old && old !== ref.slug ? old : undefined;
+  const key = ref.host === "file" ? p : ref.repo ? `${ref.host}/${[ref.owner, ref.repo].filter(Boolean).join("/")}` : undefined;
+  if (key === undefined) return [];
+  const k = key.toLowerCase();
+  const before = slugify(k);
+  const v121 = /^[a-z0-9._/]+$/.test(k) || before !== fold(k) ? before : `${slugify(k, { max: 111 })}-${sha256Hex(k).slice(0, 8)}`;
+  const prefix = ref.host === "file" ? "file-" : "";
+  return [...new Set([before, v121])].map((s) => `${prefix}${s}`).filter((s) => s !== ref.slug);
 }
 
 // A dot segment, spelled as a URL parser will read it: `%2e` is a dot to WHATWG
@@ -262,8 +289,20 @@ export async function ensureClone(ref: RepoRef, opts: { refresh?: boolean; branc
   // saw "not cloned yet", each ran `git clone` into the same directory, and the
   // losers deleted the winner's half-written tree before retrying.
   const pending = inflight.get(dir);
-  if (pending) return pending;
-  const work = obtainClone(ref, dir, { refresh: opts.refresh, branch }).finally(() => {
+  if (pending && !opts.refresh) {
+    // A plain caller wants the tree, fresh or not. Joining a refresh that could
+    // not reach the remote, it still gets the cached tree that refresh left
+    // unchanged — what it would have got a moment before, or after.
+    return pending.catch((e: unknown) => {
+      const tree = (e as { cachedTree?: unknown } | undefined)?.cachedTree;
+      return typeof tree === "string" ? tree : Promise.reject(e);
+    });
+  }
+  // A refresh must fetch after it was asked for: the call in flight may have
+  // read the remote before the commit this caller wants, or not fetched at all.
+  // So it runs once that call settles, never in place of it.
+  const run = () => obtainClone(ref, dir, { refresh: opts.refresh, branch });
+  const work = (pending ? pending.then(run, run) : run()).finally(() => {
     if (inflight.get(dir) === work) inflight.delete(dir);
   });
   inflight.set(dir, work);
@@ -281,13 +320,17 @@ function branchSlug(branch: string): string {
 async function obtainClone(ref: RepoRef, dir: string, opts: { refresh?: boolean; branch?: string }): Promise<string> {
   let target = dir;
   if (!existsSync(join(dir, ".git")) && !opts.branch) {
-    // A clone made under the slug this repository had before `repoSlug` is
-    // still this repository's — when its origin says so. One whose origin names
-    // another repository is exactly the collision the new slug exists to end.
-    const old = legacySlug(ref);
-    const legacy = old ? join(repoCacheRoot(), old) : undefined;
-    const origin = legacy && existsSync(join(legacy, ".git")) ? originUrl(legacy) : undefined;
-    if (legacy && origin && resolveRepo(origin).slug === ref.slug) target = legacy;
+    // A clone made under a slug this repository had before is still this
+    // repository's — when its origin says so. One whose origin names another
+    // repository is exactly the collision the new slug exists to end.
+    for (const old of legacySlugs(ref)) {
+      const legacy = join(repoCacheRoot(), old);
+      const origin = existsSync(join(legacy, ".git")) ? originUrl(legacy) : undefined;
+      if (origin && resolveRepo(origin).slug === ref.slug) {
+        target = legacy;
+        break;
+      }
+    }
   }
   if (existsSync(join(target, ".git"))) return opts.refresh ? refreshClone(ref, target, opts.branch) : target;
   return freshClone(ref, dir, opts.branch);
@@ -307,7 +350,11 @@ async function refreshClone(ref: RepoRef, dir: string, branch: string | undefine
     timeoutMs: fetchTimeoutMs(),
   });
   if (!fetched.ok) {
-    throw new Error(`refresh failed for ${ref.cloneUrl}: ${fetched.stderr.trim() || `exit ${fetched.status}`} (the cached tree at ${dir} is unchanged)`);
+    // `cachedTree` is for a caller that joined this refresh without asking for one.
+    throw Object.assign(
+      new Error(`refresh failed for ${ref.cloneUrl}: ${fetched.stderr.trim() || `exit ${fetched.status}`} (the cached tree at ${dir} is unchanged)`),
+      { cachedTree: dir },
+    );
   }
   const reset = await shAsync("git", ["-C", dir, "reset", "--quiet", "--hard", "FETCH_HEAD"], { timeoutMs: fetchTimeoutMs() });
   if (!reset.ok) throw new Error(`refresh of ${dir} fetched ${ref.cloneUrl} but could not check it out: ${reset.stderr.trim() || `exit ${reset.status}`}`);

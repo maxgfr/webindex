@@ -116,6 +116,19 @@ describe("resolveRepo", () => {
     expect(apiBase(resolveRepo("https://www.github.com/maxgfr/webindex"))).toBe("https://api.github.com");
   });
 
+  it("keeps www. on any host but a public forge's browser alias", () => {
+    // www.example.org and example.org are two DNS names, maybe two machines
+    // with two ssh host keys: the clone went to the one nobody named.
+    expect(resolveRepo("git@www.example.org:o/r.git").cloneUrl).toBe("git@www.example.org:o/r.git");
+    expect(resolveRepo("https://www.example.org/o/r.git")).toMatchObject({ host: "www.example.org", cloneUrl: "https://www.example.org/o/r.git" });
+    expect(resolveRepo("ssh://git@www.example.org/o/r.git").cloneUrl).toBe("ssh://git@www.example.org/o/r.git");
+    expect(apiBase(resolveRepo("https://www.gitea.example/o/r"))).toBe("https://www.gitea.example/api/v1");
+    for (const forge of ["github.com", "gitlab.com", "codeberg.org", "bitbucket.org"]) {
+      expect(resolveRepo(`https://www.${forge}/o/r`), forge).toMatchObject({ host: forge, cloneUrl: `https://${forge}/o/r.git` });
+    }
+    expect(resolveRepo("git@WWW.GitHub.com:o/r.git").cloneUrl).toBe("git@github.com:o/r.git");
+  });
+
   it("ends a GitLab path at '/-/', and a Gitea one after owner/repo", () => {
     expect(resolveRepo("https://gitlab.com/gitlab-org/gitlab/-/tree/master/app")).toMatchObject({ owner: "gitlab-org", repo: "gitlab" });
     expect(resolveRepo("https://gitlab.com/group/subgroup/thing/-/issues/3")).toMatchObject({
@@ -155,6 +168,16 @@ describe("resolveRepo", () => {
     });
     // git:// has no auth to keep; https is the transport that works everywhere.
     expect(resolveRepo("git://github.com/a/b.git").cloneUrl).toBe("https://github.com/a/b.git");
+    // An absolute scp path is another repository than the same path read from
+    // the ssh user's home: dropping its "/" cloned the wrong one, or none.
+    expect(resolveRepo("git@server.example:/srv/git/project.git")).toMatchObject({
+      host: "server.example",
+      repo: "project",
+      cloneUrl: "git@server.example:/srv/git/project.git",
+    });
+    expect(resolveRepo("alice@server.example:/home/alice/repos/proj.git").cloneUrl).toBe("alice@server.example:/home/alice/repos/proj.git");
+    expect(resolveRepo("git@server.example:srv/git/project.git").cloneUrl).toBe("git@server.example:srv/git/project.git");
+    expect(resolveRepo("git@server.example:~/proj.git").cloneUrl).toBe("git@server.example:~/proj.git");
   });
 
   it("parses adversarial identifiers in linear time", () => {
@@ -174,6 +197,20 @@ describe("resolveRepo", () => {
       resolveRepo(s);
     }
     expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("slugs a long run of dashes in linear time", () => {
+    // Trimming the slug's ends with /^-+|-+$/g retried the trailing branch at
+    // every dash of a run that did not end the string: 80,000 of them took
+    // seconds, once for the repository's own slug and again inside slugify.
+    const run = "-".repeat(100_000);
+    const started = Date.now();
+    expect(resolveRepo(`a${run}b`).slug).toMatch(/^a-[0-9a-f]{8}$/);
+    expect(resolveRepo(`https://gitlab.com/g/${run}x`).slug).toMatch(/^gitlab\.com-g--[0-9a-f]{12}$/);
+    expect(slugify(`${run}a${run}b${run}`, { max: 300_000 })).toBe(`a${run}b`);
+    // A file:// path's trailing slashes were cut the same way.
+    expect(resolveRepo(`file:///srv${"/".repeat(100_000)}x///`).repo).toBe("x");
+    expect(Date.now() - started).toBeLessThan(3_000);
   });
 
   it("never lets a user or host that git would read as an option through", () => {
@@ -203,7 +240,7 @@ describe("slugify", () => {
     const a = resolveRepo("file:///srv/git/项目").slug;
     const b = resolveRepo("file:///srv/git/文档").slug;
     expect(a).not.toBe(b);
-    expect(a).toMatch(/^file-srv-git-[0-9a-f]{8}$/);
+    expect(a).toMatch(/^file-srv-git--[0-9a-f]{12}$/);
     const long = `/srv/${"x".repeat(130)}`;
     expect(resolveRepo(`file://${long}/alpha`).slug).not.toBe(resolveRepo(`file://${long}/beta`).slug);
     expect(slugify("x".repeat(200)).length).toBe(120);
@@ -397,6 +434,62 @@ describe("where a token is sent", () => {
   });
 });
 
+describe("a caller's URL authorizer", () => {
+  // The MCP server's public-only wall hands one in. The forge client follows its
+  // redirects by hand, so the hook is the only thing that sees where they lead:
+  // a public host answering 302 → the metadata endpoint must not be followed.
+  const METADATA = "http://169.254.169.254/latest/meta-data/iam/";
+  const publicOnly = async (url: string) => !new URL(url).hostname.startsWith("169.254.");
+  function redirectingForge() {
+    return installFetchMock((url) =>
+      url.startsWith("https://93.184.216.34/")
+        ? { status: 302, headers: { location: METADATA } }
+        : { body: JSON.stringify([{ name: "LEAKED", title: "LEAKED", body: "credentials" }]), contentType: "application/json" },
+    );
+  }
+
+  it("stops at a redirect it refuses, for every call, and does not ask twice", async () => {
+    const ref = resolveRepo("https://93.184.216.34/o/r");
+    const opts = { kind: "gitea" as const, authorizeUrl: publicOnly };
+    for (const [what, call] of [
+      ["facts", () => repoFactsResult(ref, opts)],
+      ["releases", () => listReleases(ref, opts)],
+      ["tags", () => listTags(ref, opts)],
+      ["issues", () => searchIssues(ref, ["x"], "issue", opts)],
+    ] as const) {
+      const spy = redirectingForge();
+      const r = (await call()) as { note?: string; status?: number; items?: unknown[] };
+      expect(r.note, what).toMatch(/not authorized: http:\/\/169\.254\.169\.254/);
+      expect(r.status, what).toBe(0);
+      expect(JSON.stringify(r), what).not.toContain("LEAKED");
+      // Refused is an answer: a second try would be refused the same way.
+      expect(
+        spy.mock.calls.map(([u]) => String(u)),
+        what,
+      ).toEqual([expect.stringMatching(/^https:\/\/93\.184\.216\.34\/api\/v1\/repos\/o\/r/)]);
+    }
+  });
+
+  it("asks it before the first request as well", async () => {
+    const spy = redirectingForge();
+    const r = await repoFactsResult(resolveRepo("https://169.254.169.254/o/r"), { kind: "gitea", authorizeUrl: publicOnly });
+    expect(r.note).toMatch(/not authorized: https:\/\/169\.254\.169\.254\/api\/v1\/repos\/o\/r/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("says so when the authorizer itself fails, and sends nothing", async () => {
+    const spy = redirectingForge();
+    const r = await listTags(resolveRepo("https://93.184.216.34/o/r"), {
+      kind: "gitea",
+      authorizeUrl: async () => {
+        throw new Error("resolver down");
+      },
+    });
+    expect(r.note).toMatch(/authorization failed.*resolver down/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
 describe("why a forge call failed", () => {
   const REF = resolveRepo("github.com/a/b");
   beforeEach(() => {
@@ -442,6 +535,33 @@ describe("why a forge call failed", () => {
     expect((await repoFactsResult(REF)).note).toMatch(/requires authentication.*GITHUB_TOKEN/);
   });
 
+  it("says a token was withheld from a host nobody declared, instead of asking for it", async () => {
+    // "set GITLAB_TOKEN" to a user who has: following the advice changed
+    // nothing, since the token only goes to a host they declared.
+    vi.stubEnv("GITLAB_TOKEN", "glpat-SET");
+    const corp = resolveRepo("https://gitlab.corp.example/g/p");
+    const spy = answer(401, { message: "401 Unauthorized" });
+    const note = (await repoFactsResult(corp)).note ?? "";
+    expect(spy.mock.calls[0]![1]?.headers).not.toHaveProperty("authorization");
+    expect(note).toMatch(/GITLAB_TOKEN is set, but is only sent to hosts listed in \w*FORGE_HOSTS/);
+    expect(note).toMatch(/FORGE_HOSTS=gitlab\.corp\.example=gitlab/);
+    expect(note).not.toMatch(/— set GITLAB_TOKEN\.$/);
+    // GitLab reads a private project anonymously as a 404, and a 403 is no clearer.
+    answer(404, { message: "404 Project Not Found" });
+    expect((await repoFactsResult(corp)).note).toMatch(/or it is private.*GITLAB_TOKEN is set, but.*FORGE_HOSTS/);
+    answer(403, { message: "403 Forbidden" });
+    expect((await listReleases(corp)).note).toMatch(/refused access.*GITLAB_TOKEN is set, but.*FORGE_HOSTS/);
+
+    // Undeclared and no token at all: both halves of the advice.
+    vi.stubEnv("GITLAB_TOKEN", "");
+    answer(401, {});
+    expect((await repoFactsResult(corp)).note).toMatch(/FORGE_HOSTS=gitlab\.corp\.example=gitlab and set GITLAB_TOKEN/);
+    // Declared, the token goes, and the texts say what they always said.
+    vi.stubEnv(envName("FORGE_HOSTS"), "gitlab.corp.example=gitlab");
+    answer(404, {});
+    expect((await repoFactsResult(corp)).note).toMatch(/or it is private\.$/);
+  });
+
   it("reports a quota with the time it resets, and asks only once", async () => {
     const reset = Math.floor(Date.UTC(2030, 0, 2, 3, 4, 5) / 1000);
     const spy = answer(403, { message: "API rate limit exceeded for 1.2.3.4." }, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) });
@@ -456,6 +576,33 @@ describe("why a forge call failed", () => {
     expect(search).toMatchObject({ rateLimited: true, status: 429 });
     expect(search.resetAt).toMatch(/^\d{4}-\d\d-\d\dT/);
     expect(again).toHaveBeenCalledTimes(1);
+  });
+
+  it("tells a secondary limit from a spent quota, and reports the wait it asked for", async () => {
+    // GitHub's secondary limits answer with Retry-After while the x-ratelimit-*
+    // headers still describe the primary quota: thousands left, reset up to an
+    // hour away. That hour was reported, and the quota called spent.
+    vi.stubEnv("GITHUB_TOKEN", "ghp_OK");
+    const primaryReset = Math.floor(Date.now() / 1000) + 3000;
+    answer(
+      403,
+      { message: "You have exceeded a secondary rate limit. Please wait a few minutes before you try again." },
+      { "retry-after": "60", "x-ratelimit-remaining": "4987", "x-ratelimit-reset": String(primaryReset) },
+    );
+    const before = Date.now();
+    const r = await repoFactsResult(REF);
+    expect(r).toMatchObject({ status: 403, rateLimited: true });
+    const wait = Date.parse(r.resetAt!) - before;
+    expect(wait).toBeGreaterThanOrEqual(59_000);
+    expect(wait).toBeLessThan(120_000);
+    expect(r.note).not.toMatch(/is spent/);
+    expect(r.note).toMatch(/secondary/);
+
+    // Spent is spent: the reset header is the answer, and the note says so.
+    answer(403, { message: "API rate limit exceeded" }, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(primaryReset) });
+    const spent = await repoFactsResult(REF);
+    expect(spent.resetAt).toBe(new Date(primaryReset * 1000).toISOString());
+    expect(spent.note).toMatch(/the quota for GITHUB_TOKEN is spent/);
   });
 
   it("says a network error is one, with its cause, instead of 'status 0'", async () => {
@@ -475,6 +622,44 @@ describe("why a forge call failed", () => {
     expect(s.note).not.toMatch(/status 0/);
     // The rename lookup failed; the search that would have failed the same way is not sent.
     expect(spy.mock.calls.every(([u]) => String(u).includes("/repos/"))).toBe(true);
+  });
+
+  it("retries under the same policy as every other request, and only what a retry can change", async () => {
+    // Forge calls left httpJson and stopped honouring MAX_ATTEMPTS, a Retry-After
+    // past the cap, and the failures a second try only repeats.
+    vi.stubEnv(envName("MAX_ATTEMPTS"), "1");
+    const one = answer(503);
+    expect((await repoFactsResult(REF)).status).toBe(503);
+    expect(one).toHaveBeenCalledTimes(1);
+    vi.stubEnv(envName("MAX_ATTEMPTS"), "3");
+    const three = answer(502);
+    await repoFactsResult(REF);
+    expect(three).toHaveBeenCalledTimes(3);
+    vi.stubEnv(envName("MAX_ATTEMPTS"), "");
+
+    // Asked to come back in an hour: not asked again in 600 ms.
+    const later = answer(503, {}, { "retry-after": "3600" });
+    expect((await repoFactsResult(REF)).note).toMatch(/status 503/);
+    expect(later).toHaveBeenCalledTimes(1);
+    const now = answer(503, {}, { "retry-after": "0" });
+    await repoFactsResult(REF);
+    expect(now).toHaveBeenCalledTimes(2);
+
+    // A redirect loop is walked once, not twice over.
+    const loop = installFetchMock((url) => ({ status: 302, headers: { location: url } }));
+    expect((await repoFactsResult(REF)).note).toMatch(/more than 5 redirects/);
+    expect(loop).toHaveBeenCalledTimes(6);
+    const ftp = installFetchMock(() => ({ status: 302, headers: { location: "ftp://files.example/x" } }));
+    expect((await repoFactsResult(REF)).note).toMatch(/redirected to ftp:/);
+    expect(ftp).toHaveBeenCalledTimes(1);
+
+    // A name that does not resolve will not resolve 600 ms later either.
+    const typo = vi.fn(async (_url: unknown) => {
+      throw new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.github.com"), { code: "ENOTFOUND" }) });
+    });
+    vi.stubGlobal("fetch", typo);
+    expect((await repoFactsResult(REF)).note).toMatch(/ENOTFOUND/);
+    expect(typo).toHaveBeenCalledTimes(1);
   });
 
   it("spends one timeout on a black-holed network, not one per request", async () => {
