@@ -478,9 +478,21 @@ describe("diversify", () => {
     expect(out[0]!.url).toBe("https://a.test/");
   });
 
-  it("is a passthrough on pools too small to reorder", () => {
+  it("orders a pool too small to diversify by score, best first", () => {
+    // It was a passthrough, so a two-item pool came back in the caller's
+    // order: a zero-score item could lead, against the relevant-first and
+    // best-leads guarantees every larger pool keeps. Greedy MMR on two items
+    // is a score sort anyway.
     const items = [src("https://a.test/", 0.1, ""), src("https://b.test/", 0.9, "")];
-    expect(diversify(items, () => new Set()).map((i) => i.url)).toEqual(items.map((i) => i.url));
+    expect(diversify(items, () => new Set()).map((i) => i.url)).toEqual(["https://b.test/", "https://a.test/"]);
+    const pair = [src("https://zero.test/", 0, ""), src("https://hit.test/", 1, "")];
+    expect(diversify(pair, () => new Set()).map((i) => i.url)).toEqual(["https://hit.test/", "https://zero.test/"]);
+    expect(diversify(pair, () => new Set(), 0.75, { window: 1 }).map((i) => i.url)).toEqual(["https://hit.test/", "https://zero.test/"]);
+    // A tie breaks by code unit, as it does in a larger pool.
+    const tie = [src("https://b.test/", 0.5, ""), src("https://a.test/", 0.5, "")];
+    expect(diversify(tie, () => new Set()).map((i) => i.url)).toEqual(["https://a.test/", "https://b.test/"]);
+    expect(diversify([src("https://one.test/", 0, "")], () => new Set()).map((i) => i.url)).toEqual(["https://one.test/"]);
+    expect(diversify([], () => new Set())).toEqual([]);
   });
 
   it("never ranks a matched document below one that matched nothing", () => {

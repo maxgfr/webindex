@@ -671,10 +671,11 @@ export function dedupeNearDuplicates<T extends Ranked>(
  * costs what a `window`-sized one does.
  */
 export function diversify<T extends Ranked>(items: readonly T[], tokensOf: (it: T) => Iterable<string>, lambda = 0.75, opts: { window?: number } = {}): T[] {
-  if (items.length <= 2) return [...items];
   // The best-scored item always leads: the most relevant result is never demoted
-  // for being similar to nothing.
+  // for being similar to nothing. A pool of two is that sort and nothing more —
+  // returned as given, a zero-score item could lead it.
   const sorted = [...items].sort((a, b) => b.score - a.score || byCodeUnit(a.url, b.url));
+  if (sorted.length <= 2) return sorted;
   const window = opts.window !== undefined && opts.window > 0 ? Math.floor(opts.window) : sorted.length;
   if (window >= sorted.length) return mmr(sorted, tokensOf, lambda);
   // The tail is lower-scored than all of the window, so the relevant-first
