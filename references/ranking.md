@@ -102,3 +102,12 @@ as the best thing here" rather than an uncalibrated BM25 magnitude that cannot b
 compared across runs. `recencyScore` is relative to the result set rather than to
 wall-clock for the same reason: a score computed against "now" changes daily, and
 two runs over identical inputs would rank differently.
+
+Once a lane is fused — documents carrying a `score`, or `--dense` — the score is
+the reciprocal-rank fusion rescaled over the documents it ranks: 1 for the best,
+0.01 for the weakest, and 0 (without `--dense`) for one sharing no term with the
+question. It is an order, not a ratio. A fusion sum spans only a sliver of its
+range — divided by the maximum, every matching document fell between about 0.86
+and 1 — and MMR, weighing a gap that small against similarity, moved a page
+ranked last by every lane up to second. Rescaled, relevance again spans the range
+λ trades against.
