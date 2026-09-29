@@ -168,8 +168,8 @@ export function markdownAgainst(html: string, base: string | undefined, fullPage
         // Cells are text like any other: `<length>` or `*` in one is not syntax.
         const escaped = {
           ...(table.caption ? { caption: escapeText(table.caption) } : {}),
-          headers: table.headers.map(escapeText),
-          rows: table.rows.map((row) => row.map(escapeText)),
+          headers: table.headers.map((cell) => escapeText(cell)),
+          rows: table.rows.map((row) => row.map((cell) => escapeText(cell))),
         };
         w.block(tableToMarkdown(escaped).split("\n"));
         last = tag.lastIndex = prevEnd = region.to;
@@ -301,7 +301,7 @@ class Writer {
     if (!decoded) return;
     const core = decoded.trim();
     if (decoded[0] === " ") this.space();
-    if (core) this.push(this.inCode() ? core : escapeText(core));
+    if (core) this.push(this.inCode() ? core : escapeText(core, { after: decoded[decoded.length - 1] !== " " }));
     if (core && decoded[decoded.length - 1] === " ") this.space();
   }
 
@@ -598,10 +598,21 @@ const EDGE_UNDERSCORE = /(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])/gu;
 const HTML_LIKE = /<(?=[a-zA-Z/!?])/g;
 const ENTITY_LIKE = /&(?=#?[a-zA-Z0-9]+;)/g;
 const STRIKE = /~(?=~)|(?<=~)~/g;
+// A '<' or an entity's start that the next run of text could complete.
+const OPEN_END = /(?:<|&#?[a-zA-Z0-9]*)$/;
 
-/** A run of text with its Markdown metacharacters escaped, so it reads back as the same text. */
-function escapeText(s: string): string {
-  return s.replace(ALWAYS_SYNTAX, "\\$&").replace(EDGE_UNDERSCORE, "\\_").replace(HTML_LIKE, "\\<").replace(ENTITY_LIKE, "\\&").replace(STRIKE, "\\~");
+/**
+ * A run of text with its Markdown metacharacters escaped, so it reads back as
+ * the same text. The syntax that depends on what follows — `<` before a tag
+ * name, `&` before an entity's name — is judged within the run. `edges.after`
+ * says the next run may touch its end, no space between: an element that
+ * splits `&lt;script&gt;` round "script" writes nothing of its own, and the
+ * two halves would join into a live tag. A '<' or '&' there is escaped
+ * whatever follows.
+ */
+function escapeText(s: string, edges?: { after: boolean }): string {
+  const out = s.replace(ALWAYS_SYNTAX, "\\$&").replace(EDGE_UNDERSCORE, "\\_").replace(HTML_LIKE, "\\<").replace(ENTITY_LIKE, "\\&").replace(STRIKE, "\\~");
+  return edges?.after ? out.replace(OPEN_END, "\\$&") : out;
 }
 
 /**

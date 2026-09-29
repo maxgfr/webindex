@@ -245,6 +245,17 @@ describe("htmlToMarkdown: escaping", () => {
   it("escapes a doubled tilde, which GFM reads as strikethrough", () => {
     expect(md("<p>~~gone~~ ~5 minutes</p>")).toBe("\\~\\~gone\\~\\~ ~5 minutes");
   });
+
+  it("escapes syntax an element splits in two, which joins up again in the Markdown", () => {
+    // Each run of text is escaped on its own: a '<' at the end of one, a tag
+    // name at the start of the next, was a live tag once written side by side.
+    expect(md("<p>&lt;<span>script</span>&gt;alert(1)&lt;/script&gt;</p>")).toBe("\\<script>alert(1)\\</script>");
+    expect(md('<p>Use the &lt;<span class="tag">img</span> src=x onerror=alert(1)&gt; element</p>')).toBe("Use the \\<img src=x onerror=alert(1)> element");
+    expect(md("<p>&amp;<span>amp;</span> and &amp;<b>#38;</b></p>")).toBe("\\&amp; and \\&**#38;**");
+    expect(md('<h2>&lt;<a href="#s">script</a>&gt;</h2>', "https://d.test/")).toBe("## \\<script>");
+    // A '<' or '&' with a space after it was never syntax, and stays as written.
+    expect(md("<p>a &lt; <b>b</b> &amp; c</p>")).toBe("a < **b** & c");
+  });
 });
 
 describe("htmlToMarkdown stays linear on hostile markup", () => {
@@ -283,6 +294,8 @@ describe("htmlToMarkdown stays linear on hostile markup", () => {
     ["unclosed divs round a pre", `${'<div class="highlight-x">'.repeat(50_000)}<pre>x</pre>`],
     ["a link wrapped round thousands of blocks", `<a href="/x">${"<p>word</p>".repeat(60_000)}</a>`],
     ["underscores and tildes", "<p>" + "_~".repeat(200_000)],
+    ["runs of text that end in '<' or an entity's start", "<p>" + "&amp;a1<i>&lt;</i>".repeat(80_000)],
+    ["one run holding an entity's name to its end", `<p>${"&a&#".repeat(50_000)}&${"a".repeat(300_000)}<b>x</b>`],
   ])("%s", (_label, html) => {
     within(10_000, () => htmlToMarkdown(html, { baseUrl: "https://d.test/" }));
   });
