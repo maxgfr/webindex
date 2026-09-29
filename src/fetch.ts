@@ -133,6 +133,12 @@ export interface HttpResult {
   rateLimited?: boolean;
   /** Retry-After in ms, when the server sent one — its own number, not capped to what httpGet waits out. */
   retryAfterMs?: number;
+  /**
+   * The server answered, but only with redirects that lead nowhere this client
+   * goes: more than 20 of them, or to a URL or a scheme it cannot fetch. Status
+   * is 0 as for a failure, yet nothing failed to answer.
+   */
+  redirectFailed?: boolean;
 }
 
 /**
@@ -338,7 +344,9 @@ async function authorizedGet(
   authorize: (url: string) => Promise<boolean>,
 ): Promise<{ response: Response } | { failure: HttpResult }> {
   let target = url;
-  const fail = (error: string): { failure: HttpResult } => ({ failure: { ok: false, status: 0, body: "", contentType: "", url: target, error } });
+  const fail = (error: string, redirectFailed?: boolean): { failure: HttpResult } => ({
+    failure: { ok: false, status: 0, body: "", contentType: "", url: target, error, ...(redirectFailed ? { redirectFailed } : {}) },
+  });
   const headers = { ...(init.headers as Record<string, string>) };
   for (let redirects = 0; ; redirects++) {
     try {
@@ -350,10 +358,10 @@ async function authorizedGet(
     const location = response.headers.get("location");
     if (!REDIRECT_STATUS.has(response.status) || !location) return { response };
     await response.body?.cancel().catch(() => {});
-    if (redirects >= 20) return fail("Too many redirects (maximum 20)");
+    if (redirects >= 20) return fail("Too many redirects (maximum 20)", true);
     try {
       const next = new URL(location, target);
-      if (!/^https?:$/.test(next.protocol)) return fail(`Unsupported redirect protocol: ${next.protocol}`);
+      if (!/^https?:$/.test(next.protocol)) return fail(`Unsupported redirect protocol: ${next.protocol}`, true);
       if (next.origin !== new URL(target).origin) {
         delete headers.authorization;
         delete headers.cookie;
@@ -361,7 +369,7 @@ async function authorizedGet(
       }
       target = next.href;
     } catch {
-      return fail(`Invalid redirect URL from ${target}`);
+      return fail(`Invalid redirect URL from ${target}`, true);
     }
   }
 }
@@ -546,7 +554,9 @@ export async function httpGet(
       return result;
     } catch (e) {
       if (!timedOut && opts.signal?.aborted) return cancelled();
-      last = { ok: false, status: 0, body: "", contentType: "", url, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
+      const error = timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e);
+      // The follow path's loop, in undici's words; authorizedGet says its own.
+      last = { ok: false, status: 0, body: "", contentType: "", url, error, ...(!timedOut && /redirect count exceeded/i.test(error) ? { redirectFailed: true } : {}) };
       // A timeout has spent the whole budget the caller granted, and a host
       // silent for that long rarely answers a second time: retrying it made the
       // real worst case attempts × timeout, twice what the caller asked for.

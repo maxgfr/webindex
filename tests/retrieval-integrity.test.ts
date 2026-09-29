@@ -147,6 +147,7 @@ describe("authorized requests", () => {
     const result = await httpGet("https://x.test/loop", { authorizeUrl: async () => true });
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/maximum 20/i);
+    expect(result.redirectFailed).toBe(true);
     expect(spy).toHaveBeenCalledTimes(21);
   });
 

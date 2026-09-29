@@ -9,16 +9,24 @@ describe("crawl redirects over HTTP", () => {
   let requests: string[];
   let redirectSitemap: boolean;
   let redirectRobots: boolean;
+  let robotsRedirect: string | undefined;
 
   beforeEach(async () => {
     requests = [];
     redirectSitemap = false;
     redirectRobots = false;
+    robotsRedirect = undefined;
     resetRobotsCache();
     resetHostSchedule();
     server = createServer((req, res) => {
       const path = req.url ?? "/";
       requests.push(`${req.headers.host}${path}`);
+      if (robotsRedirect && path.startsWith("/robots.txt")) {
+        // A loop (/robots.txt -> /robots.txt?loop -> /robots.txt), or one hop to another scheme.
+        res.writeHead(302, { location: robotsRedirect === "loop" ? (path === "/robots.txt" ? "/robots.txt?loop" : "/robots.txt") : robotsRedirect });
+        res.end();
+        return;
+      }
       if (path === "/robots.txt") {
         if (redirectRobots) {
           res.writeHead(302, { location: base.replace("127.0.0.1", "localhost") + "/foreign-policy" });
@@ -135,6 +143,22 @@ describe("crawl redirects over HTTP", () => {
     expect(requests.some((path) => path.startsWith("localhost:") && path.endsWith("/foreign-policy"))).toBe(true);
     expect(requests.some((path) => path.endsWith("/private"))).toBe(false);
     expect(result.disallowed).toEqual([`${base}/private`]);
+  });
+
+  it.each(["loop", "ftp://files.test/robots.txt"])("reads a robots.txt whose redirects lead nowhere (%s) as no file, not as a server that did not answer", async (to) => {
+    // RFC 9309 lets a crawler treat a redirect chain it will not follow to the
+    // end as an unavailable file (a 4xx: crawling allowed); its MUST-disallow
+    // is for server and network errors. The walk stopped before the seed and
+    // said the robots.txt "did not answer" after it had answered 21 times.
+    robotsRedirect = to;
+    const direct = await fetchRobots(base);
+    expect(direct.unreachable).toBeUndefined();
+    expect(direct.absent).toBe(true);
+    expect(requests.filter((path) => path.includes("/robots.txt")).length).toBeLessThanOrEqual(21);
+    resetRobotsCache();
+    const result = await crawlSite(`${base}/dir/index`, { useSitemap: false, delayMs: 0, maxPages: 1, maxDepth: 0 });
+    expect(result.pages.map((page) => page.url)).toEqual([`${base}/dir/index`]);
+    expect(result.notes.join(" ")).not.toMatch(/did not answer/);
   });
 
   it("applies robots restrictions to sitemap redirects as well as page redirects", async () => {

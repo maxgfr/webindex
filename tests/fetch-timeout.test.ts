@@ -205,6 +205,8 @@ describe("network failure reporting", () => {
       const r = await httpGet(`http://127.0.0.1:${port}/a`, { retries: 1 });
       expect(r.ok).toBe(false);
       expect(r.error).toMatch(/redirect/i);
+      // The server answered every time: robots.txt reads this apart from an outage.
+      expect(r.redirectFailed).toBe(true);
       expect(hits).toBe(21);
     } finally {
       await new Promise((resolve) => server.close(resolve));
