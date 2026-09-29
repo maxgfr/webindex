@@ -135,13 +135,17 @@ export interface HttpResult {
   retryAfterMs?: number;
 }
 
-export function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+/**
+ * Resolve after `ms`, or as soon as `signal` aborts: early, and never with a
+ * rejection — a caller that was cancelled only wants to stop waiting, and
+ * checks its signal next.
+ */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return signal ? sleepUnlessAborted(ms, signal) : new Promise((r) => setTimeout(r, ms));
 }
 
-// A wait that ends early when `signal` aborts. By hand, like the signal link in
-// httpGet: timers/promises' own signal option rejects rather than resolves, and
-// the caller only wants to stop waiting.
+// By hand, like the signal link in httpGet: timers/promises' own signal option
+// rejects rather than resolves.
 function sleepUnlessAborted(ms: number, signal: AbortSignal | undefined): Promise<void> {
   return new Promise((resolve) => {
     if (signal?.aborted) return resolve();

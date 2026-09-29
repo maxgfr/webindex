@@ -44,8 +44,8 @@ export function resetHostSchedule(): void {
 // warning, so a site asking for a very long wait would get none at all.
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
-async function sleepFor(ms: number): Promise<void> {
-  for (let left = ms; left > 0; left -= MAX_TIMER_MS) await sleep(Math.min(left, MAX_TIMER_MS));
+async function sleepFor(ms: number, signal?: AbortSignal): Promise<void> {
+  for (let left = ms; left > 0 && !signal?.aborted; left -= MAX_TIMER_MS) await sleep(Math.min(left, MAX_TIMER_MS), signal);
 }
 
 /**
@@ -91,8 +91,12 @@ function hostOf(url: string): string {
  *
  * Different hosts never wait on each other: the whole point is to keep
  * concurrency high across a candidate list while staying single-file per site.
+ *
+ * `signal` ends the wait early, and the caller must then not send: the slot
+ * stays claimed, which errs on the polite side, and the time returned is the
+ * time actually waited.
  */
-export async function awaitHostSlot(url: string, delayMs: number = hostDelayMs(), now: number = Date.now()): Promise<number> {
+export async function awaitHostSlot(url: string, delayMs: number = hostDelayMs(), now: number = Date.now(), signal?: AbortSignal): Promise<number> {
   const host = hostOf(url);
   if (!host) return 0;
   const spaced = delayMs > 0;
@@ -103,8 +107,10 @@ export async function awaitHostSlot(url: string, delayMs: number = hostDelayMs()
     const free = spaced ? Math.max(nextFree.get(host) ?? 0, hold) : hold;
     const wait = Math.max(0, free - t);
     if (spaced) nextFree.set(host, Math.max(free, t) + delayMs);
-    if (wait === 0) return waited;
-    await sleepFor(wait);
+    if (wait === 0 || signal?.aborted) return waited;
+    const started = Date.now();
+    await sleepFor(wait, signal);
+    if (signal?.aborted) return waited + Math.min(wait, Math.max(0, Date.now() - started));
     waited += wait;
     t = Date.now();
     if ((holdUntil.get(host) ?? 0) <= t) return waited;
@@ -450,6 +456,9 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
   // robots-refused page. Delays apply to the destination host as well. The
   // seed's own redirects may leave the origin: they are what settles it.
   const authorizeHop = async (url: string, seedHop: boolean): Promise<boolean> => {
+    // Cancelled: nothing more is sent, and nothing is judged — fetchOne reads
+    // the refusal under an aborted signal as a page left pending.
+    if (opts.signal?.aborted) return false;
     if (!(await permitted(url))) return false;
     if (!seedHop && !inScope(url)) {
       notes.push(`${url}: destination is outside the crawl origin.`);
@@ -461,8 +470,11 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
       return false;
     }
     if (refusesDelay(url, r)) return false;
-    await awaitHostSlot(url, delayFor(r));
-    return true;
+    // The politeness wait is the long one — width × Crawl-delay — and a
+    // worker that slept it out before noticing the cancel kept a cancelled
+    // crawl pending for minutes.
+    await awaitHostSlot(url, delayFor(r), Date.now(), opts.signal);
+    return !opts.signal?.aborted;
   };
   const authorizeUrl = (url: string) => authorizeHop(url, false);
   const authorizeSeed = (url: string) => authorizeHop(url, true);

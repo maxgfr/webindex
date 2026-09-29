@@ -44,6 +44,19 @@ describe("per-host politeness", () => {
     expect([a, b, c]).toEqual([0, 50, 100]);
   });
 
+  it("ends a wait early when its signal aborts, and says how long it actually waited", async () => {
+    await awaitHostSlot("https://a.test/1", 20_000);
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 20);
+    const started = performance.now();
+    const waited = await awaitHostSlot("https://a.test/2", 20_000, Date.now(), ctrl.signal);
+    // ~20 ms locally.
+    expect(performance.now() - started).toBeLessThan(3000);
+    expect(waited).toBeLessThan(3000);
+    // An aborted signal waits for nothing.
+    expect(await awaitHostSlot("https://a.test/3", 20_000, Date.now(), ctrl.signal)).toBe(0);
+  });
+
   it("never makes one host wait on another", async () => {
     await awaitHostSlot("https://a.test/1", 500, 0);
     expect(await awaitHostSlot("https://b.test/1", 500, 0)).toBe(0);
@@ -308,6 +321,37 @@ describe("crawlSite", () => {
     expect(r.pending).toEqual(expect.arrayContaining(["https://s.test/a", "https://s.test/b"]));
     expect(r.notes.join(" ")).toMatch(/cancelled/);
   });
+
+  it("stops at once when its signal aborts during a politeness wait", async () => {
+    // Each worker sat out its claimed Crawl-delay slot and only then saw the
+    // cancel: width × delay after the abort, minutes at a 60 s Crawl-delay,
+    // with an MCP tool slot held for all of it.
+    const spy = site({ "https://s.test/": '<p>root</p><a href="/a">a</a><a href="/b">b</a><a href="/c">c</a><a href="/d">d</a>' });
+    const ctrl = new AbortController();
+    let abortedAt = 0;
+    const r = await crawlSite("https://s.test/", {
+      maxPages: 10,
+      maxDepth: 1,
+      useSitemap: false,
+      delayMs: 20_000,
+      signal: ctrl.signal,
+      onPage: (p) => {
+        if (p.depth === 0)
+          setTimeout(() => {
+            abortedAt = performance.now();
+            ctrl.abort();
+          }, 50);
+      },
+    });
+    // ~5 ms locally; the uncancelled wait is 80 s.
+    expect(performance.now() - abortedAt).toBeLessThan(3000);
+    const pages = spy.mock.calls.map((c) => String(c[0])).filter((u) => !/robots|sitemap/.test(u));
+    expect(pages).toEqual(["https://s.test/"]);
+    expect(r.pending).toEqual(["https://s.test/a", "https://s.test/b", "https://s.test/c", "https://s.test/d"]);
+    expect(r.disallowed).toEqual([]);
+    expect(r.notes.join(" ")).toMatch(/cancelled/);
+    expect(r.notes.join(" ")).not.toMatch(/refused by|outside the crawl origin/);
+  }, 10_000);
 });
 
 describe("crawlSite concurrency", () => {
