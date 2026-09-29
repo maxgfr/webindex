@@ -84,6 +84,10 @@ describe("htmlToMarkdown: inline", () => {
     expect(md(html, "https://d.test/v1/page")).toBe("[Guide](https://d.test/v2/guide)");
   });
 
+  it("resolves a path-relative <base href> against the page once", () => {
+    expect(md('<base href="docs/"><a href="g">g</a>', "https://d.test/site/i.html")).toBe("[g](https://d.test/site/docs/g)");
+  });
+
   it("ignores a <base href> that is javascript: or data:, as a browser does", () => {
     const html = '<head><base href="javascript:alert(1)//"></head><p><a href="guide">Guide</a></p>';
     expect(md(html, "https://d.test/v1/page")).toBe("[Guide](https://d.test/v1/guide)");

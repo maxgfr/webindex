@@ -377,6 +377,22 @@ describe("fetchAndExtract", () => {
       expect(r.text).toContain("[the limits](https://cdn.test/ref/limits)");
     });
 
+    it("applies a path-relative <base href> once, whether or not the head survives into the Markdown", async () => {
+      // `docs/` resolved twice is /site/docs/docs/: the head reaches the
+      // writer with fullPage, and when isolation keeps the whole document.
+      const small = '<html><head><base href="docs/"></head><body><p>See <a href="guide.html">the guide</a> <img src="pic.png" alt="pic"></p></body></html>';
+      installFetchMock(() => ({ body: small, contentType: "text/html", url: "https://d.test/site/index.html" }));
+      for (const fullPage of [false, true]) {
+        const r = await fetchAndExtract("https://d.test/site/index.html", { format: "markdown", fullPage });
+        expect(r.text).toBe("See [the guide](https://d.test/site/docs/guide.html) ![pic](https://d.test/site/docs/pic.png)");
+      }
+      installFetchMock(() => ({ body: page(ARTICLE, '<base href="docs/">'), contentType: "text/html", url: "https://d.test/site/index.html" }));
+      for (const fullPage of [false, true]) {
+        const r = await fetchAndExtract("https://d.test/site/index.html", { format: "markdown", fullPage });
+        expect(r.text).toContain("[the limits](https://d.test/site/ref/limits)");
+      }
+    });
+
     it("leaves the default text output exactly as it was", async () => {
       installFetchMock(() => ({ body: page(ARTICLE), contentType: "text/html" }));
       const plain = await fetchAndExtract("https://docs.test/guide");

@@ -60,12 +60,21 @@ export interface MarkdownOptions {
  * main-content region (extractMainHtml) for an article rather than a page.
  */
 export function htmlToMarkdown(html: string, opts: MarkdownOptions = {}): string {
-  // As htmlToText does: a NUL is U+FFFD, as a browser reads it.
-  const src = html.includes(NUL) ? html.split(NUL).join("�") : html;
-  const base = documentBaseUrl(src, opts.baseUrl);
-  const hidden = opts.fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
+  return markdownAgainst(html, documentBaseUrl(withoutNul(html), opts.baseUrl), opts.fullPage);
+}
+
+/**
+ * htmlToMarkdown for a caller that has already read the page's <base href>
+ * off the whole page, as it must once isolation has cut the <head> away:
+ * `base` is final, and a <base> still in `html` is not applied again. A
+ * path-relative one (`docs/`) resolved a second time against its own result
+ * would send every link one directory too deep.
+ */
+export function markdownAgainst(html: string, base: string | undefined, fullPage?: boolean): string {
+  const src = withoutNul(html);
+  const hidden = fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
   let s = dropElements(src, hidden, RAW_TEXT_ELEMENTS);
-  if (!opts.fullPage) s = dropLandmarks(s, CHROME_ROLES);
+  if (!fullPage) s = dropLandmarks(s, CHROME_ROLES);
 
   // Every table that closes, by where it opens: one stack pass for the page.
   const tables = new Map<number, Region>();
@@ -223,6 +232,11 @@ export function htmlToMarkdown(html: string, opts: MarkdownOptions = {}): string
 }
 
 const NUL = "\u0000";
+
+// As htmlToText does: a NUL is U+FFFD, as a browser reads it.
+function withoutNul(html: string): string {
+  return html.includes(NUL) ? html.split(NUL).join("�") : html;
+}
 const TABLE_OPEN = /<table[\s/>]/i;
 // The next heading tag of any level, open or close: where a heading ends.
 const HEADING_EDGE = /<\/h[1-6]\s*>|<h[1-6](?=[\s/>])/;
