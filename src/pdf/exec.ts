@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { type SpawnOptions, spawn } from "node:child_process";
 import { killTree } from "../process-tree.js";
 
 // Run an external extractor with the PDF on stdin and its text on stdout.
@@ -67,14 +67,14 @@ export function runWithInput(cmd: string, args: string[], input: Buffer, timeout
       // Since the CVE-2024-27980 fix (Node 18.20.2, 20.12.2, 22.x) spawn refuses
       // a .cmd or .bat without a shell — EINVAL, which cost Windows both npx
       // rungs. Through cmd.exe every argument is quoted; they are constants of
-      // this engine (the document travels on stdin), never text from a URL.
+      // this engine (the document travels on stdin), never text from a URL. The
+      // shell gets ONE command line, built here: an args array beside
+      // `shell: true` is only concatenated, which Node 24 flags at runtime
+      // (DEP0190) and a later Node may refuse.
       const viaShell = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(bin);
       const quote = (s: string) => `"${s.replace(/"/g, '""')}"`;
-      child = spawn(viaShell ? quote(bin) : bin, viaShell ? args.map(quote) : args, {
-        stdio: ["pipe", "pipe", "pipe"],
-        ...(viaShell ? { shell: true, windowsHide: true } : {}),
-        ...(opts.env ? { env: opts.env } : {}),
-      });
+      const common: SpawnOptions = { stdio: ["pipe", "pipe", "pipe"], ...(opts.env ? { env: opts.env } : {}) };
+      child = viaShell ? spawn([bin, ...args].map(quote).join(" "), { ...common, shell: true, windowsHide: true }) : spawn(bin, args, common);
     } catch (e) {
       resolve({ ok: false, stdout: "", error: (e as Error).message });
       return;
