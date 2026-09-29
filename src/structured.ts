@@ -102,14 +102,27 @@ function flattenJsonLd(v: unknown, out: unknown[]): void {
  * One forward pass: each script's close is searched from its opener, and a
  * script that never closes ends the scan, since nothing after it can close
  * either. A lazy `[\s\S]*?</script>` per opener re-read the rest of the page
- * from every unclosed one.
+ * from every unclosed one. Comments are skipped in the same pass, whichever
+ * of a comment and a script comes first owning what follows, as dropElements
+ * does: `<!-- old tracker: <script> -->` paired with the real block's
+ * </script> and swallowed it, and a commented-out block is not what the page
+ * says. A comment that never closes is text, as metaEntries reads it.
  */
 export function extractJsonLd(html: string): unknown[] {
   const out: unknown[] = [];
-  const open = openTag("script");
+  const open = new RegExp(`<!--|${openTag("script").source}`, "gi");
   const close = closeTagRe("script");
+  let commentsClose = true;
   let m: RegExpExecArray | null;
   while ((m = open.exec(html))) {
+    if (m[0] === "<!--") {
+      // From +2, so the degenerate `<!-->` closes itself as the spec says. A
+      // search that fails proves no comment after it closes either.
+      const end = commentsClose ? html.indexOf("-->", m.index + 2) : -1;
+      if (end < 0) commentsClose = false;
+      else open.lastIndex = end + 3;
+      continue;
+    }
     close.lastIndex = open.lastIndex;
     const c = close.exec(html);
     if (!c) break;

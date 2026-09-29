@@ -629,6 +629,24 @@ describe("structured metadata", () => {
     expect(performance.now() - started).toBeLessThan(2000);
   });
 
+  it("skips comments, so a commented-out <script> opener or block is not read as the page's", () => {
+    // The opener paired with the real block's </script> and swallowed it.
+    const real = '<script type="application/ld+json">{"@type":"Article","headline":"Real","author":{"@type":"Person","name":"Ann"}}</script>';
+    expect(pageMetadata(`<head><!-- old tracker: <script> -->${real}</head>`)).toMatchObject({ title: "Real", authors: ["Ann"] });
+    const stale = '<!-- <script type="application/ld+json">{"@type":"Article","headline":"Stale"}</script> -->';
+    expect(pageMetadata(`${stale}<script type="application/ld+json">{"@type":"Article","headline":"Fresh"}</script>`).title).toBe("Fresh");
+    // A block whose body a template wraps in <!-- --> is still read: that comment is script text.
+    expect(extractJsonLd('<script type="application/ld+json"><!-- {"@type":"W"} --></script>')).toEqual([{ "@type": "W" }]);
+    expect(extractJsonLd(`<!--><script type="application/ld+json">{"@type":"V"}</script>`)).toEqual([{ "@type": "V" }]);
+  });
+
+  it("scans JSON-LD in linear time past comments that never close", () => {
+    const html = `${"<!-- x ".repeat(100_000)}<script type="application/ld+json">{"@type":"A"}</script>${"<!-- <script> ".repeat(50_000)}`;
+    const started = performance.now();
+    expect(extractJsonLd(html)).toEqual([{ "@type": "A" }]);
+    expect(performance.now() - started).toBeLessThan(10_000);
+  });
+
   it("reads meta tags in linear time on a page of unterminated ones", () => {
     // `<meta ` x 40k (240 KB) took 4 s: each opener read to the end of the page.
     const started = performance.now();
