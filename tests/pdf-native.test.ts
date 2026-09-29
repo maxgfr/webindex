@@ -177,12 +177,16 @@ describe("pdfToText on hostile input", () => {
       objects(opening, { dict: "/Filter /ASCII85Decode ", body: zs.subarray(zs.length - 16 * 1024 * 1024) }),
       objects(opening, { body: zs.subarray(zs.length - 16 * 1024 * 1024) }),
     ];
+    // The cap bounds OUTPUT, so each case still decodes ~32 MB: ~0.5 s for all
+    // three locally, ~10x that under the CI job's v8 coverage. The bound sits
+    // far above that and far below the uncapped decode (8 s locally, so ~100 s
+    // on that runner, and a fatal crash on Node 18).
     for (const doc of cases) {
       const { value, ms } = timed(() => pdfToText(doc));
       expect(value).toBe("Opening sentence survives.");
-      expect(ms).toBeLessThan(5000);
+      expect(ms).toBeLessThan(30_000);
     }
-  });
+  }, 60_000);
 
   it("does not mine image or font programs, whatever bytes they carry", () => {
     const doc = objects(
