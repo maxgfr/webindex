@@ -84,6 +84,23 @@ describe("the Word reader", () => {
     expect(officeToText(docx(body))).toBe("new wording\n\nthe link\n\nboxed");
   });
 
+  // A tracked move keeps its source as ordinary w:t runs inside w:moveFrom
+  // (ECMA-376 §17.13.5.22), not as delText, and the same text again at
+  // w:moveTo: read both and every moved sentence appears twice.
+  it("reads a tracked move once, where it was moved to", () => {
+    const mark = '<w:rPr><w:moveFrom w:id="9" w:author="a" w:date="2026-01-01T00:00:00Z"/></w:rPr>';
+    const body =
+      para("Alpha paragraph.") +
+      '<w:p><w:moveFromRangeStart w:id="1" w:name="move1"/><w:moveFrom w:id="2"><w:r><w:t>MOVED SENTENCE.</w:t></w:r></w:moveFrom><w:moveFromRangeEnd w:id="1"/>' +
+      '<w:del w:id="3"><w:r><w:delText>DELETED WORDS.</w:delText></w:r></w:del><w:ins w:id="4"><w:r><w:t>Inserted words.</w:t></w:r></w:ins></w:p>' +
+      // A whole moved paragraph, its mark flagged by a self-closing moveFrom.
+      `<w:p><w:pPr>${mark}</w:pPr><w:moveFrom w:id="5"><w:r><w:t>A MOVED PARAGRAPH.</w:t><w:tab/><w:br/></w:r></w:moveFrom></w:p>` +
+      '<w:p><w:r><w:t xml:space="preserve">Omega paragraph. </w:t></w:r><w:moveTo w:id="6"><w:r><w:t>MOVED SENTENCE.</w:t></w:r></w:moveTo></w:p>' +
+      '<w:p><w:moveTo w:id="7"><w:r><w:t>A MOVED PARAGRAPH.</w:t></w:r></w:moveTo></w:p>' +
+      para("After the move.");
+    expect(officeToText(docx(body))).toBe("Alpha paragraph.\n\nInserted words.\n\nOmega paragraph. MOVED SENTENCE.\n\nA MOVED PARAGRAPH.\n\nAfter the move.");
+  });
+
   it("reads a heading from a localised style id, and a list item from its numbering", () => {
     const body =
       para("Einleitung", '<w:pStyle w:val="berschrift2"/>') +
