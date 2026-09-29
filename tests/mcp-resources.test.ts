@@ -103,7 +103,26 @@ describe("resources/read", () => {
   });
 
   it("rejects traversal out of the skill root", () => {
-    expect(() => readResource("skill://../../package.json", PAYLOAD_MODULE_DIR)).toThrow(/escapes the skill root|no such resource/);
+    expect(() => readResource("skill://../../package.json", PAYLOAD_MODULE_DIR)).toThrow(/not a resource this server serves/);
+  });
+
+  it("says the same about any path it does not serve, whether or not it exists", () => {
+    // The realpath ran first, so "escapes the skill root" meant the file was
+    // there and "no such resource" that it was not: an existence oracle for
+    // every path on the machine, over HTTP too.
+    const message = (uri: string) => {
+      try {
+        readResource(uri, PAYLOAD_MODULE_DIR);
+      } catch (e) {
+        return (e as Error).message.replace(uri, "<uri>");
+      }
+      return "served";
+    };
+    const up = "../".repeat(20);
+    const there = message(`skill://${up}${__filename.replace(/^\//, "")}`);
+    expect(there).toMatch(/not a resource this server serves/);
+    expect(message(`skill://${up}${__filename.replace(/^\//, "")}.nope`)).toBe(there);
+    expect(message("skill://.git/config")).toBe(message("skill://.git/no-such-file"));
   });
 
   it("rejects a symlink that points out of the skill root", () => {
@@ -112,12 +131,13 @@ describe("resources/read", () => {
     // realpath. Relevant because this server can be reached over HTTP.
     const root = tmp();
     mkdirSync(join(root, "scripts"), { recursive: true });
+    mkdirSync(join(root, "references"), { recursive: true });
     writeFileSync(join(root, "SKILL.md"), "# skill\n\nBody.\n");
     const secret = join(tmp(), "secret.md");
     writeFileSync(secret, "top secret");
-    symlinkSync(secret, join(root, "escape.md"));
+    symlinkSync(secret, join(root, "references", "escape.md"));
 
-    expect(() => readResource("skill://escape.md", join(root, "scripts"))).toThrow(/escapes the skill root/);
+    expect(() => readResource("skill://references/escape.md", join(root, "scripts"))).toThrow(/escapes the skill root/);
   });
 
   it("serves only the documents it lists, not every file under the root", () => {
@@ -143,8 +163,13 @@ describe("resources/read", () => {
   });
 
   it("rejects a directory and a file that is not there", () => {
-    expect(() => readResource("skill://references", PAYLOAD_MODULE_DIR)).toThrow(/not a file/);
+    expect(() => readResource("skill://references", PAYLOAD_MODULE_DIR)).toThrow(/not a resource this server serves/);
     expect(() => readResource("skill://references/nope.md", PAYLOAD_MODULE_DIR)).toThrow(/no such resource/);
+    const root = tmp();
+    mkdirSync(join(root, "scripts"), { recursive: true });
+    mkdirSync(join(root, "references", "folder.md"), { recursive: true });
+    writeFileSync(join(root, "SKILL.md"), "# skill\n\nBody.\n");
+    expect(() => readResource("skill://references/folder.md", join(root, "scripts"))).toThrow(/not a file/);
   });
 
   it("explains itself when there is no payload at all", () => {

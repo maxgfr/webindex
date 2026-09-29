@@ -88,11 +88,22 @@ export function readResource(uri: string, moduleDir?: string): ResourceContents 
   const rel = uri.slice(URI_SCHEME.length);
   if (!rel) throw new ResourceError("empty resource path");
 
-  // Containment is checked on the REALPATH, not on the joined string. A
-  // `skill://../../.ssh/id_rsa` normalises away, but a symlink inside
-  // references/ pointing out of the tree does not — and this server may be
-  // reachable over HTTP.
+  // Containment alone served EVERY file under the root, and run from a checkout
+  // the root is the repository: .git/config (a token in a remote URL), .env,
+  // the sources — each one resources/read away, over HTTP too. Only what
+  // listResources advertises is served: SKILL.md and references/*.md. Checked
+  // on the path as written, BEFORE the filesystem is asked anything: run after
+  // the realpath, "escapes the skill root" meant a file was there and "no such
+  // resource" that it was not, for any path on the machine.
   const target = resolve(root, rel);
+  const served = relative(root, target).split(sep).join("/");
+  if (served !== "SKILL.md" && !/^references\/[^/]+\.md$/.test(served)) {
+    throw new ResourceError(`not a resource this server serves: ${uri} (resources/list names them)`);
+  }
+
+  // Containment is checked on the REALPATH as well: a listed name can still be
+  // a symlink inside references/ pointing out of the tree — and this server may
+  // be reachable over HTTP.
   const rootReal = realpathSync(root);
   let targetReal: string;
   try {
@@ -104,14 +115,6 @@ export function readResource(uri: string, moduleDir?: string): ResourceContents 
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
   if (!statSync(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
-  // Containment alone served EVERY file under the root, and run from a checkout
-  // the root is the repository: .git/config (a token in a remote URL), .env,
-  // the sources — each one resources/read away, over HTTP too. Only what
-  // listResources advertises is served: SKILL.md and references/*.md.
-  const served = relative(root, target).split(sep).join("/");
-  if (served !== "SKILL.md" && !/^references\/[^/]+\.md$/.test(served)) {
-    throw new ResourceError(`not a resource this server serves: ${uri} (resources/list names them)`);
-  }
 
   return { uri, mimeType: "text/markdown", text: readFileSync(targetReal, "utf8") };
 }
