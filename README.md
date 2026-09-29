@@ -326,7 +326,9 @@ own site (`https`, `www`).
 It uses local extraction so a remote browser cannot bypass those checks.
 Library callers can supply the same asynchronous `authorizeUrl` check to
 `httpGet`, `fetchAndExtract`, `fetchSitemap`, and `fetchRobots`. Authorization
-and politeness waits do not consume the HTTP network timeout budget.
+and politeness waits do not consume the HTTP network timeout budget. The forge
+calls take it too, as `ForgeOptions.authorizeUrl`: it approves the API URL and
+every redirect the forge client follows, inside that call's one timeout.
 
 ## What is deliberately out of scope
 

@@ -111,6 +111,11 @@ has named the host itself, so the token goes there too.
 Every token travels in the `Authorization` header — GitLab's as a Bearer — and is
 dropped the moment a redirect leaves the API's origin.
 
+A caller's `authorizeUrl` (in `ForgeOptions`, the hook `httpGet` takes) approves
+the API URL and every redirect before it is requested; a refusal comes back as a
+failed call, not retried. The MCP server's public-only wall passes one, so a
+public forge host cannot redirect a forge tool into a private address.
+
 ## Getting the source itself
 
 `resolveRepo` parses every identifier shape — a URL in any scheme, `git@host:…`,
