@@ -780,6 +780,32 @@ describe("doctor", () => {
     expect(s).toContain(`anydoc         off (${envName("DOC_ENGINE")}=none)`);
     expect(s).toMatch(/pdf rungs {3}firecrawl/);
   });
+
+  it("does not blame an engine list the ladder ignored", async () => {
+    // A list naming no known rung is warned about and ignored — the full
+    // ladder runs, minus what NO_NPX removed — so NO_NPX is what switched the
+    // npx rungs off, not the list.
+    process.env[envName("FIRECRAWL")] = "off";
+    process.env[envName("NO_NPX")] = "1";
+    process.env[envName("PDF_ENGINE")] = "bogus";
+    process.env[envName("DOC_ENGINE")] = " , ";
+    const warn = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    try {
+      expect(await run(["doctor"])).toBe(0);
+      const [pdfRows, docRows] = stdout().split("doc rungs");
+      expect(pdfRows).toContain(`pdf-inspector  off (${envName("NO_NPX")})`);
+      expect(pdfRows).toContain(`anydoc         off (${envName("NO_NPX")})`);
+      expect(docRows).toContain(`anydoc         off (${envName("NO_NPX")})`);
+      expect(stdout()).not.toMatch(/_(?:PDF|DOC)_ENGINE=/);
+      out.length = 0;
+      expect(await run(["doctor", "--json"])).toBe(0);
+      const j = JSON.parse(stdout());
+      expect(j.rungs.pdf).toContainEqual({ id: "anydoc", enabled: false, state: `off (${envName("NO_NPX")})` });
+      expect(j.rungs.doc).toContainEqual({ id: "anydoc", enabled: false, state: `off (${envName("NO_NPX")})` });
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe("unknown input", () => {
