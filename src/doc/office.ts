@@ -841,7 +841,8 @@ const ODF_ASIDES = new Set(["text:note", "office:annotation", "text:tracked-chan
 function openDocumentText(xml: string, budget: Budget): string {
   const blocks: string[] = [];
   const paragraphs: Paragraph[] = [];
-  const tables: (Table & { repeatRow: number; repeatCell: number })[] = [];
+  // `heading`: where a sheet's "## <name>" went in blocks, for a top-level table.
+  const tables: (Table & { repeatRow: number; repeatCell: number; heading?: number })[] = [];
   let skip = 0; // inside one of ODF_ASIDES
   let listItem = false;
   let spreadsheet = false;
@@ -889,8 +890,8 @@ function openDocumentText(xml: string, budget: Budget): string {
       else if (name === "draw:frame" && (titleFrame || attr(attrs, "presentation:class") === "title")) titleFrame++;
       else if (name === "table:table") {
         const sheet = attr(attrs, "table:name");
-        tables.push({ rows: [], repeatRow: 1, repeatCell: 1 });
-        if (sheet && spreadsheet) blocks.push(`## ${sheet}`);
+        const heading = sheet && spreadsheet && !tables.length ? blocks.push(`## ${sheet}`) - 1 : undefined;
+        tables.push({ rows: [], repeatRow: 1, repeatCell: 1, ...(heading !== undefined ? { heading } : {}) });
       } else if (name === "table:table-row" && table) {
         table.row = [];
         table.repeatRow = repeat(attrs, "table:number-rows-repeated");
@@ -929,11 +930,17 @@ function openDocumentText(xml: string, budget: Budget): string {
       } else if (name === "table:table") {
         const done = tables.pop();
         if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows, budget));
+        // A sheet with nothing in it goes unlisted, as the .xlsx reader leaves
+        // it out: its heading was the last thing written.
+        if (done?.heading !== undefined && blocks.length === done.heading + 1) blocks.length = done.heading;
       } else if (name === "draw:frame" && titleFrame) titleFrame--;
       else if (name === "presentation:notes") inNotes = Math.max(0, inNotes - 1);
       else if (name === "draw:page" && heading >= 0) {
         if (title.length) blocks[heading] = `## Slide ${slide}: ${title.join(" ")}`;
         if (notes.length) blocks.push(`Notes: ${notes.join(" ")}`);
+        // An empty slide — no title, text or notes — goes unlisted, as the
+        // .pptx reader leaves it out; the next one keeps its number by position.
+        if (!title.length && !notes.length && blocks.length === heading + 1) blocks.length = heading;
         heading = -1;
       }
     },

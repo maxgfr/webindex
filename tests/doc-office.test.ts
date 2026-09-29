@@ -157,6 +157,16 @@ describe("the OpenDocument reader", () => {
     const text = `<office:text>${changes}<text:h text:outline-level="1">Title</text:h><text:p>Kept text.<text:change text:change-id="ct1"/> More kept text.</text:p></office:text>`;
     expect(officeToText(odf("text", text))).toBe("# Title\n\nKept text. More kept text.");
   });
+
+  // The .xlsx reader lists no sheet without cells; the ODS one printed a bare
+  // "## <sheet>" heading for it.
+  it("skips an empty sheet, as the .xlsx reader does", () => {
+    const cell = (text: string) => `<table:table-cell><text:p>${text}</text:p></table:table-cell>`;
+    const sheet = (name: string, rows: string) => `<table:table table:name="${name}">${rows}</table:table>`;
+    const padding = '<table:table-row table:number-rows-repeated="1048576"><table:table-cell table:number-columns-repeated="1024"/></table:table-row>';
+    const body = `<office:spreadsheet>${sheet("Data", `<table:table-row>${cell("a")}${cell("b")}</table:table-row>`)}${sheet("Empty", padding)}${sheet("More", `<table:table-row>${cell("c")}</table:table-row>`)}</office:spreadsheet>`;
+    expect(officeToText(odf("spreadsheet", body))).toBe("## Data\n\n| a | b |\n| --- | --- |\n\n## More\n\n| c |\n| --- |");
+  });
 });
 
 describe("the spreadsheet reader", () => {
@@ -235,6 +245,36 @@ describe("the presentation reader", () => {
     const content = `<office:document-content><office:body><office:presentation>${page("Plan", "Ship it", "Say thanks")}${page("Risks", "Bombs", "")}</office:presentation></office:body></office:document-content>`;
     const odp = zip({ mimetype: { data: "application/vnd.oasis.opendocument.presentation", method: 0 }, "content.xml": content });
     expect(officeToText(odp)).toBe("## Slide 1: Plan\n\nShip it\n\nNotes: Say thanks\n\n## Slide 2: Risks\n\nBombs");
+  });
+
+  // The .pptx reader lists no empty slide; the ODP one printed a bare heading
+  // for it, so the same deck read differently by the format it was saved in.
+  it("skips an empty slide in either format, and numbers the rest by position", () => {
+    const frame = (cls: string, text: string) =>
+      `<draw:frame presentation:class="${cls}"><draw:text-box>${text ? `<text:p>${text}</text:p>` : ""}</draw:text-box></draw:frame>`;
+    const page = (title: string, body: string) =>
+      `<draw:page draw:name="p">${frame("title", title)}${frame("outline", body)}<presentation:notes><draw:page-thumbnail/>${frame("notes", "")}</presentation:notes></draw:page>`;
+    const content = `<office:document-content><office:body><office:presentation>${page("One", "First body")}${page("", "")}${page("Three", "Third body")}</office:presentation></office:body></office:document-content>`;
+    const odp = zip({ mimetype: { data: "application/vnd.oasis.opendocument.presentation", method: 0 }, "content.xml": content });
+
+    const P = 'xmlns:p="p" xmlns:a="a" xmlns:r="r"';
+    const shape = (ph: string, text: string) =>
+      `<p:sp><p:nvSpPr><p:nvPr>${ph}</p:nvPr></p:nvSpPr><p:txBody>${text ? `<a:p><a:r><a:t>${text}</a:t></a:r></a:p>` : "<a:p/>"}</p:txBody></p:sp>`;
+    const slide = (title: string, body: string) =>
+      `<p:sld ${P}><p:cSld><p:spTree>${shape('<p:ph type="title"/>', title)}${shape('<p:ph idx="1"/>', body)}</p:spTree></p:cSld></p:sld>`;
+    const ids = [1, 2, 3].map((i) => `<p:sldId id="${255 + i}" r:id="rId${i}"/>`).join("");
+    const rels = [1, 2, 3].map((i) => `<Relationship Id="rId${i}" Type="x/slide" Target="slides/slide${i}.xml"/>`).join("");
+    const pptx = zip({
+      "ppt/presentation.xml": `<p:presentation ${P}><p:sldIdLst>${ids}</p:sldIdLst></p:presentation>`,
+      "ppt/_rels/presentation.xml.rels": `<Relationships>${rels}</Relationships>`,
+      "ppt/slides/slide1.xml": slide("One", "First body"),
+      "ppt/slides/slide2.xml": slide("", ""),
+      "ppt/slides/slide3.xml": slide("Three", "Third body"),
+    });
+
+    const expected = "## Slide 1: One\n\nFirst body\n\n## Slide 3: Three\n\nThird body";
+    expect(officeToText(pptx)).toBe(expected);
+    expect(officeToText(odp)).toBe(expected);
   });
 });
 
