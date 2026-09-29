@@ -780,6 +780,32 @@ describe("doctor", () => {
     expect(s).toContain(`anydoc         off (${envName("DOC_ENGINE")}=none)`);
     expect(s).toMatch(/pdf rungs {3}firecrawl/);
   });
+
+  it("does not blame an engine list the ladder ignored", async () => {
+    // A list naming no known rung is warned about and ignored — the full
+    // ladder runs, minus what NO_NPX removed — so NO_NPX is what switched the
+    // npx rungs off, not the list.
+    process.env[envName("FIRECRAWL")] = "off";
+    process.env[envName("NO_NPX")] = "1";
+    process.env[envName("PDF_ENGINE")] = "bogus";
+    process.env[envName("DOC_ENGINE")] = " , ";
+    const warn = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    try {
+      expect(await run(["doctor"])).toBe(0);
+      const [pdfRows, docRows] = stdout().split("doc rungs");
+      expect(pdfRows).toContain(`pdf-inspector  off (${envName("NO_NPX")})`);
+      expect(pdfRows).toContain(`anydoc         off (${envName("NO_NPX")})`);
+      expect(docRows).toContain(`anydoc         off (${envName("NO_NPX")})`);
+      expect(stdout()).not.toMatch(/_(?:PDF|DOC)_ENGINE=/);
+      out.length = 0;
+      expect(await run(["doctor", "--json"])).toBe(0);
+      const j = JSON.parse(stdout());
+      expect(j.rungs.pdf).toContainEqual({ id: "anydoc", enabled: false, state: `off (${envName("NO_NPX")})` });
+      expect(j.rungs.doc).toContainEqual({ id: "anydoc", enabled: false, state: `off (${envName("NO_NPX")})` });
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe("unknown input", () => {
@@ -1322,6 +1348,35 @@ describe("the MCP tools", () => {
       // The shorthand still means GitHub when the root holds no such directory.
       expect(JSON.parse((await confined.callTool("webindex_repo", { repo: "o/r" })).text)).toMatchObject({ fullName: "o/r" });
       expect(seen.at(-1)).toBe("https://api.github.com/repos/o/r");
+    });
+
+    it("reads a relative checkout path against --extract-root, as it reads a file", async () => {
+      // The forge tools resolved it against the server's cwd, so a checkout
+      // under the root was "not a repository" unless named absolutely.
+      const root = join(dir, "served");
+      mkdirSync(join(root, "r1"), { recursive: true });
+      execFileSync("git", ["-C", join(root, "r1"), "init", "-q"]);
+      execFileSync("git", ["-C", join(root, "r1"), "remote", "add", "origin", "https://github.com/maxgfr/webindex.git"]);
+      mkdirSync(join(dir, "elsewhere"));
+      const seen: string[] = [];
+      installFetchMock((url) => {
+        seen.push(url);
+        return { body: JSON.stringify({ full_name: "maxgfr/webindex" }), contentType: "application/json" };
+      });
+      try {
+        const confined = webindexAdapter({ extractRoot: root });
+        const r = JSON.parse((await confined.callTool("webindex_repo", { repo: "r1" })).text);
+        expect(r.ref).toMatchObject({ host: "github.com", owner: "maxgfr", repo: "webindex" });
+        expect(seen[0]).toBe("https://api.github.com/repos/maxgfr/webindex");
+        // Relative to the root still may not climb out of it…
+        await expect(confined.callTool("webindex_repo", { repo: "../elsewhere" })).rejects.toThrow(/outside/);
+        // …and a shorthand naming no directory under it is still a forge slug.
+        seen.length = 0;
+        await confined.callTool("webindex_repo", { repo: "a/b" });
+        expect(seen[0]).toBe("https://api.github.com/repos/a/b");
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
   });
 

@@ -208,6 +208,42 @@ describe("the OCR rung in the ladder", () => {
     expect(second).toMatchObject({ via: "ocr", text: "Text recovered from the healthy scan." });
   });
 
+  // The slot is reserved before converting, so the budget reads 0 after a
+  // failed conversion on the LAST slot too — which the rung took for "spent by
+  // a concurrent scan" and reported as a plain "no text layer".
+  it("says the conversion failed when it failed on the last slot", async () => {
+    vi.stubEnv(envName("OCR_MAX"), "1");
+    runMock.mockImplementation(async (_cmd, args) => ({ ok: !args.includes("-o"), stdout: "", ...(args.includes("-o") ? { error: "exit 1" } : {}) }));
+    const r = await extractPdf(SCAN, { engines: ["native", "ocr"] });
+    expect(r.text).toBe("");
+    expect(r.reason).toContain("ocr: the conversion failed on this document");
+  });
+
+  it("says the budget is spent for a scan a concurrent one took the last slot from", async () => {
+    vi.stubEnv(envName("OCR_MAX"), "1");
+    runMock.mockImplementation(async (_cmd, args) => {
+      const i = args.indexOf("-o");
+      if (i >= 0) {
+        await new Promise((r) => setTimeout(r, 50));
+        writeFileSync(args[i + 1]!.replace(/\.pdf$/, ".md"), "Text recovered from the scan.");
+      }
+      return { ok: true, stdout: "" };
+    });
+    const both = await Promise.all([extractPdf(SCAN, { engines: ["native", "ocr"] }), extractPdf(SCAN, { engines: ["native", "ocr"] })]);
+    expect(both.filter((r) => r.via === "ocr")).toHaveLength(1);
+    const declined = both.find((r) => r.via !== "ocr")!;
+    expect(declined.reason).toMatch(/OCR budget is spent/);
+    expect(declined.reason).not.toMatch(/conversion failed/);
+  });
+
+  it("treats a converter that vanished after the probe as missing, not as this scan's failure", async () => {
+    runMock.mockImplementation(async (_cmd, args) => (args.includes("-o") ? { ok: false, stdout: "", error: "not installed" } : { ok: true, stdout: "" }));
+    const r = await extractPdf(SCAN, { engines: ["native", "ocr"] });
+    expect(r.reason).toMatch(/install copyable-pdf and tesseract to OCR it/);
+    expect(r.reason).not.toMatch(/conversion failed/);
+    expect(ocrBudgetLeft()).toBe(3); // refunded
+  });
+
   it("says what would read a scan when the OCR tools are missing", async () => {
     const r = await extractPdf(SCAN, { engines: ["native", "ocr"] });
     expect(r.reason).toMatch(/no text layer/);

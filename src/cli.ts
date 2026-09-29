@@ -23,6 +23,7 @@ import { ENGINE_VERSION } from "./version.js";
 import { DOC_EXTRACTORS, docFormatForUrl, extractDocument, enabledDocExtractors, sniffDocument } from "./doc.js";
 import { enabledExtractors, extractPdf, ocrBudgetLeft, ocrTools, PDF_EXTRACTORS } from "./pdf.js";
 import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./pdf/exec.js";
+import { enginesFromEnv } from "./pdf/ladder.js";
 import { npxCacheState } from "./pdf/npx.js";
 import { have } from "./exec.js";
 import { type ExtractResult, extractMainHtml, fetchAndExtract, htmlToText, httpGet, httpJson, looksLikePdfUrl, stripConsentBoilerplate } from "./fetch.js";
@@ -319,8 +320,9 @@ ENVIRONMENT
   WEBINDEX_NO_ROBOTS     robots and crawl do not consult robots.txt — only on a site you own
   WEBINDEX_ROBOTS_UA     the token robots.txt groups are matched against (default webindex)
   WEBINDEX_CRAWL_CONCURRENCY  pages a crawl keeps in flight, 1-16 (default 4); one host still departs single-file
-  WEBINDEX_FETCH_CONCURRENCY  URLs one fetch keeps in flight, 1-16 (default 4)
-  WEBINDEX_POLITE_DELAY_MS    floor between two requests to one host, in ms (default 400)
+  WEBINDEX_FETCH_CONCURRENCY  URLs one fetch keeps in flight, 1-16 (default 4), one host's included
+  WEBINDEX_POLITE_DELAY_MS    floor between two requests a crawl makes to one host, in ms
+                              (default 400); a robots.txt Crawl-delay wins
   WEBINDEX_MAX_CRAWL_DELAY_MS the longest robots.txt Crawl-delay a crawl waits out, in ms
                               (default 60000); a site asking for more is not crawled
   WEBINDEX_PUBLIC_ONLY   set to make every \`mcp\` run --public-only
@@ -2495,9 +2497,12 @@ async function dispatch(argv: string[]): Promise<void> {
       return "built-in";
     };
     // The ladder in the order it runs, then the rungs the environment switched
-    // off, with the variable that did it.
+    // off, with the variable that did it. An engine list is to blame only when
+    // the ladder honoured it: one naming no known rung is warned about and
+    // ignored, and then NO_NPX is what took the npx rungs away.
     const rungRows = (all: readonly string[], enabled: readonly string[], engineVar: string) => {
-      const why = env(engineVar)?.trim() ? `${envName(engineVar)}=${env(engineVar)!.trim()}` : envName("NO_NPX");
+      const honoured = enginesFromEnv(engineVar, all) !== undefined;
+      const why = honoured ? `${envName(engineVar)}=${env(engineVar)!.trim()}` : envName("NO_NPX");
       return [
         ...enabled.map((id) => ({ id, enabled: true, state: rungState(id) })),
         ...all.filter((id) => !enabled.includes(id)).map((id) => ({ id, enabled: false, state: `off (${why})` })),

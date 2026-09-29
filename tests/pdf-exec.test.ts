@@ -136,11 +136,31 @@ describe("the npx shim on Windows", () => {
     return spawnMock.mock.calls.at(-1)!;
   }
 
-  it("runs npx.cmd through a shell, with every argument quoted for cmd.exe", async () => {
-    const [file, args, opts] = await spawnedOnWindows("npx", ["-y", "--prefer-offline", "@firecrawl/anydoc@0.1", "-", 'say "hi"']);
-    expect(file).toBe('"npx.cmd"');
-    expect(args).toEqual(['"-y"', '"--prefer-offline"', '"@firecrawl/anydoc@0.1"', '"-"', '"say ""hi"""']);
-    expect(opts).toMatchObject({ shell: true });
+  // As ONE command line: an args array beside `shell: true` is only
+  // concatenated, which Node 24 flags at runtime as DEP0190 on every process
+  // that reaches an npx rung, and a later Node may refuse outright.
+  it("runs npx.cmd through a shell, as one command line with every argument quoted for cmd.exe", async () => {
+    const call = await spawnedOnWindows("npx", ["-y", "--prefer-offline", "@firecrawl/anydoc@0.1", "-", 'say "hi"']);
+    expect(call).toHaveLength(2);
+    const [cmdline, opts] = call as unknown as [string, object];
+    expect(cmdline).toBe('"npx.cmd" "-y" "--prefer-offline" "@firecrawl/anydoc@0.1" "-" "say ""hi"""');
+    expect(opts).toMatchObject({ shell: true, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+  });
+
+  it("draws no DEP0190 warning from the real spawn", async () => {
+    // Off Windows the pretend cmd.exe is not found, which is fine: Node warns
+    // while building the call, before it looks for the shell.
+    const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    spawnMock.mockImplementationOnce(actual.spawn);
+    const warn = vi.spyOn(process, "emitWarning");
+    setPlatform("win32");
+    try {
+      await runWithInput("npx", ["--version"], Buffer.alloc(0), 30_000);
+      expect(warn.mock.calls.flat().filter((a) => typeof a === "string" && a.includes("DEP0190"))).toEqual([]);
+    } finally {
+      setPlatform(platform);
+      warn.mockRestore();
+    }
   });
 
   it("spawns a real executable directly, with its arguments untouched", async () => {

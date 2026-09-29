@@ -3,7 +3,7 @@ import { runWithInput, ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./exec.js";
 import { failureDetail, resetNpxState, runNpx, skipNpxHint } from "./npx.js";
 import { assessPdfText, NO_TEXT_LAYER } from "./quality.js";
 import { pdfToText } from "./native.js";
-import { ocrPdf, ocrBudgetLeft, ocrTools, resetOcrBudget, resetOcrTools } from "./ocr.js";
+import { ocrAttempt, ocrBudgetLeft, resetOcrBudget, resetOcrTools } from "./ocr.js";
 
 // The PDF extractor ladder: try the strongest tool available, fall through when
 // it is missing or its output fails the quality gate, and refuse rather than
@@ -144,6 +144,8 @@ interface Unread {
   hint?: string;
   /** The rung cannot run in this process at all; stop asking. */
   unavailable?: boolean;
+  /** OCR declined this scan: the run's budget went to other documents. */
+  budgetSpent?: boolean;
 }
 
 /** What one rung made of the PDF: text to judge, or why there is none. */
@@ -168,15 +170,13 @@ async function viaPdftotext(bytes: Buffer): Promise<RungResult> {
 }
 
 async function viaOcr(bytes: Buffer): Promise<RungResult> {
-  const text = await ocrPdf(bytes);
-  if (text !== undefined) return { text };
-  // ocrPdf says only "no text". The tools decide which kind of no: missing
-  // binaries are the machine's; a conversion that failed or timed out is this
-  // scan's, and must not cost every later scan its only reader.
-  const { copyablePdf, tesseract } = await ocrTools();
-  if (!copyablePdf || !tesseract) return { unavailable: true };
-  // Spent by concurrent scans between the ladder's check and this one.
-  if (ocrBudgetLeft() <= 0) return {};
+  const r = await ocrAttempt(bytes);
+  if ("text" in r) return { text: r.text };
+  // Three kinds of no. Missing binaries are the machine's; a budget spent by
+  // concurrent scans between the ladder's check and this one is the run's; a
+  // conversion that failed or timed out is this scan's, and must not cost every
+  // later scan its only reader.
+  if ("declined" in r) return r.declined === "tools" ? { unavailable: true } : { budgetSpent: true };
   return { failure: "ocr: the conversion failed on this document" };
 }
 
@@ -229,6 +229,7 @@ export async function extractPdf(bytes: Buffer, opts: PdfLadderOptions = {}): Pr
     else if (got.failure) failures.push(got.failure);
     if (got.hint) hints.add(got.hint);
   };
+  const budgetSpent = `scanned PDF, and this run's OCR budget is spent (raise ${envName("OCR_MAX")})`;
 
   for (const id of enabledExtractors(opts.engines)) {
     const known = dead.get(id);
@@ -242,12 +243,18 @@ export async function extractPdf(bytes: Buffer, opts: PdfLadderOptions = {}): Pr
     // it simply declined to read, and the reader would go looking for a fault in
     // the PDF instead of raising the OCR budget.
     if (id === "ocr" && ocrBudgetLeft() <= 0) {
-      lastReason = `scanned PDF, and this run's OCR budget is spent (raise ${envName("OCR_MAX")})`;
+      lastReason = budgetSpent;
       continue;
     }
 
     const got = await runRung(id, bytes, opts);
     if (got.text === undefined) {
+      // …and the same for a scan a concurrent one took the last slot from
+      // while this one waited on the tool probe.
+      if (got.budgetSpent) {
+        lastReason = budgetSpent;
+        continue;
+      }
       if (got.unavailable) dead.set(id, got);
       noteFailure(id, got);
       continue;
