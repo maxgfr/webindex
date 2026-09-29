@@ -312,7 +312,7 @@ ENVIRONMENT
   WEBINDEX_MAX_ATTEMPTS, WEBINDEX_RETRY_MS
                          attempts per request (default 2, at most 5), back-off before a retry (600)
   WEBINDEX_CACHE_DIR     where the fetch cache lives, and the stack in compose/
-                         (default <tmp>/webindex-<uid>/cache)
+                         (default <tmp>/webindex-<uid>/cache, private to you)
   WEBINDEX_CACHE_TTL_HOURS  how long a cached page stays fresh (default 24; fractions allowed)
   WEBINDEX_NO_WRITE      write nothing: no cache entry, no eviction
   WEBINDEX_NO_ROBOTS     robots and crawl do not consult robots.txt — only on a site you own
@@ -2012,6 +2012,8 @@ async function dispatch(argv: string[]): Promise<void> {
         `  size     ${mb(s.bytes)}`,
         `  ttl      ${Math.round(s.ttlMs / 1000)}s`,
         ...(s.oldest ? [`  oldest   ${s.oldest}`, `  newest   ${s.newest}`] : []),
+        // Otherwise a refused directory reads as an empty cache that never fills.
+        ...(s.refused ? [`  unused   ${s.refused}: remove it, or set ${envName("CACHE_DIR")} to a directory only you can write`] : []),
       ].join("\n") + "\n",
     );
     return;
