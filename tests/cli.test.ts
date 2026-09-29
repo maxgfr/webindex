@@ -1257,6 +1257,53 @@ describe("the MCP tools", () => {
       mkdirSync(root);
       await expect(webindexAdapter({ extractRoot: root }).callTool("webindex_repo", { repo: dir })).rejects.toThrow(/outside/);
     });
+
+    it("answers the forge tools the same about a directory that exists and one that does not", async () => {
+      // The filesystem was asked first: an existing directory got the wall's
+      // refusal, a missing one "does not name a repository" — a map of the
+      // machine for anyone who can call the tool.
+      const root = join(dir, "served");
+      mkdirSync(root);
+      const refusal = async (policy: Parameters<typeof webindexAdapter>[0], repo: string) => {
+        try {
+          await webindexAdapter(policy).callTool("webindex_tags", { repo });
+        } catch (e) {
+          return (e as Error).message.replace(repo, "<repo>");
+        }
+        throw new Error(`${repo} was not refused`);
+      };
+      // `tests` exists in the working directory the server runs in; the second does not.
+      const pairs: [string, string][] = [
+        [dir, join(dir, "no-such-dir")],
+        ["tests", "no-such-dir-here"],
+        ["./tests", "./no-such-dir-here"],
+      ];
+      for (const policy of [{ noLocalFiles: true }, { extractRoot: root }]) {
+        for (const [there, missing] of pairs) {
+          expect(await refusal(policy, there), `${JSON.stringify(policy)} ${there}`).toBe(await refusal(policy, missing));
+        }
+      }
+    });
+
+    it("reads a repository path relative to --extract-root, as it reads a file", async () => {
+      const root = join(dir, "served");
+      const checkout = join(root, "myrepo");
+      mkdirSync(checkout, { recursive: true });
+      execFileSync("git", ["-C", checkout, "init", "-q"]);
+      execFileSync("git", ["-C", checkout, "remote", "add", "origin", "https://github.com/o/checked-out.git"]);
+      const seen: string[] = [];
+      installFetchMock((url) => {
+        seen.push(url);
+        return { body: JSON.stringify({ full_name: url.split("/repos/")[1] }), contentType: "application/json" };
+      });
+      const confined = webindexAdapter({ extractRoot: root });
+      for (const repo of ["myrepo", "./myrepo", checkout]) {
+        expect(JSON.parse((await confined.callTool("webindex_repo", { repo })).text), repo).toMatchObject({ fullName: "o/checked-out" });
+      }
+      // The shorthand still means GitHub when the root holds no such directory.
+      expect(JSON.parse((await confined.callTool("webindex_repo", { repo: "o/r" })).text)).toMatchObject({ fullName: "o/r" });
+      expect(seen.at(-1)).toBe("https://api.github.com/repos/o/r");
+    });
   });
 
   describe("cancellation and progress", () => {

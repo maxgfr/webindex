@@ -14,7 +14,7 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // URLs through the local keyless stack, turn a URL or a local file into clean
 // text, drive the containers, and serve all of that to an agent over MCP.
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, extname, join, relative, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { configure, env, envFlag, envInt, envName } from "./brand.js";
 import { decodeLocal } from "./charset.js";
@@ -938,6 +938,28 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
       throw new ToolError((e as Error).message);
     }
   };
+  // The ref a forge tool was named, with the file policy applied BEFORE the
+  // filesystem is asked anything. resolveRepo asks first whether the string
+  // is a directory, and the wall ran only when it was: an existing directory
+  // got the wall's refusal, a missing one "does not name a repository", and a
+  // caller could map the machine. Under a policy, a path (absolute, `./`,
+  // `../`, `~`) goes to the wall whether or not it exists; anything else is a
+  // checkout only when the root holds it, and otherwise a remote, read without
+  // a probe. A relative name is the root's, as it is for webindex_extract.
+  const repoRef = (raw: string, kind: { kind?: ForgeKind }): RepoRef => {
+    if (root === undefined && localFiles) return resolveRepo(raw, kind);
+    const named = raw.trim();
+    if (isAbsolute(named) || /^(?:\.{1,2}|~)(?:[\\/]|$)/.test(named)) return resolveRepo(localPath(named), kind);
+    if (named && root !== undefined) {
+      try {
+        const under = confinePath(root, named);
+        if (statSync(under).isDirectory()) return resolveRepo(under, kind);
+      } catch {
+        /* not a checkout under the root: a remote */
+      }
+    }
+    return resolveRepo(named, { ...kind, local: false });
+  };
   // A forge host a caller named, where the operator did not: under the
   // public-only policy it must resolve publicly like any URL. Checked here on
   // the API base, for a refusal that says why before anything is sent.
@@ -1354,9 +1376,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
         const kind = forge ? { kind: forge } : {};
         // A local checkout is read (its origin remote) before anything else, so
         // the file policy is applied before forgeRef runs git in it.
-        const parsed = resolveRepo(raw, kind);
-        if (parsed.isLocal) localPath(resolve(raw.trim()));
-        const ref = forgeRef(parsed, kind);
+        const ref = forgeRef(repoRef(raw, kind), kind);
         if (ref.host === "generic") throw new ToolError(`"${raw}" does not name a repository.`);
         await refuseForgeHost(ref, forge);
         const limit = typeof args.limit === "number" ? args.limit : undefined;

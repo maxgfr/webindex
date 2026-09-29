@@ -57,19 +57,22 @@ const historyTimeoutMs = () => envInt("GIT_HISTORY_TIMEOUT_MS", 300_000, 1000);
  * `host/owner/repo`, and the bare `owner/repo` shorthand (which means GitHub).
  * A URL copied from a browser names its repository, not the page within it.
  * `opts.kind` says which forge a self-hosted host runs, where its name does not.
+ * `opts.local: false` reads the string as a remote only, without asking the
+ * filesystem whether it names a directory — for a caller (a server others can
+ * reach) whose answer must not say what exists on the machine.
  *
  * An unrecognisable seed becomes a `generic` ref with NO synthesised clone URL.
  * That matters: minting `https://github.com/<free text>.git` would turn "some
  * words the user typed" into a plausible-looking URL that 404s later, far from
  * where the mistake was made.
  */
-export function resolveRepo(raw: string, opts: { kind?: ForgeKind } = {}): RepoRef {
+export function resolveRepo(raw: string, opts: { kind?: ForgeKind; local?: boolean } = {}): RepoRef {
   const trimmed = raw.trim();
 
   // A local directory wins, so a caller can point at a checkout they already
   // have and stay offline. Guarded on non-empty: `resolve("")` is the current
   // working directory, and an empty seed must not silently mean "here".
-  if (trimmed) {
+  if (trimmed && opts.local !== false) {
     const asPath = resolve(trimmed);
     if (existsSync(asPath) && statSync(asPath).isDirectory()) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename(asPath)}-${asPath}`)}` };
