@@ -508,6 +508,33 @@ describe("why a forge call failed", () => {
     expect((await repoFactsResult(REF)).note).toMatch(/requires authentication.*GITHUB_TOKEN/);
   });
 
+  it("says a token was withheld from a host nobody declared, instead of asking for it", async () => {
+    // "set GITLAB_TOKEN" to a user who has: following the advice changed
+    // nothing, since the token only goes to a host they declared.
+    vi.stubEnv("GITLAB_TOKEN", "glpat-SET");
+    const corp = resolveRepo("https://gitlab.corp.example/g/p");
+    const spy = answer(401, { message: "401 Unauthorized" });
+    const note = (await repoFactsResult(corp)).note ?? "";
+    expect(spy.mock.calls[0]![1]?.headers).not.toHaveProperty("authorization");
+    expect(note).toMatch(/GITLAB_TOKEN is set, but is only sent to hosts listed in \w*FORGE_HOSTS/);
+    expect(note).toMatch(/FORGE_HOSTS=gitlab\.corp\.example=gitlab/);
+    expect(note).not.toMatch(/— set GITLAB_TOKEN\.$/);
+    // GitLab reads a private project anonymously as a 404, and a 403 is no clearer.
+    answer(404, { message: "404 Project Not Found" });
+    expect((await repoFactsResult(corp)).note).toMatch(/or it is private.*GITLAB_TOKEN is set, but.*FORGE_HOSTS/);
+    answer(403, { message: "403 Forbidden" });
+    expect((await listReleases(corp)).note).toMatch(/refused access.*GITLAB_TOKEN is set, but.*FORGE_HOSTS/);
+
+    // Undeclared and no token at all: both halves of the advice.
+    vi.stubEnv("GITLAB_TOKEN", "");
+    answer(401, {});
+    expect((await repoFactsResult(corp)).note).toMatch(/FORGE_HOSTS=gitlab\.corp\.example=gitlab and set GITLAB_TOKEN/);
+    // Declared, the token goes, and the texts say what they always said.
+    vi.stubEnv(envName("FORGE_HOSTS"), "gitlab.corp.example=gitlab");
+    answer(404, {});
+    expect((await repoFactsResult(corp)).note).toMatch(/or it is private\.$/);
+  });
+
   it("reports a quota with the time it resets, and asks only once", async () => {
     const reset = Math.floor(Date.UTC(2030, 0, 2, 3, 4, 5) / 1000);
     const spy = answer(403, { message: "API rate limit exceeded for 1.2.3.4." }, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) });

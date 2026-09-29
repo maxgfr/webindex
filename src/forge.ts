@@ -371,13 +371,17 @@ interface Failure {
 function failure(r: ForgeResponse, forge: ForgeKind, ref: RepoRef, action: string, opts: ForgeOptions): Failure {
   const host = ref.host;
   const tokenVar = TOKEN_VARS[forge][0]!;
+  // Whether a token would go to this host at all. A token the user did set is
+  // WITHHELD from a host nobody declared (see TOKEN_HOSTS), so "set it" is
+  // advice that changes nothing: declaring the host is what sends it.
+  const declared = !!opts.apiBase || tokenHostAllowed(forge, host);
+  const withheld = !r.tokenVar && !declared ? forgeToken(forge)?.name : undefined;
+  const declare = `${envName("FORGE_HOSTS")}=${host}=${forge}`;
+  const withheldNote = withheld ? `${withheld} is set, but is only sent to hosts listed in ${envName("FORGE_HOSTS")}: declare this one with ${declare}` : "";
+  const authAdvice = withheldNote || (declared ? `set ${tokenVar}` : `declare the host with ${declare} and set ${tokenVar}`);
   if (r.rateLimited) {
     const when = r.resetAt ? ` until ${r.resetAt}` : "";
-    const advice = r.tokenVar
-      ? `the quota for ${r.tokenVar} is spent`
-      : opts.apiBase || tokenHostAllowed(forge, host)
-        ? `set ${tokenVar} to raise the anonymous quota`
-        : `list ${host} in ${envName("FORGE_HOSTS")} and set ${tokenVar} to raise the anonymous quota`;
+    const advice = r.tokenVar ? `the quota for ${r.tokenVar} is spent` : `${authAdvice} to raise the anonymous quota`;
     return {
       note: `${FORGE_NAME[forge]} rate-limited this request${when} — ${advice}.`,
       status: r.status,
@@ -399,13 +403,13 @@ function failure(r: ForgeResponse, forge: ForgeKind, ref: RepoRef, action: strin
   }
   const why =
     r.status === 404
-      ? `no such repository on ${host}, or it is private`
+      ? `no such repository on ${host}, or it is private${withheldNote ? ` — ${withheldNote}` : ""}`
       : r.status === 401
         ? r.tokenVar
           ? `${host} rejected ${r.tokenVar} — refresh it, or unset it to read public repositories anonymously`
-          : `${host} requires authentication — set ${tokenVar}`
+          : `${host} requires authentication — ${authAdvice}`
         : r.status === 403
-          ? `${host} refused access${r.tokenVar ? ` — ${r.tokenVar} may lack the scope this needs` : ""}`
+          ? `${host} refused access${r.tokenVar ? ` — ${r.tokenVar} may lack the scope this needs` : withheldNote ? ` — ${withheldNote}` : ""}`
           : r.status === 422 && forge === "github"
             ? "GitHub cannot search that repository — it does not exist, or it is private"
             : r.status >= 500
