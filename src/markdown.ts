@@ -370,8 +370,13 @@ class Writer {
     // before it — where a browser draws it. That item goes back on the stack.
     if (top?.kind === "list" && top.items && this.blocks.length + 1 < MAX_BLOCK_DEPTH) this.blocks.push({ kind: "item", marker: top.last, first: false });
     if (!this.room()) return;
-    // A list nested in an item follows the item's text with no blank line.
-    if (this.blocks[this.blocks.length - 1]?.kind === "item") this.needBlank = false;
+    // A list nested in an item follows the item's text with no blank line —
+    // when it can: an ordered list interrupts a paragraph only from 1, and
+    // "4. Fourth" straight under the item's text continues it. A list opening
+    // an empty item shares the item's marker line, so the blank line owed to
+    // what came before stands.
+    const item = this.blocks[this.blocks.length - 1];
+    if (item?.kind === "item" && !item.first && (!ordered || start === 1)) this.needBlank = false;
     this.blocks.push({ kind: "list", ordered, next: start, items: 0, last: "" });
   }
 

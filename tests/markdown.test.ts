@@ -32,6 +32,15 @@ describe("htmlToMarkdown: blocks", () => {
     expect(md(html)).toBe("- One\n- Two\n  - Two a\n  - Two b\n- Three\n\n4. Four\n5. Five\n\nAfter.");
   });
 
+  it("keeps the blank line a nested list needs to start a list rather than continue a paragraph", () => {
+    // An ordered list interrupts a paragraph only when it starts at 1.
+    expect(md('<ul><li>Steps continued<ol start="4"><li>Fourth</li><li>Fifth</li></ol></li></ul>')).toBe("- Steps continued\n\n  4. Fourth\n  5. Fifth");
+    expect(md('<ul><li>Steps<ol start="1"><li>One</li></ol></li></ul>')).toBe("- Steps\n  1. One");
+    // A list opening an empty item owes what came before its blank line.
+    expect(md('<p>Intro</p><ol start="3"><li><ul><li>x</li></ul></li></ol>')).toBe("Intro\n\n3. - x");
+    expect(md("<blockquote><p>quoted</p></blockquote><blockquote><ul><li><ul><li>x</li></ul></li></ul></blockquote>")).toBe("> quoted\n\n> - - x");
+  });
+
   it("nests a list set straight inside another under the item before it, as a browser shows it", () => {
     expect(md("<ul><li>a</li><ul><li>b</li><li>c</li></ul><li>d</li></ul>")).toBe("- a\n  - b\n  - c\n- d");
     expect(md("<ol><li>one</li><ol><li>sub</li></ol></ol>")).toBe("1. one\n   1. sub");
