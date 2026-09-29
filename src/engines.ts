@@ -96,6 +96,13 @@ export interface EngineResult {
   answered?: boolean;
   /** When it did not answer: the HTTP status that ended it, 0 when no response came back at all. */
   status?: number;
+  /**
+   * The call stopped before the engine could answer: the caller's signal fired
+   * (before the request or during it), or no budget was left to ask. It says
+   * nothing about the engine — read as a status 0 it was "unreachable", and a
+   * caller that cancelled was told a working engine was down.
+   */
+  stopped?: boolean;
 }
 
 // Tags that style a run of text without breaking it. The engines wrap every
@@ -437,7 +444,11 @@ export async function searchViaKeyless(
     timeoutMs?: number;
     /** The whole call's budget in ms, every page included: no page starts after it, and each request's timeout is capped to what is left. */
     budgetMs?: number;
-    /** Checked before each page. A page already in flight finishes, within its timeout. */
+    /**
+     * Checked before each page and cuts the pause between two short; a page in
+     * flight is aborted (httpGet takes the signal). A call it stopped before
+     * any page came back is `stopped`, not unreachable.
+     */
     signal?: AbortSignal;
   } = {},
 ): Promise<EngineResult> {
@@ -465,7 +476,7 @@ export async function searchViaKeyless(
   for (let p = 0; p < pages && hits.length < limit; p++) {
     if (opts.signal?.aborted || Date.now() >= deadline - spentSlackMs(opts.budgetMs)) {
       if (p > 0) break; // the pages already read stand
-      return { hits: [], note: `${spec.label} was not asked: ${opts.signal?.aborted ? "the search was cancelled" : "no time was left"}.` };
+      return { hits: [], note: `${spec.label} was not asked: ${opts.signal?.aborted ? "the search was cancelled" : "no time was left"}.`, stopped: true };
     }
     // No retry: in a cascade the next engine IS the retry, and asking an
     // engine that just answered 429 again is how a throttle becomes a block.
@@ -479,6 +490,8 @@ export async function searchViaKeyless(
     if (!r.ok || !r.body.trim()) {
       // A later page failing is not a failure — page one's results stand.
       if (p > 0) break;
+      // Abandoned by the caller's signal: httpGet's own word for it.
+      if (!r.status && r.error === "cancelled") return { hits: [], note: `${spec.label} did not get to answer: the search was cancelled.`, stopped: true };
       // A success with nothing in it is not an unreachable host: something
       // answered, and said nothing.
       if (r.ok) return { hits: [], note: `${spec.label} returned an empty page (HTTP ${r.status}).`, status: r.status };

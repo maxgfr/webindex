@@ -79,7 +79,8 @@ export type SearchRung = "searxng" | "firecrawl" | KeylessEngine;
  * - `unreachable`: nothing answered — not running, no connection, timed out;
  * - `error`: something answered, but not with results — an error status, an
  *   empty or unreadable page, a request the backend rejected;
- * - `disabled`: switched off; `not-tried`: the cascade stopped before it.
+ * - `disabled`: switched off; `not-tried`: the cascade stopped before it
+ *   answered — out of budget, or cancelled, even with its request in flight.
  */
 export type RungOutcome = "hits" | "empty" | "throttled" | "blocked" | "unreachable" | "error" | "disabled" | "not-tried";
 
@@ -227,6 +228,11 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
       signal: opts.signal,
     });
     if (!r.ok) {
+      // Abandoned by the caller's signal (httpGet's own word for it): nothing
+      // was learned about SearXNG, which "unreachable" would say is down.
+      if (p === 0 && !r.status && r.error === "cancelled") {
+        return rungResult("searxng", "not-tried", [], ["SearXNG did not get to answer: the search was cancelled."]);
+      }
       if (p === 0) {
         failed = r.status === 429 || r.status === 503 ? "throttled" : r.status === 0 ? "unreachable" : "error";
         notes.push(
@@ -320,6 +326,7 @@ const answered = (outcome: RungOutcome) => outcome === "hits" || outcome === "em
 // What a keyless engine's result says in the cascade's vocabulary.
 function keylessOutcome(r: EngineResult): RungOutcome {
   if (r.hits.length) return "hits";
+  if (r.stopped) return "not-tried";
   if (r.answered) return "empty";
   if (r.blocked) return "blocked";
   if (r.throttled) return "throttled";
@@ -415,7 +422,7 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
       if (!r.answered && r.note) notes.push(r.note);
     }
   }
-  if (!hits.length) notes.push(closingNote(rungs));
+  if (!hits.length) notes.push(closingNote(rungs, opts.signal?.aborted === true));
   return { hits, notes, rungs, searched: rungs.some((r) => answered(r.outcome)) };
 }
 
@@ -451,12 +458,14 @@ function firecrawlOutcome(fc: { hits?: unknown[]; status?: number }): RungOutcom
  * converts a refusal into a finding about the world); or something answered
  * and found nothing.
  */
-function closingNote(rungs: RungReport[]): string {
+function closingNote(rungs: RungReport[], cancelled: boolean): string {
   const cli = brand().cli;
   if (rungs.every((r) => r.outcome === "disabled")) {
     return `No search backend was enabled — SearXNG and Firecrawl are off and no keyless engine is selected, so nothing was searched. Set ${envName("ENGINES")} to a list of ${KEYLESS_ENGINES.join(", ")}, or run \`${cli} stack up\`.`;
   }
   if (rungs.some((r) => answered(r.outcome))) return `No results from any engine. \`${cli} stack up\` starts SearXNG and Firecrawl locally.`;
+  // The caller stopped it: "try again later" is advice for an outage.
+  if (cancelled) return "The search was cancelled before any engine answered — nothing was searched.";
   const keyless = rungs.filter((r) => isKeylessEngine(r.rung));
   if (keyless.length && keyless.every((r) => r.outcome === "blocked")) {
     return `Every keyless engine blocked this client (${keyless.map((r) => r.rung).join(", ")}) — nothing was searched, which is not the same as nothing being there. Try again later, or run \`${cli} stack up\` for a local SearXNG.`;

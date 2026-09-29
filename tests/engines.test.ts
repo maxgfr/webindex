@@ -683,6 +683,40 @@ describe("a search is bounded in time", () => {
       expect(r.hits).toEqual([]);
     }
   });
+
+  it("reports a rung cancelled in flight as not tried, not as unreachable", async () => {
+    // `unreachable` says the backend is down, and `rungs` is what a caller
+    // reads to decide which ones are; one that cancelled learned nothing about
+    // them, and was told to try again later.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (u: string, init?: RequestInit) => {
+        if (String(u).endsWith("/healthz")) return new Response("OK");
+        return new Promise<Response>((_resolve, reject) =>
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError"))),
+        );
+      }),
+    );
+    const cancelIn = (ms: number) => {
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), ms);
+      return ctrl.signal;
+    };
+    const engine = await searchViaKeyless("ddglite", "x", { signal: cancelIn(20) });
+    expect(engine).toMatchObject({ hits: [], stopped: true });
+    expect(engine.note).toMatch(/cancelled/);
+    for (const opts of [
+      { searxng: "http://sx-cancelled.test", engines: [] },
+      { searxng: "off", engines: ["ddglite" as const] },
+    ]) {
+      const r = await search("x", { ...opts, firecrawl: "off", signal: cancelIn(20) });
+      const outcomes = r.rungs!.filter((x) => x.outcome !== "disabled").map((x) => x.outcome);
+      expect(outcomes).toEqual(["not-tried"]);
+      expect(r.notes.join(" ")).toMatch(/cancelled/);
+      expect(r.notes.join(" ")).not.toMatch(/unreachable|Try again later/);
+      expect(r.searched).toBe(false);
+    }
+  });
 });
 
 describe("the notes name the switch the user actually threw", () => {

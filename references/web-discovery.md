@@ -52,7 +52,8 @@ learns the answer does not exist.
 The same facts come back as data. `--json` (and `search()` in the library) adds
 `rungs` — each rung's `outcome`: `hits`, `empty`, `throttled`, `blocked`,
 `unreachable` (nothing answered), `error` (something answered, but not with
-results), `disabled` or `not-tried` — and `searched`, true only when some rung
+results), `disabled` or `not-tried` (the search stopped before it answered: out
+of budget, or cancelled, even mid-request) — and `searched`, true only when some rung
 answered (`hits` or `empty`). `webindex_search` ends its text with the same as
 one line: `rungs: searxng=unreachable ddg=blocked ddglite=hits(10) firecrawl=not-tried`.
 
