@@ -358,9 +358,10 @@ class Writer {
   }
 
   rule(): void {
-    // Never straight under a line of text, where `---` is a heading underline.
-    this.needBlank = true;
-    this.block(["---"]);
+    // `***`, never `---`: on an item's first line `- ---` is itself a rule and
+    // cuts the list in two (Bootstrap's dropdown dividers are <li><hr>), and
+    // straight under a line of text `---` underlines it into a heading.
+    this.block(["***"]);
   }
 
   openList(ordered: boolean, start: number): void {

@@ -48,9 +48,12 @@ describe("htmlToMarkdown: blocks", () => {
     );
   });
 
-  it("writes a rule, never straight under a line of text", () => {
-    expect(md("<p>Above</p><hr><p>Below</p>")).toBe("Above\n\n---\n\nBelow");
-    expect(md("Above<hr>Below")).toBe("Above\n\n---\n\nBelow");
+  it("writes a rule as ***, which no list marker or line of text above can turn into something else", () => {
+    expect(md("<p>Above</p><hr><p>Below</p>")).toBe("Above\n\n***\n\nBelow");
+    expect(md("Above<hr>Below")).toBe("Above\n\n***\n\nBelow");
+    // `- ---` is itself a rule, and cut the list in two: Bootstrap's dropdown dividers.
+    expect(md("<ul><li>a</li><li><hr></li><li>b</li></ul>")).toBe("- a\n- ***\n- b");
+    expect(md("<ul><li><hr>after rule</li></ul>")).toBe("- ***\n\n  after rule");
   });
 
   it("turns <br> into a hard break, and two of them into a new paragraph", () => {
