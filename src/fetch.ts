@@ -467,17 +467,24 @@ export async function httpGet(
       // the text cap and then refused as incomplete.
       const namedDocument = isBinaryDocument(meta.contentType) || namesDocument(filename);
       const ambiguous = AMBIGUOUS_TYPES.has(mime);
-      const max = opts.maxBytes ?? (namedDocument || ambiguous ? opts.maxDocumentBytes : undefined) ?? DEFAULT_MAX_RESPONSE_BYTES;
+      const declared = Number(res.headers.get("content-length"));
+      const documentCap = namedDocument || ambiguous ? opts.maxDocumentBytes : undefined;
+      // Declared past the document cap, an ambiguous body cannot be a whole
+      // document, and a prefix of one is only ever read as text: the text cap
+      // is all of it worth downloading, not the 16 MB the document cap allows.
+      const pastDocumentCap = !namedDocument && documentCap !== undefined && declared > documentCap;
+      const max = opts.maxBytes ?? (pastDocumentCap ? Math.min(documentCap, DEFAULT_MAX_RESPONSE_BYTES) : documentCap) ?? DEFAULT_MAX_RESPONSE_BYTES;
 
       // Refuse a body the server has already declared too big, before a single
-      // byte of it is read, when its prefix is useless: a document, or the
+      // byte of it is read, when its prefix is useless: a document, media that
+      // is never text (fetchAndExtract discards it whatever arrives), or the
       // answer to a Range request (declared that large, the range was ignored
       // and the prefix is not the part asked for). Not retried: the size will
       // be the same next time. Any other text body reads its capped prefix
       // below, exactly as it does when the same bytes arrive chunked — whether
       // a long article is readable must not depend on a Content-Length.
-      const declared = Number(res.headers.get("content-length"));
-      const prefixUseless = opts.binary || namedDocument || Object.keys(opts.headers ?? {}).some((k) => k.toLowerCase() === "range");
+      const prefixUseless =
+        opts.binary || namedDocument || NON_TEXT_TYPE_RE.test(mime) || Object.keys(opts.headers ?? {}).some((k) => k.toLowerCase() === "range");
       if (Number.isFinite(declared) && declared > max && prefixUseless) {
         ctrl.abort();
         return { ok: false, status: res.status, body: "", bytesRead: 0, truncated: true, ...meta, error: `response too large: ${declared} bytes > ${max} cap` };

@@ -629,6 +629,48 @@ describe("fetchAndExtract routes on what the bytes are", () => {
     expect(r.text.length).toBe(4 * 1024 * 1024);
   });
 
+  it("downloads no more of a body declared too large than it could ever use", async () => {
+    // Media declared over the cap is thrown away whatever arrives, and an
+    // ambiguous body declared over the document cap can only be read as text:
+    // they were read to the 4 MB and the 16 MB cap before being discarded.
+    const declared = { "content-length": String(200 * 1024 * 1024) };
+    const CHUNK = 256 * 1024;
+    let produced = 0;
+    const count = (n: number) => void (produced += n);
+    installFetchMock(() => ({ bytes: Buffer.alloc(6 * 1024 * 1024), contentType: "video/mp4", headers: declared, chunkSize: CHUNK, onPull: count }));
+    const video = await fetchAndExtract("https://x.test/clip");
+    expect(video.text).toBe("");
+    expect(video.note).toMatch(/too large/);
+    expect(produced).toBe(0);
+
+    produced = 0;
+    installFetchMock(() => ({
+      bytes: Buffer.alloc(20 * 1024 * 1024),
+      contentType: "application/octet-stream",
+      headers: declared,
+      chunkSize: CHUNK,
+      onPull: count,
+    }));
+    const blob = await fetchAndExtract("https://x.test/blob");
+    expect(blob.text).toBe("");
+    expect(blob.note).toMatch(/binary data/);
+    expect(produced).toBeLessThanOrEqual(4 * 1024 * 1024 + CHUNK);
+
+    // Still read as text, to the text cap, when that is what it is.
+    produced = 0;
+    installFetchMock(() => ({
+      bytes: Buffer.alloc(20 * 1024 * 1024, 0x61),
+      contentType: "application/octet-stream",
+      headers: declared,
+      chunkSize: CHUNK,
+      onPull: count,
+    }));
+    const log = await fetchAndExtract("https://x.test/log");
+    expect(log).toMatchObject({ truncated: true });
+    expect(log.text.length).toBe(4 * 1024 * 1024);
+    expect(produced).toBeLessThanOrEqual(4 * 1024 * 1024 + CHUNK);
+  });
+
   it.each([
     ["image/png", Buffer.from("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10", "latin1")],
     ["video/mp4", Buffer.from("\x00\x00\x00\x18ftypmp42", "latin1")],
