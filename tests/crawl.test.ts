@@ -573,6 +573,31 @@ describe("crawlSite request ceiling", () => {
     expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/"]);
     expect(r.notes.join(" ")).not.toMatch(/NaN/);
   });
+
+  it("reads an Infinity budget or depth as unlimited, not as the default", async () => {
+    // Only NaN was meant to fall back. Infinity is a number, and a caller who
+    // passes it asked for no ceiling: it silently became depth 2 and 20 pages,
+    // and at depth 2 the result read as a site that ended there.
+    installFetchMock((url) => {
+      if (url.includes("robots.txt") || url.includes("sitemap")) return { status: 404, body: "" };
+      const chain = /\/d(\d+)$/.exec(url);
+      if (chain) return html(`<p>d${chain[1]}</p><a href="/d${Number(chain[1]) + 1}">next</a>`);
+      if (url === "https://s.test/") return html('<p>root</p><a href="/d1">next</a>');
+      return undefined;
+    });
+    const deep = await crawlSite("https://s.test/", { maxDepth: Number.POSITIVE_INFINITY, maxPages: 5, useSitemap: false, delayMs: 0 });
+    expect(deep.pages.map((p) => p.depth)).toEqual([0, 1, 2, 3, 4]);
+
+    installFetchMock((url) => {
+      if (url.includes("robots.txt") || url.includes("sitemap")) return { status: 404, body: "" };
+      if (url === "https://s.test/") return html(Array.from({ length: 30 }, (_, i) => `<a href="/p${i}">${i}</a>`).join(""));
+      return html("<p>leaf</p>");
+    });
+    const wide = await crawlSite("https://s.test/", { maxPages: Number.POSITIVE_INFINITY, maxDepth: 1, useSitemap: false, delayMs: 0 });
+    expect(wide.pages).toHaveLength(31);
+    expect(wide.pending).toEqual([]);
+    expect(wide.notes.join(" ")).not.toMatch(/Infinity|budget/);
+  });
 });
 
 describe("crawlSite redirects", () => {

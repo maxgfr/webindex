@@ -148,7 +148,10 @@ export interface CrawlOptions {
    * their own, one per origin and a few documents.
    */
   maxRequests?: number;
-  /** How many links deep to follow. The seed is depth 0. */
+  /**
+   * How many links deep to follow. The seed is depth 0. On every ceiling here,
+   * `Infinity` is no ceiling and a value that is not a number is the default.
+   */
   maxDepth?: number;
   /**
    * Leave the crawl's origin. Off by default — a crawl that wanders is not a
@@ -343,9 +346,13 @@ interface Frontier {
   depth: number;
 }
 
-/** A whole number from a caller's option, or the default when it is absent or not a number. */
+/**
+ * A whole number from a caller's option, or the default when it is absent or
+ * not a number. Infinity is a number — the caller asked for no ceiling — and
+ * stays one: read as absent, it quietly became the default.
+ */
 function whole(n: number | undefined, fallback: number, min: number): number {
-  return n !== undefined && Number.isFinite(n) ? Math.max(min, Math.floor(n)) : fallback;
+  return typeof n === "number" && !Number.isNaN(n) ? Math.max(min, Math.floor(n)) : fallback;
 }
 
 const seconds = (ms: number) => `${ms / 1000} s`;
