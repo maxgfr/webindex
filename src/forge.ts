@@ -67,6 +67,15 @@ export interface ForgeOptions {
    * `false` keeps a search to exactly one request.
    */
   relax?: boolean;
+  /**
+   * Approve each URL before it is requested — the API URL and every redirect it
+   * leads to — as `httpGet`'s hook of the same name does. A refusal is a failed
+   * answer (status 0, "URL not authorized") and is not retried. The client
+   * follows its redirects itself, so this is the only place a caller sees where
+   * they go: a public-only server needs it, or a public host's 302 walks the
+   * client into the machine's own network.
+   */
+  authorizeUrl?: (url: string) => Promise<boolean>;
 }
 
 /**
@@ -181,6 +190,10 @@ interface ForgeResponse {
   resetAt?: string;
   /** The variable whose token went out with the request, if one did. */
   tokenVar?: string;
+  /** A failure a second try would only repeat: not retried. */
+  permanent?: boolean;
+  /** The caller's `authorizeUrl` refused a URL — its policy, not the network. */
+  refused?: boolean;
 }
 
 // A quota answer looks like a normal failure unless you check for it, and the
@@ -216,12 +229,32 @@ function failureText(e: unknown): string {
   return code && !detail.includes(code) ? `${code}: ${detail}` : detail;
 }
 
+// A URL the caller's authorizer refused, or could not judge, as the failed
+// answer this client returns instead of throwing.
+async function refusal(authorize: ((url: string) => Promise<boolean>) | undefined, url: string): Promise<ForgeResponse | undefined> {
+  if (!authorize) return undefined;
+  let error: string | undefined;
+  try {
+    if (!(await authorize(url))) error = `URL not authorized: ${url}`;
+  } catch (e) {
+    error = `URL authorization failed for ${url}: ${(e as Error).message}`;
+  }
+  return error === undefined ? undefined : { ok: false, status: 0, data: undefined, error, permanent: true, refused: true };
+}
+
 // One GET, following redirects BY HAND so a credential never outlives its
 // origin. `fetch` decides for itself which headers survive a cross-origin hop,
 // and older runtimes kept them all; here every header that can carry a secret is
 // dropped the moment the target changes origin, whatever the runtime. One
-// timeout covers the whole chain.
-async function forgeGetOnce(url: string, headers: Record<string, string>, timeoutMs: number): Promise<ForgeResponse> {
+// timeout covers the whole chain. `authorize` approves the first URL and every
+// hop before it is requested: following by hand means `fetch` never sees the
+// chain, so nothing else can.
+async function forgeGetOnce(
+  url: string,
+  headers: Record<string, string>,
+  timeoutMs: number,
+  authorize?: (url: string) => Promise<boolean>,
+): Promise<ForgeResponse> {
   const ctrl = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -232,6 +265,8 @@ async function forgeGetOnce(url: string, headers: Record<string, string>, timeou
   let target = url;
   try {
     for (let hop = 0; ; hop++) {
+      const refused = await refusal(authorize, target);
+      if (refused) return refused;
       const res = await fetch(target, { headers: sent, redirect: "manual", signal: ctrl.signal });
       const location = res.headers.get("location");
       if (REDIRECT_STATUS.has(res.status) && location) {
@@ -278,10 +313,10 @@ async function forgeGet(url: string, kind: ForgeKind, ref: RepoRef, opts: ForgeO
   const headers = { "user-agent": contactUa(), accept: kind === "github" ? "application/vnd.github+json" : "application/json", ...auth };
   const tokenVar = auth.authorization ? forgeToken(kind)?.name : undefined;
   const timeoutMs = opts.timeoutMs ?? 15_000;
-  let r = await forgeGetOnce(url, headers, timeoutMs);
-  if (RETRY_STATUS.has(r.status) || (r.status === 0 && !r.timedOut)) {
+  let r = await forgeGetOnce(url, headers, timeoutMs, opts.authorizeUrl);
+  if (RETRY_STATUS.has(r.status) || (r.status === 0 && !r.timedOut && !r.permanent)) {
     await sleep(envInt("RETRY_MS", 600, 0, 5000));
-    r = await forgeGetOnce(url, headers, timeoutMs);
+    r = await forgeGetOnce(url, headers, timeoutMs, opts.authorizeUrl);
   }
   return tokenVar ? { ...r, tokenVar } : r;
 }
@@ -322,6 +357,9 @@ function failure(r: ForgeResponse, forge: ForgeKind, ref: RepoRef, action: strin
       ...(r.resetAt ? { resetAt: r.resetAt } : {}),
     };
   }
+  // The caller's own wall, not the network: "network error" would send the
+  // reader looking at the wrong machine.
+  if (r.refused) return { note: `${action} refused: ${r.error}.`, status: 0 };
   if (r.status === 0) {
     let apiHost = host;
     try {

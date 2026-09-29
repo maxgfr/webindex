@@ -1186,6 +1186,39 @@ describe("the MCP tools", () => {
       await expect(guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/group/project" })).rejects.not.toThrow(/not a public address/);
     });
 
+    it("refuses a forge's redirect into a private address, at the hop", async () => {
+      // The forge client follows its redirects by hand, so checking the API base
+      // alone let a public host's 302 walk every forge tool into the metadata
+      // endpoint, and the answer's fields came back to the caller.
+      const spy = installFetchMock((url) =>
+        url.startsWith("https://93.184.216.34/")
+          ? { status: 302, headers: { location: "http://169.254.169.254/latest/meta-data/iam/" } }
+          : { body: JSON.stringify([{ name: "LEAKED", title: "LEAKED", body: "credentials", description: "LEAKED" }]), contentType: "application/json" },
+      );
+      const guarded = webindexAdapter({ publicOnly: true });
+      for (const tool of ["webindex_repo", "webindex_issues", "webindex_releases", "webindex_tags"]) {
+        await expect(guarded.callTool(tool, { repo: "https://93.184.216.34/o/r", forge: "gitea" }), tool).rejects.toThrow(
+          /not authorized: http:\/\/169\.254\.169\.254/,
+        );
+      }
+      expect(spy.mock.calls.map(([u]) => String(u)).filter((u) => u.includes("169.254."))).toEqual([]);
+    });
+
+    it("follows a declared private forge's redirects within it, and no further", async () => {
+      // The operator vouched for the host, and a renamed repository answers
+      // with a redirect to its own origin — but not for wherever it points next.
+      process.env[envName("FORGE_HOSTS")] = "10.1.2.3=gitea";
+      const spy = installFetchMock((url) => {
+        if (url.startsWith("https://10.1.2.3/api/v1/repos/old/")) return { status: 301, headers: { location: "https://10.1.2.3/api/v1/repos/new/name" } };
+        if (url.startsWith("https://10.1.2.3/api/v1/repos/away/")) return { status: 302, headers: { location: "http://169.254.169.254/latest/" } };
+        return { body: JSON.stringify({ full_name: "new/name" }), contentType: "application/json" };
+      });
+      const guarded = webindexAdapter({ publicOnly: true });
+      expect(JSON.parse((await guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/old/name" })).text)).toMatchObject({ fullName: "new/name" });
+      await expect(guarded.callTool("webindex_repo", { repo: "https://10.1.2.3/away/name" })).rejects.toThrow(/not authorized: http:\/\/169\.254\.169\.254/);
+      expect(spy.mock.calls.map(([u]) => String(u)).filter((u) => u.includes("169.254."))).toEqual([]);
+    });
+
     it("reads files only under --extract-root, relative paths against it, symlinks checked", async () => {
       const root = join(dir, "served");
       mkdirSync(root);

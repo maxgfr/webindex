@@ -939,11 +939,22 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
     }
   };
   // A forge host a caller named, where the operator did not: under the
-  // public-only policy it must resolve publicly like any URL. The forge client
-  // follows its own redirects, so this is checked once, on the API base.
+  // public-only policy it must resolve publicly like any URL. Checked here on
+  // the API base, for a refusal that says why before anything is sent.
   const refuseForgeHost = async (ref: RepoRef, kind: ForgeKind | undefined): Promise<void> => {
     if (!guard || configuredForgeHosts().has(normalizeForgeHost(ref.host))) return;
     await refuseUrl(apiBase(ref, kind ? { kind } : {}));
+  };
+  // ...and at every redirect after it, which the forge client follows by hand,
+  // out of `fetch`'s sight: a public host answering 302 → 169.254.169.254 was
+  // otherwise followed, and the metadata answer's fields came back to the
+  // caller. A host the operator declared is trusted on its own origin — a
+  // renamed repository redirects there — and nowhere else.
+  const forgeGuard = (ref: RepoRef, kind: ForgeKind | undefined): ((url: string) => Promise<boolean>) | undefined => {
+    if (!guard) return undefined;
+    if (!configuredForgeHosts().has(normalizeForgeHost(ref.host))) return guard;
+    const own = new URL(apiBase(ref, kind ? { kind } : {})).origin;
+    return async (url) => new URL(url).origin === own || (await guard(url));
   };
   return {
     version: ENGINE_VERSION,
@@ -1349,7 +1360,8 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
         if (ref.host === "generic") throw new ToolError(`"${raw}" does not name a repository.`);
         await refuseForgeHost(ref, forge);
         const limit = typeof args.limit === "number" ? args.limit : undefined;
-        const opts = { ...(limit ? { limit } : {}), ...(forge ? { kind: forge } : {}) };
+        const authorizeUrl = forgeGuard(ref, forge);
+        const opts = { ...(limit ? { limit } : {}), ...(forge ? { kind: forge } : {}), ...(authorizeUrl ? { authorizeUrl } : {}) };
         if (name === "webindex_repo") {
           const { facts: f, note } = await repoFactsResult(ref, opts);
           if (!f) throw new ToolError(note ?? `Could not read ${ref.webUrl ?? ref.raw}.`);

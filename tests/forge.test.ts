@@ -397,6 +397,62 @@ describe("where a token is sent", () => {
   });
 });
 
+describe("a caller's URL authorizer", () => {
+  // The MCP server's public-only wall hands one in. The forge client follows its
+  // redirects by hand, so the hook is the only thing that sees where they lead:
+  // a public host answering 302 → the metadata endpoint must not be followed.
+  const METADATA = "http://169.254.169.254/latest/meta-data/iam/";
+  const publicOnly = async (url: string) => !new URL(url).hostname.startsWith("169.254.");
+  function redirectingForge() {
+    return installFetchMock((url) =>
+      url.startsWith("https://93.184.216.34/")
+        ? { status: 302, headers: { location: METADATA } }
+        : { body: JSON.stringify([{ name: "LEAKED", title: "LEAKED", body: "credentials" }]), contentType: "application/json" },
+    );
+  }
+
+  it("stops at a redirect it refuses, for every call, and does not ask twice", async () => {
+    const ref = resolveRepo("https://93.184.216.34/o/r");
+    const opts = { kind: "gitea" as const, authorizeUrl: publicOnly };
+    for (const [what, call] of [
+      ["facts", () => repoFactsResult(ref, opts)],
+      ["releases", () => listReleases(ref, opts)],
+      ["tags", () => listTags(ref, opts)],
+      ["issues", () => searchIssues(ref, ["x"], "issue", opts)],
+    ] as const) {
+      const spy = redirectingForge();
+      const r = (await call()) as { note?: string; status?: number; items?: unknown[] };
+      expect(r.note, what).toMatch(/not authorized: http:\/\/169\.254\.169\.254/);
+      expect(r.status, what).toBe(0);
+      expect(JSON.stringify(r), what).not.toContain("LEAKED");
+      // Refused is an answer: a second try would be refused the same way.
+      expect(
+        spy.mock.calls.map(([u]) => String(u)),
+        what,
+      ).toEqual([expect.stringMatching(/^https:\/\/93\.184\.216\.34\/api\/v1\/repos\/o\/r/)]);
+    }
+  });
+
+  it("asks it before the first request as well", async () => {
+    const spy = redirectingForge();
+    const r = await repoFactsResult(resolveRepo("https://169.254.169.254/o/r"), { kind: "gitea", authorizeUrl: publicOnly });
+    expect(r.note).toMatch(/not authorized: https:\/\/169\.254\.169\.254\/api\/v1\/repos\/o\/r/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("says so when the authorizer itself fails, and sends nothing", async () => {
+    const spy = redirectingForge();
+    const r = await listTags(resolveRepo("https://93.184.216.34/o/r"), {
+      kind: "gitea",
+      authorizeUrl: async () => {
+        throw new Error("resolver down");
+      },
+    });
+    expect(r.note).toMatch(/authorization failed.*resolver down/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
 describe("why a forge call failed", () => {
   const REF = resolveRepo("github.com/a/b");
   beforeEach(() => {
