@@ -4,7 +4,7 @@
 // lived. Used to score fetched page text against the question so an excerpt
 // carries the lines that actually answer it.
 //
-// Lowercase, drop stopwords (EN + FR question scaffolding), keep identifiers,
+// Lowercase, drop stopwords (EN, FR and DE question scaffolding), keep identifiers,
 // fold accents and plurals, split camelCase/snake_case, compile
 // accent-insensitive patterns. Deterministic, no LLM, no dependencies.
 
@@ -112,6 +112,15 @@ const STOPWORDS = new Set([
   "me",
   "my",
   "our",
+  "vs",
+]);
+
+// French and German question scaffolding: the locale layer targets FR and DE.
+// Written in capitals, one of these is an English acronym instead — MIT, DAS,
+// IM, DES, UN, CE — and stays a term: "mit" took MIT out of every licence
+// question, and out of the ranker's terms with it. English scaffolding in
+// capitals ("WHAT IS THE") is still scaffolding.
+const LOCALE_STOPWORDS = new Set([
   "le",
   "la",
   "les",
@@ -168,8 +177,7 @@ const STOPWORDS = new Set([
   "aux",
   "si",
   "ne",
-  "vs",
-  // German question scaffolding: the locale layer targets DE as well as FR.
+  // German.
   "der",
   "die",
   "das",
@@ -211,10 +219,14 @@ const STOPWORDS = new Set([
  * excerpt matcher highlights. Two lists that drift apart make the two disagree,
  * and the symptom — a source that scores well but shows an excerpt with no
  * highlight — looks like a bug in neither.
+ *
+ * Pass the term as written: a French or German stopword in capitals is an
+ * English acronym (MIT, DAS, IM) and is not one.
  */
 export function isStopword(term: string): boolean {
   const t = term.toLowerCase();
   if (STOPWORDS.has(t)) return true;
+  if (LOCALE_STOPWORDS.has(t) && !(term !== t && term === term.toUpperCase())) return true;
   // Read through the brand, at CALL time, so a consumer's extras apply to
   // buildMatcher and to its own tokeniser alike — the two must agree on what a
   // term is, or a document ranks on a word the excerpt never highlights.
@@ -266,7 +278,7 @@ export function keywords(question: string): string[] {
   const out: string[] = [];
   const add = (raw: string, minLength: number): void => {
     const lower = raw.toLowerCase();
-    if (raw.length < minLength || isStopword(lower) || seen.has(lower)) return;
+    if (raw.length < minLength || isStopword(raw) || seen.has(lower)) return;
     seen.add(lower);
     out.push(raw);
   };
@@ -372,7 +384,7 @@ export function subtokens(raw: string): string[] {
   const out: string[] = [];
   for (const p of parts) {
     const lower = p.toLowerCase();
-    if (lower.length < 3 || isStopword(lower)) continue;
+    if (lower.length < 3 || isStopword(p)) continue;
     if (!out.includes(lower)) out.push(lower);
     if (out.length >= 4) break;
   }

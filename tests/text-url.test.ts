@@ -150,6 +150,21 @@ describe("keywords", () => {
   it("drops 'vs' and German question scaffolding", () => {
     expect(keywords("node.js vs deno performance")).not.toContain("vs");
     expect(keywords("Wie funktioniert die Datenschutz-Grundverordnung?")).toEqual(["funktioniert", "Datenschutz", "Grundverordnung"]);
+    expect(keywords("Mit welchem Werkzeug?")).toEqual(["welchem", "Werkzeug"]);
+  });
+
+  it("keeps a French or German stopword written in capitals, an English acronym there", () => {
+    // "mit" dropped MIT from every licence question, and the ranker with it.
+    expect(keywords("Is lodash MIT licensed?")).toEqual(["lodash", "MIT", "licensed"]);
+    expect(keywords("DAS vs NAS storage")).toEqual(["DAS", "NAS", "storage"]);
+    expect(keywords("IM protocol XMPP")).toEqual(["IM", "protocol", "XMPP"]);
+    expect(keywords("DES encryption")).toEqual(["DES", "encryption"]);
+    expect(bm25Tokenize("Is lodash MIT licensed?", { subtokens: false })).toEqual(["lodash", "mit", "licensed"]);
+    expect([...buildMatcher("Is lodash MIT licensed?").matchLine("Released under the MIT license.")]).toContain("mit");
+    const page = [...Array.from({ length: 20 }, (_, i) => `Line ${i} of the changelog.`), "License: MIT"].join("\n");
+    expect(excerptWindows(page, "MIT")[0]).toMatchObject({ anchor: 20, score: 1 });
+    // English scaffolding stays scaffolding in capitals.
+    expect(keywords("WHAT IS THE LIMIT")).toEqual(["LIMIT"]);
   });
 
   it("keeps a word written with combining marks whole", () => {
