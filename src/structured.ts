@@ -24,6 +24,7 @@ export interface PageMetadata {
   /** ISO-ish date strings, exactly as the page wrote them. */
   publishedAt?: string;
   modifiedAt?: string;
+  /** Every author the page names, each once, in the order given; at most 10 000. */
   authors: string[];
   imageUrl?: string;
   canonicalUrl?: string;
@@ -243,6 +244,14 @@ export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): Pag
   const set = <K extends keyof PageMetadata>(k: K, v: PageMetadata[K] | undefined) => {
     if (v !== undefined && out[k] === undefined) out[k] = v;
   };
+  // Deduped through a Set: checking each against the list kept so far made a
+  // page of 100k author tags (3 MB) cost 16 s.
+  const authorSeen = new Set<string>();
+  const addAuthor = (a: string) => {
+    if (out.authors.length >= MAX_AUTHORS || authorSeen.has(a)) return;
+    authorSeen.add(a);
+    out.authors.push(a);
+  };
 
   const nodes = jsonLd.filter(isNode);
   const byId = indexById(jsonLd);
@@ -276,7 +285,7 @@ export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): Pag
     set("modifiedAt", firstString(n.dateModified));
     set("imageUrl", image(n.image));
     set("siteName", names(n.publisher)[0]);
-    if (!out.authors.length) out.authors.push(...new Set(names(n.author)));
+    if (!out.authors.length) for (const a of names(n.author)) addAuthor(a);
   }
   const nameOfA = (...types: string[]) => nodes.filter((n) => typesOf(n).some((t) => types.includes(t))).flatMap((n) => names(n.name))[0];
   set("siteName", nameOfA("WebSite"));
@@ -292,7 +301,7 @@ export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): Pag
   set("canonicalUrl", htmlCanonicalUrl(html) ?? sources.map((n) => firstString(n.url)).find(Boolean));
   // Scholarly pages give each author a tag of their own; every one counts.
   const authorKeys = new Set(["article:author", "author", "citation_author", "dc.creator"]);
-  for (const [key, v] of entries) if (authorKeys.has(key) && !out.authors.includes(v)) out.authors.push(v);
+  for (const [key, v] of entries) if (authorKeys.has(key)) addAuthor(v);
 
   // `<title>` is the last resort — it carries site chrome ("Foo — Example.com")
   // that the structured fields do not.
@@ -308,6 +317,10 @@ export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): Pag
   }
   return out;
 }
+
+// The largest real author list, a collaboration paper's, runs to about 5 000
+// names; past twice that it is a hostile page, and the list stops.
+const MAX_AUTHORS = 10_000;
 
 /** `url` made absolute against `base`; undefined when that yields no http(s) URL. */
 function resolveUrl(url: string, base: string): string | undefined {

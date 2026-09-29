@@ -602,6 +602,20 @@ describe("structured metadata", () => {
     expect(pageMetadata(`${"<meta ".repeat(40_000)}${'<meta content="x ">'.repeat(20_000)}`).authors).toEqual([]);
     expect(performance.now() - started).toBeLessThan(2000);
   });
+
+  it("keeps a page of author tags in linear time, and a bounded number of them", () => {
+    // Each tag was checked against every author kept before it: 100k tags
+    // (3 MB, under the fetch cap) took 16 s. The largest real author list,
+    // a collaboration paper's, is about 5 000 names.
+    const tags = Array.from({ length: 100_000 }, (_, i) => `<meta name=author content=${i}>`).join("");
+    const started = performance.now();
+    const m = pageMetadata(`<meta name=author content=0>${tags}`);
+    expect(performance.now() - started).toBeLessThan(10_000);
+    expect(m.authors).toHaveLength(10_000);
+    expect(m.authors.slice(0, 3)).toEqual(["0", "1", "2"]);
+    const listed = { "@type": "Article", author: Array.from({ length: 200_000 }, (_, i) => ({ name: `A${i}` })) };
+    expect(pageMetadata(ld(listed)).authors).toHaveLength(10_000);
+  });
 });
 
 describe("feeds", () => {
