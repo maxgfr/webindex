@@ -459,8 +459,9 @@ class Writer {
     this.heading = 0;
     if (level) {
       const title = text.replace(/\s+/g, " ").trim();
-      // "Section #" would lose its "#" as a closing sequence.
-      if (title) this.block([`${"#".repeat(level)} ${title.replace(/(\s)(#+)$/, "$1\\$2")}`]);
+      // "Section #" would lose its "#" as a closing sequence, and a title of
+      // nothing but hashes (a glossary's "#") would leave the heading empty.
+      if (title) this.block([`${"#".repeat(level)} ${title.replace(/(^|\s)(#+)$/, "$1\\$2")}`]);
       return;
     }
     // Hard breaks split the paragraph into lines; two in a row end it.

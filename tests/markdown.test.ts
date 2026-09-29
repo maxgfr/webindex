@@ -241,6 +241,10 @@ describe("htmlToMarkdown: escaping", () => {
 
   it("escapes a heading's trailing hashes, which would read as its closing sequence", () => {
     expect(md("<h2>Section #</h2>")).toBe("## Section \\#");
+    // A title of nothing but hashes (a glossary's "#" section) was an empty heading.
+    expect(md("<h2>#</h2>")).toBe("## \\#");
+    expect(md("<h3>##</h3>")).toBe("### \\##");
+    expect(md("<h2>C#</h2>")).toBe("## C#");
   });
 
   it("escapes a '!' written straight before a link, which would make it an image", () => {
@@ -293,6 +297,7 @@ describe("htmlToMarkdown stays linear on hostile markup", () => {
     ["unclosed comment openers", "<!-- x ".repeat(150_000)],
     ["an unterminated attribute quote per tag", '<a title="x '.repeat(80_000)],
     ["unclosed <h2> openers", "<h2>x ".repeat(150_000)],
+    ["a heading of hashes and spaces", `<h2>${"## ".repeat(100_000)}#x</h2>`],
     ["headings closed only at the very end", `${"<h2>x ".repeat(150_000)}</h2>`],
     ["unclosed <pre> openers", "<pre>x ".repeat(150_000)],
     ["unclosed links", '<a href="/x">x '.repeat(100_000)],
