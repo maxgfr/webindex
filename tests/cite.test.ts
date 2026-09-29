@@ -11,6 +11,7 @@ import {
   danglingTokens,
   extractClaimUnits,
   extractNumerals,
+  FILE_LINE_TOKEN,
   markedQuoteMask,
   normalizeNumeralText,
   orMasks,
@@ -308,6 +309,18 @@ describe("collecting citations", () => {
     // All parts must pass, or none is taken: the predicate stays the boundary.
     expect(citationTokensIn("Claim [S1, see also S2] here", isSource)).toEqual([]);
     expect(collectCitations("Claim [S1, S2].\n\n```\n[S3, S4]\n```", isSource)).toEqual({ grounding: ["S1", "S2"], inertOnly: ["S3", "S4"] });
+  });
+
+  it("splits a group of file:line citations, which the whole-token pattern also accepts", () => {
+    // FILE_LINE_TOKEN's lazy path took the whole bracket as one citation,
+    // path "src/limit.ts:12, src/bucket.ts": a caller resolved a path that
+    // does not exist and never checked the first citation.
+    const isFileLine = (t: string) => FILE_LINE_TOKEN.test(t);
+    expect(citationTokensIn("Handled in the limiter [src/limit.ts:12, src/bucket.ts:40-52].", isFileLine)).toEqual(["src/limit.ts:12", "src/bucket.ts:40-52"]);
+    expect(citationTokensIn("See [src/a.ts:3; src/b.ts:7].", isFileLine)).toEqual(["src/a.ts:3", "src/b.ts:7"]);
+    // A path that holds a comma is still one citation: its parts do not pass.
+    expect(citationTokensIn("See [docs/a, b.md:3].", isFileLine)).toEqual(["docs/a, b.md:3"]);
+    expect(citationTokensIn("Single [src/a.ts:3].", isFileLine)).toEqual(["src/a.ts:3"]);
   });
 });
 
