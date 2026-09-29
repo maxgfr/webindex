@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMatcher, excerptWindows, foldTerm, isStopword, keywords, matcherFromTokens, rankedKeywords } from "../src/text.js";
+import { buildMatcher, excerptWindows, foldTerm, isStopword, keywords, matcherFromTokens, nearestHeading, rankedKeywords } from "../src/text.js";
 import { focusedSnippet } from "../src/fetch.js";
 import { bm25Tokenize } from "../src/rank.js";
 import { configure, resetBrand } from "../src/brand.js";
@@ -145,11 +145,44 @@ describe("keywords", () => {
     expect(keywords("Is HTTP/2 multiplexing faster than HTTP/1.1?")).toEqual(expect.arrayContaining(["HTTP/2", "HTTP/1.1", "multiplexing"]));
     // A '+' between words is still a separator.
     expect(keywords("a+b tuning")).toEqual(["tuning"]);
+    expect(keywords("C++20 modules with g++ and F#")).toEqual(["C++20", "modules", "g++", "F#"]);
+  });
+
+  it("reads 'Node 18+' as version 18, which a page writes without the '+'", () => {
+    // The suffix is C++'s and C#'s: after a digit it made "18+" a keyword no
+    // line saying "Node 18" matched, and split the matcher from the ranker.
+    expect(keywords("Does it support Node 18+?")).toEqual(["support", "Node", "18"]);
+    expect([...buildMatcher("Does it support Node 18+?").matchLine("Requires Node 18 or later.")]).toEqual(expect.arrayContaining(["node", "18"]));
+    expect([...buildMatcher("iOS 15+ deployment target").matchLine("Set the deployment target to iOS 15.")]).toContain("15");
+    expect([...buildMatcher("Python 3.10+ typing").matchLine("New in Python 3.10: union types")]).toContain("10");
+    expect(keywords("ES2015+ features").map(foldTerm)).toEqual([...new Set(bm25Tokenize("ES2015+ features", { subtokens: false }))]);
+  });
+
+  it("tokenises a question of hostile '+', '#' and '/' runs in linear time", () => {
+    const question = `${"9".repeat(200_000)}++ ${"a1+#".repeat(50_000)} ${"C++x".repeat(50_000)} ${"a/1.1/".repeat(40_000)}`;
+    const started = performance.now();
+    keywords(question);
+    expect(performance.now() - started).toBeLessThan(10_000);
   });
 
   it("drops 'vs' and German question scaffolding", () => {
     expect(keywords("node.js vs deno performance")).not.toContain("vs");
     expect(keywords("Wie funktioniert die Datenschutz-Grundverordnung?")).toEqual(["funktioniert", "Datenschutz", "Grundverordnung"]);
+    expect(keywords("Mit welchem Werkzeug?")).toEqual(["welchem", "Werkzeug"]);
+  });
+
+  it("keeps a French or German stopword written in capitals, an English acronym there", () => {
+    // "mit" dropped MIT from every licence question, and the ranker with it.
+    expect(keywords("Is lodash MIT licensed?")).toEqual(["lodash", "MIT", "licensed"]);
+    expect(keywords("DAS vs NAS storage")).toEqual(["DAS", "NAS", "storage"]);
+    expect(keywords("IM protocol XMPP")).toEqual(["IM", "protocol", "XMPP"]);
+    expect(keywords("DES encryption")).toEqual(["DES", "encryption"]);
+    expect(bm25Tokenize("Is lodash MIT licensed?", { subtokens: false })).toEqual(["lodash", "mit", "licensed"]);
+    expect([...buildMatcher("Is lodash MIT licensed?").matchLine("Released under the MIT license.")]).toContain("mit");
+    const page = [...Array.from({ length: 20 }, (_, i) => `Line ${i} of the changelog.`), "License: MIT"].join("\n");
+    expect(excerptWindows(page, "MIT")[0]).toMatchObject({ anchor: 20, score: 1 });
+    // English scaffolding stays scaffolding in capitals.
+    expect(keywords("WHAT IS THE LIMIT")).toEqual(["LIMIT"]);
   });
 
   it("keeps a word written with combining marks whole", () => {
@@ -254,6 +287,28 @@ describe("buildMatcher", () => {
     expect(buildMatcher("straße").matchLine("Strasse 5").size).toBe(1);
     expect(buildMatcher("strasse").matchLine("Straße 5").size).toBe(1);
     expect(buildMatcher("encyclopaedia").matchLine("encyclopædia").size).toBe(1);
+  });
+});
+
+describe("nearestHeading", () => {
+  it("reads a closing run of '#' only after a space, and a '\\#' as the hash it escapes", () => {
+    // htmlToMarkdown writes "Issue #" as "## Issue \#": the label read "Issue \".
+    expect(nearestHeading(["## Issue \\#", "x"], 1)).toBe("Issue #");
+    expect(nearestHeading(["## Learn C#", "x"], 1)).toBe("Learn C#");
+    expect(nearestHeading(["## Title ##", "x"], 1)).toBe("Title");
+    expect(nearestHeading(["### \\##", "x"], 1)).toBe("##");
+    expect(nearestHeading(["# A", "## 5 \\* 3 \\[1\\] ##  ", "x"], 2)).toBe("5 * 3 [1]");
+    // Not headings: no space after the marker, nothing but a closing run, seven hashes.
+    expect(nearestHeading(["# Kept", "##nospace", "## #", "####### seven", "x"], 4)).toBe("Kept");
+    const md = "## Issue \\#\n\nThe tracker number goes after the hash sign in every report.";
+    expect(excerptWindows(md, "tracker number report")[0]?.heading).toBe("Issue #");
+  });
+
+  it("reads a hostile heading line in linear time", () => {
+    const lines = [`## a${" ".repeat(200_000)}b`, `## ${"# ".repeat(100_000)}`, `## x${" \\#".repeat(100_000)}`, `## ${"#".repeat(200_000)}x`, "x"];
+    const started = performance.now();
+    nearestHeading(lines, 4);
+    expect(performance.now() - started).toBeLessThan(10_000);
   });
 });
 

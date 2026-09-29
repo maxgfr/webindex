@@ -24,6 +24,7 @@ export interface PageMetadata {
   /** ISO-ish date strings, exactly as the page wrote them. */
   publishedAt?: string;
   modifiedAt?: string;
+  /** Every author the page names, each once, in the order given; at most 10 000. */
   authors: string[];
   imageUrl?: string;
   canonicalUrl?: string;
@@ -61,6 +62,25 @@ function parseJsonLd(raw: string): unknown {
   }
 }
 
+// How deep a JSON-LD block may nest its objects and arrays. Real ones stop
+// near ten — a @graph, a node, a recipe's sections of steps. JSON.parse
+// accepts thousands of levels (a 40 KB block of brackets), and every reader
+// after it recurses: the fields below, and JSON.stringify for `meta --json`
+// and webindex_meta, which died with "Maximum call stack size exceeded".
+const MAX_JSONLD_DEPTH = 32;
+
+/** Whether `v` nests deeper than `max` — walked with a stack of its own, since recursion is what such a value breaks. */
+function nestsDeeper(v: unknown, max: number): boolean {
+  const stack: [unknown, number][] = [[v, 0]];
+  while (stack.length) {
+    const [x, depth] = stack.pop()!;
+    if (!x || typeof x !== "object") continue;
+    if (depth >= max) return true;
+    for (const y of Array.isArray(x) ? x : Object.values(x)) if (y && typeof y === "object") stack.push([y, depth + 1]);
+  }
+  return false;
+}
+
 // A @graph wrapper is the common shape from CMS plugins, and some emit an array
 // of them; flatten both so a caller does not have to know which generator
 // produced the page.
@@ -76,19 +96,33 @@ function flattenJsonLd(v: unknown, out: unknown[]): void {
  *
  * A block that does not parse, even leniently, is skipped rather than thrown:
  * malformed JSON-LD is common and must never cost the caller the rest of the
- * page. The type may be unquoted or carry a charset parameter.
+ * page. So is one nested deeper than any real block. The type may be unquoted
+ * or carry a charset parameter.
  *
  * One forward pass: each script's close is searched from its opener, and a
  * script that never closes ends the scan, since nothing after it can close
  * either. A lazy `[\s\S]*?</script>` per opener re-read the rest of the page
- * from every unclosed one.
+ * from every unclosed one. Comments are skipped in the same pass, whichever
+ * of a comment and a script comes first owning what follows, as dropElements
+ * does: `<!-- old tracker: <script> -->` paired with the real block's
+ * </script> and swallowed it, and a commented-out block is not what the page
+ * says. A comment that never closes is text, as metaEntries reads it.
  */
 export function extractJsonLd(html: string): unknown[] {
   const out: unknown[] = [];
-  const open = openTag("script");
+  const open = new RegExp(`<!--|${openTag("script").source}`, "gi");
   const close = closeTagRe("script");
+  let commentsClose = true;
   let m: RegExpExecArray | null;
   while ((m = open.exec(html))) {
+    if (m[0] === "<!--") {
+      // From +2, so the degenerate `<!-->` closes itself as the spec says. A
+      // search that fails proves no comment after it closes either.
+      const end = commentsClose ? html.indexOf("-->", m.index + 2) : -1;
+      if (end < 0) commentsClose = false;
+      else open.lastIndex = end + 3;
+      continue;
+    }
     close.lastIndex = open.lastIndex;
     const c = close.exec(html);
     if (!c) break;
@@ -100,7 +134,7 @@ export function extractJsonLd(html: string): unknown[] {
         .replace(/-->\s*$/, "")
         .trim();
       const parsed = raw ? parseJsonLd(raw) : undefined;
-      if (parsed !== undefined) flattenJsonLd(parsed, out);
+      if (parsed !== undefined && !nestsDeeper(parsed, MAX_JSONLD_DEPTH)) flattenJsonLd(parsed, out);
     }
     open.lastIndex = c.index + c[0].length;
   }
@@ -174,13 +208,51 @@ const PAGE_TYPES = new Set([
   "MedicalWebPage",
 ]);
 
+// The works a page is written to present: an article or post of any kind, a
+// product, an event, a recipe, a review… They outrank every other type that
+// is not chrome. A template's header organization comes in hundreds of
+// subtypes no chrome list keeps up with — Restaurant and every LocalBusiness,
+// CollegeOrUniversity, GovernmentOrganization — and one of them read first
+// made a news story the university's page, its authors and date lost.
+const WORK_TYPES = new Set([
+  "CreativeWork",
+  "Blog",
+  "Book",
+  "Chapter",
+  "Course",
+  "Dataset",
+  "Game",
+  "Guide",
+  "HowTo",
+  "Legislation",
+  "Movie",
+  "MusicAlbum",
+  "Question",
+  "Recipe",
+  "Report",
+  "SoftwareSourceCode",
+  "Thesis",
+  "VideoGame",
+  "VideoObject",
+  "AudioObject",
+]);
+// The families with many members: NewsArticle and ScholarlyArticle, BlogPosting
+// and JobPosting, MusicEvent, ClaimReview, SoftwareApplication, TVEpisode…
+const WORK_SUFFIX = /(?:Article|Posting|Event|Review|Product|Application|Episode|Series|Recording)$/;
+const isWork = (t: string) => WORK_TYPES.has(t) || WORK_SUFFIX.test(t);
+
 // "https://schema.org/NewsArticle" and "schema:NewsArticle" are NewsArticle.
 const typesOf = (n: Node): string[] => allStrings(n["@type"]).map((t) => t.slice(Math.max(t.lastIndexOf("/"), t.lastIndexOf(":")) + 1));
 
-/** 3 for the thing a page presents (an article, a product, a recipe…), 2 for the page, 1 untyped, 0 site chrome. */
+/**
+ * 4 for the work a page presents (an article, a product, a recipe…), 3 for any
+ * other thing that is not chrome (the business on its own page), 2 for the
+ * page, 1 untyped, 0 site chrome.
+ */
 function rank(n: Node): number {
   const types = typesOf(n);
   if (!types.length) return 1;
+  if (types.some(isWork)) return 4;
   if (types.some((t) => !CHROME_TYPES.has(t) && !PAGE_TYPES.has(t))) return 3;
   return types.some((t) => PAGE_TYPES.has(t)) ? 2 : 0;
 }
@@ -223,10 +295,11 @@ function firstString(v: unknown): string | undefined {
  * JSON-LD wins on conflict: OpenGraph is written for social-preview cards and is
  * routinely stale or templated, while JSON-LD is what the site feeds search
  * engines and tends to be generated from the real record. But only the JSON-LD
- * that describes THIS page: the primary entity is the first node presenting
- * something (an Article, a Product, a Recipe…), else the page node, and only
- * then site chrome. Taking every field from whichever node came first reported
- * a news story as the newspaper's Organization block, titled with its name.
+ * that describes THIS page: the primary entity is the first work the page
+ * presents (an Article, a Product, a Recipe…), else the first other thing
+ * that is not site chrome (a business on its own page), else the page node.
+ * Taking every field from whichever node came first reported a news story as
+ * the newspaper's Organization block, titled with its name.
  *
  * The canonical URL is the page's own `<link rel="canonical">`, then `og:url`,
  * then the JSON-LD `url` — never an `@id`, which is an identifier such as
@@ -242,6 +315,14 @@ export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): Pag
 
   const set = <K extends keyof PageMetadata>(k: K, v: PageMetadata[K] | undefined) => {
     if (v !== undefined && out[k] === undefined) out[k] = v;
+  };
+  // Deduped through a Set: checking each against the list kept so far made a
+  // page of 100k author tags (3 MB) cost 16 s.
+  const authorSeen = new Set<string>();
+  const addAuthor = (a: string) => {
+    if (out.authors.length >= MAX_AUTHORS || authorSeen.has(a)) return;
+    authorSeen.add(a);
+    out.authors.push(a);
   };
 
   const nodes = jsonLd.filter(isNode);
@@ -276,7 +357,7 @@ export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): Pag
     set("modifiedAt", firstString(n.dateModified));
     set("imageUrl", image(n.image));
     set("siteName", names(n.publisher)[0]);
-    if (!out.authors.length) out.authors.push(...new Set(names(n.author)));
+    if (!out.authors.length) for (const a of names(n.author)) addAuthor(a);
   }
   const nameOfA = (...types: string[]) => nodes.filter((n) => typesOf(n).some((t) => types.includes(t))).flatMap((n) => names(n.name))[0];
   set("siteName", nameOfA("WebSite"));
@@ -292,7 +373,20 @@ export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): Pag
   set("canonicalUrl", htmlCanonicalUrl(html) ?? sources.map((n) => firstString(n.url)).find(Boolean));
   // Scholarly pages give each author a tag of their own; every one counts.
   const authorKeys = new Set(["article:author", "author", "citation_author", "dc.creator"]);
-  for (const [key, v] of entries) if (authorKeys.has(key) && !out.authors.includes(v)) out.authors.push(v);
+  for (const [key, v] of entries) if (authorKeys.has(key)) addAuthor(v);
+
+  // A primary that is no work — an organization of a subtype nothing above
+  // names, emitted first — leaves the byline and date to the first other node
+  // outside the chrome that gives them, as every node's fields once merged.
+  if (!primary || rank(primary) < 4) {
+    const read = new Set(sources);
+    const rest = nodes.filter((n) => !read.has(n) && rank(n) > 0);
+    for (const n of rest) {
+      if (out.authors.length) break;
+      for (const a of names(n.author)) addAuthor(a);
+    }
+    set("publishedAt", rest.map((n) => firstString(n.datePublished)).find(Boolean));
+  }
 
   // `<title>` is the last resort — it carries site chrome ("Foo — Example.com")
   // that the structured fields do not.
@@ -308,6 +402,10 @@ export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): Pag
   }
   return out;
 }
+
+// The largest real author list, a collaboration paper's, runs to about 5 000
+// names; past twice that it is a hostile page, and the list stops.
+const MAX_AUTHORS = 10_000;
 
 /** `url` made absolute against `base`; undefined when that yields no http(s) URL. */
 function resolveUrl(url: string, base: string): string | undefined {

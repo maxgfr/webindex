@@ -20,10 +20,12 @@ otherwise assign that term an enormous weight on no evidence.
 
 Terms are the excerpt matcher's terms: the same folding and stopwords, and an
 identifier counts as itself AND its words (`RateLimiter`, `rate_limiter` also
-match "rate limiter"). Combining marks stay inside their word, so Devanagari,
-Thai or Tamil words survive whole. Chinese and Japanese, written without spaces,
-are read as overlapping character bigrams (a lone ideograph as itself) — no
-dictionary, still deterministic.
+match "rate limiter"). The stopwords are English, French and German question
+scaffolding; a French or German one written in capitals (`MIT`, `DAS`, `IM`)
+is an English acronym and stays a term. Combining marks stay inside their
+word, so Devanagari, Thai or Tamil words survive whole. Chinese and Japanese,
+written without spaces, are read as overlapping character bigrams (a lone
+ideograph as itself) — no dictionary, still deterministic.
 
 **SimHash collapse** — the same CONTENT syndicated across different URLs:
 mirrors, scraper copies, a press release reprinted verbatim. Identity dedup

@@ -22,7 +22,7 @@ import { AMBIGUOUS_TYPES } from "./mime.js";
 // `nearestHeading` moved to text.ts — it is a fact about markdown, not about
 // HTTP — and is still exported from the package root, so no consumer sees it move.
 import { buildMatcher, nearestHeading } from "./text.js";
-import { documentBaseUrl, htmlToMarkdown } from "./markdown.js";
+import { documentBaseUrl, markdownAgainst } from "./markdown.js";
 import { extractPdf } from "./pdf.js";
 import { extractDocument, docFormatForUrl, docFormatForContentType, sniffDocument, type DocFormat } from "./doc.js";
 // Cyclic by design: firecrawl.ts is a CLIENT of this HTTP layer, and this layer
@@ -1369,12 +1369,10 @@ export async function fetchAndExtract(
   const markdown = opts.format === "markdown";
   const main = isHtml ? (opts.fullPage ? body : extractMainHtml(body)) : body;
   // The base is read off the whole page: its <base href> sits in the <head>
-  // that main-content isolation has just cut away.
-  const stripped = !isHtml
-    ? body
-    : markdown
-      ? htmlToMarkdown(main, { baseUrl: documentBaseUrl(body, res.url), fullPage: opts.fullPage })
-      : htmlToText(main, opts);
+  // that main-content isolation has just cut away. It is applied once — with
+  // fullPage, or when isolation keeps the whole document, the <base> is still
+  // in `main`, and a relative one (`docs/`) applied twice is a directory off.
+  const stripped = !isHtml ? body : markdown ? markdownAgainst(main, documentBaseUrl(body, res.url), opts.fullPage) : htmlToText(main, opts);
   const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped, { markdown }) : { text: stripped, dropped: 0 };
   const title = isHtml ? pageTitle(body) : undefined;
   const canonical = isHtml ? absoluteCanonical(htmlCanonicalUrl(body), res.url) : undefined;

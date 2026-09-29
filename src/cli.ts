@@ -32,7 +32,7 @@ import { hybridSearch, probeQdrant, qdrantBase } from "./vector.js";
 import { embed } from "./embed.js";
 import { crawlSite } from "./crawl.js";
 import { extractTables, tableToMarkdown } from "./tables.js";
-import { documentBaseUrl, htmlToMarkdown } from "./markdown.js";
+import { documentBaseUrl, markdownAgainst } from "./markdown.js";
 import { fingerprint, hasChanged } from "./changed.js";
 import {
   auditEngineUsage,
@@ -594,7 +594,7 @@ async function extractLocal(
   const main = looksHtml && !fullPage ? extractMainHtml(raw) : raw;
   // A file has no address of its own to resolve against — only the <base href>
   // a saved page may carry, and only when that one is absolute.
-  const text = !looksHtml ? raw : markdown ? htmlToMarkdown(main, { fullPage, baseUrl: documentBaseUrl(raw) }) : htmlToText(main, { fullPage });
+  const text = !looksHtml ? raw : markdown ? markdownAgainst(main, documentBaseUrl(raw), fullPage) : htmlToText(main, { fullPage });
   const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text, { markdown }) : { text, dropped: 0 };
   return { text: consent.text, extractor: looksHtml ? "native" : "plain", consentDropped: consent.dropped };
 }
