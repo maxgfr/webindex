@@ -14,7 +14,7 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // URLs through the local keyless stack, turn a URL or a local file into clean
 // text, drive the containers, and serve all of that to an agent over MCP.
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, extname, join, relative, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { configure, env, envFlag, envInt, envName } from "./brand.js";
 import { decodeLocal } from "./charset.js";
@@ -913,6 +913,23 @@ export interface WebindexToolPolicy {
 }
 
 /**
+ * The checkout a relative `repo` names under the operator's root, or the name
+ * unchanged when no directory there answers to it. Only a lookup: the caller
+ * still confines what it gets, so `../x` resolving outside the root is refused
+ * there, not trusted here.
+ */
+function checkoutUnder(root: string, raw: string): string {
+  const name = raw.trim();
+  if (!name || isAbsolute(name)) return raw;
+  const p = resolve(root, name);
+  try {
+    return statSync(p).isDirectory() ? p : raw;
+  } catch {
+    return raw;
+  }
+}
+
+/**
  * webindex's own MCP tools: fetch a URL, extract a file.
  *
  * Exported because it is a useful seam in both directions — the suite drives it
@@ -1342,10 +1359,16 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
         if (forge !== undefined && !isForgeKind(forge)) throw new InvalidParamsError(`\`forge\` must be one of: ${FORGE_KINDS.join(", ")}`);
         const raw = String(args.repo ?? "");
         const kind = forge ? { kind: forge } : {};
+        // Under a root, a relative path names a checkout under it, as a relative
+        // path given to webindex_extract names a file there: resolved against
+        // the server's cwd it found nothing, or something outside the root. A
+        // name no directory under the root answers to keeps its meaning — `a/b`
+        // is still a forge slug.
+        const seed = root !== undefined ? checkoutUnder(root, raw) : raw;
         // A local checkout is read (its origin remote) before anything else, so
         // the file policy is applied before forgeRef runs git in it.
-        const parsed = resolveRepo(raw, kind);
-        if (parsed.isLocal) localPath(resolve(raw.trim()));
+        const parsed = resolveRepo(seed, kind);
+        if (parsed.isLocal) localPath(resolve(seed.trim()));
         const ref = forgeRef(parsed, kind);
         if (ref.host === "generic") throw new ToolError(`"${raw}" does not name a repository.`);
         await refuseForgeHost(ref, forge);

@@ -1238,6 +1238,35 @@ describe("the MCP tools", () => {
       mkdirSync(root);
       await expect(webindexAdapter({ extractRoot: root }).callTool("webindex_repo", { repo: dir })).rejects.toThrow(/outside/);
     });
+
+    it("reads a relative checkout path against --extract-root, as it reads a file", async () => {
+      // The forge tools resolved it against the server's cwd, so a checkout
+      // under the root was "not a repository" unless named absolutely.
+      const root = join(dir, "served");
+      mkdirSync(join(root, "r1"), { recursive: true });
+      execFileSync("git", ["-C", join(root, "r1"), "init", "-q"]);
+      execFileSync("git", ["-C", join(root, "r1"), "remote", "add", "origin", "https://github.com/maxgfr/webindex.git"]);
+      mkdirSync(join(dir, "elsewhere"));
+      const seen: string[] = [];
+      installFetchMock((url) => {
+        seen.push(url);
+        return { body: JSON.stringify({ full_name: "maxgfr/webindex" }), contentType: "application/json" };
+      });
+      try {
+        const confined = webindexAdapter({ extractRoot: root });
+        const r = JSON.parse((await confined.callTool("webindex_repo", { repo: "r1" })).text);
+        expect(r.ref).toMatchObject({ host: "github.com", owner: "maxgfr", repo: "webindex" });
+        expect(seen[0]).toBe("https://api.github.com/repos/maxgfr/webindex");
+        // Relative to the root still may not climb out of it…
+        await expect(confined.callTool("webindex_repo", { repo: "../elsewhere" })).rejects.toThrow(/outside/);
+        // …and a shorthand naming no directory under it is still a forge slug.
+        seen.length = 0;
+        await confined.callTool("webindex_repo", { repo: "a/b" });
+        expect(seen[0]).toBe("https://api.github.com/repos/a/b");
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
   });
 
   describe("cancellation and progress", () => {
