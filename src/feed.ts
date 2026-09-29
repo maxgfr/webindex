@@ -2,7 +2,7 @@ import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 import { decodeBody } from "./charset.js";
 import { decodeEntities, httpGet } from "./fetch.js";
-import { closeTagRe, dropElements, htmlAttributes, INLINE_TAGS, LOOSE_TAG_RE, RAW_TEXT_ELEMENTS, TAG_RE, tagName } from "./html.js";
+import { BLOCK_TAGS, closeTagRe, dropElements, htmlAttributes, INLINE_TAGS, LOOSE_TAG_RE, RAW_TEXT_ELEMENTS, TAG_RE, tagName } from "./html.js";
 
 // Feeds and sitemaps: the two machine-readable indexes a site publishes about
 // itself.
@@ -170,6 +170,22 @@ function tagText(block: string, ...names: string[]): string | undefined {
   return undefined;
 }
 
+// The elements a title written as markup is made of. Anything else in angle
+// brackets — `<T>`, `<Widget>` — is the title's own text.
+const HTML_ELEMENTS: ReadonlySet<string> = new Set([...BLOCK_TAGS, ...INLINE_TAGS, "br", "hr", "img", "h1", "h2", "h3", "h4", "h5", "h6"]);
+
+/**
+ * Whether decoded text reads as HTML, the test feedparser applies to an RSS
+ * title: a close tag or an entity, and no tag naming anything but an HTML
+ * element. `Box<T>` and "The <dialog> element" are text; `<em>Big</em> news`
+ * and `Tom &amp; Jerry` escaped twice are markup.
+ */
+function looksLikeHtml(text: string): boolean {
+  if (!/<\/[A-Za-z]\w*>/.test(text) && !/&#?\w+;/.test(text)) return false;
+  for (const m of text.matchAll(/<\/?([A-Za-z]\w*)/g)) if (!HTML_ELEMENTS.has(m[1]!.toLowerCase())) return false;
+  return true;
+}
+
 /**
  * An element's value as the words a reader would see.
  *
@@ -177,16 +193,21 @@ function tagText(block: string, ...names: string[]): string | undefined {
  * so the XML is decoded FIRST and the HTML read after. Stripping tags before
  * decoding found none, and then printed `<p>Hello <b>world</b></p>`. Atom's
  * `type="text"` — its default — is text: its angle brackets are content.
+ *
+ * An RSS title is text escaped once by most generators (Hugo's is
+ * `{{ .Title }}`), so `Box&lt;T&gt;` is Box<T>: read as HTML, the `<T>` was
+ * stripped as a tag. It is read as HTML only when it looks like markup.
  */
 function proseText(block: string, atom: boolean, ...names: string[]): string | undefined {
   for (const name of names) {
     const el = elements(block, name, 1)[0];
     if (!el) continue;
-    const type = htmlAttributes(el.attrs).get("type")?.toLowerCase() ?? (atom ? "text" : "html");
+    const declared = htmlAttributes(el.attrs).get("type")?.toLowerCase();
+    const decoded = declared === "xhtml" ? "" : xmlText(el.inner);
+    const type = declared ?? (atom ? "text" : name === "title" && !looksLikeHtml(decoded) ? "text" : "html");
     // `xhtml` is markup inline, not escaped: its entities are decoded once, by
     // the HTML reader, or `&lt;b&gt;` in its prose would turn into a tag.
-    const text =
-      type === "xhtml" ? fragmentText(el.inner) : type === "text" || type === "text/plain" ? collapse(xmlText(el.inner)) : fragmentText(xmlText(el.inner));
+    const text = type === "xhtml" ? fragmentText(el.inner) : type === "text" || type === "text/plain" ? collapse(decoded) : fragmentText(decoded);
     if (text) return text;
   }
   return undefined;
