@@ -688,14 +688,15 @@ function preSlotIndex(line: string): number | undefined {
 // flattenHeadings keeps to its one `## text` line. Restored there, on that
 // line, rather than inside flattenHeadings — the block's text is already
 // decoded, and the entity and tag passes after it would decode it again.
-const INLINE_PRE_SLOT = / ?\u0000(\d+)\u0000/g;
 function restoreInlinePre(line: string, blocks: readonly string[]): string {
-  return line
-    .replace(INLINE_PRE_SLOT, (_, i: string) => {
-      const code = (blocks[Number(i)] ?? "").replace(/\s+/g, " ").trim();
-      return code ? ` ${code}` : "";
-    })
-    .trim();
+  // Split on NUL: the odd pieces are block indices, the even ones the line.
+  const parts = line.split(NUL);
+  let out = parts[0]!;
+  for (let i = 1; i < parts.length; i += 2) {
+    const code = (blocks[Number(parts[i])] ?? "").replace(/\s+/g, " ").trim();
+    out += ` ${code} ${parts[i + 1] ?? ""}`;
+  }
+  return out.replace(/ {2,}/g, " ").trim();
 }
 
 /**
