@@ -556,7 +556,15 @@ export async function httpGet(
       if (!timedOut && opts.signal?.aborted) return cancelled();
       const error = timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e);
       // The follow path's loop, in undici's words; authorizedGet says its own.
-      last = { ok: false, status: 0, body: "", contentType: "", url, error, ...(!timedOut && /redirect count exceeded/i.test(error) ? { redirectFailed: true } : {}) };
+      last = {
+        ok: false,
+        status: 0,
+        body: "",
+        contentType: "",
+        url,
+        error,
+        ...(!timedOut && /redirect count exceeded/i.test(error) ? { redirectFailed: true } : {}),
+      };
       // A timeout has spent the whole budget the caller granted, and a host
       // silent for that long rarely answers a second time: retrying it made the
       // real worst case attempts × timeout, twice what the caller asked for.

@@ -193,7 +193,18 @@ describe("what cannot ground a claim", () => {
     // fence. Read as a heading, a level-1 one masked everything to the end of
     // the report: the claims after the sample vanished and their citations
     // read as inert.
-    const md = ["# Rate limiting report", "", "Token buckets smooth bursts [S1].", "", ...sample, "", "Bursts past the limit get 429 [S2].", "", "## Sources", "- [S2] a"].join("\n");
+    const md = [
+      "# Rate limiting report",
+      "",
+      "Token buckets smooth bursts [S1].",
+      "",
+      ...sample,
+      "",
+      "Bursts past the limit get 429 [S2].",
+      "",
+      "## Sources",
+      "- [S2] a",
+    ].join("\n");
     expect(collectCitations(md, isSource, { exclude: (lines) => appendixMask(lines) })).toEqual({ grounding: ["S1", "S2"], inertOnly: [] });
   });
 

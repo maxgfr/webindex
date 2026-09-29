@@ -1484,13 +1484,31 @@ describe("rank", () => {
   // Seven pages on one topic, close enough to each other that diversity has
   // something to demote, and one that shares a single word with the question.
   const ON_TOPIC = [
-    ["Token bucket rate limiter explained", "A token bucket rate limiter refills tokens at a fixed rate. Each request takes a token from the bucket; when the bucket is empty the limiter rejects the request."],
-    ["Implementing a rate limiter with token buckets", "To implement a rate limiter, keep a token bucket per client. Refill the bucket at the configured rate and allow bursts up to capacity."],
-    ["Rate limiting algorithms compared", "Fixed window, sliding window, leaky bucket and token bucket are common rate limiting algorithms. The token bucket limiter permits bursts."],
-    ["Distributed rate limiter design", "A distributed rate limiter stores token bucket state in Redis. Each node decrements the bucket atomically; the limiter refills tokens."],
+    [
+      "Token bucket rate limiter explained",
+      "A token bucket rate limiter refills tokens at a fixed rate. Each request takes a token from the bucket; when the bucket is empty the limiter rejects the request.",
+    ],
+    [
+      "Implementing a rate limiter with token buckets",
+      "To implement a rate limiter, keep a token bucket per client. Refill the bucket at the configured rate and allow bursts up to capacity.",
+    ],
+    [
+      "Rate limiting algorithms compared",
+      "Fixed window, sliding window, leaky bucket and token bucket are common rate limiting algorithms. The token bucket limiter permits bursts.",
+    ],
+    [
+      "Distributed rate limiter design",
+      "A distributed rate limiter stores token bucket state in Redis. Each node decrements the bucket atomically; the limiter refills tokens.",
+    ],
     ["Token bucket in Go", "The golang.org/x/time/rate package implements a token bucket limiter. You configure the rate and the bucket burst."],
-    ["API gateway rate limits", "API gateways enforce rate limits with a token bucket per key. When the bucket runs out of tokens the gateway limiter responds with 429."],
-    ["Tuning a token bucket limiter", "Tuning the limiter means choosing the rate and the bucket capacity. A larger bucket absorbs bursts; a lower rate protects the backend."],
+    [
+      "API gateway rate limits",
+      "API gateways enforce rate limits with a token bucket per key. When the bucket runs out of tokens the gateway limiter responds with 429.",
+    ],
+    [
+      "Tuning a token bucket limiter",
+      "Tuning the limiter means choosing the rate and the bucket capacity. A larger bucket absorbs bursts; a lower rate protects the backend.",
+    ],
   ].map(([title, text], i) => ({ url: `https://on${i}.test/`, title, text, score: 0.95 - i * 0.05 }));
   const OFF_TOPIC = {
     url: "https://weak.test/",
@@ -1506,7 +1524,10 @@ describe("rank", () => {
     // by BM25F AND by its engine's score was ranked second.
     // Whichever way the engine orders the on-topic pages among themselves.
     const reversed = ON_TOPIC.map((d, i) => ({ ...d, score: 0.65 + i * 0.05 }));
-    for (const pool of [[...ON_TOPIC, OFF_TOPIC], [...reversed, OFF_TOPIC]]) {
+    for (const pool of [
+      [...ON_TOPIC, OFF_TOPIC],
+      [...reversed, OFF_TOPIC],
+    ]) {
       out = [];
       await run(["rank", "--query", "token bucket rate limiter", "--docs", withDocs(JSON.stringify(pool)), "--json"]);
       const ranked = JSON.parse(stdout()).ranked as { url: string; score: number }[];

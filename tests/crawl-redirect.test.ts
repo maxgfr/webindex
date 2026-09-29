@@ -147,21 +147,24 @@ describe("crawl redirects over HTTP", () => {
     expect(result.disallowed).toEqual([`${base}/private`]);
   });
 
-  it.each(["loop", "ftp://files.test/robots.txt"])("reads a robots.txt whose redirects lead nowhere (%s) as no file, not as a server that did not answer", async (to) => {
-    // RFC 9309 lets a crawler treat a redirect chain it will not follow to the
-    // end as an unavailable file (a 4xx: crawling allowed); its MUST-disallow
-    // is for server and network errors. The walk stopped before the seed and
-    // said the robots.txt "did not answer" after it had answered 21 times.
-    robotsRedirect = to;
-    const direct = await fetchRobots(base);
-    expect(direct.unreachable).toBeUndefined();
-    expect(direct.absent).toBe(true);
-    expect(requests.filter((path) => path.includes("/robots.txt")).length).toBeLessThanOrEqual(21);
-    resetRobotsCache();
-    const result = await crawlSite(`${base}/dir/index`, { useSitemap: false, delayMs: 0, maxPages: 1, maxDepth: 0 });
-    expect(result.pages.map((page) => page.url)).toEqual([`${base}/dir/index`]);
-    expect(result.notes.join(" ")).not.toMatch(/did not answer/);
-  });
+  it.each(["loop", "ftp://files.test/robots.txt"])(
+    "reads a robots.txt whose redirects lead nowhere (%s) as no file, not as a server that did not answer",
+    async (to) => {
+      // RFC 9309 lets a crawler treat a redirect chain it will not follow to the
+      // end as an unavailable file (a 4xx: crawling allowed); its MUST-disallow
+      // is for server and network errors. The walk stopped before the seed and
+      // said the robots.txt "did not answer" after it had answered 21 times.
+      robotsRedirect = to;
+      const direct = await fetchRobots(base);
+      expect(direct.unreachable).toBeUndefined();
+      expect(direct.absent).toBe(true);
+      expect(requests.filter((path) => path.includes("/robots.txt")).length).toBeLessThanOrEqual(21);
+      resetRobotsCache();
+      const result = await crawlSite(`${base}/dir/index`, { useSitemap: false, delayMs: 0, maxPages: 1, maxDepth: 0 });
+      expect(result.pages.map((page) => page.url)).toEqual([`${base}/dir/index`]);
+      expect(result.notes.join(" ")).not.toMatch(/did not answer/);
+    },
+  );
 
   it("lists a refused URL once, reached by a redirect and then by a link", async () => {
     // A redirect destination is never `seen`, so the frontier check listed
