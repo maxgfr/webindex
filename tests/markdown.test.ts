@@ -41,6 +41,15 @@ describe("htmlToMarkdown: blocks", () => {
     expect(md("<blockquote><p>quoted</p></blockquote><blockquote><ul><li><ul><li>x</li></ul></li></ul></blockquote>")).toBe("> quoted\n\n> - - x");
   });
 
+  it("keeps two lists side by side apart, switching the marker as CommonMark needs", () => {
+    // A blank line alone joins them into one loose list, and renumbers the second.
+    expect(md("<ul><li>a</li></ul><ul><li>b</li></ul><ul><li>c</li></ul>")).toBe("- a\n\n+ b\n\n- c");
+    expect(md('<ol><li>a</li></ol><p></p><ol start="5"><li>b</li><li>c</li></ol>')).toBe("1. a\n\n5) b\n6) c");
+    expect(md("<ul><li>x<ul><li>a</li></ul><ul><li>b</li></ul></li></ul>")).toBe("- x\n  - a\n  + b");
+    // Anything between them already keeps them apart.
+    expect(md("<ul><li>a</li></ul><h2>H</h2><ul><li>b</li></ul><ol><li>c</li></ol>")).toBe("- a\n\n## H\n\n- b\n\n1. c");
+  });
+
   it("nests a list set straight inside another under the item before it, as a browser shows it", () => {
     expect(md("<ul><li>a</li><ul><li>b</li><li>c</li></ul><li>d</li></ul>")).toBe("- a\n  - b\n  - c\n- d");
     expect(md("<ol><li>one</li><ol><li>sub</li></ol></ol>")).toBe("1. one\n   1. sub");

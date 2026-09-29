@@ -263,8 +263,9 @@ const INLINE_KIND: Record<string, InlineKind | undefined> = {
 
 // `first`: nothing written inside it yet. An item's first line carries its
 // marker; a quote's marker is left off the blank line that comes before it.
+// `alt`: a list's items are marked `+` or `1)` rather than `-` or `1.`.
 type Block =
-  | { kind: "list"; ordered: boolean; next: number; items: number; last: string }
+  | { kind: "list"; ordered: boolean; alt: boolean; next: number; items: number; last: string }
   | { kind: "item"; marker: string; first: boolean }
   | { kind: "quote"; first: boolean };
 
@@ -294,6 +295,8 @@ class Writer {
   private frames: Frame[] = [];
   private pendingSpace = false;
   private needBlank = false;
+  /** The list closed last: its container's depth, its kind, and how many lines were written by then. */
+  private closedList?: { depth: number; ordered: boolean; alt: boolean; lines: number };
 
   text(raw: string): void {
     // A tag whose quotes never balance is not text; htmlToText drops it too.
@@ -377,7 +380,12 @@ class Writer {
     // what came before stands.
     const item = this.blocks[this.blocks.length - 1];
     if (item?.kind === "item" && !item.first && (!ordered || start === 1)) this.needBlank = false;
-    this.blocks.push({ kind: "list", ordered, next: start, items: 0, last: "" });
+    // Straight after a list of its kind in the same place, nothing written
+    // between, a blank line alone would join the two into one loose list and
+    // renumber the second. A new marker character starts a new list.
+    const prev = this.closedList;
+    const alt = prev !== undefined && prev.depth === this.blocks.length && prev.ordered === ordered && prev.lines === this.lines.length && !prev.alt;
+    this.blocks.push({ kind: "list", ordered, alt, next: start, items: 0, last: "" });
   }
 
   closeList(): void {
@@ -387,6 +395,8 @@ class Writer {
     }
     const i = this.nearest("list");
     if (i < 0) return;
+    const { ordered, alt } = this.blocks[i] as Extract<Block, { kind: "list" }>;
+    this.closedList = { depth: i, ordered, alt, lines: this.lines.length };
     this.blocks.length = i;
     this.needBlank = true;
   }
@@ -402,12 +412,13 @@ class Writer {
     else {
       // An item outside any list reads as one of an unordered list.
       if (!this.room()) return;
-      this.blocks.push({ kind: "list", ordered: false, next: 1, items: 0, last: "" });
+      this.blocks.push({ kind: "list", ordered: false, alt: false, next: 1, items: 0, last: "" });
       list = this.blocks.length - 1;
     }
     if (!this.room()) return;
     const owner = this.blocks[list] as Extract<Block, { kind: "list" }>;
-    const marker = owner.ordered ? `${owner.next++}. ` : "- ";
+    // Not `*`: "* ***", an item holding only a rule, would be a rule itself.
+    const marker = owner.ordered ? `${owner.next++}${owner.alt ? ")" : "."} ` : owner.alt ? "+ " : "- ";
     owner.last = marker;
     this.blocks.push({ kind: "item", marker, first: true });
     // The items of one list sit together. The first keeps the blank line owed
