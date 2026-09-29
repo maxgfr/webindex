@@ -102,6 +102,13 @@ describe("htmlToMarkdown: inline", () => {
     expect(md('<p><a href="javascript:void(0)">Menu</a> <a name="top">Top</a> <a href="/x"></a>end</p>', "https://d.test/")).toBe("Menu Top end");
   });
 
+  it("drops a javascript: or data: target hidden behind control characters the URL parser strips", () => {
+    const html = '<p><a href="&#1;javascript:alert(1)">x</a> <img src="&#2;data:image/png;base64,AA" alt="i"> <a href=" &#x1F;vbscript:msgbox">y</a></p>';
+    expect(md(html)).toBe("x y");
+    expect(md(html, "https://d.test/")).toBe("x y");
+    expect(md('<p><a href="java&#10;script:alert(1)">z</a></p>', "https://d.test/")).toBe("z");
+  });
+
   it("escapes parentheses only when they do not balance, and encodes spaces", () => {
     expect(md('<p><a href="https://en.wikipedia.org/wiki/Mercury_(planet)">M</a></p>')).toBe("[M](https://en.wikipedia.org/wiki/Mercury_(planet))");
     expect(md('<p><a href="notes (draft">N</a></p>')).toBe("[N](notes%20\\(draft)");

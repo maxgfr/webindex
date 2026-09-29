@@ -666,18 +666,27 @@ function longestRun(s: string, ch: string): number {
  * resolve.
  */
 function linkTarget(raw: string | undefined, base: string | undefined): string | undefined {
-  const href =
-    raw === undefined
-      ? ""
-      : decodeEntities(raw)
-          .replace(/[\t\n\r]/g, "")
-          .trim();
-  if (!href || /^(?:javascript|vbscript|data):/i.test(href)) return undefined;
+  // Read as the URL parser reads it, and a browser following the link: a tab
+  // or newline anywhere is dropped, and so is every C0 control or space before
+  // the scheme — "&#1;javascript:" is javascript:.
+  const href = raw === undefined ? "" : afterControls(decodeEntities(raw).replace(/[\t\n\r]/g, "")).trim();
+  if (!href || UNFOLLOWABLE.test(href)) return undefined;
   try {
-    return new URL(href, base).href;
+    const url = new URL(href, base);
+    // Judged again on what the parser made of it, which is what is written out.
+    return UNFOLLOWABLE.test(url.protocol) ? undefined : url.href;
   } catch {
     return base === undefined ? href : undefined;
   }
+}
+
+const UNFOLLOWABLE = /^(?:javascript|vbscript|data):/i;
+
+/** `s` without the C0 controls and spaces the URL parser strips from its start. */
+function afterControls(s: string): string {
+  let i = 0;
+  while (i < s.length && s.charCodeAt(i) <= 0x20) i++;
+  return s.slice(i);
 }
 
 /** A URL as a Markdown link destination: no raw space or angle bracket, parentheses escaped unless they balance. */
