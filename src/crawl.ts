@@ -316,11 +316,14 @@ function sectionOf(url: string): string {
   return last && !last.includes(".") ? `${path}/` : path.slice(0, cut + 1);
 }
 
-// Links a crawl never spends a request on: images, media, fonts, archives,
-// executables, stylesheets and scripts are not pages, and at best cost a
-// request to learn so. PDFs and office documents are documents, and stay.
+// Links a crawl never spends a request on: images, media, fonts, archives and
+// executables are not pages, and at best cost a request to learn so. PDFs and
+// office documents are documents, and stay. So do paths ending in .js, .css or
+// .map: these come from <a href>, which a script or a stylesheet almost never
+// is, while /wiki/Node.js and github.com/vercel/next.js are pages — skipping
+// them saved nothing and dropped real ones. A real script costs one request.
 const NOT_A_PAGE_RE =
-  /\.(?:png|jpe?g|gif|webp|avif|bmp|ico|svg|tiff?|heic|mp3|m4a|aac|ogg|oga|opus|wav|flac|mp4|m4v|mov|avi|wmv|mkv|webm|woff2?|ttf|otf|eot|zip|gz|tgz|bz2|xz|7z|rar|tar|dmg|iso|exe|msi|apk|deb|rpm|css|js|mjs|map)$/i;
+  /\.(?:png|jpe?g|gif|webp|avif|bmp|ico|svg|tiff?|heic|mp3|m4a|aac|ogg|oga|opus|wav|flac|mp4|m4v|mov|avi|wmv|mkv|webm|woff2?|ttf|otf|eot|zip|gz|tgz|bz2|xz|7z|rar|tar|dmg|iso|exe|msi|apk|deb|rpm)$/i;
 
 /**
  * How many pages a crawl keeps in flight at once (`<PREFIX>_CRAWL_CONCURRENCY`,

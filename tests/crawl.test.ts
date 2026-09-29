@@ -775,6 +775,23 @@ describe("crawlSite scope", () => {
     expect(r.notes.join(" ")).toMatch(/skipped 4 link\(s\) to images, media, fonts or archives/);
   });
 
+  it("reads a page whose path ends like a script or a stylesheet", async () => {
+    // /wiki/Node.js and github.com/vercel/next.js are HTML pages. An <a href>
+    // is almost never a script or a stylesheet, so skipping .js/.css saved
+    // nothing and dropped real pages, under a note calling them images.
+    const asked: string[] = [];
+    installFetchMock((url) => {
+      if (url.includes("robots.txt") || url.includes("sitemap")) return { status: 404, body: "", contentType: "text/plain" };
+      asked.push(new URL(url).pathname);
+      if (url === "https://s.test/") return html('<a href="/wiki/Node.js">n</a><a href="/vercel/next.js">x</a><a href="/blog/why-i-left.css">c</a>');
+      return html("<p>a page</p>");
+    });
+    const r = await crawlSite("https://s.test/", { maxPages: 10, maxDepth: 1, useSitemap: false, delayMs: 0 });
+    expect(asked).toEqual(["/", "/wiki/Node.js", "/vercel/next.js", "/blog/why-i-left.css"]);
+    expect(r.pages).toHaveLength(4);
+    expect(r.notes.join(" ")).not.toMatch(/skipped/);
+  });
+
   /** /docs/ links to two pages of its own; the sitemap lists the shop, and one docs page. */
   const sectioned = () =>
     installFetchMock((url) => {
