@@ -195,6 +195,32 @@ describe("searchViaSearxng", () => {
     expect(r.hits.map((h) => h.url)).toEqual(["https://a.test/1", "https://a.test/2"]);
   });
 
+  it("does not sleep out the pause between pages past its budget or a cancel", async () => {
+    // The pause ran in full, and only then did the loop see it had to stop.
+    vi.stubEnv(envName("PAGE_DELAY_MS"), "5000");
+    try {
+      const spy = installFetchMock((url) => (url.includes("/search") ? page([hit(`https://a.test/${url.includes("pageno=2") ? 2 : 1}`)]) : { body: "OK" }));
+      const pages = () => spy.mock.calls.filter((c) => String(c[0]).includes("/search")).length;
+      let t0 = performance.now();
+      const budgeted = await searchViaSearxng("q", { searxng: nextBase(), pages: 2, timeoutMs: 300 });
+      expect(performance.now() - t0).toBeLessThan(2500);
+      expect(pages()).toBe(1);
+      expect(budgeted.hits).toHaveLength(1);
+
+      spy.mockClear();
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), 50);
+      t0 = performance.now();
+      const cancelled = await searchViaSearxng("q", { searxng: nextBase(), pages: 2, signal: ctrl.signal });
+      // ~50 ms locally; the uncut pause is 5 s.
+      expect(performance.now() - t0).toBeLessThan(2500);
+      expect(pages()).toBe(1);
+      expect(cancelled.hits).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("stops paginating as soon as a page adds nothing new", async () => {
     const base = nextBase();
     const spy = installFetchMock(routes([["/search", page([hit("https://a.test/1")])]])); // every page identical

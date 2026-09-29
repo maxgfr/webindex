@@ -536,7 +536,12 @@ export async function searchViaKeyless(
     const next = spec.next ? spec.next(r.body, q, kl, p) : spec.url(q, p + 1, kl, locale);
     if (!next) break;
     url = next;
-    if (pageDelayMs()) await sleep(pageDelayMs());
+    // A pause the budget cannot cover leaves no time for the page after it,
+    // and a cancel cuts it short: both used to be slept out in full, only for
+    // the check above to stop the loop without sending anything.
+    const pause = pageDelayMs();
+    if (opts.signal?.aborted || Date.now() + pause >= deadline - spentSlackMs(opts.budgetMs)) break;
+    if (pause) await sleep(pause, opts.signal);
   }
 
   return hits.length ? { hits, answered: true } : { hits: [], note: `${spec.label} returned no results.`, answered: true };

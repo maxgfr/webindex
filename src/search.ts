@@ -280,7 +280,12 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
       if (hits.length >= limit) break;
     }
     if (hits.length === before) break; // a page that added nothing new ends it
-    if (p < pages - 1 && pageDelayMs()) await sleep(pageDelayMs());
+    if (p < pages - 1) {
+      // Not slept out past the budget or a cancel, only to stop right after.
+      const pause = pageDelayMs();
+      if (opts.signal?.aborted || Date.now() + pause >= deadline - spentSlackMs(opts.timeoutMs)) break;
+      if (pause) await sleep(pause, opts.signal);
+    }
   }
 
   if (suspended.size) {
