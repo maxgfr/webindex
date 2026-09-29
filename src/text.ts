@@ -561,10 +561,29 @@ export function nearestHeading(lines: string[], anchor: number): string | undefi
       continue;
     }
     if (inFence) continue;
-    const m = line.match(/^#{1,6}\s+(.+?)\s*#*\s*$/);
-    if (m) heading = m[1]!.trim();
+    const title = atxTitle(line);
+    if (title) heading = title;
   }
   return heading;
+}
+
+const ATX_OPEN = /^#{1,6}\s+/;
+// A closing run of '#' needs whitespace before it, as CommonMark has it: "C#"
+// keeps its hash, and so does the "\#" htmlToMarkdown writes for a title that
+// ends in one. Found from the end in one pass: `(.+?)\s*#*\s*$` retried its
+// tail at every character, quadratic on a long run of spaces.
+const ATX_CLOSE = /(?:^|\s)#+$/;
+// The escapes htmlToMarkdown writes: a backslash before ASCII punctuation.
+const MD_ESCAPE = /\\([!-/:-@[-`{-~])/g;
+
+/** An ATX heading line's title, unescaped; undefined for any other line, and for a heading with none. */
+function atxTitle(line: string): string | undefined {
+  const open = ATX_OPEN.exec(line);
+  if (!open) return undefined;
+  let title = line.slice(open[0].length).trimEnd();
+  const close = ATX_CLOSE.exec(title);
+  if (close) title = title.slice(0, close.index).trimEnd();
+  return title ? title.replace(MD_ESCAPE, "$1") : undefined;
 }
 
 /** A passage of a document, chosen because it answers the question. */

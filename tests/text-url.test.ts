@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMatcher, excerptWindows, foldTerm, isStopword, keywords, matcherFromTokens, rankedKeywords } from "../src/text.js";
+import { buildMatcher, excerptWindows, foldTerm, isStopword, keywords, matcherFromTokens, nearestHeading, rankedKeywords } from "../src/text.js";
 import { focusedSnippet } from "../src/fetch.js";
 import { bm25Tokenize } from "../src/rank.js";
 import { configure, resetBrand } from "../src/brand.js";
@@ -287,6 +287,28 @@ describe("buildMatcher", () => {
     expect(buildMatcher("straße").matchLine("Strasse 5").size).toBe(1);
     expect(buildMatcher("strasse").matchLine("Straße 5").size).toBe(1);
     expect(buildMatcher("encyclopaedia").matchLine("encyclopædia").size).toBe(1);
+  });
+});
+
+describe("nearestHeading", () => {
+  it("reads a closing run of '#' only after a space, and a '\\#' as the hash it escapes", () => {
+    // htmlToMarkdown writes "Issue #" as "## Issue \#": the label read "Issue \".
+    expect(nearestHeading(["## Issue \\#", "x"], 1)).toBe("Issue #");
+    expect(nearestHeading(["## Learn C#", "x"], 1)).toBe("Learn C#");
+    expect(nearestHeading(["## Title ##", "x"], 1)).toBe("Title");
+    expect(nearestHeading(["### \\##", "x"], 1)).toBe("##");
+    expect(nearestHeading(["# A", "## 5 \\* 3 \\[1\\] ##  ", "x"], 2)).toBe("5 * 3 [1]");
+    // Not headings: no space after the marker, nothing but a closing run, seven hashes.
+    expect(nearestHeading(["# Kept", "##nospace", "## #", "####### seven", "x"], 4)).toBe("Kept");
+    const md = "## Issue \\#\n\nThe tracker number goes after the hash sign in every report.";
+    expect(excerptWindows(md, "tracker number report")[0]?.heading).toBe("Issue #");
+  });
+
+  it("reads a hostile heading line in linear time", () => {
+    const lines = [`## a${" ".repeat(200_000)}b`, `## ${"# ".repeat(100_000)}`, `## x${" \\#".repeat(100_000)}`, `## ${"#".repeat(200_000)}x`, "x"];
+    const started = performance.now();
+    nearestHeading(lines, 4);
+    expect(performance.now() - started).toBeLessThan(10_000);
   });
 });
 
