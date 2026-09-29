@@ -246,6 +246,17 @@ describe("htmlToMarkdown: escaping", () => {
     expect(md("<p>~~gone~~ ~5 minutes</p>")).toBe("\\~\\~gone\\~\\~ ~5 minutes");
   });
 
+  it("escapes every tilde that could close a strikethrough, single ones too, as GitHub strikes ~text~", () => {
+    // A tilde with a space before it only opens, and an opener with no closer is text.
+    expect(md("<p>Price ~5~ now</p>")).toBe("Price ~5\\~ now");
+    expect(md("<p>Installed in C:\\PROGRA~1\\MICROS~1\\Office</p>")).toBe("Installed in C:\\\\PROGRA\\~1\\\\MICROS\\~1\\\\Office");
+    // Where a run of text starts against the one before, or inside an
+    // emphasis whose marker will stand before it, its first tilde can close too.
+    expect(md("<p>~<span>~x~</span>~</p>")).toBe("~\\~x\\~\\~");
+    expect(md("<p>costs ~5 or <em>~ 10</em></p>")).toBe("costs ~5 or *\\~ 10*");
+    expect(md("<p>a <span>~b</span></p>")).toBe("a ~b");
+  });
+
   it("escapes syntax an element splits in two, which joins up again in the Markdown", () => {
     // Each run of text is escaped on its own: a '<' at the end of one, a tag
     // name at the start of the next, was a live tag once written side by side.
@@ -295,6 +306,7 @@ describe("htmlToMarkdown stays linear on hostile markup", () => {
     ["a link wrapped round thousands of blocks", `<a href="/x">${"<p>word</p>".repeat(60_000)}</a>`],
     ["underscores and tildes", "<p>" + "_~".repeat(200_000)],
     ["runs of text that end in '<' or an entity's start", "<p>" + "&amp;a1<i>&lt;</i>".repeat(80_000)],
+    ["runs of text that start with a tilde, in emphasis and out", "<p>" + "<b><i>~x</i></b>a<span>~</span> ~".repeat(50_000)],
     ["one run holding an entity's name to its end", `<p>${"&a&#".repeat(50_000)}&${"a".repeat(300_000)}<b>x</b>`],
   ])("%s", (_label, html) => {
     within(10_000, () => htmlToMarkdown(html, { baseUrl: "https://d.test/" }));

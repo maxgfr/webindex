@@ -301,7 +301,7 @@ class Writer {
     if (!decoded) return;
     const core = decoded.trim();
     if (decoded[0] === " ") this.space();
-    if (core) this.push(this.inCode() ? core : escapeText(core, { after: decoded[decoded.length - 1] !== " " }));
+    if (core) this.push(this.inCode() ? core : escapeText(core, { before: this.joinsBefore(decoded[0] !== " "), after: decoded[decoded.length - 1] !== " " }));
     if (core && decoded[decoded.length - 1] === " ") this.space();
   }
 
@@ -505,6 +505,18 @@ class Writer {
     return this.frames.some((f) => f.kind === "code");
   }
 
+  /**
+   * Whether text pushed next will stand straight after something other than
+   * a space or a line start: the text before it, when `touching` it, or the
+   * marker of an emphasis or link that opens where it starts (the marker goes
+   * in when the element closes, and moves the element's leading space outside).
+   */
+  private joinsBefore(touching: boolean): boolean {
+    const last = this.parts[this.parts.length - 1];
+    if (touching && !this.pendingSpace && last !== undefined && last !== "\n") return true;
+    return this.frames.some((f) => !f.inert && f.start === this.parts.length);
+  }
+
   /** Replace an element's text with its Markdown, its outer whitespace kept outside it. */
   private wrap(f: Frame): void {
     if (f.inert) return;
@@ -597,22 +609,29 @@ const ALWAYS_SYNTAX = /[\\`*[\]]/g;
 const EDGE_UNDERSCORE = /(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])/gu;
 const HTML_LIKE = /<(?=[a-zA-Z/!?])/g;
 const ENTITY_LIKE = /&(?=#?[a-zA-Z0-9]+;)/g;
-const STRIKE = /~(?=~)|(?<=~)~/g;
+// GFM strikes `~x~` as well as `~~x~~`. A tilde closes only with no space
+// before it: escaping those, and a doubled one, leaves every opener without a
+// closer, so `~5 minutes` keeps its tilde as written.
+const STRIKE = /~(?=~)|(?<=[^\t\n\f\r\p{Zs}])~/gu;
 // A '<' or an entity's start that the next run of text could complete.
 const OPEN_END = /(?:<|&#?[a-zA-Z0-9]*)$/;
 
 /**
  * A run of text with its Markdown metacharacters escaped, so it reads back as
- * the same text. The syntax that depends on what follows — `<` before a tag
- * name, `&` before an entity's name — is judged within the run. `edges.after`
- * says the next run may touch its end, no space between: an element that
- * splits `&lt;script&gt;` round "script" writes nothing of its own, and the
- * two halves would join into a live tag. A '<' or '&' there is escaped
- * whatever follows.
+ * the same text. The syntax that depends on its neighbours — `<` before a tag
+ * name, `&` before an entity's name, `~` after a character — is judged within
+ * the run. `edges` says which of its ends may touch the next or the last run,
+ * no space between: an element that splits `&lt;script&gt;` round "script"
+ * writes nothing of its own, and the two halves would join into a live tag.
+ * A '<' or '&' at such an end, and a '~' at such a start, is escaped whatever
+ * joins it.
  */
-function escapeText(s: string, edges?: { after: boolean }): string {
-  const out = s.replace(ALWAYS_SYNTAX, "\\$&").replace(EDGE_UNDERSCORE, "\\_").replace(HTML_LIKE, "\\<").replace(ENTITY_LIKE, "\\&").replace(STRIKE, "\\~");
-  return edges?.after ? out.replace(OPEN_END, "\\$&") : out;
+function escapeText(s: string, edges?: { before: boolean; after: boolean }): string {
+  let out = s.replace(ALWAYS_SYNTAX, "\\$&").replace(EDGE_UNDERSCORE, "\\_").replace(HTML_LIKE, "\\<").replace(ENTITY_LIKE, "\\&").replace(STRIKE, "\\~");
+  if (edges?.after) out = out.replace(OPEN_END, "\\$&");
+  // STRIKE leaves only a first tilde with none after it; whatever stands before it is outside the run.
+  if (edges?.before && out[0] === "~") out = `\\${out}`;
+  return out;
 }
 
 /**
