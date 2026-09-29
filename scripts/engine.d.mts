@@ -833,6 +833,9 @@ declare function escapeRegExp(s: string): string;
  * excerpt matcher highlights. Two lists that drift apart make the two disagree,
  * and the symptom — a source that scores well but shows an excerpt with no
  * highlight — looks like a bug in neither.
+ *
+ * Pass the term as written: a French or German stopword in capitals is an
+ * English acronym (MIT, DAS, IM) and is not one.
  */
 declare function isStopword(term: string): boolean;
 declare function keywords(question: string): string[];
@@ -1670,7 +1673,8 @@ declare function charsetFromHtml(head: string): string | undefined;
  * Decode response bytes into text, honouring — in order — a BOM, the
  * Content-Type header, an XML declaration, and (for a body that may be HTML) the
  * document's own `<meta charset>`; with none of those naming a non-UTF-8
- * encoding, UTF-8 when the bytes are valid and Windows-1252 when they are not.
+ * encoding, UTF-8 when the bytes read as UTF-8 and Windows-1252 when they do
+ * not.
  *
  * Precedence follows what actually helps: a BOM cannot be wrong, a header is
  * usually right, and a meta tag is the last resort because a page served as
@@ -1687,7 +1691,7 @@ declare function decodeBody(bytes: Buffer, contentType?: string): string;
  * Decode bytes read from disk: BOM, then an XML declaration or `<meta charset>`,
  * then a UTF-8 validity rescue. A local file has no transport header to trust,
  * and a stale template declaring UTF-8 over Latin-1 bytes is common. Without a
- * BOM or a non-UTF-8 declaration, trust UTF-8 only when the bytes are valid;
+ * BOM or a non-UTF-8 declaration, trust UTF-8 only when the bytes read as UTF-8;
  * otherwise use Windows-1252 so accents and typographic punctuation survive.
  *
  * `sniffHtmlCharset: false` skips the meta step — for a file the caller already
@@ -1761,6 +1765,7 @@ interface PageMetadata {
     /** ISO-ish date strings, exactly as the page wrote them. */
     publishedAt?: string;
     modifiedAt?: string;
+    /** Every author the page names, each once, in the order given; at most 10 000. */
     authors: string[];
     imageUrl?: string;
     canonicalUrl?: string;
@@ -1772,12 +1777,17 @@ interface PageMetadata {
  *
  * A block that does not parse, even leniently, is skipped rather than thrown:
  * malformed JSON-LD is common and must never cost the caller the rest of the
- * page. The type may be unquoted or carry a charset parameter.
+ * page. So is one nested deeper than any real block. The type may be unquoted
+ * or carry a charset parameter.
  *
  * One forward pass: each script's close is searched from its opener, and a
  * script that never closes ends the scan, since nothing after it can close
  * either. A lazy `[\s\S]*?</script>` per opener re-read the rest of the page
- * from every unclosed one.
+ * from every unclosed one. Comments are skipped in the same pass, whichever
+ * of a comment and a script comes first owning what follows, as dropElements
+ * does: `<!-- old tracker: <script> -->` paired with the real block's
+ * </script> and swallowed it, and a commented-out block is not what the page
+ * says. A comment that never closes is text, as metaEntries reads it.
  */
 declare function extractJsonLd(html: string): unknown[];
 /** Every `<meta>` name/property and its content, lower-cased keys; the first of a repeated key wins. */
@@ -1788,10 +1798,11 @@ declare function extractMetaTags(html: string): Map<string, string>;
  * JSON-LD wins on conflict: OpenGraph is written for social-preview cards and is
  * routinely stale or templated, while JSON-LD is what the site feeds search
  * engines and tends to be generated from the real record. But only the JSON-LD
- * that describes THIS page: the primary entity is the first node presenting
- * something (an Article, a Product, a Recipe…), else the page node, and only
- * then site chrome. Taking every field from whichever node came first reported
- * a news story as the newspaper's Organization block, titled with its name.
+ * that describes THIS page: the primary entity is the first work the page
+ * presents (an Article, a Product, a Recipe…), else the first other thing
+ * that is not site chrome (a business on its own page), else the page node.
+ * Taking every field from whichever node came first reported a news story as
+ * the newspaper's Organization block, titled with its name.
  *
  * The canonical URL is the page's own `<link rel="canonical">`, then `og:url`,
  * then the JSON-LD `url` — never an `@id`, which is an identifier such as
@@ -2315,6 +2326,12 @@ interface CacheStats {
     ttlMs: number;
     oldest?: string;
     newest?: string;
+    /**
+     * Why the default directory is not used, when it is not: it is a symbolic
+     * link, belongs to another user, or other users may write it. The cache then
+     * reads and writes nothing, and every fetch goes to the network.
+     */
+    refused?: string;
 }
 /**
  * What is on disk right now: how many entries, how much space, how many are

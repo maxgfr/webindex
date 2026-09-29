@@ -166,6 +166,28 @@ describe("pdfToText on hostile input", () => {
     expect(ms).toBeLessThan(5000);
   });
 
+  // Each ASCII85 `z` is four zero bytes. Decoded into a growable array, 32 MB
+  // of them (a 32 KB Flate stream) became 128M elements: 8 s and 2 GB on Node
+  // 22, and on Node 18 a fatal, uncatchable "invalid size error".
+  it("caps an ASCII85 stream of `z`, behind Flate, alone, or guessed from its `~>`", () => {
+    const zs = Buffer.from(`${"z".repeat(32 * 1024 * 1024 - 16)}~>`, "latin1");
+    const opening = { body: "BT (Opening sentence survives.) Tj ET" };
+    const cases = [
+      objects(opening, { dict: "/Filter [/FlateDecode /ASCII85Decode] ", body: deflateSync(zs) }),
+      objects(opening, { dict: "/Filter /ASCII85Decode ", body: zs.subarray(zs.length - 16 * 1024 * 1024) }),
+      objects(opening, { body: zs.subarray(zs.length - 16 * 1024 * 1024) }),
+    ];
+    // The cap bounds OUTPUT, so each case still decodes ~32 MB: ~0.5 s for all
+    // three locally, ~10x that under the CI job's v8 coverage. The bound sits
+    // far above that and far below the uncapped decode (8 s locally, so ~100 s
+    // on that runner, and a fatal crash on Node 18).
+    for (const doc of cases) {
+      const { value, ms } = timed(() => pdfToText(doc));
+      expect(value).toBe("Opening sentence survives.");
+      expect(ms).toBeLessThan(30_000);
+    }
+  }, 60_000);
+
   it("does not mine image or font programs, whatever bytes they carry", () => {
     const doc = objects(
       { dict: "/Type /XObject /Subtype /Image /Width 8 /Height 8 ", body: "BT (pixels that look like text) Tj ET" },

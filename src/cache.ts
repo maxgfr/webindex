@@ -1,12 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, type Stats, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fetchAndExtract, looksLikePdfUrl, type ExtractorId } from "./fetch.js";
 import { docFormatForUrl } from "./doc.js";
 import { firecrawlBase, firecrawlIsExplicit, probeFirecrawl } from "./firecrawl.js";
 import { canonicalizeUrl, domainOf, fnv1a64 } from "./url.js";
 import { isNoWrite, writeFileAtomic } from "./no-write.js";
-import { brand, countFetch, env, envInt } from "./brand.js";
+import { brand, countFetch, env, envInt, envName } from "./brand.js";
 
 // Opt-in on-disk fetch cache (--cache). The in-process hydrate cache only spans
 // ONE gather; the deep tier fans out N separate `gather` processes (one per
@@ -45,13 +45,18 @@ export function cacheDir(): string {
   // run in one would be served the body another cached under a different
   // extraction stack.
   //
-  // The default is per USER too, where the platform has uids. The temp dir is
-  // shared by everyone on the machine, so one fixed name there was a directory
-  // any other user could create first — as a symlink into your project for
-  // `cache clean` to sweep, or pre-filled with entries for you to be served.
-  // An explicit directory is taken as given: a shared volume is a choice.
-  return env("CACHE_DIR") ?? brand().cacheDir ?? join(tmpdir(), userScoped(brand().name), "cache");
+  // The default is per USER too, where the platform has uids, so two users of
+  // one machine never share a cache. The name alone protects nothing: the uid
+  // is public, so another user can still create the directory first — as a
+  // symlink into your project for `cache clean` to sweep, or pre-filled with
+  // entries for you to be served. What it holds is only used once it proves to
+  // be yours (see openCacheDir). An explicit directory is taken as given: a
+  // shared volume is a choice.
+  return namedCacheDir() ?? join(tmpdir(), userScoped(brand().name), "cache");
 }
+
+/** The directory the operator or the brand named, if either did. */
+const namedCacheDir = (): string | undefined => env("CACHE_DIR") ?? brand().cacheDir;
 
 function userScoped(name: string): string {
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
@@ -274,6 +279,7 @@ function entryPaths(url: string, acceptLanguage: string, extractor: CacheNamespa
 // refetch into a 304. Still undefined for missing / corrupt / empty-text
 // entries, which carry nothing worth revalidating.
 function readCache(url: string, acceptLanguage = "", extractor: CacheNamespace = "native", variant: CacheVariant = ""): CacheEntry | undefined {
+  if (!entryDir(false)) return undefined;
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
   if (!existsSync(meta)) return undefined;
   try {
@@ -298,7 +304,6 @@ function writeCache(url: string, res: Extract, now: number, acceptLanguage = "",
   // through writeArtifact — a cache entry is not an artifact anyone wants
   // streamed back to them.
   if (isNoWrite()) return;
-  const dir = cacheDir();
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
   // The note is not stored: it describes the run that fetched the page (a
   // Firecrawl fallback, say), and replaying it on every hit for a day misreports
@@ -306,7 +311,7 @@ function writeCache(url: string, res: Extract, now: number, acceptLanguage = "",
   // field (`truncated`) and restated when the entry is served.
   const { text, note: _note, ...rest } = res as CacheEntry;
   const write = () => {
-    ensureDir(dir);
+    if (!entryDir(true)) return; // refused: the run goes on uncached
     // Body first: a reader that catches the pair mid-write sees either the old
     // metadata (pointing at a body that is at worst the new one for the same
     // URL) or no metadata at all. The reverse order can publish metadata for a
@@ -321,7 +326,7 @@ function writeCache(url: string, res: Extract, now: number, acceptLanguage = "",
   } catch {
     // The directory may have been removed under us (`cache clean`, a tmp
     // sweeper): forget that it existed and try once more before giving up.
-    ensured.delete(dir);
+    ensured.delete(cacheDir());
     try {
       write();
     } catch {
@@ -338,6 +343,86 @@ function ensureDir(dir: string): void {
   if (ensured.has(dir)) return;
   mkdirSync(dir, { recursive: true });
   ensured.add(dir);
+}
+
+/**
+ * The cache directory, when this run may read or write it: `dir` when it may,
+ * `refused` saying why it may not, neither when the default one does not exist
+ * yet (and `create` was not asked for).
+ *
+ * A named directory is used as given. The default one is used only once it
+ * proves to be the caller's: `<tmp>/<brand>-<uid>` and `cache` inside it must
+ * each be a real directory — no symbolic link — that belongs to the caller and
+ * that no other user may write. Whoever can write either one can plant an entry
+ * at the path cachePath computes, and it is served as the page. Nobody else can
+ * move a directory of ours out of the sticky temp dir, or write inside one of
+ * ours once it is private, so what is checked here stays true.
+ *
+ * Created one level at a time, 0700 whatever the umask (mkdir only ever takes
+ * bits away from the mode it is given), and never through a link: `mkdir -p`
+ * follows a planted `<brand>-<uid>` symlink and makes `cache` wherever it
+ * points. One of the caller's own that others may only READ — what an earlier
+ * engine made with the umask's mode — is made private rather than refused:
+ * every page cached in it was readable by every user of the machine.
+ *
+ * Checked on every use rather than once per process: a tmp sweeper can remove
+ * the directory under a long-lived MCP server, and whoever creates it next
+ * must not inherit the verdict.
+ */
+function openCacheDir(create: boolean): { dir?: string; refused?: string } {
+  const dir = cacheDir();
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (namedCacheDir() !== undefined || uid === undefined) {
+    if (create) ensureDir(dir);
+    return { dir };
+  }
+  if (create) mkdirSync(dirname(dirname(dir)), { recursive: true }); // the temp dir itself
+  for (const p of [dirname(dir), dir]) {
+    if (create) mkdirPrivate(p);
+    let st: Stats;
+    try {
+      st = lstatSync(p);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return {}; // nothing cached yet
+      return { refused: `${p} cannot be inspected (${(e as Error).message})` };
+    }
+    if (st.isSymbolicLink()) return { refused: `${p} is a symbolic link` };
+    if (!st.isDirectory()) return { refused: `${p} is not a directory` };
+    if (st.uid !== uid) return { refused: `${p} belongs to another user` };
+    if (st.mode & 0o022) return { refused: `${p} is writable by other users` };
+    if (st.mode & 0o077 && !isNoWrite()) {
+      try {
+        chmodSync(p, 0o700);
+      } catch {
+        /* still writable by nobody else, so still usable */
+      }
+    }
+  }
+  return { dir };
+}
+
+/** mkdir, private, and never through whatever already has the name. */
+function mkdirPrivate(p: string): void {
+  try {
+    mkdirSync(p, { mode: 0o700 });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+  }
+}
+
+// Each refusal is announced once per process, as an unknown ladder rung is:
+// a run that asked for the cache and silently got none would read as a cache
+// that never fills.
+const announced = new Set<string>();
+
+/** The directory entries are read from and written to, announcing a refusal. */
+function entryDir(create: boolean): string | undefined {
+  const { dir, refused } = openCacheDir(create);
+  if (refused && !announced.has(refused)) {
+    announced.add(refused);
+    process.emitWarning(`the fetch cache is not used: ${refused}. Remove it, or set ${envName("CACHE_DIR")} to a directory only you can write.`);
+  }
+  return dir;
 }
 
 /**
@@ -389,6 +474,8 @@ export async function cachedFetchAndExtract(
   if (offline) {
     const stored = readAnyCopy(url, lang, variant);
     if (stored) return served(stored);
+    const { refused } = openCacheDir(false);
+    if (refused) return { text: "", finalUrl: url, status: 0, note: `Offline: the cache is not used — ${refused}.` };
     return { text: "", finalUrl: url, status: 0, note: `Offline: ${url} is not in the cache (drop --offline, or warm it with a normal run).` };
   }
 
@@ -471,6 +558,12 @@ export interface CacheStats {
   ttlMs: number;
   oldest?: string; // ISO
   newest?: string; // ISO
+  /**
+   * Why the default directory is not used, when it is not: it is a symbolic
+   * link, belongs to another user, or other users may write it. The cache then
+   * reads and writes nothing, and every fetch goes to the network.
+   */
+  refused?: string;
 }
 
 // The only files stats and eviction ever look at: the names this module writes
@@ -529,6 +622,8 @@ function sizeOf(abs: string): number {
 export function cacheStats(now = Date.now()): CacheStats {
   const dir = cacheDir();
   const out: CacheStats = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
+  const { refused } = openCacheDir(false);
+  if (refused) return { ...out, refused };
   if (!existsSync(dir)) return out;
   let oldest = Number.POSITIVE_INFINITY;
   let newest = 0;
@@ -572,7 +667,7 @@ export function cacheStats(now = Date.now()): CacheStats {
  */
 export function cacheClean(all = false, now = Date.now()): number {
   const dir = cacheDir();
-  if (!existsSync(dir) || isNoWrite()) return 0;
+  if (isNoWrite() || !openCacheDir(false).dir || !existsSync(dir)) return 0;
   const names = readdirSync(dir);
   const present = new Set(names);
   const remove = (name: string): boolean => {

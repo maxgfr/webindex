@@ -16,6 +16,47 @@ describe("looksLikeJunkExtraction (consent / anti-bot detection)", () => {
   it("flags a Cloudflare anti-bot interstitial", () => {
     expect(looksLikeJunkExtraction("Attention Required! Cloudflare. Checking your browser before accessing.")).toBeTruthy();
   });
+  it("flags Cloudflare's 'Sorry, you have been blocked' page, as extracted", () => {
+    // Its only strong-sounding line, "Attention Required! | Cloudflare", is the
+    // <title>, which extraction drops; the rest was all weak or unmatched.
+    const html = `<!DOCTYPE html><html lang="en-US"><head><title>Attention Required! | Cloudflare</title><meta charset="UTF-8"><script>if (!navigator.cookieEnabled) {}</script></head>
+<body><div id="cf-wrapper">
+  <div class="cf-alert cf-alert-error cf-cookie-error" id="cookie-alert" data-translate="enable_cookies">Please enable cookies.</div>
+  <div id="cf-error-details" class="cf-error-details-wrapper">
+    <div class="cf-wrapper cf-header cf-error-overview">
+      <h1 data-translate="block_headline">Sorry, you have been blocked</h1>
+      <h2 class="cf-subheadline"><span data-translate="unable_to_access">You are unable to access</span> example.com</h2>
+    </div>
+    <div class="cf-section cf-highlight"><div class="cf-wrapper"><div class="cf-screenshot-container cf-screenshot-full"><span class="cf-no-screenshot error"></span></div></div></div>
+    <div class="cf-section cf-wrapper"><div class="cf-columns two">
+      <div class="cf-column">
+        <h2 data-translate="blocked_why_headline">Why have I been blocked?</h2>
+        <p data-translate="blocked_why_detail">This website is using a security service to protect itself from online attacks. The action you just performed triggered the security solution. There are several actions that could trigger this block including submitting a certain word or phrase, a SQL command or malformed data.</p>
+      </div>
+      <div class="cf-column">
+        <h2 data-translate="blocked_resolve_headline">What can I do to resolve this?</h2>
+        <p data-translate="blocked_resolve_detail">You can email the site owner to let them know you were blocked. Please include what you were doing when this page came up and the Cloudflare Ray ID found at the bottom of this page.</p>
+      </div>
+    </div></div>
+    <div class="cf-error-footer cf-wrapper"><p class="text-13">
+      <span class="cf-footer-item">Cloudflare Ray ID: <strong class="font-semibold">8c1f2e3d4a5b6c7d</strong></span>
+      <span class="cf-footer-separator">&bull;</span>
+      <span id="cf-footer-item-ip" class="cf-footer-item">Your IP: <button type="button" id="cf-footer-ip-reveal">Click to reveal</button><span class="hidden" id="cf-footer-ip">203.0.113.7</span></span>
+      <span class="cf-footer-item"><span>Performance &amp; security by</span> <a rel="noopener noreferrer" href="https://www.cloudflare.com/5xx-error-landing" id="brand_link" target="_blank">Cloudflare</a></span>
+    </p></div>
+  </div>
+</div></body></html>`;
+    expect(looksLikeJunkExtraction(htmlToText(extractMainHtml(html)))).toMatch(/anti-bot/);
+    expect(looksLikeJunkExtraction(htmlToText(html, { fullPage: true }))).toMatch(/anti-bot/);
+    // An article that quotes the wall is still an article.
+    const article = [
+      "# Why Cloudflare shows 'Sorry, you have been blocked'",
+      "The page appears when a site's web application firewall rule matches something in your request, often a word in a form field.",
+      "Site owners can look the request up in the firewall events log, searching by the Ray ID the visitor sends them.",
+      "Visitors cannot lift the block themselves; clearing cookies or switching networks only helps when the rule keys on them.",
+    ].join("\n");
+    expect(looksLikeJunkExtraction(article)).toBeUndefined();
+  });
   it("flags FR/DE consent walls", () => {
     expect(looksLikeJunkExtraction("Nous utilisons des cookies pour améliorer votre expérience.")).toBeTruthy();
     expect(looksLikeJunkExtraction("Wir verwenden Cookies, um Ihre Erfahrung zu verbessern.")).toBeTruthy();
@@ -94,6 +135,15 @@ describe("extractMainHtml (readability-lite)", () => {
   it("isolates role=main ahead of a wider content wrapper holding the sidebar", () => {
     const sidebar = Array.from({ length: 40 }, (_, i) => `<li><a href="/p${i}">Sidebar page ${i}</a></li>`).join("");
     const html = `<div class="page-content"><div class="sphinxsidebar" role="navigation"><ul>${sidebar}</ul></div><div role="main"><h1>API reference</h1><p>${"The client exposes a single request method. ".repeat(10)}</p></div></div>`;
+    const text = htmlToText(extractMainHtml(html));
+    expect(text).toContain("API reference");
+    expect(text).not.toContain("Sidebar page 7");
+  });
+
+  it.each(['<DIV ROLE="main">', '<div role="Main">', "<div ROLE=main>", '<section Role="main">'])("reads %s as role=main, as HTML's case rules do", (open) => {
+    const sidebar = Array.from({ length: 60 }, (_, i) => `<li><a href="/p${i}">Sidebar page ${i}</a></li>`).join("");
+    const close = open.startsWith("<section") ? "</section>" : "</DIV>";
+    const html = `<div class="sidebar"><ul>${sidebar}</ul></div>${open}<h1>API reference</h1><p>${"The client exposes a single request method. ".repeat(30)}</p>${close}`;
     const text = htmlToText(extractMainHtml(html));
     expect(text).toContain("API reference");
     expect(text).not.toContain("Sidebar page 7");

@@ -60,12 +60,21 @@ export interface MarkdownOptions {
  * main-content region (extractMainHtml) for an article rather than a page.
  */
 export function htmlToMarkdown(html: string, opts: MarkdownOptions = {}): string {
-  // As htmlToText does: a NUL is U+FFFD, as a browser reads it.
-  const src = html.includes(NUL) ? html.split(NUL).join("�") : html;
-  const base = documentBaseUrl(src, opts.baseUrl);
-  const hidden = opts.fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
+  return markdownAgainst(html, documentBaseUrl(withoutNul(html), opts.baseUrl), opts.fullPage);
+}
+
+/**
+ * htmlToMarkdown for a caller that has already read the page's <base href>
+ * off the whole page, as it must once isolation has cut the <head> away:
+ * `base` is final, and a <base> still in `html` is not applied again. A
+ * path-relative one (`docs/`) resolved a second time against its own result
+ * would send every link one directory too deep.
+ */
+export function markdownAgainst(html: string, base: string | undefined, fullPage?: boolean): string {
+  const src = withoutNul(html);
+  const hidden = fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
   let s = dropElements(src, hidden, RAW_TEXT_ELEMENTS);
-  if (!opts.fullPage) s = dropLandmarks(s, CHROME_ROLES);
+  if (!fullPage) s = dropLandmarks(s, CHROME_ROLES);
 
   // Every table that closes, by where it opens: one stack pass for the page.
   const tables = new Map<number, Region>();
@@ -159,8 +168,8 @@ export function htmlToMarkdown(html: string, opts: MarkdownOptions = {}): string
         // Cells are text like any other: `<length>` or `*` in one is not syntax.
         const escaped = {
           ...(table.caption ? { caption: escapeText(table.caption) } : {}),
-          headers: table.headers.map(escapeText),
-          rows: table.rows.map((row) => row.map(escapeText)),
+          headers: table.headers.map((cell) => escapeText(cell)),
+          rows: table.rows.map((row) => row.map((cell) => escapeText(cell))),
         };
         w.block(tableToMarkdown(escaped).split("\n"));
         last = tag.lastIndex = prevEnd = region.to;
@@ -223,6 +232,11 @@ export function htmlToMarkdown(html: string, opts: MarkdownOptions = {}): string
 }
 
 const NUL = "\u0000";
+
+// As htmlToText does: a NUL is U+FFFD, as a browser reads it.
+function withoutNul(html: string): string {
+  return html.includes(NUL) ? html.split(NUL).join("�") : html;
+}
 const TABLE_OPEN = /<table[\s/>]/i;
 // The next heading tag of any level, open or close: where a heading ends.
 const HEADING_EDGE = /<\/h[1-6]\s*>|<h[1-6](?=[\s/>])/;
@@ -249,8 +263,9 @@ const INLINE_KIND: Record<string, InlineKind | undefined> = {
 
 // `first`: nothing written inside it yet. An item's first line carries its
 // marker; a quote's marker is left off the blank line that comes before it.
+// `alt`: a list's items are marked `+` or `1)` rather than `-` or `1.`.
 type Block =
-  | { kind: "list"; ordered: boolean; next: number; items: number; last: string }
+  | { kind: "list"; ordered: boolean; alt: boolean; next: number; items: number; last: string }
   | { kind: "item"; marker: string; first: boolean }
   | { kind: "quote"; first: boolean };
 
@@ -280,6 +295,10 @@ class Writer {
   private frames: Frame[] = [];
   private pendingSpace = false;
   private needBlank = false;
+  /** The list closed last: its container's depth, its kind, and how many lines were written by then. */
+  private closedList?: { depth: number; ordered: boolean; alt: boolean; lines: number };
+  /** An emphasis just written that ends in punctuation, whose closing marker a letter pushed next would spoil. */
+  private flanked?: { at: number; marker: string; core: string; start: boolean };
 
   text(raw: string): void {
     // A tag whose quotes never balance is not text; htmlToText drops it too.
@@ -287,7 +306,7 @@ class Writer {
     if (!decoded) return;
     const core = decoded.trim();
     if (decoded[0] === " ") this.space();
-    if (core) this.push(this.inCode() ? core : escapeText(core));
+    if (core) this.push(this.inCode() ? core : escapeText(core, { before: this.joinsBefore(decoded[0] !== " "), after: decoded[decoded.length - 1] !== " " }));
     if (core && decoded[decoded.length - 1] === " ") this.space();
   }
 
@@ -344,9 +363,10 @@ class Writer {
   }
 
   rule(): void {
-    // Never straight under a line of text, where `---` is a heading underline.
-    this.needBlank = true;
-    this.block(["---"]);
+    // `***`, never `---`: on an item's first line `- ---` is itself a rule and
+    // cuts the list in two (Bootstrap's dropdown dividers are <li><hr>), and
+    // straight under a line of text `---` underlines it into a heading.
+    this.block(["***"]);
   }
 
   openList(ordered: boolean, start: number): void {
@@ -355,9 +375,19 @@ class Writer {
     // before it — where a browser draws it. That item goes back on the stack.
     if (top?.kind === "list" && top.items && this.blocks.length + 1 < MAX_BLOCK_DEPTH) this.blocks.push({ kind: "item", marker: top.last, first: false });
     if (!this.room()) return;
-    // A list nested in an item follows the item's text with no blank line.
-    if (this.blocks[this.blocks.length - 1]?.kind === "item") this.needBlank = false;
-    this.blocks.push({ kind: "list", ordered, next: start, items: 0, last: "" });
+    // A list nested in an item follows the item's text with no blank line —
+    // when it can: an ordered list interrupts a paragraph only from 1, and
+    // "4. Fourth" straight under the item's text continues it. A list opening
+    // an empty item shares the item's marker line, so the blank line owed to
+    // what came before stands.
+    const item = this.blocks[this.blocks.length - 1];
+    if (item?.kind === "item" && !item.first && (!ordered || start === 1)) this.needBlank = false;
+    // Straight after a list of its kind in the same place, nothing written
+    // between, a blank line alone would join the two into one loose list and
+    // renumber the second. A new marker character starts a new list.
+    const prev = this.closedList;
+    const alt = prev !== undefined && prev.depth === this.blocks.length && prev.ordered === ordered && prev.lines === this.lines.length && !prev.alt;
+    this.blocks.push({ kind: "list", ordered, alt, next: start, items: 0, last: "" });
   }
 
   closeList(): void {
@@ -367,6 +397,8 @@ class Writer {
     }
     const i = this.nearest("list");
     if (i < 0) return;
+    const { ordered, alt } = this.blocks[i] as Extract<Block, { kind: "list" }>;
+    this.closedList = { depth: i, ordered, alt, lines: this.lines.length };
     this.blocks.length = i;
     this.needBlank = true;
   }
@@ -382,12 +414,13 @@ class Writer {
     else {
       // An item outside any list reads as one of an unordered list.
       if (!this.room()) return;
-      this.blocks.push({ kind: "list", ordered: false, next: 1, items: 0, last: "" });
+      this.blocks.push({ kind: "list", ordered: false, alt: false, next: 1, items: 0, last: "" });
       list = this.blocks.length - 1;
     }
     if (!this.room()) return;
     const owner = this.blocks[list] as Extract<Block, { kind: "list" }>;
-    const marker = owner.ordered ? `${owner.next++}. ` : "- ";
+    // Not `*`: "* ***", an item holding only a rule, would be a rule itself.
+    const marker = owner.ordered ? `${owner.next++}${owner.alt ? ")" : "."} ` : owner.alt ? "+ " : "- ";
     owner.last = marker;
     this.blocks.push({ kind: "item", marker, first: true });
     // The items of one list sit together. The first keeps the blank line owed
@@ -439,14 +472,16 @@ class Writer {
     while (this.frames.length) this.wrap(this.frames.pop()!);
     const text = this.parts.join("");
     this.parts = [];
+    this.flanked = undefined;
     this.pendingSpace = false;
     this.frames = open.map((f) => ({ ...f, start: 0 }));
     const level = this.heading;
     this.heading = 0;
     if (level) {
       const title = text.replace(/\s+/g, " ").trim();
-      // "Section #" would lose its "#" as a closing sequence.
-      if (title) this.block([`${"#".repeat(level)} ${title.replace(/(\s)(#+)$/, "$1\\$2")}`]);
+      // "Section #" would lose its "#" as a closing sequence, and a title of
+      // nothing but hashes (a glossary's "#") would leave the heading empty.
+      if (title) this.block([`${"#".repeat(level)} ${title.replace(/(^|\s)(#+)$/, "$1\\$2")}`]);
       return;
     }
     // Hard breaks split the paragraph into lines; two in a row end it.
@@ -482,6 +517,11 @@ class Writer {
   }
 
   private push(markdown: string): void {
+    const f = this.flanked;
+    this.flanked = undefined;
+    if (f && !this.pendingSpace && f.at === this.parts.length - 1 && FLANK_WORD.test(markdown[0] ?? "")) {
+      this.parts[f.at] = flank(f.marker, f.core, f.start, true);
+    }
     if (this.pendingSpace) this.parts.push(" ");
     this.pendingSpace = false;
     this.parts.push(markdown);
@@ -491,22 +531,44 @@ class Writer {
     return this.frames.some((f) => f.kind === "code");
   }
 
+  /**
+   * Whether text pushed next will stand straight after something other than
+   * a space or a line start: the text before it, when `touching` it, or the
+   * marker of an emphasis or link that opens where it starts (the marker goes
+   * in when the element closes, and moves the element's leading space outside).
+   */
+  private joinsBefore(touching: boolean): boolean {
+    const last = this.parts[this.parts.length - 1];
+    if (touching && !this.pendingSpace && last !== undefined && last !== "\n") return true;
+    return this.frames.some((f) => !f.inert && f.start === this.parts.length);
+  }
+
   /** Replace an element's text with its Markdown, its outer whitespace kept outside it. */
   private wrap(f: Frame): void {
     if (f.inert) return;
     const trailing = this.pendingSpace;
     this.pendingSpace = false;
+    if (this.flanked && this.flanked.at >= f.start) this.flanked = undefined;
     const content = this.parts.splice(f.start).join("");
     const core = content.trim();
     const lead = content.slice(0, content.length - content.trimStart().length);
     const trail = content.slice(content.trimEnd().length);
     this.whitespace(lead);
     if (core) {
-      const markdown = wrapInline(f, core, this.heading > 0);
+      let markdown = wrapInline(f, core, this.heading > 0);
       // A "!" straight before a link's "[" would turn the link into an image.
       const last = this.parts.length - 1;
       if (f.kind === "a" && markdown && !this.pendingSpace && this.parts[last]?.endsWith("!")) this.parts[last] = `${this.parts[last]!.slice(0, -1)}\\!`;
-      this.push(markdown);
+      // An emphasis's marker against punctuation inside and a letter outside is
+      // not a marker to CommonMark. The letter before is known now; the one
+      // after, only once it is pushed.
+      const marker = f.kind === "em" ? "*" : f.kind === "strong" ? "**" : "";
+      if (marker) {
+        const start = !this.pendingSpace && FLANK_WORD.test(this.parts[last]?.slice(-1) ?? "") && FLANK_PUNCT.test(core[0]!);
+        if (start) markdown = flank(marker, core, true, false);
+        this.push(markdown);
+        if (FLANK_PUNCT.test(core[core.length - 1]!)) this.flanked = { at: this.parts.length - 1, marker, core, start };
+      } else this.push(markdown);
     }
     this.whitespace(trail);
     if (trailing) this.space();
@@ -546,6 +608,37 @@ class Writer {
   }
 }
 
+// CommonMark's flanking rules: a marker next to punctuation (or a symbol) on
+// its inner side needs a space or punctuation on its outer side.
+const FLANK_PUNCT = /[\p{P}\p{S}]/u;
+const FLANK_WORD = /[^\s\p{P}\p{S}]/u;
+// The markup an emphasis's text may hold — emphasis, code, a link's brackets
+// — and the escape: punctuation moved across the marker never splits one.
+const MARKUP_CHARS = "\\*`[]";
+
+/**
+ * Emphasis with the text punctuation (and space) at a spoiled edge moved
+ * outside its markers: "**Note:**This" is no emphasis, "**Note**:This" is, and
+ * so is "「**注意**」" where "**「注意」**" between two ideographs was not.
+ * The move stops at markup or an escape; emphasis of nothing but punctuation
+ * is left as its text.
+ */
+function flank(marker: string, core: string, start: boolean, end: boolean): string {
+  // With a link inside, a parenthesis may be its destination's; an image's "!" goes with its "[".
+  const link = core.includes("](");
+  const movable = (i: number) => {
+    const c = core[i]!;
+    if (!(c === " " || FLANK_PUNCT.test(c)) || MARKUP_CHARS.includes(c) || core[i - 1] === "\\") return false;
+    return c === "(" || c === ")" ? !link : !(c === "!" && core[i + 1] === "[");
+  };
+  let from = 0;
+  let to = core.length;
+  if (start) while (from < to && movable(from)) from++;
+  if (end) while (to > from && movable(to - 1)) to--;
+  if (from === to) return core;
+  return `${core.slice(0, from)}${marker}${core.slice(from, to)}${marker}${core.slice(to)}`;
+}
+
 // A permalink's whole text: Sphinx's ¶, a docs theme's # or §, GitHub's icon.
 const PERMALINK_TEXT = /^(?:¶|#|§|🔗)$/u;
 
@@ -583,11 +676,29 @@ const ALWAYS_SYNTAX = /[\\`*[\]]/g;
 const EDGE_UNDERSCORE = /(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])/gu;
 const HTML_LIKE = /<(?=[a-zA-Z/!?])/g;
 const ENTITY_LIKE = /&(?=#?[a-zA-Z0-9]+;)/g;
-const STRIKE = /~(?=~)|(?<=~)~/g;
+// GFM strikes `~x~` as well as `~~x~~`. A tilde closes only with no space
+// before it: escaping those, and a doubled one, leaves every opener without a
+// closer, so `~5 minutes` keeps its tilde as written.
+const STRIKE = /~(?=~)|(?<=[^\t\n\f\r\p{Zs}])~/gu;
+// A '<' or an entity's start that the next run of text could complete.
+const OPEN_END = /(?:<|&#?[a-zA-Z0-9]*)$/;
 
-/** A run of text with its Markdown metacharacters escaped, so it reads back as the same text. */
-function escapeText(s: string): string {
-  return s.replace(ALWAYS_SYNTAX, "\\$&").replace(EDGE_UNDERSCORE, "\\_").replace(HTML_LIKE, "\\<").replace(ENTITY_LIKE, "\\&").replace(STRIKE, "\\~");
+/**
+ * A run of text with its Markdown metacharacters escaped, so it reads back as
+ * the same text. The syntax that depends on its neighbours — `<` before a tag
+ * name, `&` before an entity's name, `~` after a character — is judged within
+ * the run. `edges` says which of its ends may touch the next or the last run,
+ * no space between: an element that splits `&lt;script&gt;` round "script"
+ * writes nothing of its own, and the two halves would join into a live tag.
+ * A '<' or '&' at such an end, and a '~' at such a start, is escaped whatever
+ * joins it.
+ */
+function escapeText(s: string, edges?: { before: boolean; after: boolean }): string {
+  let out = s.replace(ALWAYS_SYNTAX, "\\$&").replace(EDGE_UNDERSCORE, "\\_").replace(HTML_LIKE, "\\<").replace(ENTITY_LIKE, "\\&").replace(STRIKE, "\\~");
+  if (edges?.after) out = out.replace(OPEN_END, "\\$&");
+  // STRIKE leaves only a first tilde with none after it; whatever stands before it is outside the run.
+  if (edges?.before && out[0] === "~") out = `\\${out}`;
+  return out;
 }
 
 /**
@@ -622,23 +733,36 @@ function longestRun(s: string, ch: string): number {
  * resolve.
  */
 function linkTarget(raw: string | undefined, base: string | undefined): string | undefined {
-  const href =
-    raw === undefined
-      ? ""
-      : decodeEntities(raw)
-          .replace(/[\t\n\r]/g, "")
-          .trim();
-  if (!href || /^(?:javascript|vbscript|data):/i.test(href)) return undefined;
+  // Read as the URL parser reads it, and a browser following the link: a tab
+  // or newline anywhere is dropped, and so is every C0 control or space before
+  // the scheme — "&#1;javascript:" is javascript:.
+  const href = raw === undefined ? "" : afterControls(decodeEntities(raw).replace(/[\t\n\r]/g, "")).trim();
+  if (!href || UNFOLLOWABLE.test(href)) return undefined;
   try {
-    return new URL(href, base).href;
+    const url = new URL(href, base);
+    // Judged again on what the parser made of it, which is what is written out.
+    return UNFOLLOWABLE.test(url.protocol) ? undefined : url.href;
   } catch {
     return base === undefined ? href : undefined;
   }
 }
 
-/** A URL as a Markdown link destination: no raw space or angle bracket, parentheses escaped unless they balance. */
+const UNFOLLOWABLE = /^(?:javascript|vbscript|data):/i;
+
+/** `s` without the C0 controls and spaces the URL parser strips from its start. */
+function afterControls(s: string): string {
+  let i = 0;
+  while (i < s.length && s.charCodeAt(i) <= 0x20) i++;
+  return s.slice(i);
+}
+
+/**
+ * A URL as a Markdown link destination: no raw space, angle bracket or
+ * backslash (the URL parser keeps one in a query or fragment, and `\*` there
+ * would read as an escaped `*`), parentheses escaped unless they balance.
+ */
 function destination(url: string): string {
-  const d = url.replace(/[ <>]/g, (c) => encodeURIComponent(c));
+  const d = url.replace(/[ <>\\]/g, (c) => encodeURIComponent(c));
   let depth = 0;
   for (const c of d) {
     if (c === "(") depth++;

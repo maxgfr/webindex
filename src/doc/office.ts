@@ -22,9 +22,9 @@ import { inflateRawSync } from "node:zlib";
 //     a 1 GiB bomb is refused after 64 MB of work instead of allocated;
 //   - every XML walk linear in its input: no regex that backtracks over a part,
 //     so an unclosed tag costs one scan, not one per `<`;
-//   - output capped for the whole document (see Budget), and spreadsheet rows
-//     capped in width, so a single cell at column XFD cannot pad every row with
-//     sixteen thousand empties.
+//   - output capped for the whole document (see Budget), table rules included,
+//     and table rows capped in width, so a single cell at column XFD cannot pad
+//     every row with sixteen thousand empties.
 // Nothing is ever written to disk, so path traversal in entry names is moot.
 
 const MAX_ENTRIES = 10_000;
@@ -155,8 +155,16 @@ function openZip(buf: Buffer): Zip {
 // .ods repeats a row a thousand times with one attribute. So the text itself is
 // metered, once for the whole document; past the allowance nothing more is
 // kept — as with the external rungs, whose stdout stops at the same size.
+//
+// So are the rules drawn round a table's cells, on an allowance of their own:
+// they are not text the document holds, yet an empty cell is three characters
+// of them, and one far-right cell makes every row of its table a line of 770.
+// Charged against the text, they would spend it on the cells' behalf once the
+// cells had; left unmetered, a 1 KB .docx made 25 MB of "|  |  |". Either
+// allowance spent ends the document: the output is cut at that size anyway.
 class Budget {
   private left = MAX_OUTPUT_CHARS;
+  private rulesLeft = MAX_OUTPUT_CHARS;
 
   /** Spend `n` characters: false, and nothing spent, once they no longer fit — the caller drops them. */
   take(n: number): boolean {
@@ -168,8 +176,18 @@ class Budget {
     return true;
   }
 
+  /** The same, for `n` characters of table rules. */
+  takeRules(n: number): boolean {
+    if (n > this.rulesLeft) {
+      this.rulesLeft = 0;
+      return false;
+    }
+    this.rulesLeft -= n;
+    return true;
+  }
+
   get spent(): boolean {
-    return this.left <= 0;
+    return this.left <= 0 || this.rulesLeft <= 0;
   }
 }
 
@@ -256,8 +274,36 @@ function attr(attrs: string, name: string): string | undefined {
 
 const cell = (s: string): string => s.replace(/\s+/g, " ").trim().replace(/\|/g, "\\|");
 
-/** A Markdown table, header rule after the first row; trailing empty rows and columns dropped. */
-function markdownTable(rows: string[][]): string {
+/** Whether a row shows nothing in its first `width` cells. */
+function blankRow(row: string[], width: number): boolean {
+  for (let c = 0; c < row.length && c < width; c++) if (row[c]?.trim()) return false;
+  return true;
+}
+
+interface Rows {
+  rows: string[][];
+  /** Whether the last row kept was empty. */
+  blank?: boolean;
+}
+
+/**
+ * A finished row onto its table — but a run of empty rows as one, before they
+ * are held at all: `<w:tr/>` is seven bytes, and a 64 MB part of them was
+ * nine million arrays.
+ */
+function keepRow(table: Rows, row: string[]): void {
+  const blank = blankRow(row, row.length);
+  if (!blank || !table.blank) table.rows.push(row);
+  table.blank = blank;
+}
+
+/**
+ * A Markdown table, header rule after the first row; trailing empty rows and
+ * columns dropped, and a run of empty rows shown as one. The cells were
+ * metered as they were read; the rules round them are metered here, and the
+ * rows stop once the document's allowance for them is spent.
+ */
+function markdownTable(rows: string[][], budget: Budget): string {
   let last = rows.length;
   while (last > 0 && rows[last - 1]!.every((c) => !c.trim())) last--;
   let width = 0;
@@ -271,15 +317,22 @@ function markdownTable(rows: string[][]): string {
     }
   }
   if (!last || !width) return "";
+  // A row's rules: "| " before its first cell, " | " between two, " |" and a
+  // newline after its last.
+  const rules = 3 * width + 2;
+  const rule = `|${" --- |".repeat(width)}`;
+  if (!budget.takeRules(rules + rule.length + 1)) return "";
   const line = (row: string[]) => `| ${Array.from({ length: width }, (_, c) => cell(row[c] ?? "")).join(" | ")} |`;
-  const out = [line(rows[0]!), `|${" --- |".repeat(width)}`];
-  // The cells are metered; the rules around them are not, and an empty row
-  // between two far-apart cells is nothing but rules.
-  let size = 0;
-  for (let r = 1; r < last && size < MAX_OUTPUT_CHARS; r++) {
-    const l = line(rows[r]!);
-    size += l.length;
-    out.push(l);
+  const out = [line(rows[0]!), rule];
+  let blank = false;
+  for (let r = 1; r < last; r++) {
+    const row = rows[r]!;
+    // Empty within the width: its only text is past the last column shown.
+    const empty = blankRow(row, width);
+    if (empty && blank) continue;
+    blank = empty;
+    if (!budget.takeRules(rules)) break;
+    out.push(line(row));
   }
   return out.join("\n");
 }
@@ -395,8 +448,7 @@ interface Paragraph {
   prefix: string;
 }
 
-interface Table {
-  rows: string[][];
+interface Table extends Rows {
   row?: string[];
   cell?: string[];
 }
@@ -461,11 +513,11 @@ function wordText(xml: string, budget: Budget, styles?: Map<string, string>): st
         table.row.push(table.cell.join(" "));
         table.cell = undefined;
       } else if (n === "tr" && table?.row) {
-        table.rows.push(table.row);
+        keepRow(table, table.row);
         table.row = undefined;
       } else if (n === "tbl") {
         const done = tables.pop();
-        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows));
+        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows, budget));
       }
     },
     text(s) {
@@ -590,7 +642,7 @@ interface SheetStyles {
 }
 
 function sheetRows(xml: string, shared: string[], styles: SheetStyles, budget: Budget): string[][] {
-  const rows: string[][] = [];
+  const table: Rows = { rows: [] };
   let row: string[] | undefined;
   let col = 0;
   let type: string | undefined;
@@ -624,7 +676,7 @@ function sheetRows(xml: string, shared: string[], styles: SheetStyles, budget: B
         }
         value = undefined;
       } else if (n === "row" && row) {
-        rows.push(row);
+        keepRow(table, row);
         row = undefined;
       }
     },
@@ -632,7 +684,7 @@ function sheetRows(xml: string, shared: string[], styles: SheetStyles, budget: B
       if (collecting && value !== undefined && value.length < MAX_OUTPUT_CHARS) value += s;
     },
   });
-  return rows;
+  return table.rows;
 }
 
 function spreadsheetText(zip: Zip, workbookPart: string, budget: Budget): string {
@@ -655,7 +707,7 @@ function spreadsheetText(zip: Zip, workbookPart: string, budget: Budget): string
     if (budget.spent) break;
     const part = rels.get(sheet.id)?.target;
     const xml = part ? zip.text(part) : undefined;
-    const table = xml ? markdownTable(sheetRows(xml, shared, styles, budget)) : "";
+    const table = xml ? markdownTable(sheetRows(xml, shared, styles, budget), budget) : "";
     if (table) blocks.push(`## ${sheet.name}\n\n${table}`);
   }
   return blocks.join("\n\n");
@@ -726,12 +778,12 @@ function drawingText(xml: string, budget: Budget, onlyBody = false): { title: st
         table.row.push(table.cell.join(" "));
         table.cell = undefined;
       } else if (name === "a:tr" && table?.row) {
-        table.rows.push(table.row);
+        keepRow(table, table.row);
         table.row = undefined;
       } else if (name === "a:tbl") {
         const done = tables.pop();
         // Blank lines around it, or Markdown reads it as part of a paragraph.
-        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : `\n${markdownTable(done.rows)}\n`);
+        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : `\n${markdownTable(done.rows, budget)}\n`);
       } else if (n === "sp") {
         const shape = shapes.pop();
         if (!shape) return;
@@ -772,11 +824,16 @@ function presentationText(zip: Zip, presentationPart: string, budget: Budget): s
 
 // ── OpenDocument (.odt, .ods, .odp) ─────────────────────────────────────────
 
+// Not the body's text: footnotes, comments, and the tracked changes a writer
+// keeps at the head of the body while Record Changes is on — deleted text
+// among them, which the Word reader leaves out too (w:del).
+const ODF_ASIDES = new Set(["text:note", "office:annotation", "text:tracked-changes"]);
+
 function openDocumentText(xml: string, budget: Budget): string {
   const blocks: string[] = [];
   const paragraphs: Paragraph[] = [];
   const tables: (Table & { repeatRow: number; repeatCell: number })[] = [];
-  let skip = 0; // footnotes, comments: not the body's text
+  let skip = 0; // inside one of ODF_ASIDES
   let listItem = false;
   let spreadsheet = false;
   // A presentation's slides, read as a .pptx's are: the title frame heads the
@@ -802,7 +859,7 @@ function openDocumentText(xml: string, budget: Budget): string {
 
   walkXml(xml, {
     open(name, attrs) {
-      if (name === "text:note" || name === "office:annotation") skip++;
+      if (ODF_ASIDES.has(name)) skip++;
       if (skip) return;
       const p = paragraphs[paragraphs.length - 1];
       const table = tables[tables.length - 1];
@@ -834,7 +891,7 @@ function openDocumentText(xml: string, budget: Budget): string {
       }
     },
     close(name) {
-      if (name === "text:note" || name === "office:annotation") {
+      if (ODF_ASIDES.has(name)) {
         skip = Math.max(0, skip - 1);
         return;
       }
@@ -857,12 +914,12 @@ function openDocumentText(xml: string, budget: Budget): string {
         const times = size ? table.repeatRow : 1;
         for (let k = 0; k < times; k++) {
           if (k && !budget.take(size)) break;
-          table.rows.push(table.row);
+          keepRow(table, table.row);
         }
         table.row = undefined;
       } else if (name === "table:table") {
         const done = tables.pop();
-        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows));
+        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows, budget));
       } else if (name === "draw:frame" && titleFrame) titleFrame--;
       else if (name === "presentation:notes") inNotes = Math.max(0, inNotes - 1);
       else if (name === "draw:page" && heading >= 0) {

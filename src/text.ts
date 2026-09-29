@@ -4,7 +4,7 @@
 // lived. Used to score fetched page text against the question so an excerpt
 // carries the lines that actually answer it.
 //
-// Lowercase, drop stopwords (EN + FR question scaffolding), keep identifiers,
+// Lowercase, drop stopwords (EN, FR and DE question scaffolding), keep identifiers,
 // fold accents and plurals, split camelCase/snake_case, compile
 // accent-insensitive patterns. Deterministic, no LLM, no dependencies.
 
@@ -112,6 +112,15 @@ const STOPWORDS = new Set([
   "me",
   "my",
   "our",
+  "vs",
+]);
+
+// French and German question scaffolding: the locale layer targets FR and DE.
+// Written in capitals, one of these is an English acronym instead — MIT, DAS,
+// IM, DES, UN, CE — and stays a term: "mit" took MIT out of every licence
+// question, and out of the ranker's terms with it. English scaffolding in
+// capitals ("WHAT IS THE") is still scaffolding.
+const LOCALE_STOPWORDS = new Set([
   "le",
   "la",
   "les",
@@ -168,8 +177,7 @@ const STOPWORDS = new Set([
   "aux",
   "si",
   "ne",
-  "vs",
-  // German question scaffolding: the locale layer targets DE as well as FR.
+  // German.
   "der",
   "die",
   "das",
@@ -211,10 +219,14 @@ const STOPWORDS = new Set([
  * excerpt matcher highlights. Two lists that drift apart make the two disagree,
  * and the symptom — a source that scores well but shows an excerpt with no
  * highlight — looks like a bug in neither.
+ *
+ * Pass the term as written: a French or German stopword in capitals is an
+ * English acronym (MIT, DAS, IM) and is not one.
  */
 export function isStopword(term: string): boolean {
   const t = term.toLowerCase();
   if (STOPWORDS.has(t)) return true;
+  if (LOCALE_STOPWORDS.has(t) && !(term !== t && term === term.toUpperCase())) return true;
   // Read through the brand, at CALL time, so a consumer's extras apply to
   // buildMatcher and to its own tokeniser alike — the two must agree on what a
   // term is, or a document ranks on a word the excerpt never highlights.
@@ -238,12 +250,14 @@ function extraStopwordSet(extra: readonly string[]): Set<string> {
 // One question token: a run of letters, combining marks, digits and
 // underscores. Splitting on everything else took the subject out of "C++",
 // "C#", ".NET" and "HTTP/2", so a run keeps a trailing `+`/`#` pair (C++, C#,
-// F#, C++20), a `/2` or `/1.1` version, and .NET its leading dot. The marks are
-// part of the word, as bm25Tokenize has them: Devanagari, Thai and Tamil write
-// vowels as combining marks, and splitting at each one left fragments that
-// matched nothing.
+// F#, C++20), a `/2` or `/1.1` version, and .NET its leading dot. The pair
+// follows a letter only: after a digit it is "or later" ("Node 18+", "iOS
+// 15+"), and "18+" matched no line saying "Node 18". The marks are part of the
+// word, as bm25Tokenize has them: Devanagari, Thai and Tamil write vowels as
+// combining marks, and splitting at each one left fragments that matched
+// nothing.
 const TOKEN_RE =
-  /(?<![\p{L}\p{M}\p{N}_])\.net(?![\p{L}\p{M}\p{N}_])|[\p{L}\p{M}\p{N}_]+(?:[+#]{1,2}\d*(?![\p{L}\p{M}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{M}\p{N}_./]))?/giu;
+  /(?<![\p{L}\p{M}\p{N}_])\.net(?![\p{L}\p{M}\p{N}_])|[\p{L}\p{M}\p{N}_]+(?:(?<=\p{L})[+#]{1,2}\d*(?![\p{L}\p{M}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{M}\p{N}_./]))?/giu;
 
 // Chinese and Japanese put no space between words, so a whole clause was one
 // keyword and no page ever matched it. bm25Tokenize reads them as overlapping
@@ -266,7 +280,7 @@ export function keywords(question: string): string[] {
   const out: string[] = [];
   const add = (raw: string, minLength: number): void => {
     const lower = raw.toLowerCase();
-    if (raw.length < minLength || isStopword(lower) || seen.has(lower)) return;
+    if (raw.length < minLength || isStopword(raw) || seen.has(lower)) return;
     seen.add(lower);
     out.push(raw);
   };
@@ -372,7 +386,7 @@ export function subtokens(raw: string): string[] {
   const out: string[] = [];
   for (const p of parts) {
     const lower = p.toLowerCase();
-    if (lower.length < 3 || isStopword(lower)) continue;
+    if (lower.length < 3 || isStopword(p)) continue;
     if (!out.includes(lower)) out.push(lower);
     if (out.length >= 4) break;
   }
@@ -547,10 +561,29 @@ export function nearestHeading(lines: string[], anchor: number): string | undefi
       continue;
     }
     if (inFence) continue;
-    const m = line.match(/^#{1,6}\s+(.+?)\s*#*\s*$/);
-    if (m) heading = m[1]!.trim();
+    const title = atxTitle(line);
+    if (title) heading = title;
   }
   return heading;
+}
+
+const ATX_OPEN = /^#{1,6}\s+/;
+// A closing run of '#' needs whitespace before it, as CommonMark has it: "C#"
+// keeps its hash, and so does the "\#" htmlToMarkdown writes for a title that
+// ends in one. Found from the end in one pass: `(.+?)\s*#*\s*$` retried its
+// tail at every character, quadratic on a long run of spaces.
+const ATX_CLOSE = /(?:^|\s)#+$/;
+// The escapes htmlToMarkdown writes: a backslash before ASCII punctuation.
+const MD_ESCAPE = /\\([!-/:-@[-`{-~])/g;
+
+/** An ATX heading line's title, unescaped; undefined for any other line, and for a heading with none. */
+function atxTitle(line: string): string | undefined {
+  const open = ATX_OPEN.exec(line);
+  if (!open) return undefined;
+  let title = line.slice(open[0].length).trimEnd();
+  const close = ATX_CLOSE.exec(title);
+  if (close) title = title.slice(0, close.index).trimEnd();
+  return title ? title.replace(MD_ESCAPE, "$1") : undefined;
 }
 
 /** A passage of a document, chosen because it answers the question. */

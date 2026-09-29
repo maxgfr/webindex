@@ -32,6 +32,24 @@ describe("htmlToMarkdown: blocks", () => {
     expect(md(html)).toBe("- One\n- Two\n  - Two a\n  - Two b\n- Three\n\n4. Four\n5. Five\n\nAfter.");
   });
 
+  it("keeps the blank line a nested list needs to start a list rather than continue a paragraph", () => {
+    // An ordered list interrupts a paragraph only when it starts at 1.
+    expect(md('<ul><li>Steps continued<ol start="4"><li>Fourth</li><li>Fifth</li></ol></li></ul>')).toBe("- Steps continued\n\n  4. Fourth\n  5. Fifth");
+    expect(md('<ul><li>Steps<ol start="1"><li>One</li></ol></li></ul>')).toBe("- Steps\n  1. One");
+    // A list opening an empty item owes what came before its blank line.
+    expect(md('<p>Intro</p><ol start="3"><li><ul><li>x</li></ul></li></ol>')).toBe("Intro\n\n3. - x");
+    expect(md("<blockquote><p>quoted</p></blockquote><blockquote><ul><li><ul><li>x</li></ul></li></ul></blockquote>")).toBe("> quoted\n\n> - - x");
+  });
+
+  it("keeps two lists side by side apart, switching the marker as CommonMark needs", () => {
+    // A blank line alone joins them into one loose list, and renumbers the second.
+    expect(md("<ul><li>a</li></ul><ul><li>b</li></ul><ul><li>c</li></ul>")).toBe("- a\n\n+ b\n\n- c");
+    expect(md('<ol><li>a</li></ol><p></p><ol start="5"><li>b</li><li>c</li></ol>')).toBe("1. a\n\n5) b\n6) c");
+    expect(md("<ul><li>x<ul><li>a</li></ul><ul><li>b</li></ul></li></ul>")).toBe("- x\n  - a\n  + b");
+    // Anything between them already keeps them apart.
+    expect(md("<ul><li>a</li></ul><h2>H</h2><ul><li>b</li></ul><ol><li>c</li></ol>")).toBe("- a\n\n## H\n\n- b\n\n1. c");
+  });
+
   it("nests a list set straight inside another under the item before it, as a browser shows it", () => {
     expect(md("<ul><li>a</li><ul><li>b</li><li>c</li></ul><li>d</li></ul>")).toBe("- a\n  - b\n  - c\n- d");
     expect(md("<ol><li>one</li><ol><li>sub</li></ol></ol>")).toBe("1. one\n   1. sub");
@@ -48,9 +66,12 @@ describe("htmlToMarkdown: blocks", () => {
     );
   });
 
-  it("writes a rule, never straight under a line of text", () => {
-    expect(md("<p>Above</p><hr><p>Below</p>")).toBe("Above\n\n---\n\nBelow");
-    expect(md("Above<hr>Below")).toBe("Above\n\n---\n\nBelow");
+  it("writes a rule as ***, which no list marker or line of text above can turn into something else", () => {
+    expect(md("<p>Above</p><hr><p>Below</p>")).toBe("Above\n\n***\n\nBelow");
+    expect(md("Above<hr>Below")).toBe("Above\n\n***\n\nBelow");
+    // `- ---` is itself a rule, and cut the list in two: Bootstrap's dropdown dividers.
+    expect(md("<ul><li>a</li><li><hr></li><li>b</li></ul>")).toBe("- a\n- ***\n- b");
+    expect(md("<ul><li><hr>after rule</li></ul>")).toBe("- ***\n\n  after rule");
   });
 
   it("turns <br> into a hard break, and two of them into a new paragraph", () => {
@@ -61,6 +82,19 @@ describe("htmlToMarkdown: blocks", () => {
 describe("htmlToMarkdown: inline", () => {
   it("writes emphasis and strong, keeping their outer whitespace outside the markers", () => {
     expect(md("<p>A <em>very</em> <strong>big </strong>deal, <b><i>really</i></b>.</p>")).toBe("A *very* **big** deal, ***really***.");
+  });
+
+  it("moves an emphasis's edge punctuation outside its markers when a letter touches them", () => {
+    // "**Note:**This" is not emphasis to CommonMark: a closing marker after
+    // punctuation needs a space or punctuation after it. CJK uses no spaces.
+    expect(md("<p><strong>Note:</strong>This feature is experimental.</p>")).toBe("**Note**:This feature is experimental.");
+    expect(md("<p><strong>注意：</strong>此功能仅在专业版中可用。</p>")).toBe("**注意**：此功能仅在专业版中可用。");
+    expect(md("<p>此<strong>「注意」</strong>功能</p>")).toBe("此「**注意**」功能");
+    expect(md("<p>Le mot <em>«&nbsp;cœur&nbsp;»</em>vient du latin.</p>")).toBe("Le mot *« cœur* »vient du latin.");
+    // Emphasis of nothing but punctuation is its text.
+    expect(md("<p>a<b>:</b>b</p>")).toBe("a:b");
+    // A space or punctuation beside the marker already lets it parse: left as written.
+    expect(md("<p><strong>Note:</strong> This, <em>(x)</em>.</p>")).toBe("**Note:** This, *(x)*.");
   });
 
   it("adds no markers for an emphasis nested in its own kind", () => {
@@ -84,6 +118,10 @@ describe("htmlToMarkdown: inline", () => {
     expect(md(html, "https://d.test/v1/page")).toBe("[Guide](https://d.test/v2/guide)");
   });
 
+  it("resolves a path-relative <base href> against the page once", () => {
+    expect(md('<base href="docs/"><a href="g">g</a>', "https://d.test/site/i.html")).toBe("[g](https://d.test/site/docs/g)");
+  });
+
   it("ignores a <base href> that is javascript: or data:, as a browser does", () => {
     const html = '<head><base href="javascript:alert(1)//"></head><p><a href="guide">Guide</a></p>';
     expect(md(html, "https://d.test/v1/page")).toBe("[Guide](https://d.test/v1/guide)");
@@ -98,9 +136,24 @@ describe("htmlToMarkdown: inline", () => {
     expect(md('<p><a href="javascript:void(0)">Menu</a> <a name="top">Top</a> <a href="/x"></a>end</p>', "https://d.test/")).toBe("Menu Top end");
   });
 
+  it("drops a javascript: or data: target hidden behind control characters the URL parser strips", () => {
+    const html = '<p><a href="&#1;javascript:alert(1)">x</a> <img src="&#2;data:image/png;base64,AA" alt="i"> <a href=" &#x1F;vbscript:msgbox">y</a></p>';
+    expect(md(html)).toBe("x y");
+    expect(md(html, "https://d.test/")).toBe("x y");
+    expect(md('<p><a href="java&#10;script:alert(1)">z</a></p>', "https://d.test/")).toBe("z");
+  });
+
   it("escapes parentheses only when they do not balance, and encodes spaces", () => {
     expect(md('<p><a href="https://en.wikipedia.org/wiki/Mercury_(planet)">M</a></p>')).toBe("[M](https://en.wikipedia.org/wiki/Mercury_(planet))");
     expect(md('<p><a href="notes (draft">N</a></p>')).toBe("[N](notes%20\\(draft)");
+  });
+
+  it("encodes a backslash in a target, which Markdown would read as an escape", () => {
+    // The URL parser keeps '\' in a query or fragment; "\*" in a destination is "*".
+    expect(md('<p><a href="https://a.com/?q=\\*x">l</a></p>')).toBe("[l](https://a.com/?q=%5C*x)");
+    expect(md('<p><a href="#\\_x">f</a> <img src="i\\(1).png" alt="i"></p>', "https://d.test/p")).toBe(
+      "[f](https://d.test/p#%5C_x) ![i](https://d.test/i/(1).png)",
+    );
   });
 
   it("links every block of a link wrapped round a card", () => {
@@ -192,6 +245,14 @@ describe("htmlToMarkdown: what is not the page", () => {
     expect(md("<p>Kept</p><script>var x = '<p>no</p>';</script><style>p{}</style><template><p>no</p></template><!-- <p>no</p> -->")).toBe("Kept");
   });
 
+  it("takes no <script> quoted in an attribute for one, and keeps the page after it", () => {
+    // With no real </script> after it, the quoted opener ran to the end of the
+    // page and left the half-eaten <img> behind.
+    const html =
+      '<h1>Scripts</h1><figure><img src="/d.png" alt="how a <script> tag works"><figcaption>Timeline</figcaption></figure><h2>Defer</h2><p>Later.</p>';
+    expect(md(html, "https://d.test/")).toBe("# Scripts\n\n![how a \\<script> tag works](https://d.test/d.png)\n\nTimeline\n\n## Defer\n\nLater.");
+  });
+
   it("drops navigation, footers and chrome landmarks unless fullPage", () => {
     const html = '<nav><a href="/">Home</a></nav><div role="navigation">Crumbs</div><p>Body</p><footer>Legal</footer>';
     expect(md(html)).toBe("Body");
@@ -230,6 +291,10 @@ describe("htmlToMarkdown: escaping", () => {
 
   it("escapes a heading's trailing hashes, which would read as its closing sequence", () => {
     expect(md("<h2>Section #</h2>")).toBe("## Section \\#");
+    // A title of nothing but hashes (a glossary's "#" section) was an empty heading.
+    expect(md("<h2>#</h2>")).toBe("## \\#");
+    expect(md("<h3>##</h3>")).toBe("### \\##");
+    expect(md("<h2>C#</h2>")).toBe("## C#");
   });
 
   it("escapes a '!' written straight before a link, which would make it an image", () => {
@@ -240,6 +305,28 @@ describe("htmlToMarkdown: escaping", () => {
 
   it("escapes a doubled tilde, which GFM reads as strikethrough", () => {
     expect(md("<p>~~gone~~ ~5 minutes</p>")).toBe("\\~\\~gone\\~\\~ ~5 minutes");
+  });
+
+  it("escapes every tilde that could close a strikethrough, single ones too, as GitHub strikes ~text~", () => {
+    // A tilde with a space before it only opens, and an opener with no closer is text.
+    expect(md("<p>Price ~5~ now</p>")).toBe("Price ~5\\~ now");
+    expect(md("<p>Installed in C:\\PROGRA~1\\MICROS~1\\Office</p>")).toBe("Installed in C:\\\\PROGRA\\~1\\\\MICROS\\~1\\\\Office");
+    // Where a run of text starts against the one before, or inside an
+    // emphasis whose marker will stand before it, its first tilde can close too.
+    expect(md("<p>~<span>~x~</span>~</p>")).toBe("~\\~x\\~\\~");
+    expect(md("<p>costs ~5 or <em>~ 10</em></p>")).toBe("costs ~5 or *\\~ 10*");
+    expect(md("<p>a <span>~b</span></p>")).toBe("a ~b");
+  });
+
+  it("escapes syntax an element splits in two, which joins up again in the Markdown", () => {
+    // Each run of text is escaped on its own: a '<' at the end of one, a tag
+    // name at the start of the next, was a live tag once written side by side.
+    expect(md("<p>&lt;<span>script</span>&gt;alert(1)&lt;/script&gt;</p>")).toBe("\\<script>alert(1)\\</script>");
+    expect(md('<p>Use the &lt;<span class="tag">img</span> src=x onerror=alert(1)&gt; element</p>')).toBe("Use the \\<img src=x onerror=alert(1)> element");
+    expect(md("<p>&amp;<span>amp;</span> and &amp;<b>#38;</b></p>")).toBe("\\&amp; and \\&**#38;**");
+    expect(md('<h2>&lt;<a href="#s">script</a>&gt;</h2>', "https://d.test/")).toBe("## \\<script>");
+    // A '<' or '&' with a space after it was never syntax, and stays as written.
+    expect(md("<p>a &lt; <b>b</b> &amp; c</p>")).toBe("a < **b** & c");
   });
 });
 
@@ -259,7 +346,9 @@ describe("htmlToMarkdown stays linear on hostile markup", () => {
     ["a '<' in prose with no '>' after it", "<p>" + "if a<b then ".repeat(80_000)],
     ["unclosed comment openers", "<!-- x ".repeat(150_000)],
     ["an unterminated attribute quote per tag", '<a title="x '.repeat(80_000)],
+    ["script openers quoted in attributes", '<img alt="<script>">'.repeat(100_000)],
     ["unclosed <h2> openers", "<h2>x ".repeat(150_000)],
+    ["a heading of hashes and spaces", `<h2>${"## ".repeat(100_000)}#x</h2>`],
     ["headings closed only at the very end", `${"<h2>x ".repeat(150_000)}</h2>`],
     ["unclosed <pre> openers", "<pre>x ".repeat(150_000)],
     ["unclosed links", '<a href="/x">x '.repeat(100_000)],
@@ -269,6 +358,8 @@ describe("htmlToMarkdown stays linear on hostile markup", () => {
     ["unclosed blockquotes", "<blockquote>x ".repeat(100_000)],
     ["deep blockquotes, then their closes", `${"<blockquote><p>x</p>".repeat(30_000)}${"</blockquote>".repeat(30_000)}`],
     ["a list above a pile of blockquotes, then stray </li>s", `<ul>${"<blockquote>".repeat(30_000)}${"</li>".repeat(30_000)}`],
+    ["emphasis ending in punctuation against a letter", "<p>" + "a<b>「x:</b>y<i><b>(:</b></i>z".repeat(40_000)],
+    ["one emphasis of punctuation against letters", `<p>a<b>${":".repeat(300_000)}</b>b`],
     ["one emphasis holding thousands of breaks", `<b>${"<br>".repeat(150_000)}x</b>`],
     ["a code span of backticks", `<code>${"`".repeat(300_000)}</code>`],
     ["a pre of whitespace", `<pre>${" ".repeat(300_000)}x${" \n".repeat(100_000)}</pre>`],
@@ -279,6 +370,9 @@ describe("htmlToMarkdown stays linear on hostile markup", () => {
     ["unclosed divs round a pre", `${'<div class="highlight-x">'.repeat(50_000)}<pre>x</pre>`],
     ["a link wrapped round thousands of blocks", `<a href="/x">${"<p>word</p>".repeat(60_000)}</a>`],
     ["underscores and tildes", "<p>" + "_~".repeat(200_000)],
+    ["runs of text that end in '<' or an entity's start", "<p>" + "&amp;a1<i>&lt;</i>".repeat(80_000)],
+    ["runs of text that start with a tilde, in emphasis and out", "<p>" + "<b><i>~x</i></b>a<span>~</span> ~".repeat(50_000)],
+    ["one run holding an entity's name to its end", `<p>${"&a&#".repeat(50_000)}&${"a".repeat(300_000)}<b>x</b>`],
   ])("%s", (_label, html) => {
     within(10_000, () => htmlToMarkdown(html, { baseUrl: "https://d.test/" }));
   });

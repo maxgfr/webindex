@@ -127,6 +127,12 @@ export function htmlAttributes(tag: string): Map<string, string> {
   return attrs;
 }
 
+// RCDATA, stepped over whole: a browser reads everything up to `</title>` as
+// text, so a "<script>" written in a title opens nothing. Taken for an opener,
+// it paired with the head's real </script> and deleted the title and the
+// canonical after it.
+const RCDATA_ELEMENTS: ReadonlySet<string> = new Set(["title"]);
+
 /**
  * Replace every comment and every `<name …>…</name>` element among `names`
  * with a space, content and all.
@@ -137,6 +143,12 @@ export function htmlAttributes(tag: string): Map<string, string> {
  * prose after it; elements first lets "<!-- <script> -->" pair with a real
  * </script> further down and delete the article in between.
  *
+ * The pass steps over every other tag whole, quoted values and all, so an
+ * opener QUOTED in an attribute — alt="how a <script> tag works" — is text, as
+ * it is to a browser. Searched for bare, it ran to the end of the page. The
+ * bare opener is still the fallback for a tag that never closes, such as a
+ * script cut off by a size cap inside its own tag.
+ *
  * Linear by construction. The close is searched forward from its opener, and a
  * search that fails proves no close exists anywhere after it — so that name is
  * never searched for again, rather than once per opener (which is what made the
@@ -146,14 +158,17 @@ export function htmlAttributes(tag: string): Map<string, string> {
  * cap; the others keep their content, as they always did.
  */
 export function dropElements(html: string, names: readonly string[], toEof: ReadonlySet<string> = new Set()): string {
-  const open = new RegExp(`<!--|<(${names.join("|")})(?=[\\s/>])`, "gi");
+  const drop = new Set(names);
+  const open = new RegExp(`<!--|${TAG_RE.source}|<(${names.join("|")})(?=[\\s/>])`, "gi");
   const unclosed = new Set<string>();
   let out = "";
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = open.exec(html))) {
-    const name = m[1]?.toLowerCase() ?? "!--";
-    if (unclosed.has(name)) continue;
+    const tag = m[0];
+    const name = m[1]?.toLowerCase() ?? (tag === "<!--" ? "!--" : tag[1] === "/" ? "" : tagName(tag));
+    const opaque = !drop.has(name) && RCDATA_ELEMENTS.has(name);
+    if ((name !== "!--" && !drop.has(name) && !opaque) || unclosed.has(name)) continue;
     let end: number;
     if (name === "!--") {
       // From +2, so the degenerate `<!-->` closes itself as the spec says.
@@ -169,8 +184,11 @@ export function dropElements(html: string, names: readonly string[], toEof: Read
       unclosed.add(name);
       continue;
     }
-    out += html.slice(last, m.index) + " ";
-    last = open.lastIndex = end;
+    if (!opaque) {
+      out += html.slice(last, m.index) + " ";
+      last = end;
+    }
+    open.lastIndex = end; // an opaque element is kept, only stepped over
   }
   return last === 0 ? html : out + html.slice(last);
 }

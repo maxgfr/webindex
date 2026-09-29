@@ -17,6 +17,8 @@
 // gave an em dash on one Node version and a raw control character on another.
 // See CP1252_C1 below.
 
+import { AMBIGUOUS_TYPES } from "./mime.js";
+
 /** A BOM is authoritative — it beats every declaration. */
 function bomEncoding(bytes: Buffer): { encoding: string; skip: number } | undefined {
   if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return { encoding: "utf-8", skip: 3 };
@@ -110,18 +112,47 @@ function charsetFromXmlDeclaration(bytes: Buffer): string | undefined {
 
 const isUtf8Label = (label: string | undefined) => label === "utf-8" || label === "utf8";
 
-// The MIME types whose body may declare its own encoding in markup. Anything
-// else (text/plain, JSON, CSS…) that shows `<meta charset>` is only quoting one.
-const SNIFFABLE_MIME = new Set(["", "text/html", "application/xhtml+xml", "application/octet-stream"]);
+// The MIME types whose body may declare its own encoding in markup: HTML, and
+// every type that says nothing about its body, which fetchAndExtract reads as
+// HTML when it looks like HTML. Anything else (text/plain, JSON, CSS…) that
+// shows `<meta charset>` is only quoting one.
+const SNIFFABLE_MIME: ReadonlySet<string> = new Set(["text/html", "application/xhtml+xml", ...AMBIGUOUS_TYPES]);
 
-/** UTF-8 when the bytes are valid UTF-8, Windows-1252 when they are not. */
+/**
+ * Whether text decoded leniently as UTF-8 reads as UTF-8: some character
+ * beyond ASCII decoded, and more of them than U+FFFD. Latin-1 bytes almost
+ * never form a valid multi-byte sequence, so a Latin-1 page yields replacement
+ * characters and nothing else; a UTF-8 page with one stray byte yields one.
+ */
+function readsAsUtf8(text: string): boolean {
+  let valid = 0;
+  let replaced = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 0x80 || (c >= 0xdc00 && c <= 0xdfff)) continue; // ASCII, or the second half of a pair
+    if (c === 0xfffd) replaced++;
+    else valid++;
+  }
+  return valid > replaced;
+}
+
+/**
+ * UTF-8 when the bytes read as UTF-8, Windows-1252 when they do not.
+ *
+ * One invalid sequence is not proof of Latin-1. A CMS excerpt cut mid-character
+ * or one pasted Latin-1 byte leaves the rest of a page valid UTF-8, and
+ * switching the whole page to cp1252 on that byte turned every accent and dash
+ * on it into mojibake — a browser shows one U+FFFD. So the bytes decide: what
+ * decodes as UTF-8 around the error settles it (see readsAsUtf8).
+ */
 function decodeUtf8OrCp1252(bytes: Buffer): string {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let text: string;
   try {
     text = decoder.decode(bytes, { stream: true });
   } catch {
-    return decodeCp1252(bytes);
+    const lenient = new TextDecoder("utf-8").decode(bytes);
+    return readsAsUtf8(lenient) ? lenient : decodeCp1252(bytes);
   }
   try {
     return text + decoder.decode();
@@ -140,7 +171,8 @@ function decodeUtf8OrCp1252(bytes: Buffer): string {
  * Decode response bytes into text, honouring — in order — a BOM, the
  * Content-Type header, an XML declaration, and (for a body that may be HTML) the
  * document's own `<meta charset>`; with none of those naming a non-UTF-8
- * encoding, UTF-8 when the bytes are valid and Windows-1252 when they are not.
+ * encoding, UTF-8 when the bytes read as UTF-8 and Windows-1252 when they do
+ * not.
  *
  * Precedence follows what actually helps: a BOM cannot be wrong, a header is
  * usually right, and a meta tag is the last resort because a page served as
@@ -172,7 +204,7 @@ export function decodeBody(bytes: Buffer, contentType = ""): string {
  * Decode bytes read from disk: BOM, then an XML declaration or `<meta charset>`,
  * then a UTF-8 validity rescue. A local file has no transport header to trust,
  * and a stale template declaring UTF-8 over Latin-1 bytes is common. Without a
- * BOM or a non-UTF-8 declaration, trust UTF-8 only when the bytes are valid;
+ * BOM or a non-UTF-8 declaration, trust UTF-8 only when the bytes read as UTF-8;
  * otherwise use Windows-1252 so accents and typographic punctuation survive.
  *
  * `sniffHtmlCharset: false` skips the meta step — for a file the caller already
@@ -186,11 +218,7 @@ export function decodeLocal(bytes: Buffer, opts: { sniffHtmlCharset?: boolean } 
   const own = charsetFromXmlDeclaration(bytes) ?? (opts.sniffHtmlCharset === false ? undefined : charsetFromHtml(bytes.subarray(0, 4096).toString("latin1")));
   if (own && !isUtf8Label(own)) return decodeWith(bytes, own);
 
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    return decodeCp1252(bytes);
-  }
+  return decodeUtf8OrCp1252(bytes);
 }
 
 // The 32 code points where Windows-1252 differs from ISO-8859-1 — the C1 range,

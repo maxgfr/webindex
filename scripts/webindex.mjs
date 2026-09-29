@@ -443,6 +443,19 @@ import { existsSync as existsSync7, readFileSync as readFileSync13, realpathSync
 import { basename as basename4, extname, join as join15, relative as relative4, resolve as resolve7 } from "path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL } from "url";
 
+// src/mime.ts
+var AMBIGUOUS_TYPES = /* @__PURE__ */ new Set([
+  "",
+  "application/octet-stream",
+  "binary/octet-stream",
+  "application/x-download",
+  "application/force-download",
+  "application/download",
+  "application/unknown",
+  "application/zip",
+  "application/x-zip-compressed"
+]);
+
 // src/charset.ts
 function bomEncoding(bytes) {
   if (bytes.length >= 3 && bytes[0] === 239 && bytes[1] === 187 && bytes[2] === 191) return { encoding: "utf-8", skip: 3 };
@@ -488,14 +501,26 @@ function charsetFromXmlDeclaration(bytes) {
   return label ? prescanLabel(label) : void 0;
 }
 var isUtf8Label = (label) => label === "utf-8" || label === "utf8";
-var SNIFFABLE_MIME = /* @__PURE__ */ new Set(["", "text/html", "application/xhtml+xml", "application/octet-stream"]);
+var SNIFFABLE_MIME = /* @__PURE__ */ new Set(["text/html", "application/xhtml+xml", ...AMBIGUOUS_TYPES]);
+function readsAsUtf8(text) {
+  let valid = 0;
+  let replaced = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 128 || c >= 56320 && c <= 57343) continue;
+    if (c === 65533) replaced++;
+    else valid++;
+  }
+  return valid > replaced;
+}
 function decodeUtf8OrCp1252(bytes) {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let text;
   try {
     text = decoder.decode(bytes, { stream: true });
   } catch {
-    return decodeCp1252(bytes);
+    const lenient = new TextDecoder("utf-8").decode(bytes);
+    return readsAsUtf8(lenient) ? lenient : decodeCp1252(bytes);
   }
   try {
     return text + decoder.decode();
@@ -519,11 +544,7 @@ function decodeLocal(bytes, opts = {}) {
   if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
   const own = charsetFromXmlDeclaration(bytes) ?? (opts.sniffHtmlCharset === false ? void 0 : charsetFromHtml(bytes.subarray(0, 4096).toString("latin1")));
   if (own && !isUtf8Label(own)) return decodeWith(bytes, own);
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    return decodeCp1252(bytes);
-  }
+  return decodeUtf8OrCp1252(bytes);
 }
 var CP1252_C1 = [
   8364,
@@ -911,9 +932,24 @@ async function runNpx(spec, args, input) {
 function skipNpxHint() {
   return `set ${envName("NO_NPX")}=1 to skip the rungs that install through npx`;
 }
+var NOISE_RE = /^(?:npm (?:warn|WARN|notice)\b|\(node:\d+\)|\(Use `node --|\^+$|at\s|Node\.js v\d)/;
+var THROW_SITE_RE = /^(?:file:\/\/|\/|[A-Za-z]:\\)\S*:\d+$/;
+var ERROR_LINE_RE = /^\w*error\b/i;
+var PATH_RE = /(?<![\w:/.\\])(?:file:\/\/\/?(?:[A-Za-z]:)?|[A-Za-z]:(?=\\))?(?:[/\\][^\s/\\:'"()]+)+/g;
 function failureDetail(tool, r) {
-  const line = (r.stderr ?? "").split(/\r?\n/).map((l) => l.trim()).find((l) => l && !/^npm (?:warn|WARN|notice)\b/.test(l));
-  const detail = (line ?? r.error ?? "failed").slice(0, 200);
+  const lines = [];
+  let source = false;
+  let props = false;
+  for (const raw of (r.stderr ?? "").split(/\r?\n/)) {
+    const l = raw.trim();
+    if (source) source = false;
+    else if (props) props = l !== "}";
+    else if (THROW_SITE_RE.test(l)) source = true;
+    else if (l.startsWith("at ") && l.endsWith("{")) props = true;
+    else if (l && !NOISE_RE.test(l)) lines.push(l);
+  }
+  const line = lines.find((l) => ERROR_LINE_RE.test(l)) ?? lines[0];
+  const detail = (line ?? r.error ?? "failed").replace(PATH_RE, (p) => p.slice(Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")) + 1)).slice(0, 200);
   return detail.startsWith(`${tool}:`) ? detail : `${tool}: ${detail}`;
 }
 
@@ -1195,8 +1231,10 @@ function extractTextOps(s) {
   }
   return out;
 }
-function ascii85Decode(text) {
-  const out = [];
+var TOO_BIG = /* @__PURE__ */ Symbol("too big");
+function ascii85Decode(text, cap) {
+  const out = Buffer.allocUnsafe(Math.min(cap, 4 * text.length));
+  let n = 0;
   let group = 0;
   let count = 0;
   for (let i = 0; i < text.length; i++) {
@@ -1204,13 +1242,17 @@ function ascii85Decode(text) {
     if (c === 126) break;
     if (isWhite(c)) continue;
     if (c === 122 && count === 0) {
-      out.push(0, 0, 0, 0);
+      if (n + 4 > cap) return TOO_BIG;
+      out.writeUInt32BE(0, n);
+      n += 4;
       continue;
     }
     if (c < 33 || c > 117) return void 0;
     group = group * 85 + (c - 33);
     if (++count === 5) {
-      out.push(group >>> 24 & 255, group >>> 16 & 255, group >>> 8 & 255, group & 255);
+      if (n + 4 > cap) return TOO_BIG;
+      out.writeUInt32BE(group >>> 0, n);
+      n += 4;
       group = 0;
       count = 0;
     }
@@ -1218,17 +1260,16 @@ function ascii85Decode(text) {
   if (count === 1) return void 0;
   if (count > 1) {
     for (let k = count; k < 5; k++) group = group * 85 + 84;
-    const bytes = [group >>> 24 & 255, group >>> 16 & 255, group >>> 8 & 255, group & 255];
-    out.push(...bytes.slice(0, count - 1));
+    if (n + count - 1 > cap) return TOO_BIG;
+    for (let k = 0; k < count - 1; k++) out[n++] = group >>> 24 - 8 * k & 255;
   }
-  return Buffer.from(out);
+  return out.subarray(0, n);
 }
 function asciiHexDecode(text) {
   const end = text.indexOf(">");
   const hex = (end < 0 ? text : text.slice(0, end)).replace(/[^0-9A-Fa-f]/g, "");
   return Buffer.from(hex.length % 2 ? `${hex}0` : hex, "hex");
 }
-var TOO_BIG = /* @__PURE__ */ Symbol("too big");
 function inflateCapped(data, cap) {
   for (const inflate of [inflateSync, inflateRawSync]) {
     try {
@@ -1267,18 +1308,24 @@ function* contentStreams(buf) {
     if (filters) {
       for (const f of filters) {
         if (!data) break;
-        if (f === "ASCII85Decode" || f === "A85") data = ascii85Decode(data.toString("latin1"));
-        else if (f === "ASCIIHexDecode" || f === "AHx") data = asciiHexDecode(data.toString("latin1"));
-        else if (f === "FlateDecode" || f === "Fl") {
-          const cap = Math.min(MAX_STREAM_BYTES, budget);
-          const inflated = inflateCapped(data, cap);
-          if (inflated === TOO_BIG) budget -= cap;
-          data = inflated instanceof Buffer ? inflated : void 0;
-        } else data = void 0;
+        const cap = Math.min(MAX_STREAM_BYTES, budget);
+        let decoded;
+        if (f === "ASCII85Decode" || f === "A85") decoded = ascii85Decode(data.toString("latin1"), cap);
+        else if (f === "ASCIIHexDecode" || f === "AHx") decoded = asciiHexDecode(data.toString("latin1"));
+        else if (f === "FlateDecode" || f === "Fl") decoded = inflateCapped(data, cap);
+        if (decoded === TOO_BIG) budget -= cap;
+        data = decoded instanceof Buffer ? decoded : void 0;
       }
     } else {
-      if (/~>\s*$/.test(s.slice(Math.max(start, stop - 8), stop))) data = ascii85Decode(data.toString("latin1")) ?? data;
       const cap = Math.min(MAX_STREAM_BYTES, budget);
+      if (/~>\s*$/.test(s.slice(Math.max(start, stop - 8), stop))) {
+        const decoded = ascii85Decode(data.toString("latin1"), cap);
+        if (decoded === TOO_BIG) {
+          budget -= cap;
+          continue;
+        }
+        data = decoded ?? data;
+      }
       const inflated = inflateCapped(data, cap);
       if (inflated === TOO_BIG) {
         budget -= cap;
@@ -1549,6 +1596,7 @@ function openZip(buf) {
 }
 var Budget = class {
   left = MAX_OUTPUT_CHARS;
+  rulesLeft = MAX_OUTPUT_CHARS;
   /** Spend `n` characters: false, and nothing spent, once they no longer fit — the caller drops them. */
   take(n) {
     if (n > this.left) {
@@ -1558,8 +1606,17 @@ var Budget = class {
     this.left -= n;
     return true;
   }
+  /** The same, for `n` characters of table rules. */
+  takeRules(n) {
+    if (n > this.rulesLeft) {
+      this.rulesLeft = 0;
+      return false;
+    }
+    this.rulesLeft -= n;
+    return true;
+  }
   get spent() {
-    return this.left <= 0;
+    return this.left <= 0 || this.rulesLeft <= 0;
   }
 };
 var ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
@@ -1621,7 +1678,16 @@ function attr(attrs, name) {
   return m ? decodeXml(m[1] ?? m[2] ?? "") : void 0;
 }
 var cell = (s) => s.replace(/\s+/g, " ").trim().replace(/\|/g, "\\|");
-function markdownTable(rows) {
+function blankRow(row, width) {
+  for (let c = 0; c < row.length && c < width; c++) if (row[c]?.trim()) return false;
+  return true;
+}
+function keepRow(table, row) {
+  const blank = blankRow(row, row.length);
+  if (!blank || !table.blank) table.rows.push(row);
+  table.blank = blank;
+}
+function markdownTable(rows, budget) {
   let last = rows.length;
   while (last > 0 && rows[last - 1].every((c) => !c.trim())) last--;
   let width = 0;
@@ -1635,13 +1701,19 @@ function markdownTable(rows) {
     }
   }
   if (!last || !width) return "";
+  const rules = 3 * width + 2;
+  const rule = `|${" --- |".repeat(width)}`;
+  if (!budget.takeRules(rules + rule.length + 1)) return "";
   const line = (row) => `| ${Array.from({ length: width }, (_, c) => cell(row[c] ?? "")).join(" | ")} |`;
-  const out = [line(rows[0]), `|${" --- |".repeat(width)}`];
-  let size = 0;
-  for (let r = 1; r < last && size < MAX_OUTPUT_CHARS; r++) {
-    const l = line(rows[r]);
-    size += l.length;
-    out.push(l);
+  const out = [line(rows[0]), rule];
+  let blank = false;
+  for (let r = 1; r < last; r++) {
+    const row = rows[r];
+    const empty = blankRow(row, width);
+    if (empty && blank) continue;
+    blank = empty;
+    if (!budget.takeRules(rules)) break;
+    out.push(line(row));
   }
   return out.join("\n");
 }
@@ -1780,11 +1852,11 @@ function wordText(xml, budget, styles) {
         table.row.push(table.cell.join(" "));
         table.cell = void 0;
       } else if (n === "tr" && table?.row) {
-        table.rows.push(table.row);
+        keepRow(table, table.row);
         table.row = void 0;
       } else if (n === "tbl") {
         const done = tables.pop();
-        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows));
+        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows, budget));
       }
     },
     text(s) {
@@ -1878,7 +1950,7 @@ function serialDate(serial, kind, date1904) {
   return kind === "date" ? iso.slice(0, 10) : kind === "time" ? time : `${iso.slice(0, 10)} ${time}`;
 }
 function sheetRows(xml, shared, styles, budget) {
-  const rows = [];
+  const table = { rows: [] };
   let row;
   let col = 0;
   let type;
@@ -1911,7 +1983,7 @@ function sheetRows(xml, shared, styles, budget) {
         }
         value = void 0;
       } else if (n === "row" && row) {
-        rows.push(row);
+        keepRow(table, row);
         row = void 0;
       }
     },
@@ -1919,7 +1991,7 @@ function sheetRows(xml, shared, styles, budget) {
       if (collecting && value !== void 0 && value.length < MAX_OUTPUT_CHARS) value += s;
     }
   });
-  return rows;
+  return table.rows;
 }
 function spreadsheetText(zip, workbookPart, budget) {
   const rels = relationships(zip, workbookPart);
@@ -1941,7 +2013,7 @@ function spreadsheetText(zip, workbookPart, budget) {
     if (budget.spent) break;
     const part = rels.get(sheet.id)?.target;
     const xml = part ? zip.text(part) : void 0;
-    const table = xml ? markdownTable(sheetRows(xml, shared, styles, budget)) : "";
+    const table = xml ? markdownTable(sheetRows(xml, shared, styles, budget), budget) : "";
     if (table) blocks.push(`## ${sheet.name}
 
 ${table}`);
@@ -1999,12 +2071,12 @@ function drawingText(xml, budget, onlyBody = false) {
         table.row.push(table.cell.join(" "));
         table.cell = void 0;
       } else if (name === "a:tr" && table?.row) {
-        table.rows.push(table.row);
+        keepRow(table, table.row);
         table.row = void 0;
       } else if (name === "a:tbl") {
         const done = tables.pop();
         if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : `
-${markdownTable(done.rows)}
+${markdownTable(done.rows, budget)}
 `);
       } else if (n === "sp") {
         const shape = shapes.pop();
@@ -2043,6 +2115,7 @@ Notes: ${notes}` : ""}`);
   }
   return blocks.join("\n\n");
 }
+var ODF_ASIDES = /* @__PURE__ */ new Set(["text:note", "office:annotation", "text:tracked-changes"]);
 function openDocumentText(xml, budget) {
   const blocks = [];
   const paragraphs = [];
@@ -2069,7 +2142,7 @@ function openDocumentText(xml, budget) {
   const repeat = (attrs, name) => Math.min(MAX_REPEAT, Math.max(1, Number(attr(attrs, name)) || 1));
   walkXml(xml, {
     open(name, attrs) {
-      if (name === "text:note" || name === "office:annotation") skip++;
+      if (ODF_ASIDES.has(name)) skip++;
       if (skip) return;
       const p = paragraphs[paragraphs.length - 1];
       const table = tables[tables.length - 1];
@@ -2101,7 +2174,7 @@ function openDocumentText(xml, budget) {
       }
     },
     close(name) {
-      if (name === "text:note" || name === "office:annotation") {
+      if (ODF_ASIDES.has(name)) {
         skip = Math.max(0, skip - 1);
         return;
       }
@@ -2122,12 +2195,12 @@ function openDocumentText(xml, budget) {
         const times = size ? table.repeatRow : 1;
         for (let k = 0; k < times; k++) {
           if (k && !budget.take(size)) break;
-          table.rows.push(table.row);
+          keepRow(table, table.row);
         }
         table.row = void 0;
       } else if (name === "table:table") {
         const done = tables.pop();
-        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows));
+        if (done) emit(tables.length ? done.rows.map((r) => r.join(" ")).join(" ") : markdownTable(done.rows, budget));
       } else if (name === "draw:frame" && titleFrame) titleFrame--;
       else if (name === "presentation:notes") inNotes = Math.max(0, inNotes - 1);
       else if (name === "draw:page" && heading >= 0) {
@@ -2444,15 +2517,19 @@ function htmlAttributes(tag) {
   }
   return attrs;
 }
+var RCDATA_ELEMENTS = /* @__PURE__ */ new Set(["title"]);
 function dropElements(html, names, toEof = /* @__PURE__ */ new Set()) {
-  const open = new RegExp(`<!--|<(${names.join("|")})(?=[\\s/>])`, "gi");
+  const drop = new Set(names);
+  const open = new RegExp(`<!--|${TAG_RE.source}|<(${names.join("|")})(?=[\\s/>])`, "gi");
   const unclosed = /* @__PURE__ */ new Set();
   let out = "";
   let last = 0;
   let m;
   while (m = open.exec(html)) {
-    const name = m[1]?.toLowerCase() ?? "!--";
-    if (unclosed.has(name)) continue;
+    const tag = m[0];
+    const name = m[1]?.toLowerCase() ?? (tag === "<!--" ? "!--" : tag[1] === "/" ? "" : tagName(tag));
+    const opaque = !drop.has(name) && RCDATA_ELEMENTS.has(name);
+    if (name !== "!--" && !drop.has(name) && !opaque || unclosed.has(name)) continue;
     let end;
     if (name === "!--") {
       const close = html.indexOf("-->", m.index + 2);
@@ -2467,8 +2544,11 @@ function dropElements(html, names, toEof = /* @__PURE__ */ new Set()) {
       unclosed.add(name);
       continue;
     }
-    out += html.slice(last, m.index) + " ";
-    last = open.lastIndex = end;
+    if (!opaque) {
+      out += html.slice(last, m.index) + " ";
+      last = end;
+    }
+    open.lastIndex = end;
   }
   return last === 0 ? html : out + html.slice(last);
 }
@@ -2675,6 +2755,9 @@ var STOPWORDS = /* @__PURE__ */ new Set([
   "me",
   "my",
   "our",
+  "vs"
+]);
+var LOCALE_STOPWORDS = /* @__PURE__ */ new Set([
   "le",
   "la",
   "les",
@@ -2731,8 +2814,7 @@ var STOPWORDS = /* @__PURE__ */ new Set([
   "aux",
   "si",
   "ne",
-  "vs",
-  // German question scaffolding: the locale layer targets DE as well as FR.
+  // German.
   "der",
   "die",
   "das",
@@ -2767,6 +2849,7 @@ var STOPWORDS = /* @__PURE__ */ new Set([
 function isStopword(term) {
   const t = term.toLowerCase();
   if (STOPWORDS.has(t)) return true;
+  if (LOCALE_STOPWORDS.has(t) && !(term !== t && term === term.toUpperCase())) return true;
   const extra = brand().extraStopwords;
   return extra ? extraStopwordSet(extra).has(t) : false;
 }
@@ -2778,7 +2861,7 @@ function extraStopwordSet(extra) {
   extraSets.set(extra, { length: extra.length, set });
   return set;
 }
-var TOKEN_RE = /(?<![\p{L}\p{M}\p{N}_])\.net(?![\p{L}\p{M}\p{N}_])|[\p{L}\p{M}\p{N}_]+(?:[+#]{1,2}\d*(?![\p{L}\p{M}\p{N}_+#])|\/\d(?:\.\d)?(?![\p{L}\p{M}\p{N}_./]))?/giu;
+var TOKEN_RE = new RegExp("(?<![\\p{L}\\p{M}\\p{N}_])\\.net(?![\\p{L}\\p{M}\\p{N}_])|[\\p{L}\\p{M}\\p{N}_]+(?:(?<=\\p{L})[+#]{1,2}\\d*(?![\\p{L}\\p{M}\\p{N}_+#])|\\/\\d(?:\\.\\d)?(?![\\p{L}\\p{M}\\p{N}_./]))?", "giu");
 var CJK_CHAR = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
 var CJK_RUNS = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
 function cjkBigrams(run) {
@@ -2793,7 +2876,7 @@ function keywords(question) {
   const out = [];
   const add = (raw, minLength) => {
     const lower = raw.toLowerCase();
-    if (raw.length < minLength || isStopword(lower) || seen.has(lower)) return;
+    if (raw.length < minLength || isStopword(raw) || seen.has(lower)) return;
     seen.add(lower);
     out.push(raw);
   };
@@ -2874,7 +2957,7 @@ function subtokens(raw) {
   const out = [];
   for (const p of parts) {
     const lower = p.toLowerCase();
-    if (lower.length < 3 || isStopword(lower)) continue;
+    if (lower.length < 3 || isStopword(p)) continue;
     if (!out.includes(lower)) out.push(lower);
     if (out.length >= 4) break;
   }
@@ -3047,12 +3130,11 @@ function tableToMarkdown(table) {
 }
 
 // src/markdown.ts
-function htmlToMarkdown(html, opts = {}) {
-  const src = html.includes(NUL) ? html.split(NUL).join("\uFFFD") : html;
-  const base = documentBaseUrl(src, opts.baseUrl);
-  const hidden = opts.fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
+function markdownAgainst(html, base, fullPage) {
+  const src = withoutNul(html);
+  const hidden = fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
   let s = dropElements(src, hidden, RAW_TEXT_ELEMENTS);
-  if (!opts.fullPage) s = dropLandmarks(s, CHROME_ROLES);
+  if (!fullPage) s = dropLandmarks(s, CHROME_ROLES);
   const tables = /* @__PURE__ */ new Map();
   if (TABLE_OPEN.test(s)) for (const r of balancedRegions(s, "table", () => true)) tables.set(r.from, r);
   const w = new Writer();
@@ -3127,8 +3209,8 @@ function htmlToMarkdown(html, opts = {}) {
         w.flush();
         const escaped = {
           ...table.caption ? { caption: escapeText(table.caption) } : {},
-          headers: table.headers.map(escapeText),
-          rows: table.rows.map((row) => row.map(escapeText))
+          headers: table.headers.map((cell2) => escapeText(cell2)),
+          rows: table.rows.map((row) => row.map((cell2) => escapeText(cell2)))
         };
         w.block(tableToMarkdown(escaped).split("\n"));
         last = tag.lastIndex = prevEnd = region.to;
@@ -3187,6 +3269,9 @@ function htmlToMarkdown(html, opts = {}) {
   return w.finish();
 }
 var NUL = "\0";
+function withoutNul(html) {
+  return html.includes(NUL) ? html.split(NUL).join("\uFFFD") : html;
+}
 var TABLE_OPEN = /<table[\s/>]/i;
 var HEADING_EDGE = /<\/h[1-6]\s*>|<h[1-6](?=[\s/>])/;
 var MAX_BLOCK_DEPTH = 24;
@@ -3211,12 +3296,16 @@ var Writer = class {
   frames = [];
   pendingSpace = false;
   needBlank = false;
+  /** The list closed last: its container's depth, its kind, and how many lines were written by then. */
+  closedList;
+  /** An emphasis just written that ends in punctuation, whose closing marker a letter pushed next would spoil. */
+  flanked;
   text(raw) {
     const decoded = decodeEntities(raw.includes("<") ? raw.replace(LOOSE_TAG_RE, " ") : raw).replace(HTML_SPACE, " ");
     if (!decoded) return;
     const core = decoded.trim();
     if (decoded[0] === " ") this.space();
-    if (core) this.push(this.inCode() ? core : escapeText(core));
+    if (core) this.push(this.inCode() ? core : escapeText(core, { before: this.joinsBefore(decoded[0] !== " "), after: decoded[decoded.length - 1] !== " " }));
     if (core && decoded[decoded.length - 1] === " ") this.space();
   }
   space() {
@@ -3259,15 +3348,17 @@ var Writer = class {
     this.block([fence + lang, ...body.split("\n"), fence]);
   }
   rule() {
-    this.needBlank = true;
-    this.block(["---"]);
+    this.block(["***"]);
   }
   openList(ordered, start) {
     const top = this.blocks[this.blocks.length - 1];
     if (top?.kind === "list" && top.items && this.blocks.length + 1 < MAX_BLOCK_DEPTH) this.blocks.push({ kind: "item", marker: top.last, first: false });
     if (!this.room()) return;
-    if (this.blocks[this.blocks.length - 1]?.kind === "item") this.needBlank = false;
-    this.blocks.push({ kind: "list", ordered, next: start, items: 0, last: "" });
+    const item = this.blocks[this.blocks.length - 1];
+    if (item?.kind === "item" && !item.first && (!ordered || start === 1)) this.needBlank = false;
+    const prev = this.closedList;
+    const alt = prev !== void 0 && prev.depth === this.blocks.length && prev.ordered === ordered && prev.lines === this.lines.length && !prev.alt;
+    this.blocks.push({ kind: "list", ordered, alt, next: start, items: 0, last: "" });
   }
   closeList() {
     if (this.blockOverflow) {
@@ -3276,6 +3367,8 @@ var Writer = class {
     }
     const i = this.nearest("list");
     if (i < 0) return;
+    const { ordered, alt } = this.blocks[i];
+    this.closedList = { depth: i, ordered, alt, lines: this.lines.length };
     this.blocks.length = i;
     this.needBlank = true;
   }
@@ -3288,12 +3381,12 @@ var Writer = class {
     if (list >= 0) this.blocks.length = list + 1;
     else {
       if (!this.room()) return;
-      this.blocks.push({ kind: "list", ordered: false, next: 1, items: 0, last: "" });
+      this.blocks.push({ kind: "list", ordered: false, alt: false, next: 1, items: 0, last: "" });
       list = this.blocks.length - 1;
     }
     if (!this.room()) return;
     const owner = this.blocks[list];
-    const marker = owner.ordered ? `${owner.next++}. ` : "- ";
+    const marker = owner.ordered ? `${owner.next++}${owner.alt ? ")" : "."} ` : owner.alt ? "+ " : "- ";
     owner.last = marker;
     this.blocks.push({ kind: "item", marker, first: true });
     if (owner.items++) this.needBlank = false;
@@ -3336,13 +3429,14 @@ var Writer = class {
     while (this.frames.length) this.wrap(this.frames.pop());
     const text = this.parts.join("");
     this.parts = [];
+    this.flanked = void 0;
     this.pendingSpace = false;
     this.frames = open.map((f) => ({ ...f, start: 0 }));
     const level = this.heading;
     this.heading = 0;
     if (level) {
       const title = text.replace(/\s+/g, " ").trim();
-      if (title) this.block([`${"#".repeat(level)} ${title.replace(/(\s)(#+)$/, "$1\\$2")}`]);
+      if (title) this.block([`${"#".repeat(level)} ${title.replace(/(^|\s)(#+)$/, "$1\\$2")}`]);
       return;
     }
     let para = [];
@@ -3374,6 +3468,11 @@ var Writer = class {
     return this.lines.join("\n").trimEnd();
   }
   push(markdown) {
+    const f = this.flanked;
+    this.flanked = void 0;
+    if (f && !this.pendingSpace && f.at === this.parts.length - 1 && FLANK_WORD.test(markdown[0] ?? "")) {
+      this.parts[f.at] = flank(f.marker, f.core, f.start, true);
+    }
     if (this.pendingSpace) this.parts.push(" ");
     this.pendingSpace = false;
     this.parts.push(markdown);
@@ -3381,21 +3480,39 @@ var Writer = class {
   inCode() {
     return this.frames.some((f) => f.kind === "code");
   }
+  /**
+   * Whether text pushed next will stand straight after something other than
+   * a space or a line start: the text before it, when `touching` it, or the
+   * marker of an emphasis or link that opens where it starts (the marker goes
+   * in when the element closes, and moves the element's leading space outside).
+   */
+  joinsBefore(touching) {
+    const last = this.parts[this.parts.length - 1];
+    if (touching && !this.pendingSpace && last !== void 0 && last !== "\n") return true;
+    return this.frames.some((f) => !f.inert && f.start === this.parts.length);
+  }
   /** Replace an element's text with its Markdown, its outer whitespace kept outside it. */
   wrap(f) {
     if (f.inert) return;
     const trailing = this.pendingSpace;
     this.pendingSpace = false;
+    if (this.flanked && this.flanked.at >= f.start) this.flanked = void 0;
     const content = this.parts.splice(f.start).join("");
     const core = content.trim();
     const lead = content.slice(0, content.length - content.trimStart().length);
     const trail = content.slice(content.trimEnd().length);
     this.whitespace(lead);
     if (core) {
-      const markdown = wrapInline(f, core, this.heading > 0);
+      let markdown = wrapInline(f, core, this.heading > 0);
       const last = this.parts.length - 1;
       if (f.kind === "a" && markdown && !this.pendingSpace && this.parts[last]?.endsWith("!")) this.parts[last] = `${this.parts[last].slice(0, -1)}\\!`;
-      this.push(markdown);
+      const marker = f.kind === "em" ? "*" : f.kind === "strong" ? "**" : "";
+      if (marker) {
+        const start = !this.pendingSpace && FLANK_WORD.test(this.parts[last]?.slice(-1) ?? "") && FLANK_PUNCT.test(core[0]);
+        if (start) markdown = flank(marker, core, true, false);
+        this.push(markdown);
+        if (FLANK_PUNCT.test(core[core.length - 1])) this.flanked = { at: this.parts.length - 1, marker, core, start };
+      } else this.push(markdown);
     }
     this.whitespace(trail);
     if (trailing) this.space();
@@ -3430,6 +3547,23 @@ var Writer = class {
     return false;
   }
 };
+var FLANK_PUNCT = /[\p{P}\p{S}]/u;
+var FLANK_WORD = /[^\s\p{P}\p{S}]/u;
+var MARKUP_CHARS = "\\*`[]";
+function flank(marker, core, start, end) {
+  const link = core.includes("](");
+  const movable = (i) => {
+    const c = core[i];
+    if (!(c === " " || FLANK_PUNCT.test(c)) || MARKUP_CHARS.includes(c) || core[i - 1] === "\\") return false;
+    return c === "(" || c === ")" ? !link : !(c === "!" && core[i + 1] === "[");
+  };
+  let from = 0;
+  let to = core.length;
+  if (start) while (from < to && movable(from)) from++;
+  if (end) while (to > from && movable(to - 1)) to--;
+  if (from === to) return core;
+  return `${core.slice(0, from)}${marker}${core.slice(from, to)}${marker}${core.slice(to)}`;
+}
 var PERMALINK_TEXT = /^(?:¶|#|§|🔗)$/u;
 function wrapInline(f, core, inHeading) {
   switch (f.kind) {
@@ -3454,9 +3588,13 @@ var ALWAYS_SYNTAX = /[\\`*[\]]/g;
 var EDGE_UNDERSCORE = /(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])/gu;
 var HTML_LIKE = /<(?=[a-zA-Z/!?])/g;
 var ENTITY_LIKE = /&(?=#?[a-zA-Z0-9]+;)/g;
-var STRIKE = /~(?=~)|(?<=~)~/g;
-function escapeText(s) {
-  return s.replace(ALWAYS_SYNTAX, "\\$&").replace(EDGE_UNDERSCORE, "\\_").replace(HTML_LIKE, "\\<").replace(ENTITY_LIKE, "\\&").replace(STRIKE, "\\~");
+var STRIKE = /~(?=~)|(?<=[^\t\n\f\r\p{Zs}])~/gu;
+var OPEN_END = /(?:<|&#?[a-zA-Z0-9]*)$/;
+function escapeText(s, edges) {
+  let out = s.replace(ALWAYS_SYNTAX, "\\$&").replace(EDGE_UNDERSCORE, "\\_").replace(HTML_LIKE, "\\<").replace(ENTITY_LIKE, "\\&").replace(STRIKE, "\\~");
+  if (edges?.after) out = out.replace(OPEN_END, "\\$&");
+  if (edges?.before && out[0] === "~") out = `\\${out}`;
+  return out;
 }
 function escapeLineStart(line) {
   const c = line[0];
@@ -3476,16 +3614,23 @@ function longestRun(s, ch) {
   return best;
 }
 function linkTarget(raw, base) {
-  const href = raw === void 0 ? "" : decodeEntities(raw).replace(/[\t\n\r]/g, "").trim();
-  if (!href || /^(?:javascript|vbscript|data):/i.test(href)) return void 0;
+  const href = raw === void 0 ? "" : afterControls(decodeEntities(raw).replace(/[\t\n\r]/g, "")).trim();
+  if (!href || UNFOLLOWABLE.test(href)) return void 0;
   try {
-    return new URL(href, base).href;
+    const url = new URL(href, base);
+    return UNFOLLOWABLE.test(url.protocol) ? void 0 : url.href;
   } catch {
     return base === void 0 ? href : void 0;
   }
 }
+var UNFOLLOWABLE = /^(?:javascript|vbscript|data):/i;
+function afterControls(s) {
+  let i = 0;
+  while (i < s.length && s.charCodeAt(i) <= 32) i++;
+  return s.slice(i);
+}
 function destination(url) {
-  const d = url.replace(/[ <>]/g, (c) => encodeURIComponent(c));
+  const d = url.replace(/[ <>\\]/g, (c) => encodeURIComponent(c));
   let depth = 0;
   for (const c of d) {
     if (c === "(") depth++;
@@ -3857,6 +4002,18 @@ function pageDelayMs() {
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
+function sleepUnlessAborted(ms, signal) {
+  return new Promise((resolve8) => {
+    if (signal?.aborted) return resolve8();
+    const done = () => {
+      clearTimeout(t);
+      signal?.removeEventListener("abort", done);
+      resolve8();
+    };
+    const t = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
 function detectRateLimited(status, headers) {
   if (status === 429) return true;
   return status === 403 && headers.get("x-ratelimit-remaining") === "0";
@@ -3933,17 +4090,6 @@ var DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 function isBinaryDocument(contentType) {
   return /application\/pdf/i.test(contentType) || docFormatForContentType(contentType) !== void 0;
 }
-var AMBIGUOUS_TYPES = /* @__PURE__ */ new Set([
-  "",
-  "application/octet-stream",
-  "binary/octet-stream",
-  "application/x-download",
-  "application/force-download",
-  "application/download",
-  "application/unknown",
-  "application/zip",
-  "application/x-zip-compressed"
-]);
 var mimeOf = (contentType) => contentType.split(";")[0].trim().toLowerCase();
 function dispositionFilename(header2) {
   if (!header2) return void 0;
@@ -4053,9 +4199,11 @@ async function httpGet(url, opts = {}) {
       const filename = dispositionFilename(res.headers.get("content-disposition"));
       const namedDocument = isBinaryDocument(meta.contentType) || namesDocument(filename);
       const ambiguous = AMBIGUOUS_TYPES.has(mime);
-      const max = opts.maxBytes ?? (namedDocument || ambiguous ? opts.maxDocumentBytes : void 0) ?? DEFAULT_MAX_RESPONSE_BYTES;
       const declared = Number(res.headers.get("content-length"));
-      const prefixUseless = opts.binary || namedDocument || Object.keys(opts.headers ?? {}).some((k) => k.toLowerCase() === "range");
+      const documentCap = namedDocument || ambiguous ? opts.maxDocumentBytes : void 0;
+      const pastDocumentCap = !namedDocument && documentCap !== void 0 && declared > documentCap;
+      const max = opts.maxBytes ?? (pastDocumentCap ? Math.min(documentCap, DEFAULT_MAX_RESPONSE_BYTES) : documentCap) ?? DEFAULT_MAX_RESPONSE_BYTES;
+      const prefixUseless = opts.binary || namedDocument || NON_TEXT_TYPE_RE.test(mime) || Object.keys(opts.headers ?? {}).some((k) => k.toLowerCase() === "range");
       if (Number.isFinite(declared) && declared > max && prefixUseless) {
         ctrl.abort();
         return { ok: false, status: res.status, body: "", bytesRead: 0, truncated: true, ...meta, error: `response too large: ${declared} bytes > ${max} cap` };
@@ -4087,7 +4235,7 @@ async function httpGet(url, opts = {}) {
       if (wait !== void 0) {
         last = result;
         if (wait > 0) opts.onBackOff?.(result.url, wait);
-        await sleep(wait);
+        await sleepUnlessAborted(wait, opts.signal);
         continue;
       }
       return result;
@@ -4095,7 +4243,7 @@ async function httpGet(url, opts = {}) {
       if (!timedOut && opts.signal?.aborted) return cancelled();
       last = { ok: false, status: 0, body: "", contentType: "", url, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
       if (timedOut || isPermanentFailure(e)) break;
-      if (attempt < attempts - 1) await sleep(defaultRetryMs());
+      if (attempt < attempts - 1) await sleepUnlessAborted(defaultRetryMs(), opts.signal);
     } finally {
       clearTimeout(t);
       opts.signal?.removeEventListener("abort", onCancel);
@@ -4185,6 +4333,15 @@ function preSlotIndex(line) {
   const i = Number(line.slice(1, -1));
   return Number.isInteger(i) ? i : void 0;
 }
+function restoreInlinePre(line, blocks) {
+  const parts = line.split(NUL2);
+  let out = parts[0];
+  for (let i = 1; i < parts.length; i += 2) {
+    const code = (blocks[Number(parts[i])] ?? "").replace(/\s+/g, " ").trim();
+    out += ` ${code} ${parts[i + 1] ?? ""}`;
+  }
+  return out.replace(/ {2,}/g, " ").trim();
+}
 function setAsidePre(html, blocks) {
   const open = /<pre(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
   const close = closeTagRe("pre");
@@ -4251,7 +4408,8 @@ function htmlToText(html, opts = {}) {
   return s.split("\n").map((l) => {
     const t = l.trim();
     const slot = preSlotIndex(t);
-    return slot === void 0 ? t : pre[slot] ?? t;
+    if (slot !== void 0) return pre[slot] ?? t;
+    return t.includes(NUL2) ? restoreInlinePre(t, pre) : t;
   }).filter((l) => l.length > 0).join("\n");
 }
 var NOT_TITLE = ["script", "style", "template", "svg"];
@@ -4309,7 +4467,7 @@ function absoluteCanonical(href, base) {
 }
 var visibleLength = (h) => h.replace(/<[^<>]*>/g, " ").replace(/\s+/g, " ").trim().length;
 var ROLE_MAIN = /\srole\s*=\s*["']?main(?=["'\s/>])/i;
-var ROLE_MAIN_TAG = /<([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>])[^<>]*\srole\s*=\s*["']?main(?=["'\s/>])/g;
+var ROLE_MAIN_TAG = /<([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>])[^<>]*\srole\s*=\s*["']?main(?=["'\s/>])/gi;
 var CONTENT_WORDS = /* @__PURE__ */ new Set(["content", "article", "post", "entry", "story", "main", "prose"]);
 var CHROME_WORDS = /* @__PURE__ */ new Set([
   "nav",
@@ -4511,7 +4669,7 @@ async function fetchAndExtract(url, opts = {}) {
   const isHtml = HTML_TYPE_RE.test(mime) || ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(body);
   const markdown = opts.format === "markdown";
   const main2 = isHtml ? opts.fullPage ? body : extractMainHtml(body) : body;
-  const stripped = !isHtml ? body : markdown ? htmlToMarkdown(main2, { baseUrl: documentBaseUrl(body, res.url), fullPage: opts.fullPage }) : htmlToText(main2, opts);
+  const stripped = !isHtml ? body : markdown ? markdownAgainst(main2, documentBaseUrl(body, res.url), opts.fullPage) : htmlToText(main2, opts);
   const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped, { markdown }) : { text: stripped, dropped: 0 };
   const title = isHtml ? pageTitle(body) : void 0;
   const canonical = isHtml ? absoluteCanonical(htmlCanonicalUrl(body), res.url) : void 0;
@@ -4621,17 +4779,18 @@ function metaDescriptionOf(html) {
 
 // src/stack.ts
 import { spawnSync as spawnSync3 } from "child_process";
-import { existsSync as existsSync3, lstatSync, mkdirSync as mkdirSync3, readFileSync as readFileSync9, statSync as statSync2, writeFileSync as writeFileSync4 } from "fs";
-import { dirname, join as join9, resolve } from "path";
+import { existsSync as existsSync3, lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync9, statSync as statSync2, writeFileSync as writeFileSync4 } from "fs";
+import { dirname as dirname2, join as join9, resolve } from "path";
 
 // src/cache.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync8, readdirSync as readdirSync2, rmSync as rmSync2, statSync } from "fs";
-import { join as join8 } from "path";
+import { chmodSync, existsSync as existsSync2, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync8, readdirSync as readdirSync2, rmSync as rmSync2, statSync } from "fs";
+import { dirname, join as join8 } from "path";
 import { tmpdir as tmpdir2 } from "os";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
-  return env("CACHE_DIR") ?? brand().cacheDir ?? join8(tmpdir2(), userScoped(brand().name), "cache");
+  return namedCacheDir() ?? join8(tmpdir2(), userScoped(brand().name), "cache");
 }
+var namedCacheDir = () => env("CACHE_DIR") ?? brand().cacheDir;
 function userScoped(name) {
   const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
   return uid === void 0 ? name : `${name}-${uid}`;
@@ -4705,6 +4864,7 @@ function entryPaths(url, acceptLanguage, extractor, variant) {
   return { meta, body: meta.replace(/\.json$/, ".body") };
 }
 function readCache(url, acceptLanguage = "", extractor = "native", variant = "") {
+  if (!entryDir(false)) return void 0;
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
   if (!existsSync2(meta)) return void 0;
   try {
@@ -4719,18 +4879,17 @@ function readCache(url, acceptLanguage = "", extractor = "native", variant = "")
 }
 function writeCache(url, res, now, acceptLanguage = "", extractor = "native", variant = "") {
   if (isNoWrite()) return;
-  const dir = cacheDir();
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
   const { text, note: _note, ...rest } = res;
   const write = () => {
-    ensureDir2(dir);
+    if (!entryDir(true)) return;
     writeFileAtomic(body, text ?? "");
     writeFileAtomic(meta, JSON.stringify({ ...rest, cachedAt: now }));
   };
   try {
     write();
   } catch {
-    ensured.delete(dir);
+    ensured.delete(cacheDir());
     try {
       write();
     } catch {
@@ -4742,6 +4901,52 @@ function ensureDir2(dir) {
   if (ensured.has(dir)) return;
   mkdirSync2(dir, { recursive: true });
   ensured.add(dir);
+}
+function openCacheDir(create) {
+  const dir = cacheDir();
+  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
+  if (namedCacheDir() !== void 0 || uid === void 0) {
+    if (create) ensureDir2(dir);
+    return { dir };
+  }
+  if (create) mkdirSync2(dirname(dirname(dir)), { recursive: true });
+  for (const p of [dirname(dir), dir]) {
+    if (create) mkdirPrivate(p);
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch (e) {
+      if (e.code === "ENOENT") return {};
+      return { refused: `${p} cannot be inspected (${e.message})` };
+    }
+    if (st.isSymbolicLink()) return { refused: `${p} is a symbolic link` };
+    if (!st.isDirectory()) return { refused: `${p} is not a directory` };
+    if (st.uid !== uid) return { refused: `${p} belongs to another user` };
+    if (st.mode & 18) return { refused: `${p} is writable by other users` };
+    if (st.mode & 63 && !isNoWrite()) {
+      try {
+        chmodSync(p, 448);
+      } catch {
+      }
+    }
+  }
+  return { dir };
+}
+function mkdirPrivate(p) {
+  try {
+    mkdirSync2(p, { mode: 448 });
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+  }
+}
+var announced = /* @__PURE__ */ new Set();
+function entryDir(create) {
+  const { dir, refused } = openCacheDir(create);
+  if (refused && !announced.has(refused)) {
+    announced.add(refused);
+    process.emitWarning(`the fetch cache is not used: ${refused}. Remove it, or set ${envName("CACHE_DIR")} to a directory only you can write.`);
+  }
+  return dir;
 }
 function touchCache(url, entry, now, acceptLanguage = "", extractor = "native", variant = "") {
   writeCache(url, entry, now, acceptLanguage, extractor, variant);
@@ -4760,6 +4965,8 @@ async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date
   if (offline) {
     const stored = readAnyCopy(url, lang, variant);
     if (stored) return served(stored);
+    const { refused } = openCacheDir(false);
+    if (refused) return { text: "", finalUrl: url, status: 0, note: `Offline: the cache is not used \u2014 ${refused}.` };
     return { text: "", finalUrl: url, status: 0, note: `Offline: ${url} is not in the cache (drop --offline, or warm it with a normal run).` };
   }
   const ns = await currentExtractor(opts, url);
@@ -4830,6 +5037,8 @@ function sizeOf(abs) {
 function cacheStats(now = Date.now()) {
   const dir = cacheDir();
   const out = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
+  const { refused } = openCacheDir(false);
+  if (refused) return { ...out, refused };
   if (!existsSync2(dir)) return out;
   let oldest = Number.POSITIVE_INFINITY;
   let newest = 0;
@@ -4858,7 +5067,7 @@ function cacheStats(now = Date.now()) {
 }
 function cacheClean(all = false, now = Date.now()) {
   const dir = cacheDir();
-  if (!existsSync2(dir) || isNoWrite()) return 0;
+  if (isNoWrite() || !openCacheDir(false).dir || !existsSync2(dir)) return 0;
   const names = readdirSync2(dir);
   const present = new Set(names);
   const remove = (name) => {
@@ -5178,14 +5387,14 @@ function untrustedStack() {
   const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
   if (uid === void 0) return void 0;
   const root = resolve(cacheDir());
-  const top = env("CACHE_DIR") ?? brand().cacheDir ? root : dirname(root);
+  const top = env("CACHE_DIR") ?? brand().cacheDir ? root : dirname2(root);
   const paths = /* @__PURE__ */ new Set();
   for (const a of assets) {
-    for (let p = resolve(a.path); p !== top && p !== dirname(p); p = dirname(p)) paths.add(p);
+    for (let p = resolve(a.path); p !== top && p !== dirname2(p); p = dirname2(p)) paths.add(p);
   }
   for (const p of [top, ...paths]) {
     try {
-      const st = p === top ? statSync2(p) : lstatSync(p);
+      const st = p === top ? statSync2(p) : lstatSync2(p);
       if (st.isSymbolicLink()) return `${p} is a symbolic link`;
       if (st.uid !== uid) return `${p} belongs to another user`;
       if (st.mode & 2 && !(st.isDirectory() && st.mode & 512)) return `${p} is writable by anyone`;
@@ -5198,7 +5407,7 @@ function untrustedStack() {
 function writeIfChanged(path, content) {
   try {
     if (existsSync3(path) && readFileSync9(path, "utf8") === content) return;
-    mkdirSync3(dirname(path), { recursive: true });
+    mkdirSync3(dirname2(path), { recursive: true, mode: 448 });
     writeFileSync4(path, content);
   } catch {
   }
@@ -5296,7 +5505,7 @@ function stackControl(service, action, deps = {}) {
   const distrust = untrustedStack();
   if (distrust) {
     return {
-      message: `${tag}: refusing to run docker against the stack in ${dirname(file)} \u2014 ${distrust}. Set ${envName("CACHE_DIR")} to a directory only you can write.`,
+      message: `${tag}: refusing to run docker against the stack in ${dirname2(file)} \u2014 ${distrust}. Set ${envName("CACHE_DIR")} to a directory only you can write.`,
       code: 1
     };
   }
@@ -6827,7 +7036,7 @@ async function hasChanged(url, previous, opts = {}) {
 
 // src/skillkit/usage.ts
 import { readdirSync as readdirSync3, readFileSync as readFileSync10, statSync as statSync3 } from "fs";
-import { dirname as dirname2, join as join10, relative, resolve as resolve2 } from "path";
+import { dirname as dirname3, join as join10, relative, resolve as resolve2 } from "path";
 var DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|enum)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm;
 var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']((?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs))["']/g;
 function engineExports(dts) {
@@ -6879,7 +7088,7 @@ function auditEngineUsage(root, config, dts, engineName) {
         } else {
           let shim = "";
           try {
-            shim = readFileSync10(resolve2(dirname2(file), spec.replace(/\.js$/, ".ts")), "utf8");
+            shim = readFileSync10(resolve2(dirname3(file), spec.replace(/\.js$/, ".ts")), "utf8");
           } catch {
             continue;
           }
@@ -7719,6 +7928,17 @@ function parseJsonLd(raw) {
     return void 0;
   }
 }
+var MAX_JSONLD_DEPTH = 32;
+function nestsDeeper(v, max) {
+  const stack = [[v, 0]];
+  while (stack.length) {
+    const [x, depth] = stack.pop();
+    if (!x || typeof x !== "object") continue;
+    if (depth >= max) return true;
+    for (const y of Array.isArray(x) ? x : Object.values(x)) if (y && typeof y === "object") stack.push([y, depth + 1]);
+  }
+  return false;
+}
 function flattenJsonLd(v, out) {
   if (Array.isArray(v)) for (const x of v) flattenJsonLd(x, out);
   else if (v && typeof v === "object" && Array.isArray(v["@graph"])) {
@@ -7727,10 +7947,17 @@ function flattenJsonLd(v, out) {
 }
 function extractJsonLd(html) {
   const out = [];
-  const open = openTag("script");
+  const open = new RegExp(`<!--|${openTag("script").source}`, "gi");
   const close = closeTagRe("script");
+  let commentsClose = true;
   let m;
   while (m = open.exec(html)) {
+    if (m[0] === "<!--") {
+      const end = commentsClose ? html.indexOf("-->", m.index + 2) : -1;
+      if (end < 0) commentsClose = false;
+      else open.lastIndex = end + 3;
+      continue;
+    }
     close.lastIndex = open.lastIndex;
     const c = close.exec(html);
     if (!c) break;
@@ -7738,7 +7965,7 @@ function extractJsonLd(html) {
     if (type === "application/ld+json") {
       const raw = html.slice(open.lastIndex, c.index).replace(/^\s*<!--/, "").replace(/-->\s*$/, "").trim();
       const parsed = raw ? parseJsonLd(raw) : void 0;
-      if (parsed !== void 0) flattenJsonLd(parsed, out);
+      if (parsed !== void 0 && !nestsDeeper(parsed, MAX_JSONLD_DEPTH)) flattenJsonLd(parsed, out);
     }
     open.lastIndex = c.index + c[0].length;
   }
@@ -7786,10 +8013,35 @@ var PAGE_TYPES = /* @__PURE__ */ new Set([
   "FAQPage",
   "MedicalWebPage"
 ]);
+var WORK_TYPES = /* @__PURE__ */ new Set([
+  "CreativeWork",
+  "Blog",
+  "Book",
+  "Chapter",
+  "Course",
+  "Dataset",
+  "Game",
+  "Guide",
+  "HowTo",
+  "Legislation",
+  "Movie",
+  "MusicAlbum",
+  "Question",
+  "Recipe",
+  "Report",
+  "SoftwareSourceCode",
+  "Thesis",
+  "VideoGame",
+  "VideoObject",
+  "AudioObject"
+]);
+var WORK_SUFFIX = /(?:Article|Posting|Event|Review|Product|Application|Episode|Series|Recording)$/;
+var isWork = (t) => WORK_TYPES.has(t) || WORK_SUFFIX.test(t);
 var typesOf = (n) => allStrings(n["@type"]).map((t) => t.slice(Math.max(t.lastIndexOf("/"), t.lastIndexOf(":")) + 1));
 function rank(n) {
   const types = typesOf(n);
   if (!types.length) return 1;
+  if (types.some(isWork)) return 4;
   if (types.some((t) => !CHROME_TYPES.has(t) && !PAGE_TYPES.has(t))) return 3;
   return types.some((t) => PAGE_TYPES.has(t)) ? 2 : 0;
 }
@@ -7826,6 +8078,12 @@ function pageMetadata(html, opts = {}) {
   const set = (k, v) => {
     if (v !== void 0 && out[k] === void 0) out[k] = v;
   };
+  const authorSeen = /* @__PURE__ */ new Set();
+  const addAuthor = (a) => {
+    if (out.authors.length >= MAX_AUTHORS || authorSeen.has(a)) return;
+    authorSeen.add(a);
+    out.authors.push(a);
+  };
   const nodes = jsonLd.filter(isNode);
   const byId = indexById(jsonLd);
   const deref = (v) => {
@@ -7853,7 +8111,7 @@ function pageMetadata(html, opts = {}) {
     set("modifiedAt", firstString(n.dateModified));
     set("imageUrl", image(n.image));
     set("siteName", names(n.publisher)[0]);
-    if (!out.authors.length) out.authors.push(...new Set(names(n.author)));
+    if (!out.authors.length) for (const a of names(n.author)) addAuthor(a);
   }
   const nameOfA = (...types) => nodes.filter((n) => typesOf(n).some((t) => types.includes(t))).flatMap((n) => names(n.name))[0];
   set("siteName", nameOfA("WebSite"));
@@ -7867,7 +8125,16 @@ function pageMetadata(html, opts = {}) {
   set("imageUrl", meta.get("og:image") ?? meta.get("twitter:image"));
   set("canonicalUrl", htmlCanonicalUrl(html) ?? sources.map((n) => firstString(n.url)).find(Boolean));
   const authorKeys = /* @__PURE__ */ new Set(["article:author", "author", "citation_author", "dc.creator"]);
-  for (const [key, v] of entries) if (authorKeys.has(key) && !out.authors.includes(v)) out.authors.push(v);
+  for (const [key, v] of entries) if (authorKeys.has(key)) addAuthor(v);
+  if (!primary || rank(primary) < 4) {
+    const read2 = new Set(sources);
+    const rest = nodes.filter((n) => !read2.has(n) && rank(n) > 0);
+    for (const n of rest) {
+      if (out.authors.length) break;
+      for (const a of names(n.author)) addAuthor(a);
+    }
+    set("publishedAt", rest.map((n) => firstString(n.datePublished)).find(Boolean));
+  }
   set("title", htmlTitle(html));
   if (opts.baseUrl) {
     for (const k of ["canonicalUrl", "imageUrl"]) {
@@ -7879,6 +8146,7 @@ function pageMetadata(html, opts = {}) {
   }
   return out;
 }
+var MAX_AUTHORS = 1e4;
 function resolveUrl2(url, base) {
   try {
     const abs = new URL(url, base);
@@ -8748,12 +9016,12 @@ function isOriginAllowed(origin, allowed = []) {
 
 // src/mcp/resources.ts
 import { existsSync as existsSync6, readdirSync as readdirSync6, readFileSync as readFileSync12, realpathSync, statSync as statSync5 } from "fs";
-import { basename as basename3, dirname as dirname3, join as join14, relative as relative2, resolve as resolve5, sep } from "path";
+import { basename as basename3, dirname as dirname4, join as join14, relative as relative2, resolve as resolve5, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
 function resolveSkillRoot(moduleDir) {
-  const here = moduleDir ?? dirname3(fileURLToPath(import.meta.url));
+  const here = moduleDir ?? dirname4(fileURLToPath(import.meta.url));
   const name = brand().name;
   const candidates = [resolve5(here, ".."), resolve5(here, "..", "skills", name), resolve5(here, "..", "..", "skills", name)];
   return candidates.find((dir) => existsSync6(join14(dir, "SKILL.md")));
@@ -9712,12 +9980,12 @@ ENVIRONMENT
                          texts per embedding request (16), requests in flight (4)
   WEBINDEX_QDRANT_UPSERT_BATCH  points per upsert request (default 256)
   WEBINDEX_RRF_K         the fusion constant rank and hybrid use (default 60)
-  WEBINDEX_TIMEOUT_MS    how long a request may stay silent before it is abandoned,
-                         not retried (default 20000; --timeout overrides it per call)
+  WEBINDEX_TIMEOUT_MS    how long a request may take, body download included, before
+                         it is abandoned, not retried (default 20000; --timeout overrides it per call)
   WEBINDEX_MAX_ATTEMPTS, WEBINDEX_RETRY_MS
                          attempts per request (default 2, at most 5), back-off before a retry (600)
   WEBINDEX_CACHE_DIR     where the fetch cache lives, and the stack in compose/
-                         (default <tmp>/webindex-<uid>/cache)
+                         (default <tmp>/webindex-<uid>/cache, private to you)
   WEBINDEX_CACHE_TTL_HOURS  how long a cached page stays fresh (default 24; fractions allowed)
   WEBINDEX_NO_WRITE      write nothing: no cache entry, no eviction
   WEBINDEX_NO_ROBOTS     robots and crawl do not consult robots.txt \u2014 only on a site you own
@@ -9914,7 +10182,7 @@ async function extractLocal(path, fullPage = false, given, format = "text") {
   const looksHtml = !explicitText && ([".html", ".htm", ".xhtml"].includes(extension) || /^\s*<(?:!doctype\s+html|html|head|body)\b/i.test(raw));
   const markdown = format === "markdown";
   const main2 = looksHtml && !fullPage ? extractMainHtml(raw) : raw;
-  const text = !looksHtml ? raw : markdown ? htmlToMarkdown(main2, { fullPage, baseUrl: documentBaseUrl(raw) }) : htmlToText(main2, { fullPage });
+  const text = !looksHtml ? raw : markdown ? markdownAgainst(main2, documentBaseUrl(raw), fullPage) : htmlToText(main2, { fullPage });
   const consent = looksHtml && !fullPage ? stripConsentBoilerplate(text, { markdown }) : { text, dropped: 0 };
   return { text: consent.text, extractor: looksHtml ? "native" : "plain", consentDropped: consent.dropped };
 }
@@ -10157,7 +10425,7 @@ function webindexAdapter(policy = {}) {
             format: FORMAT_ARG,
             timeoutMs: {
               type: "number",
-              description: "Give up on a silent host after this many ms (default 20000, at most 300000). A timed-out request is not retried."
+              description: "How long the request may take, connection and body download included, before it is abandoned, in ms (default 20000, at most 300000). A timed-out request is not retried."
             },
             cache: {
               type: "boolean",
@@ -11047,7 +11315,9 @@ async function dispatch(argv) {
         `  entries  ${s.entries} (${s.fresh} fresh, ${s.stale} stale)`,
         `  size     ${mb(s.bytes)}`,
         `  ttl      ${Math.round(s.ttlMs / 1e3)}s`,
-        ...s.oldest ? [`  oldest   ${s.oldest}`, `  newest   ${s.newest}`] : []
+        ...s.oldest ? [`  oldest   ${s.oldest}`, `  newest   ${s.newest}`] : [],
+        // Otherwise a refused directory reads as an empty cache that never fills.
+        ...s.refused ? [`  unused   ${s.refused}: remove it, or set ${envName("CACHE_DIR")} to a directory only you can write`] : []
       ].join("\n") + "\n"
     );
     return;

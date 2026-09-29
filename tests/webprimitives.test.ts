@@ -143,6 +143,44 @@ describe("character encoding", () => {
     expect(decodeBody(cut, "text/html").startsWith("café au lait — déjà vu ")).toBe(true);
   });
 
+  it("keeps a UTF-8 page UTF-8 when one stray byte sits mid-body", () => {
+    // An excerpt cut mid-character by a CMS, one pasted Latin-1 byte: the rest
+    // of the page is UTF-8, and the whole of it turned into cp1252 mojibake.
+    const utf8 = (s: string) => Buffer.from(s, "utf8");
+    const page = Buffer.concat([utf8('<meta charset="utf-8"><title>Café</title><p>Crème — “q” caf'), Buffer.from([0xc3]), utf8(" déjà</p>")]);
+    for (const text of [decodeBody(page, "text/html"), decodeBody(page, ""), decodeLocal(page)]) {
+      expect(text).toContain("<title>Café</title>");
+      expect(text).toContain("Crème — “q” caf� déjà");
+      expect(text).not.toContain("Ã");
+    }
+    // Latin-1 that happens to hold one valid UTF-8 pair is still Latin-1.
+    const latin = Buffer.from("Â© Une réponse déjà validée", "latin1");
+    expect(decodeBody(latin, "text/html")).toBe("Â© Une réponse déjà validée");
+    expect(decodeLocal(latin)).toBe("Â© Une réponse déjà validée");
+  });
+
+  it("honours a <meta charset> in every body the extractor may read as HTML", () => {
+    // S3 serves an object uploaded without a type as binary/octet-stream, and
+    // fetchAndExtract reads it as HTML; its declared cp1251 went unread.
+    const cyrillic = Buffer.from([
+      ...Buffer.from('<meta charset="windows-1251"><title>'),
+      0xcf,
+      0xf0,
+      0xe8,
+      0xe2,
+      0xe5,
+      0xf2,
+      0x20,
+      0xec,
+      0xe8,
+      0xf0, // Привет мир
+      ...Buffer.from("</title>"),
+    ]);
+    for (const type of ["binary/octet-stream", "application/x-download", "application/unknown", "application/octet-stream", "text/html"]) {
+      expect(decodeBody(cyrillic, type)).toContain("<title>Привет мир</title>");
+    }
+  });
+
   it("honours the XML declaration's encoding when the header names none", async () => {
     const xml = Buffer.from('<?xml version="1.0" encoding="ISO-8859-1"?><rss><channel><title>Résumé à jour</title></channel></rss>', "latin1");
     expect(decodeBody(xml, "application/rss+xml")).toContain("Résumé à jour");
@@ -500,6 +538,39 @@ describe("structured metadata", () => {
     expect(pageMetadata(orgOnly).canonicalUrl).toBeUndefined();
   });
 
+  it("describes the article, not an Organization subtype the site header emits first", () => {
+    // CollegeOrUniversity, Restaurant, GovernmentOrganization… are not in the
+    // chrome list — there are hundreds — and the first of them won the page,
+    // costing the article's authors and date too.
+    const article = {
+      "@type": "NewsArticle",
+      headline: "Researchers find X",
+      author: [{ "@type": "Person", name: "Ann Writer" }],
+      datePublished: "2025-03-01",
+    };
+    const uni = ld({ "@graph": [{ "@type": "CollegeOrUniversity", name: "State University", url: "https://uni.edu" }, article] });
+    const m = pageMetadata(`${uni}<meta property="og:title" content="Researchers find X">`);
+    expect(m).toMatchObject({ type: "NewsArticle", title: "Researchers find X", authors: ["Ann Writer"], publishedAt: "2025-03-01" });
+    expect(m.canonicalUrl).toBeUndefined();
+    const post = { "@type": "BlogPosting", headline: "Spring menu", author: { name: "Chef Bob" }, datePublished: "2024-05-05" };
+    expect(pageMetadata(ld({ "@graph": [{ "@type": ["Restaurant", "Organization"], name: "Chez Bob" }, post] }))).toMatchObject({
+      type: "BlogPosting",
+      title: "Spring menu",
+      authors: ["Chef Bob"],
+      publishedAt: "2024-05-05",
+    });
+    const notice = { "@type": "Article", headline: "Road works", author: "Clerk", datePublished: "2024-01-01" };
+    expect(pageMetadata(ld([{ "@type": "GovernmentOrganization", name: "Town" }, notice]))).toMatchObject({ type: "Article", authors: ["Clerk"] });
+    // An organization's own page is still the organization.
+    expect(pageMetadata(ld({ "@type": "Restaurant", name: "Chez Bob", url: "https://bob.test/" }))).toMatchObject({ type: "Restaurant", title: "Chez Bob" });
+    // A work of a type no list names still gives its author and date when the primary has none.
+    const story = { "@type": "ShortStory", name: "The Lake", author: "Ann", datePublished: "2023-07-07" };
+    expect(pageMetadata(ld([{ "@type": "CollegeOrUniversity", name: "State University" }, story]))).toMatchObject({
+      authors: ["Ann"],
+      publishedAt: "2023-07-07",
+    });
+  });
+
   it("resolves a Yoast @graph's @id references, and never reports an @id as the canonical", () => {
     const graph = {
       "@context": "https://schema.org",
@@ -596,11 +667,75 @@ describe("structured metadata", () => {
     expect(performance.now() - started).toBeLessThan(2000);
   });
 
+  it("skips comments, so a commented-out <script> opener or block is not read as the page's", () => {
+    // The opener paired with the real block's </script> and swallowed it.
+    const real = '<script type="application/ld+json">{"@type":"Article","headline":"Real","author":{"@type":"Person","name":"Ann"}}</script>';
+    expect(pageMetadata(`<head><!-- old tracker: <script> -->${real}</head>`)).toMatchObject({ title: "Real", authors: ["Ann"] });
+    const stale = '<!-- <script type="application/ld+json">{"@type":"Article","headline":"Stale"}</script> -->';
+    expect(pageMetadata(`${stale}<script type="application/ld+json">{"@type":"Article","headline":"Fresh"}</script>`).title).toBe("Fresh");
+    // A block whose body a template wraps in <!-- --> is still read: that comment is script text.
+    expect(extractJsonLd('<script type="application/ld+json"><!-- {"@type":"W"} --></script>')).toEqual([{ "@type": "W" }]);
+    expect(extractJsonLd(`<!--><script type="application/ld+json">{"@type":"V"}</script>`)).toEqual([{ "@type": "V" }]);
+  });
+
+  it("scans JSON-LD in linear time past comments that never close", () => {
+    const html = `${"<!-- x ".repeat(100_000)}<script type="application/ld+json">{"@type":"A"}</script>${"<!-- <script> ".repeat(50_000)}`;
+    const started = performance.now();
+    expect(extractJsonLd(html)).toEqual([{ "@type": "A" }]);
+    expect(performance.now() - started).toBeLessThan(10_000);
+  });
+
   it("reads meta tags in linear time on a page of unterminated ones", () => {
     // `<meta ` x 40k (240 KB) took 4 s: each opener read to the end of the page.
     const started = performance.now();
     expect(pageMetadata(`${"<meta ".repeat(40_000)}${'<meta content="x ">'.repeat(20_000)}`).authors).toEqual([]);
     expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  it("skips JSON-LD nested deeper than any real block, which JSON.parse accepts and recursion does not", () => {
+    // 20k levels is 40 KB: `meta` died with "Maximum call stack size exceeded",
+    // and `meta --json` and webindex_meta, which stringify the blocks, with it.
+    const deep = (inner: string) => `${"[".repeat(20_000)}${inner}${"]".repeat(20_000)}`;
+    const og = '<meta property="og:title" content="T">';
+    const script = (json: string) => `<script type="application/ld+json">${json}</script>`;
+    expect(pageMetadata(og + script(deep(""))).title).toBe("T");
+    expect(extractJsonLd(script(deep('{"@type":"Lost"}')) + script('{"@type":"Kept"}'))).toEqual([{ "@type": "Kept" }]);
+    for (const field of ["author", "@type", "headline", "name", "image", "publisher", "keywords"]) {
+      const m = pageMetadata(og + script(`{"@type":"Article","headline":"Lost",${JSON.stringify(field)}:${deep('{"a":"x"}')}}`));
+      expect(m).toMatchObject({ title: "T", jsonLd: [] });
+      expect(() => JSON.stringify(m)).not.toThrow();
+    }
+    const objects = `${'{"a":'.repeat(20_000)}1${"}".repeat(20_000)}`;
+    expect(pageMetadata(og + script(`{"@type":"Article","headline":"Lost","about":${objects}}`)).title).toBe("T");
+    // What real pages nest — an array of authors, a type list, a recipe's steps — is still read.
+    expect(pageMetadata(script('{"@type":["Article"],"author":[[{"name":"A"}],["B"]]}'))).toMatchObject({ type: "Article", authors: ["A", "B"] });
+    const steps = {
+      "@type": "Recipe",
+      name: "Bread",
+      recipeInstructions: [{ "@type": "HowToSection", itemListElement: [{ "@type": "HowToStep", text: "Knead" }] }],
+    };
+    expect(pageMetadata(script(JSON.stringify({ "@graph": [steps] }))).jsonLd).toEqual([steps]);
+  });
+
+  it("picks the primary entity in linear time from a graph of many page nodes", () => {
+    const graph = { "@graph": Array.from({ length: 60_000 }, (_, i) => ({ "@type": "WebPage", name: `P${i}` })) };
+    const started = performance.now();
+    expect(pageMetadata(ld(graph))).toMatchObject({ type: "WebPage", title: "P0", authors: [] });
+    expect(performance.now() - started).toBeLessThan(10_000);
+  });
+
+  it("keeps a page of author tags in linear time, and a bounded number of them", () => {
+    // Each tag was checked against every author kept before it: 100k tags
+    // (3 MB, under the fetch cap) took 16 s. The largest real author list,
+    // a collaboration paper's, is about 5 000 names.
+    const tags = Array.from({ length: 100_000 }, (_, i) => `<meta name=author content=${i}>`).join("");
+    const started = performance.now();
+    const m = pageMetadata(`<meta name=author content=0>${tags}`);
+    expect(performance.now() - started).toBeLessThan(10_000);
+    expect(m.authors).toHaveLength(10_000);
+    expect(m.authors.slice(0, 3)).toEqual(["0", "1", "2"]);
+    const listed = { "@type": "Article", author: Array.from({ length: 200_000 }, (_, i) => ({ name: `A${i}` })) };
+    expect(pageMetadata(ld(listed)).authors).toHaveLength(10_000);
   });
 });
 
