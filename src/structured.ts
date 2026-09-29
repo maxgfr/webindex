@@ -62,6 +62,25 @@ function parseJsonLd(raw: string): unknown {
   }
 }
 
+// How deep a JSON-LD block may nest its objects and arrays. Real ones stop
+// near ten — a @graph, a node, a recipe's sections of steps. JSON.parse
+// accepts thousands of levels (a 40 KB block of brackets), and every reader
+// after it recurses: the fields below, and JSON.stringify for `meta --json`
+// and webindex_meta, which died with "Maximum call stack size exceeded".
+const MAX_JSONLD_DEPTH = 32;
+
+/** Whether `v` nests deeper than `max` — walked with a stack of its own, since recursion is what such a value breaks. */
+function nestsDeeper(v: unknown, max: number): boolean {
+  const stack: [unknown, number][] = [[v, 0]];
+  while (stack.length) {
+    const [x, depth] = stack.pop()!;
+    if (!x || typeof x !== "object") continue;
+    if (depth >= max) return true;
+    for (const y of Array.isArray(x) ? x : Object.values(x)) if (y && typeof y === "object") stack.push([y, depth + 1]);
+  }
+  return false;
+}
+
 // A @graph wrapper is the common shape from CMS plugins, and some emit an array
 // of them; flatten both so a caller does not have to know which generator
 // produced the page.
@@ -77,7 +96,8 @@ function flattenJsonLd(v: unknown, out: unknown[]): void {
  *
  * A block that does not parse, even leniently, is skipped rather than thrown:
  * malformed JSON-LD is common and must never cost the caller the rest of the
- * page. The type may be unquoted or carry a charset parameter.
+ * page. So is one nested deeper than any real block. The type may be unquoted
+ * or carry a charset parameter.
  *
  * One forward pass: each script's close is searched from its opener, and a
  * script that never closes ends the scan, since nothing after it can close
@@ -101,7 +121,7 @@ export function extractJsonLd(html: string): unknown[] {
         .replace(/-->\s*$/, "")
         .trim();
       const parsed = raw ? parseJsonLd(raw) : undefined;
-      if (parsed !== undefined) flattenJsonLd(parsed, out);
+      if (parsed !== undefined && !nestsDeeper(parsed, MAX_JSONLD_DEPTH)) flattenJsonLd(parsed, out);
     }
     open.lastIndex = c.index + c[0].length;
   }

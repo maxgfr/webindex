@@ -636,6 +636,31 @@ describe("structured metadata", () => {
     expect(performance.now() - started).toBeLessThan(2000);
   });
 
+  it("skips JSON-LD nested deeper than any real block, which JSON.parse accepts and recursion does not", () => {
+    // 20k levels is 40 KB: `meta` died with "Maximum call stack size exceeded",
+    // and `meta --json` and webindex_meta, which stringify the blocks, with it.
+    const deep = (inner: string) => `${"[".repeat(20_000)}${inner}${"]".repeat(20_000)}`;
+    const og = '<meta property="og:title" content="T">';
+    const script = (json: string) => `<script type="application/ld+json">${json}</script>`;
+    expect(pageMetadata(og + script(deep(""))).title).toBe("T");
+    expect(extractJsonLd(script(deep('{"@type":"Lost"}')) + script('{"@type":"Kept"}'))).toEqual([{ "@type": "Kept" }]);
+    for (const field of ["author", "@type", "headline", "name", "image", "publisher", "keywords"]) {
+      const m = pageMetadata(og + script(`{"@type":"Article","headline":"Lost",${JSON.stringify(field)}:${deep('{"a":"x"}')}}`));
+      expect(m).toMatchObject({ title: "T", jsonLd: [] });
+      expect(() => JSON.stringify(m)).not.toThrow();
+    }
+    const objects = `${'{"a":'.repeat(20_000)}1${"}".repeat(20_000)}`;
+    expect(pageMetadata(og + script(`{"@type":"Article","headline":"Lost","about":${objects}}`)).title).toBe("T");
+    // What real pages nest — an array of authors, a type list, a recipe's steps — is still read.
+    expect(pageMetadata(script('{"@type":["Article"],"author":[[{"name":"A"}],["B"]]}'))).toMatchObject({ type: "Article", authors: ["A", "B"] });
+    const steps = {
+      "@type": "Recipe",
+      name: "Bread",
+      recipeInstructions: [{ "@type": "HowToSection", itemListElement: [{ "@type": "HowToStep", text: "Knead" }] }],
+    };
+    expect(pageMetadata(script(JSON.stringify({ "@graph": [steps] }))).jsonLd).toEqual([steps]);
+  });
+
   it("picks the primary entity in linear time from a graph of many page nodes", () => {
     const graph = { "@graph": Array.from({ length: 60_000 }, (_, i) => ({ "@type": "WebPage", name: `P${i}` })) };
     const started = performance.now();
