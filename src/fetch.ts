@@ -130,15 +130,25 @@ export interface HttpResult {
   rateLimited?: boolean;
   /** Retry-After in ms, when the server sent one — its own number, not capped to what httpGet waits out. */
   retryAfterMs?: number;
+  /**
+   * The server answered, but only with redirects that lead nowhere this client
+   * goes: more than 20 of them, or to a URL or a scheme it cannot fetch. Status
+   * is 0 as for a failure, yet nothing failed to answer.
+   */
+  redirectFailed?: boolean;
 }
 
-export function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+/**
+ * Resolve after `ms`, or as soon as `signal` aborts: early, and never with a
+ * rejection — a caller that was cancelled only wants to stop waiting, and
+ * checks its signal next.
+ */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return signal ? sleepUnlessAborted(ms, signal) : new Promise((r) => setTimeout(r, ms));
 }
 
-// A wait that ends early when `signal` aborts. By hand, like the signal link in
-// httpGet: timers/promises' own signal option rejects rather than resolves, and
-// the caller only wants to stop waiting.
+// By hand, like the signal link in httpGet: timers/promises' own signal option
+// rejects rather than resolves.
 function sleepUnlessAborted(ms: number, signal: AbortSignal | undefined): Promise<void> {
   return new Promise((resolve) => {
     if (signal?.aborted) return resolve();
@@ -294,7 +304,9 @@ async function authorizedGet(
   authorize: (url: string) => Promise<boolean>,
 ): Promise<{ response: Response } | { failure: HttpResult }> {
   let target = url;
-  const fail = (error: string): { failure: HttpResult } => ({ failure: { ok: false, status: 0, body: "", contentType: "", url: target, error } });
+  const fail = (error: string, redirectFailed?: boolean): { failure: HttpResult } => ({
+    failure: { ok: false, status: 0, body: "", contentType: "", url: target, error, ...(redirectFailed ? { redirectFailed } : {}) },
+  });
   const headers = { ...(init.headers as Record<string, string>) };
   for (let redirects = 0; ; redirects++) {
     try {
@@ -306,10 +318,10 @@ async function authorizedGet(
     const location = response.headers.get("location");
     if (!REDIRECT_STATUS.has(response.status) || !location) return { response };
     await response.body?.cancel().catch(() => {});
-    if (redirects >= 20) return fail("Too many redirects (maximum 20)");
+    if (redirects >= 20) return fail("Too many redirects (maximum 20)", true);
     try {
       const next = new URL(location, target);
-      if (!/^https?:$/.test(next.protocol)) return fail(`Unsupported redirect protocol: ${next.protocol}`);
+      if (!/^https?:$/.test(next.protocol)) return fail(`Unsupported redirect protocol: ${next.protocol}`, true);
       if (next.origin !== new URL(target).origin) {
         delete headers.authorization;
         delete headers.cookie;
@@ -317,7 +329,7 @@ async function authorizedGet(
       }
       target = next.href;
     } catch {
-      return fail(`Invalid redirect URL from ${target}`);
+      return fail(`Invalid redirect URL from ${target}`, true);
     }
   }
 }
@@ -502,7 +514,17 @@ export async function httpGet(
       return result;
     } catch (e) {
       if (!timedOut && opts.signal?.aborted) return cancelled();
-      last = { ok: false, status: 0, body: "", contentType: "", url, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
+      const error = timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e);
+      // The follow path's loop, in undici's words; authorizedGet says its own.
+      last = {
+        ok: false,
+        status: 0,
+        body: "",
+        contentType: "",
+        url,
+        error,
+        ...(!timedOut && /redirect count exceeded/i.test(error) ? { redirectFailed: true } : {}),
+      };
       // A timeout has spent the whole budget the caller granted, and a host
       // silent for that long rarely answers a second time: retrying it made the
       // real worst case attempts × timeout, twice what the caller asked for.
@@ -535,9 +557,18 @@ export async function httpJson(
     /** Response cap in bytes; over it the transfer is cancelled and the call fails. Default 4 MB. */
     maxBytes?: number;
   } = {},
-): Promise<{ ok: boolean; status: number; data: any; error?: string; bytesRead?: number; truncated?: boolean }> {
+): Promise<{
+  ok: boolean;
+  status: number;
+  data: any;
+  error?: string;
+  bytesRead?: number;
+  truncated?: boolean;
+  /** Set when the call ended on `timeoutMs` — this caller's own deadline, not the server's failure. */
+  timedOut?: boolean;
+}> {
   const attempts = attemptsFor(opts.retries);
-  let last: { ok: boolean; status: number; data: any; error?: string } = { ok: false, status: 0, data: undefined };
+  let last: { ok: boolean; status: number; data: any; error?: string; timedOut?: boolean } = { ok: false, status: 0, data: undefined };
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   for (let attempt = 0; attempt < attempts; attempt++) {
     const ctrl = new AbortController();
@@ -590,7 +621,9 @@ export async function httpJson(
       }
       return result;
     } catch (e) {
-      last = { ok: false, status: 0, data: undefined, error: timedOut ? `timed out after ${timeoutMs} ms` : networkFailure(e) };
+      last = timedOut
+        ? { ok: false, status: 0, data: undefined, error: `timed out after ${timeoutMs} ms`, timedOut: true }
+        : { ok: false, status: 0, data: undefined, error: networkFailure(e) };
       if (timedOut || isPermanentFailure(e)) break;
       if (attempt < attempts - 1) await sleep(defaultRetryMs());
     } finally {

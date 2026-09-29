@@ -143,6 +143,26 @@ describe("searchViaSearxng", () => {
     expect(language()).toBeNull();
   });
 
+  it.each([
+    ["fr_FR", undefined, "fr-FR"],
+    ["pt_BR.UTF-8", undefined, "pt-BR"],
+    ["zh-Hant-TW", undefined, "zh-TW"],
+    ["zh-Hant", undefined, "zh-TW"],
+    ["es-419", undefined, "es"],
+    ["EN-US", undefined, "en-US"],
+    ["fr", "419", "fr"],
+    ["fr", undefined, "fr"],
+  ])("sends SearXNG a language it accepts for %s (region %s)", async (lang, region, expected) => {
+    // SearXNG answers 400 to any `language` outside ^[a-z]{2,3}(-[a-zA-Z]{2})?$,
+    // so the tag forms the other rungs understand made the first rung fail.
+    const base = nextBase();
+    const spy = installFetchMock(routes([["/search", page([])]]));
+    await searchViaSearxng("q", { searxng: base, lang, ...(region ? { region } : {}) });
+    const language = new URL(String(spy.mock.calls.at(-1)![0])).searchParams.get("language");
+    expect(language).toBe(expected);
+    expect(language).toMatch(/^[a-z]{2,3}(-[A-Z]{2})?$/);
+  });
+
   it("falls back to the URL when a result has no title", async () => {
     const base = nextBase();
     installFetchMock(routes([["/search", page([{ url: "https://a.test/1", title: "   " }])]]));
@@ -173,6 +193,32 @@ describe("searchViaSearxng", () => {
     );
     const r = await searchViaSearxng("q", { searxng: base, pages: 2 });
     expect(r.hits.map((h) => h.url)).toEqual(["https://a.test/1", "https://a.test/2"]);
+  });
+
+  it("does not sleep out the pause between pages past its budget or a cancel", async () => {
+    // The pause ran in full, and only then did the loop see it had to stop.
+    vi.stubEnv(envName("PAGE_DELAY_MS"), "5000");
+    try {
+      const spy = installFetchMock((url) => (url.includes("/search") ? page([hit(`https://a.test/${url.includes("pageno=2") ? 2 : 1}`)]) : { body: "OK" }));
+      const pages = () => spy.mock.calls.filter((c) => String(c[0]).includes("/search")).length;
+      let t0 = performance.now();
+      const budgeted = await searchViaSearxng("q", { searxng: nextBase(), pages: 2, timeoutMs: 300 });
+      expect(performance.now() - t0).toBeLessThan(2500);
+      expect(pages()).toBe(1);
+      expect(budgeted.hits).toHaveLength(1);
+
+      spy.mockClear();
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), 50);
+      t0 = performance.now();
+      const cancelled = await searchViaSearxng("q", { searxng: nextBase(), pages: 2, signal: ctrl.signal });
+      // ~50 ms locally; the uncut pause is 5 s.
+      expect(performance.now() - t0).toBeLessThan(2500);
+      expect(pages()).toBe(1);
+      expect(cancelled.hits).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("stops paginating as soon as a page adds nothing new", async () => {

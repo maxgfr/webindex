@@ -61,7 +61,10 @@ describe("mapLimit", () => {
   it("treats a width that is not a number as 1, rather than doing nothing", async () => {
     // Math.max(1, NaN) is NaN: no workers were started and the call resolved
     // to an array of holes, with fn never called.
-    for (const width of [Number.NaN, Number("ten"), Number.POSITIVE_INFINITY, -3]) {
+    // From plain JS, an unset option or a string arrives too: Number.isNaN is
+    // false for both, and they took the same no-worker path.
+    const loose = [undefined, "abc", null] as unknown as number[];
+    for (const width of [Number.NaN, Number("ten"), Number.POSITIVE_INFINITY, -3, ...loose]) {
       let calls = 0;
       const out = await mapLimit([1, 2, 3], width, async (n) => {
         calls++;

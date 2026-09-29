@@ -201,9 +201,14 @@ export function appendixMask(lines: readonly string[], opts: { headings?: RegExp
       .replace(/\s+/g, " ");
     return APPENDIX_TITLE.test(folded) || (extra?.test(bare) ?? false);
   };
+  // A report documenting its own citation format shows a "# References" in a
+  // fence. Read as a heading, it started a level-1 appendix that ran to the end
+  // of the report, and every claim after the sample went inert — the case
+  // codeMask exists for. A fenced heading neither starts nor ends one.
+  const code = codeMask(lines);
   let level = 0;
   for (let i = 0; i < lines.length; i++) {
-    const h = headingAt(lines, i);
+    const h = code[i] ? undefined : headingAt(lines, i);
     if (level && h && h.level <= level) level = 0;
     if (!level && h && isAppendix(h.text)) level = h.level;
     mask[i] = level > 0;
@@ -427,19 +432,23 @@ export function citationTokensIn(text: string, isCitation: (token: string) => bo
 /**
  * The citations one bracket holds. Reports written by a model group them —
  * `[S1, S2]`, `[S1; S2]` — or double the brackets, `[[S1]]` (which the token
- * pattern reads as "[S1"). When the predicate rejects the whole bracket, its
- * parts are taken only if EVERY one passes, so the predicate stays the
- * caller's boundary: `[S1, see also S2]` is prose.
+ * pattern reads as "[S1"). The parts are taken only if EVERY one passes, so
+ * the predicate stays the caller's boundary: `[S1, see also S2]` is prose.
+ *
+ * The split is tried FIRST: a pattern with a lazy path, FILE_LINE_TOKEN's own,
+ * accepts `src/a.ts:12, src/b.ts:40` whole, as path "src/a.ts:12, src/b.ts".
+ * A bracket whose parts do not all pass is still read whole, so a path that
+ * holds a comma stays one citation.
  */
 function citationsInBracket(inner: string, isCitation: (token: string) => boolean): string[] {
   const tok = inner.trim();
-  if (isCitation(tok)) return [tok];
   const unwrapped = tok.startsWith("[") ? tok.slice(1).trim() : tok;
-  if (unwrapped !== tok && isCitation(unwrapped)) return [unwrapped];
   // Split on the separator alone and trim after: `\s*[,;]\s*` is quadratic on
   // a bracket holding a long run of spaces.
   const parts = unwrapped.split(/[,;]/).map((p) => p.trim());
-  return parts.length > 1 && parts.every((p) => isCitation(p)) ? parts : [];
+  if (parts.length > 1 && parts.every((p) => isCitation(p))) return parts;
+  if (isCitation(tok)) return [tok];
+  return unwrapped !== tok && isCitation(unwrapped) ? [unwrapped] : [];
 }
 
 /**

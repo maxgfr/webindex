@@ -689,6 +689,8 @@ const MMR_WINDOW = 100;
  * documents' own `score`, and with `dense` the embedding lane `hybridSearch`
  * computes. Without the dense lane nothing here reads meaning, so a document
  * sharing no term with the question stays at zero whatever its own score says.
+ * A fused score is the fusion rescaled over the matching documents — 1 for the
+ * best, 0.01 for the weakest — so it orders the pool but is not a ratio.
  */
 async function rankDocuments(question: string, docs: RankInput[], opts: { limit?: number; dense?: boolean } = {}): Promise<RankResult> {
   const { limit } = opts;
@@ -721,12 +723,28 @@ async function rankDocuments(question: string, docs: RankInput[], opts: { limit?
   if (lanes.length) {
     const k = envInt("RRF_K", 60);
     const lexical = competitionRanks(raw);
-    relevance = raw.map((s, i) => {
+    const fused = raw.map((s, i) => {
       if (!dense && !(s > 0)) return 0;
-      let fused = 1 / (k + lexical[i]!);
-      for (const lane of lanes) if (lane[i] !== undefined) fused += 1 / (k + lane[i]!);
-      return fused;
+      let f = 1 / (k + lexical[i]!);
+      for (const lane of lanes) if (lane[i] !== undefined) f += 1 / (k + lane[i]!);
+      return f;
     });
+    // A reciprocal-rank sum over n documents spans only (1 + lanes)/(k + n) to
+    // (1 + lanes)/(k + 1). Divided by the pool max, every matching document
+    // landed between ~0.86 and 1, the gap between the best and the worst was
+    // smaller than MMR's diversity penalty, and a page last in every lane was
+    // ranked second. Rescaled between the weakest and the best matching
+    // document, the order is the same but the relevance spans the range MMR
+    // weighs against similarity; the weakest keeps a sliver above zero, so it
+    // still reads as matched and stays ahead of the documents that did not.
+    let lo = Number.POSITIVE_INFINITY;
+    let hi = 0;
+    for (const f of fused) {
+      if (f > 0 && f < lo) lo = f;
+      if (f > hi) hi = f;
+    }
+    const floor = 0.01;
+    relevance = fused.map((f) => (!(f > 0) ? 0 : hi > lo ? floor + ((1 - floor) * (f - lo)) / (hi - lo) : 1));
   }
   if (!dense && index.queryTerms.length && raw.every((s) => !(s > 0))) {
     notes.push("no document contains any term of the question — the order is not a relevance ranking.");
