@@ -116,6 +116,19 @@ describe("resolveRepo", () => {
     expect(apiBase(resolveRepo("https://www.github.com/maxgfr/webindex"))).toBe("https://api.github.com");
   });
 
+  it("keeps www. on any host but a public forge's browser alias", () => {
+    // www.example.org and example.org are two DNS names, maybe two machines
+    // with two ssh host keys: the clone went to the one nobody named.
+    expect(resolveRepo("git@www.example.org:o/r.git").cloneUrl).toBe("git@www.example.org:o/r.git");
+    expect(resolveRepo("https://www.example.org/o/r.git")).toMatchObject({ host: "www.example.org", cloneUrl: "https://www.example.org/o/r.git" });
+    expect(resolveRepo("ssh://git@www.example.org/o/r.git").cloneUrl).toBe("ssh://git@www.example.org/o/r.git");
+    expect(apiBase(resolveRepo("https://www.gitea.example/o/r"))).toBe("https://www.gitea.example/api/v1");
+    for (const forge of ["github.com", "gitlab.com", "codeberg.org", "bitbucket.org"]) {
+      expect(resolveRepo(`https://www.${forge}/o/r`), forge).toMatchObject({ host: forge, cloneUrl: `https://${forge}/o/r.git` });
+    }
+    expect(resolveRepo("git@WWW.GitHub.com:o/r.git").cloneUrl).toBe("git@github.com:o/r.git");
+  });
+
   it("ends a GitLab path at '/-/', and a Gitea one after owner/repo", () => {
     expect(resolveRepo("https://gitlab.com/gitlab-org/gitlab/-/tree/master/app")).toMatchObject({ owner: "gitlab-org", repo: "gitlab" });
     expect(resolveRepo("https://gitlab.com/group/subgroup/thing/-/issues/3")).toMatchObject({
