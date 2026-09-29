@@ -2,6 +2,48 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.21.1](https://github.com/maxgfr/webindex/compare/v1.21.0...v1.21.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* **cache:** use the default cache directory only once it proves to be yours ([7c91077](https://github.com/maxgfr/webindex/commit/7c91077859eb40d3511a2731682ca94d7669d288))
+* **cache:** warn once when the default cache directory is refused ([d8d83b8](https://github.com/maxgfr/webindex/commit/d8d83b8db5f0d087353a03229abdc5d7578c68e1))
+* **charset:** honour <meta charset> in every body the extractor reads as HTML ([acf012f](https://github.com/maxgfr/webindex/commit/acf012f8a0171d970b8e2fc364921b10aea71a55))
+* **charset:** keep a UTF-8 page UTF-8 when one stray byte sits mid-body ([390b6f5](https://github.com/maxgfr/webindex/commit/390b6f5e1475090dbc0dcdf545904c983cb35509))
+* **doc:** leave tracked deletions out of OpenDocument text ([96a80f1](https://github.com/maxgfr/webindex/commit/96a80f1638488314e0e32117a6c1ee81a5e927ed))
+* **doc:** meter office table rules for the whole document, and keep a run of empty rows to one ([8e95b38](https://github.com/maxgfr/webindex/commit/8e95b38e9e75441a7676836990ebdeff35798239))
+* **fetch:** detect role=main whatever the case it is written in ([fcac5fa](https://github.com/maxgfr/webindex/commit/fcac5fa9b02f5924ae1299460a881612dc9839eb))
+* **fetch:** flag Cloudflare's "Sorry, you have been blocked" page as a wall again ([b4f8d0a](https://github.com/maxgfr/webindex/commit/b4f8d0a6dcc7dfc0b767b84edcf8125bcf50ab4b))
+* **fetch:** let a cancel end httpGet's back-off wait ([63b1010](https://github.com/maxgfr/webindex/commit/63b10109e428cd470cf5b462227e45bfe69aade2))
+* **fetch:** restore a <pre> set inside a heading instead of leaking its NULs ([4ad8022](https://github.com/maxgfr/webindex/commit/4ad8022d9fee836e1e03c9ea8e05867ea935e64c))
+* **fetch:** restore an inline <pre> slot without a control-character regex ([d8d7ad7](https://github.com/maxgfr/webindex/commit/d8d7ad76a10387ce5901c6898470606021645f7e))
+* **html:** take no <script> quoted in an attribute or a title for one ([0791219](https://github.com/maxgfr/webindex/commit/0791219a7f469235d89e8851d8f9f448cd058d20))
+* **markdown:** apply a relative <base href> once in fetch --format markdown ([acf336a](https://github.com/maxgfr/webindex/commit/acf336a778f21f450b73901498d7a9fafe621911))
+* **markdown:** drop a javascript:/data: link hidden behind leading control characters ([b275b83](https://github.com/maxgfr/webindex/commit/b275b838c38c41ba409983666590598675acbf22)), closes [#1](https://github.com/maxgfr/webindex/issues/1) [#2](https://github.com/maxgfr/webindex/issues/2)
+* **markdown:** escape a '<' or '&' an element splits from the rest of its tag ([6c0f152](https://github.com/maxgfr/webindex/commit/6c0f152367ab950ecb3cf25c3d6fa50a85e60c3a))
+* **markdown:** escape a heading title made only of '#' ([d616691](https://github.com/maxgfr/webindex/commit/d616691541ad3bd9202c9fb74cecb0ab8542d0e4))
+* **markdown:** escape a single tilde that could close a GFM strikethrough ([f2dcc98](https://github.com/maxgfr/webindex/commit/f2dcc9813e8398581de3e8576670bf54d25f478c))
+* **markdown:** keep the blank line a nested list needs to be a list ([341d3c4](https://github.com/maxgfr/webindex/commit/341d3c477096f41960280e82e4e93dab6f77c15c))
+* **markdown:** keep two adjacent lists of the same kind apart ([5477868](https://github.com/maxgfr/webindex/commit/5477868877df6cddd62e523658c5ee9a0e5a692e))
+* **markdown:** move an emphasis's edge punctuation outside its markers against a letter ([355692d](https://github.com/maxgfr/webindex/commit/355692dcced84c5c70cf49cade204e3dd116b2e4))
+* **markdown:** percent-encode a backslash in a link destination ([af3dad6](https://github.com/maxgfr/webindex/commit/af3dad60fd2630e4d493b899c8c0a7a614eca25d))
+* **markdown:** write a rule as *** so an <hr> opening a list item stays in it ([a7542a8](https://github.com/maxgfr/webindex/commit/a7542a8623a61561009f7e4e76419328b64c59e7))
+* **pdf:** cap the native reader's ASCII85 decode like an inflation ([fee134e](https://github.com/maxgfr/webindex/commit/fee134e7ae9fb38d20a84b7ace483f69e6121103))
+* **pdf:** report a tool's error, not Node's throw site or local paths, as its failure ([e4982a3](https://github.com/maxgfr/webindex/commit/e4982a3dccf2d428154a0a51817d1913ad82305f))
+* **structured:** rank the work a page presents above an Organization subtype ([093b0e9](https://github.com/maxgfr/webindex/commit/093b0e9fa0da4e7bd61cadea3bfa05208d79f5ed))
+* **structured:** skip a JSON-LD block nested deeper than any real one ([9a965d5](https://github.com/maxgfr/webindex/commit/9a965d51d60d2e459b3fd57df85b4473efb0f5da))
+* **structured:** skip comments while scanning for JSON-LD blocks ([fb7f267](https://github.com/maxgfr/webindex/commit/fb7f2672d992da51ab2d9d43a66610b8d09e0c29))
+* **text:** keep a '+' after a digit out of the keyword ("Node 18+" is 18) ([cc8ee1a](https://github.com/maxgfr/webindex/commit/cc8ee1a528ab9b000ae3d40e6147e91d895f9907))
+* **text:** keep a French or German stopword written in capitals as a term ([73ad2ad](https://github.com/maxgfr/webindex/commit/73ad2adbdae28b960bc1ab2c17f18b7555e08268))
+* **text:** read a heading's '\#' as a hash, and its closing run only after a space ([5dd27c8](https://github.com/maxgfr/webindex/commit/5dd27c8bd915a918132d1b3d77b07e7becf1b208))
+
+
+### Performance Improvements
+
+* **fetch:** download no more of a body declared too large than it can use ([fb7c691](https://github.com/maxgfr/webindex/commit/fb7c69109a52db446c9c1d356ee73ea780e08cc2))
+* **structured:** dedupe meta authors through a Set, and bound the list ([713bba5](https://github.com/maxgfr/webindex/commit/713bba5f8d31da3c66d72d429b16e6279bde6eb1))
+
 # [1.21.0](https://github.com/maxgfr/webindex/compare/v1.20.0...v1.21.0) (2026-09-28)
 
 
