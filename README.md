@@ -131,8 +131,9 @@ Homebrew cellar, a global npm install or a vendored bundle alike.
 
 A compose file is something docker runs with root's rights, so before each
 action the written files are read back, and every directory from the cache root
-down must be yours, no symbolic link, and not writable by anyone else; otherwise
-the command refuses and says which path failed. With the docker client installed
+down (for the default cache, from the per-user `<tmp>/webindex-<uid>` down) must
+be yours, no symbolic link, and not writable by anyone else; otherwise the
+command refuses and says which path failed. With the docker client installed
 but no daemon answering, every action says so and exits 1 rather than reporting
 a status or blaming the image pull.
 
