@@ -123,6 +123,25 @@ describe("the Word reader", () => {
   });
 });
 
+describe("the OpenDocument reader", () => {
+  const odf = (kind: string, body: string) =>
+    zip({
+      mimetype: { data: `application/vnd.oasis.opendocument.${kind}`, method: 0 },
+      "content.xml": `<office:document-content><office:body>${body}</office:body></office:document-content>`,
+    });
+
+  // With Record Changes on, an ODF writer keeps deleted text in a
+  // tracked-changes block at the head of the body, where it read as the
+  // document's opening paragraph — as the Word reader leaves out w:del.
+  it("leaves out tracked deletions", () => {
+    const changes =
+      '<text:tracked-changes><text:changed-region text:id="ct1"><text:deletion><office:change-info><dc:creator>A</dc:creator><dc:date>2026-01-01T00:00:00</dc:date></office:change-info>' +
+      "<text:p>THIS PARAGRAPH WAS DELETED.</text:p></text:deletion></text:changed-region></text:tracked-changes>";
+    const text = `<office:text>${changes}<text:h text:outline-level="1">Title</text:h><text:p>Kept text.<text:change text:change-id="ct1"/> More kept text.</text:p></office:text>`;
+    expect(officeToText(odf("text", text))).toBe("# Title\n\nKept text. More kept text.");
+  });
+});
+
 describe("the spreadsheet reader", () => {
   const rel = (id: string, type: string, target: string) => `<Relationship Id="${id}" Type="x/${type}" Target="${target}"/>`;
   const workbook = (sheet: string, styles: string, workbookPr = "") =>

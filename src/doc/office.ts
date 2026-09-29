@@ -824,11 +824,16 @@ function presentationText(zip: Zip, presentationPart: string, budget: Budget): s
 
 // ── OpenDocument (.odt, .ods, .odp) ─────────────────────────────────────────
 
+// Not the body's text: footnotes, comments, and the tracked changes a writer
+// keeps at the head of the body while Record Changes is on — deleted text
+// among them, which the Word reader leaves out too (w:del).
+const ODF_ASIDES = new Set(["text:note", "office:annotation", "text:tracked-changes"]);
+
 function openDocumentText(xml: string, budget: Budget): string {
   const blocks: string[] = [];
   const paragraphs: Paragraph[] = [];
   const tables: (Table & { repeatRow: number; repeatCell: number })[] = [];
-  let skip = 0; // footnotes, comments: not the body's text
+  let skip = 0; // inside one of ODF_ASIDES
   let listItem = false;
   let spreadsheet = false;
   // A presentation's slides, read as a .pptx's are: the title frame heads the
@@ -854,7 +859,7 @@ function openDocumentText(xml: string, budget: Budget): string {
 
   walkXml(xml, {
     open(name, attrs) {
-      if (name === "text:note" || name === "office:annotation") skip++;
+      if (ODF_ASIDES.has(name)) skip++;
       if (skip) return;
       const p = paragraphs[paragraphs.length - 1];
       const table = tables[tables.length - 1];
@@ -886,7 +891,7 @@ function openDocumentText(xml: string, budget: Budget): string {
       }
     },
     close(name) {
-      if (name === "text:note" || name === "office:annotation") {
+      if (ODF_ASIDES.has(name)) {
         skip = Math.max(0, skip - 1);
         return;
       }
