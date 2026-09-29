@@ -173,12 +173,24 @@ export function resolveRepo(raw: string, opts: { kind?: ForgeKind; local?: boole
 /** The repository path of a `file:///path(.git)` remote, or undefined for anything else. */
 function filePath(url: string): string | undefined {
   const file = /^file:\/\/(\/.*)$/.exec(url);
-  return file ? file[1]!.replace(/\.git$/, "").replace(/\/+$/, "") : undefined;
+  return file ? trimRuns(file[1]!.replace(/\.git$/, ""), "/", false) : undefined;
+}
+
+// `s` without `ch` at either end. By hand: /^-+|-+$/g and /\/+$/ retry at every
+// character of a run that does not end the string, so a prompt-supplied name
+// with a long run of dashes or slashes took seconds (quadratic).
+function trimRuns(s: string, ch: string, start = true): string {
+  const code = ch.charCodeAt(0);
+  let a = 0;
+  let b = s.length;
+  while (start && a < b && s.charCodeAt(a) === code) a++;
+  while (b > a && s.charCodeAt(b - 1) === code) b--;
+  return s.slice(a, b);
 }
 
 // A key as slugify spells it before cutting or hashing anything: every run of
 // characters it does not keep becomes one "-".
-const fold = (k: string): string => k.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+const fold = (k: string): string => trimRuns(k.replace(/[^a-z0-9._-]+/g, "-"), "-");
 const sha256Hex = (k: string): string => createHash("sha256").update(k).digest("hex");
 
 /**

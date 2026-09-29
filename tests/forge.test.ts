@@ -199,6 +199,20 @@ describe("resolveRepo", () => {
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
+  it("slugs a long run of dashes in linear time", () => {
+    // Trimming the slug's ends with /^-+|-+$/g retried the trailing branch at
+    // every dash of a run that did not end the string: 80,000 of them took
+    // seconds, once for the repository's own slug and again inside slugify.
+    const run = "-".repeat(100_000);
+    const started = Date.now();
+    expect(resolveRepo(`a${run}b`).slug).toMatch(/^a-[0-9a-f]{8}$/);
+    expect(resolveRepo(`https://gitlab.com/g/${run}x`).slug).toMatch(/^gitlab\.com-g--[0-9a-f]{12}$/);
+    expect(slugify(`${run}a${run}b${run}`, { max: 300_000 })).toBe(`a${run}b`);
+    // A file:// path's trailing slashes were cut the same way.
+    expect(resolveRepo(`file:///srv${"/".repeat(100_000)}x///`).repo).toBe("x");
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
   it("never lets a user or host that git would read as an option through", () => {
     for (const s of ["-oProxyCommand=touch%20x@github.com:a/b", "git@-oProxyCommand=x:a/b", "ssh://-oProxyCommand=x/a/b", "ssh://-u@host.example/a/b"]) {
       const r = resolveRepo(s);
