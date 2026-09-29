@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
 import { assessPdfText, extractPdf, enabledExtractors, resetPdfLadderCache } from "../src/pdf.js";
 import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC, runWithInput } from "../src/pdf/exec.js";
+import { failureDetail } from "../src/pdf/npx.js";
 
 // The subprocess layer runs for real unless a case scripts it: the rungs that
 // shell out are exercised against an empty PATH below, and the availability
@@ -260,6 +261,57 @@ describe("rung availability", () => {
     const r = await extractPdf(TRUNCATED, { engines: ["pdf-inspector"] });
     expect(r.reason).toContain("pdf-inspector: Error: process_pdf: Invalid cross-reference table");
     expect(r.reason).not.toContain("at main"); // one line, not the stack
+  });
+
+  // The real pdf-inspector reports an unparsable PDF as an uncaught exception,
+  // and Node's banner for one starts with the throw site: the note read as a
+  // truncated path into the local npm cache instead of the error.
+  it("gives the error from Node's uncaught-exception banner, not its throw site or any path", async () => {
+    const banner =
+      "file:///home/u/.npm/_npx/07cd03d48c28f2b3/node_modules/@firecrawl/pdf-inspector/bin/pdf-inspector.mjs:125\n" +
+      "  const result = processPdf(buffer, opts.pages ?? undefined);\n" +
+      "                 ^\n\n" +
+      "Error: process_pdf: Invalid PDF structure\n" +
+      "    at file:///home/u/.npm/_npx/07cd03d48c28f2b3/node_modules/@firecrawl/pdf-inspector/bin/pdf-inspector.mjs:125:18 {\n" +
+      "  code: 'GenericFailure'\n}\n\nNode.js v22.22.2\n";
+    runMock.mockResolvedValue({ ok: false, stdout: "", error: "exit 1", stderr: banner });
+    const r = await extractPdf(TRUNCATED, { engines: ["pdf-inspector"] });
+    expect(r.reason).toContain("pdf-inspector: Error: process_pdf: Invalid PDF structure");
+    expect(r.reason).not.toMatch(/file:|\/home|_npx/);
+
+    // A message with no error line keeps its first line, with any path cut to its file name.
+    runMock.mockResolvedValue({
+      ok: false,
+      stdout: "",
+      error: "exit 1",
+      stderr:
+        "(node:4242) [DEP0040] DeprecationWarning: The `punycode` module is deprecated.\n(Use `node --trace-deprecation ...` to show where the warning was created)\ncannot open /home/u/private/draft.pdf: C:\\Users\\u\\draft.pdf, see https://x.test/help\n",
+    });
+    expect((await extractPdf(TRUNCATED, { engines: ["pdf-inspector"] })).reason).toContain(
+      "pdf-inspector: cannot open draft.pdf: draft.pdf, see https://x.test/help",
+    );
+  });
+
+  // Linear-time guard: a tool's stderr is whatever it printed, up to the
+  // subprocess cap, and every pattern that reads it runs on the caller's thread.
+  it("reads hostile stderr in linear time", () => {
+    const n = 1_000_000;
+    const cases = [
+      "/a".repeat(n),
+      `/:${"1".repeat(n)}x`,
+      `/${":1x".repeat(n)}`,
+      "a".repeat(2 * n),
+      "/ ".repeat(n),
+      "file://".repeat(n / 4),
+      `C:${"\\a".repeat(n)}`,
+      `at ${"{".repeat(n)}\n${"x\n".repeat(n)}`,
+      "^".repeat(n) + "!",
+    ];
+    for (const stderr of cases) {
+      const t0 = performance.now();
+      failureDetail("tool", { ok: false, stdout: "", error: "exit 1", stderr });
+      expect(performance.now() - t0).toBeLessThan(3000);
+    }
   });
 
   it("marks the npx rungs unavailable when npm cannot reach its registry, and says how to skip them", async () => {

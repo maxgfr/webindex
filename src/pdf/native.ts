@@ -242,8 +242,20 @@ function extractTextOps(s: string): string {
   return out;
 }
 
-function ascii85Decode(text: string): Buffer | undefined {
-  const out: number[] = [];
+/** A decoder's result when its output would pass the cap it was given. */
+const TOO_BIG = Symbol("too big");
+
+/**
+ * ASCII85 within `cap`: the bytes, TOO_BIG when they would pass it, or
+ * undefined when it is not ASCII85. Capped like an inflation, because it is
+ * one: each `z` is four zero bytes, so 32 MB of them — a 32 KB Flate stream —
+ * decoded into a growable array was 128M elements, seconds and gigabytes, and
+ * on Node 18 a fatal "invalid size" error no catch can stop.
+ */
+function ascii85Decode(text: string, cap: number): Buffer | typeof TOO_BIG | undefined {
+  // Four bytes per character at most, from a `z`: the buffer never grows.
+  const out = Buffer.allocUnsafe(Math.min(cap, 4 * text.length));
+  let n = 0;
   let group = 0;
   let count = 0;
   for (let i = 0; i < text.length; i++) {
@@ -251,13 +263,17 @@ function ascii85Decode(text: string): Buffer | undefined {
     if (c === 0x7e) break; // "~>" ends the data
     if (isWhite(c)) continue;
     if (c === 0x7a && count === 0) {
-      out.push(0, 0, 0, 0);
+      if (n + 4 > cap) return TOO_BIG;
+      out.writeUInt32BE(0, n);
+      n += 4;
       continue;
     }
     if (c < 0x21 || c > 0x75) return undefined;
     group = group * 85 + (c - 0x21);
     if (++count === 5) {
-      out.push((group >>> 24) & 0xff, (group >>> 16) & 0xff, (group >>> 8) & 0xff, group & 0xff);
+      if (n + 4 > cap) return TOO_BIG;
+      out.writeUInt32BE(group >>> 0, n);
+      n += 4;
       group = 0;
       count = 0;
     }
@@ -266,10 +282,10 @@ function ascii85Decode(text: string): Buffer | undefined {
   if (count > 1) {
     // A partial final group is padded with the highest digit and truncated.
     for (let k = count; k < 5; k++) group = group * 85 + 84;
-    const bytes = [(group >>> 24) & 0xff, (group >>> 16) & 0xff, (group >>> 8) & 0xff, group & 0xff];
-    out.push(...bytes.slice(0, count - 1));
+    if (n + count - 1 > cap) return TOO_BIG;
+    for (let k = 0; k < count - 1; k++) out[n++] = (group >>> (24 - 8 * k)) & 0xff;
   }
-  return Buffer.from(out);
+  return out.subarray(0, n);
 }
 
 function asciiHexDecode(text: string): Buffer {
@@ -279,7 +295,6 @@ function asciiHexDecode(text: string): Buffer {
 }
 
 /** Inflation within `cap`: the bytes, TOO_BIG when the cap was hit, or undefined when it is not deflate at all. */
-const TOO_BIG = Symbol("too big");
 function inflateCapped(data: Buffer, cap: number): Buffer | typeof TOO_BIG | undefined {
   for (const inflate of [inflateSync, inflateRawSync]) {
     try {
@@ -340,20 +355,28 @@ function* contentStreams(buf: Buffer): Generator<string> {
     if (filters) {
       for (const f of filters) {
         if (!data) break;
-        if (f === "ASCII85Decode" || f === "A85") data = ascii85Decode(data.toString("latin1"));
-        else if (f === "ASCIIHexDecode" || f === "AHx") data = asciiHexDecode(data.toString("latin1"));
-        else if (f === "FlateDecode" || f === "Fl") {
-          const cap = Math.min(MAX_STREAM_BYTES, budget);
-          const inflated = inflateCapped(data, cap);
-          if (inflated === TOO_BIG) budget -= cap; // the work was done; it counts
-          data = inflated instanceof Buffer ? inflated : undefined;
-        } else data = undefined; // an image codec, LZW, a crypt filter: not text we can read
+        const cap = Math.min(MAX_STREAM_BYTES, budget);
+        let decoded: Buffer | typeof TOO_BIG | undefined;
+        if (f === "ASCII85Decode" || f === "A85") decoded = ascii85Decode(data.toString("latin1"), cap);
+        else if (f === "ASCIIHexDecode" || f === "AHx") decoded = asciiHexDecode(data.toString("latin1"));
+        else if (f === "FlateDecode" || f === "Fl") decoded = inflateCapped(data, cap);
+        // Anything else is an image codec, LZW, a crypt filter: not text we can read.
+        if (decoded === TOO_BIG) budget -= cap; // the work was done; it counts
+        data = decoded instanceof Buffer ? decoded : undefined;
       }
     } else {
       // No dictionary to go on (a hand-built or damaged file): guess, as the
-      // reader always has — zlib, then raw deflate, else uncompressed.
-      if (/~>\s*$/.test(s.slice(Math.max(start, stop - 8), stop))) data = ascii85Decode(data.toString("latin1")) ?? data;
+      // reader always has — ASCII85 when it ends in `~>`, then zlib, then raw
+      // deflate, else uncompressed.
       const cap = Math.min(MAX_STREAM_BYTES, budget);
+      if (/~>\s*$/.test(s.slice(Math.max(start, stop - 8), stop))) {
+        const decoded = ascii85Decode(data.toString("latin1"), cap);
+        if (decoded === TOO_BIG) {
+          budget -= cap;
+          continue; // not mined raw either: those bytes are the bomb
+        }
+        data = decoded ?? data;
+      }
       const inflated = inflateCapped(data, cap);
       if (inflated === TOO_BIG) {
         budget -= cap;
