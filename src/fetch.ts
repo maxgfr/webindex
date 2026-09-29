@@ -684,6 +684,19 @@ function preSlotIndex(line: string): number | undefined {
   const i = Number(line.slice(1, -1));
   return Number.isInteger(i) ? i : undefined;
 }
+// The same placeholder folded INTO a line: a <pre> inside a heading, which
+// flattenHeadings keeps to its one `## text` line. Restored there, on that
+// line, rather than inside flattenHeadings — the block's text is already
+// decoded, and the entity and tag passes after it would decode it again.
+const INLINE_PRE_SLOT = / ?\u0000(\d+)\u0000/g;
+function restoreInlinePre(line: string, blocks: readonly string[]): string {
+  return line
+    .replace(INLINE_PRE_SLOT, (_, i: string) => {
+      const code = (blocks[Number(i)] ?? "").replace(/\s+/g, " ").trim();
+      return code ? ` ${code}` : "";
+    })
+    .trim();
+}
 
 /**
  * Every `<pre>…</pre>` replaced by a placeholder line, its text kept aside
@@ -792,7 +805,8 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
     .map((l) => {
       const t = l.trim();
       const slot = preSlotIndex(t);
-      return slot === undefined ? t : (pre[slot] ?? t);
+      if (slot !== undefined) return pre[slot] ?? t;
+      return t.includes(NUL) ? restoreInlinePre(t, pre) : t;
     })
     .filter((l) => l.length > 0)
     .join("\n");

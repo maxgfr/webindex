@@ -176,6 +176,16 @@ describe("htmlToText", () => {
     expect(htmlToText("<pre>code</pre><p>\u00000\u0000</p>")).toBe("code\n�0�");
   });
 
+  it("keeps a <pre> set inside a heading on the heading's line", () => {
+    // Its placeholder was pulled onto the heading line, where nothing restored
+    // it: raw NULs in the text, and the code gone.
+    expect(htmlToText("<h2>Install<pre>npm i webindex</pre></h2><p>Then run it.</p>")).toBe("## Install npm i webindex\nThen run it.");
+    expect(htmlToText("<h2>Heading with <pre>inline pre</pre> text</h2>")).toBe("## Heading with inline pre text");
+    expect(htmlToText("<h2>Two<pre>a\n  b</pre></h2>")).toBe("## Two a b");
+    // Decoded once, as the block always is: its text is not markup a second time.
+    expect(htmlToText("<h2>Escaping<pre>&amp;lt;b&amp;gt; &lt;i&gt;</pre></h2>")).toBe("## Escaping &lt;b&gt; <i>");
+  });
+
   it("drops an unclosed script or style to the end of the page, as a browser does", () => {
     // A page cut by the response cap inside a __NEXT_DATA__ blob used to hand
     // back megabytes of raw JSON as prose.
@@ -707,6 +717,7 @@ describe("HTML scans stay linear on hostile markup", () => {
     ["unclosed <h2> openers", "<h2>x ".repeat(150_000)],
     ["headings closed only at the very end", `${"<h2>x ".repeat(150_000)}</h2>`],
     ["unclosed <pre> openers", "<pre>x ".repeat(150_000)],
+    ["a heading holding thousands of <pre> blocks", `<h2>${"<pre>x</pre>".repeat(50_000)}</h2>`],
     ["unclosed <script> openers", "<p>a</p><script>x ".repeat(100_000)],
     ["script openers quoted in attributes", '<img alt="<script>">'.repeat(100_000)],
     ["unclosed <title> openers", "<title>x ".repeat(150_000)],
