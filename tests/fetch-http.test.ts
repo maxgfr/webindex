@@ -18,6 +18,9 @@ import {
   htmlCanonicalUrl,
   cleanInline,
 } from "../src/fetch.js";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { resetVideoLadderCache, setVideoDeps, type VideoRunner } from "../src/video.js";
 import { installFetchMock, routes } from "./fetchmock.js";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -1167,5 +1170,64 @@ describe("metaDescriptionOf", () => {
   it("returns undefined when there is none, or it is empty", () => {
     expect(metaDescriptionOf("<html><body>no head</body></html>")).toBeUndefined();
     expect(metaDescriptionOf('<meta name="description" content="   ">')).toBeUndefined();
+  });
+});
+
+// A YouTube video goes to the transcript ladder, never to Firecrawl or the HTTP
+// GET: its watch page holds no transcript. yt-dlp is replaced by a runner.
+describe("fetchAndExtract on a YouTube video", () => {
+  const info = {
+    id: "jNQXAC9IVRw",
+    title: "Me at the zoo",
+    channel: "jawed",
+    upload_date: "20050424",
+    duration: 19,
+    webpage_url: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    subtitles: { en: [] },
+    automatic_captions: {},
+  };
+  const vtt = readFileSync(join(import.meta.dirname, "fixtures", "video", "zoo-manual.en.vtt"), "utf8");
+  const run: VideoRunner = async (_cmd, args) => {
+    if (args.includes("-J")) return { ok: true, status: 0, stdout: JSON.stringify(info), stderr: "" };
+    const o = args[args.indexOf("-o") + 1]!;
+    writeFileSync(join(o.slice(0, o.lastIndexOf("/")), "sub.en.vtt"), vtt);
+    return { ok: true, status: 0, stdout: "", stderr: "" };
+  };
+
+  afterEach(() => {
+    setVideoDeps();
+    resetVideoLadderCache();
+  });
+
+  it("returns the timestamped transcript as a video document", async () => {
+    setVideoDeps({ run, have: () => true });
+    const httpFetch = vi.fn();
+    vi.stubGlobal("fetch", httpFetch);
+    const r = await fetchAndExtract("https://youtu.be/jNQXAC9IVRw", { firecrawl: "http://fc.test" });
+    expect(httpFetch).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ documentType: "video", extractor: "manual-subs", title: "Me at the zoo", status: 200, finalUrl: info.webpage_url });
+    expect(r.text).toContain("[00:01] All right, so here we are, in front of the elephants");
+    expect(r.note).toBeUndefined();
+  });
+
+  it("names the reason when there is no transcript", async () => {
+    setVideoDeps({ run: async () => ({ ok: false, status: 1, stdout: "", stderr: "ERROR: [youtube] x: Private video" }), have: () => true });
+    const r = await fetchAndExtract("https://www.youtube.com/watch?v=jNQXAC9IVRw");
+    expect(r).toMatchObject({ text: "", documentType: "video", status: 0 });
+    expect(r.note).toBe("No transcript for https://www.youtube.com/watch?v=jNQXAC9IVRw: private video.");
+  });
+
+  it("asks authorizeUrl before yt-dlp runs", async () => {
+    const calls: string[] = [];
+    setVideoDeps({
+      run: async (cmd) => {
+        calls.push(cmd);
+        return { ok: true, status: 0, stdout: "{}", stderr: "" };
+      },
+      have: () => true,
+    });
+    const r = await fetchAndExtract("https://www.youtube.com/watch?v=jNQXAC9IVRw", { authorizeUrl: async () => false });
+    expect(calls).toEqual([]);
+    expect(r.note).toMatch(/^Refused/);
   });
 });

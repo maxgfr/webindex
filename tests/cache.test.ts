@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { cacheClean, cacheDir, cacheStats, cachedFetchAndExtract, cachePath, setCacheMode, resetCacheMode } from "../src/cache.js";
 import { ensureComposeMaterialized } from "../src/stack.js";
+import { resetVideoLadderCache, setVideoDeps, type VideoRunner } from "../src/video.js";
 import { installFetchMock } from "./fetchmock.js";
 
 describe("cache writes", () => {
@@ -37,6 +38,51 @@ describe("cache writes", () => {
     expect(readdirSync(dir).some((n) => n.endsWith(".json"))).toBe(true);
     await cachedFetchAndExtract(URL, {}, true, 2500);
     expect(spy).toHaveBeenCalledTimes(2); // served from the rewritten entry
+  });
+});
+
+// A transcript is filed under one "video" namespace, like a PDF: its rung is
+// only known after the ladder ran. Firecrawl is never probed for it.
+describe("cache on a YouTube video", () => {
+  const VIDEO = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+  const info = { id: "jNQXAC9IVRw", title: "Me at the zoo", duration: 19, webpage_url: VIDEO, subtitles: { en: [] }, automatic_captions: {} };
+  const vtt = "WEBVTT\n\n00:01.000 --> 00:03.000\nAll right, so here we are\n";
+  let ytdlp = 0;
+  const ok: VideoRunner = async (_cmd, args) => {
+    ytdlp++;
+    if (args.includes("-J")) return { ok: true, status: 0, stdout: JSON.stringify(info), stderr: "" };
+    const o = args[args.indexOf("-o") + 1]!;
+    writeFileSync(join(dirname(o), "sub.en.vtt"), vtt);
+    return { ok: true, status: 0, stdout: "", stderr: "" };
+  };
+  beforeEach(() => {
+    ytdlp = 0;
+  });
+  afterEach(() => {
+    setVideoDeps();
+    resetVideoLadderCache();
+  });
+
+  it("serves a transcript from the cache without yt-dlp or Firecrawl", async () => {
+    const http = installFetchMock(() => ({ status: 500, body: "" }));
+    setVideoDeps({ run: ok, have: () => true });
+    const first = await cachedFetchAndExtract(VIDEO, { firecrawl: "http://fc.test" }, true, 1000);
+    expect(first).toMatchObject({ documentType: "video", extractor: "manual-subs" });
+    const calls = ytdlp;
+    const second = await cachedFetchAndExtract(VIDEO, { firecrawl: "http://fc.test" }, true, 1500);
+    expect(second).toMatchObject({ cached: true, documentType: "video", extractor: "manual-subs", text: first.text });
+    expect(ytdlp).toBe(calls);
+    expect(http).not.toHaveBeenCalled();
+  });
+
+  it("never caches a video it could not read", async () => {
+    installFetchMock(() => ({ status: 500, body: "" }));
+    setVideoDeps({ run: async () => ({ ok: false, status: 1, stdout: "", stderr: "ERROR: [youtube] x: Private video" }), have: () => true });
+    expect((await cachedFetchAndExtract(VIDEO, {}, true, 1000)).note).toContain("private video");
+    setVideoDeps({ run: ok, have: () => true });
+    const next = await cachedFetchAndExtract(VIDEO, {}, true, 1500);
+    expect(next.cached).toBeUndefined();
+    expect(next.text).toContain("All right, so here we are");
   });
 });
 

@@ -15,6 +15,7 @@ import { resetOllamaProbe } from "../src/embed.js";
 import { resetCacheMode } from "../src/cache.js";
 import { resetHaveCache } from "../src/exec.js";
 import { resetSearxngProbeCache } from "../src/search.js";
+import { setVideoDeps } from "../src/video.js";
 
 // Every stack service the engine knows, except `all` — the CLI spells that one
 // `stack`. Derived rather than typed out, because a hand-written list is exactly
@@ -768,6 +769,43 @@ describe("doctor", () => {
     expect(j.rungs.pdf).toContainEqual({ id: "native", enabled: true, state: "built-in" });
     expect(j.rungs.pdf).toContainEqual({ id: "pdf-inspector", enabled: false, state: `off (${envName("PDF_ENGINE")}=native)` });
     expect(j.rungs.doc.map((r: { id: string }) => r.id)).toEqual(["anydoc", "firecrawl", "builtin"]);
+  });
+
+  describe("video rungs", () => {
+    const ytdlp = (version: string | undefined) =>
+      setVideoDeps({
+        run: async () =>
+          version ? { ok: true, status: 0, stdout: `${version}\n`, stderr: "" } : { ok: false, status: 127, stdout: "", stderr: "", missing: true },
+        have: (cmd) => cmd === "ffmpeg",
+      });
+    afterEach(() => setVideoDeps());
+
+    it("shows yt-dlp's age, flags an old release, and what whisper lacks", async () => {
+      process.env[envName("FIRECRAWL")] = "off";
+      ytdlp("2020.01.01");
+      expect(await run(["doctor"])).toBe(0);
+      const s = stdout();
+      expect(s).toMatch(/video rungs {1}manual-subs {4}yt-dlp 2020\.01\.01 \(\d+ days old — update it: `yt-dlp -U`/);
+      expect(s).toMatch(/^ {14}whisper {8}unavailable \(uvx: no, ffmpeg: yes\)$/m);
+    });
+
+    it("answers as JSON under rungs.video, and names what switched a rung off", async () => {
+      process.env[envName("FIRECRAWL")] = "off";
+      process.env[envName("VIDEO_ENGINES")] = "auto-subs";
+      ytdlp(undefined);
+      try {
+        expect(await run(["doctor", "--json"])).toBe(0);
+      } finally {
+        delete process.env[envName("VIDEO_ENGINES")];
+      }
+      const j = JSON.parse(stdout());
+      expect(j.rungs.video).toEqual([
+        { id: "auto-subs", enabled: true, state: "yt-dlp not installed" },
+        { id: "manual-subs", enabled: false, state: `off (${envName("VIDEO_ENGINES")}=auto-subs)` },
+        { id: "whisper", enabled: false, state: `off (${envName("VIDEO_ENGINES")}=auto-subs)` },
+      ]);
+      expect(j.ytdlp).toEqual({ state: "not installed" });
+    });
   });
 
   it("lists a rung the environment switched off, and which variable did it", async () => {

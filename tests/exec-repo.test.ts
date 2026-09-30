@@ -111,6 +111,17 @@ describe("running a command without blocking", () => {
     expect(r.stderr).toMatch(/timed out after 150ms/);
   });
 
+  it("kills a command its caller aborts, and never starts one already aborted", async () => {
+    const ctl = new AbortController();
+    const started = Date.now();
+    const pending = shAsync(NODE, ["-e", "setTimeout(() => {}, 10000)"], { signal: ctl.signal });
+    setTimeout(() => ctl.abort(), 100);
+    const r = await pending;
+    expect(r).toMatchObject({ ok: false, status: 130, stderr: "aborted" });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(await shAsync(NODE, ["-e", "1"], { signal: ctl.signal })).toMatchObject({ ok: false, status: 130 });
+  });
+
   // A command that spawns its own child (git clone and its transport) left that
   // grandchild running after the kill, holding the pipes — the process could
   // not exit until it finished.

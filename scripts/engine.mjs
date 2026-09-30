@@ -767,13 +767,13 @@ var ERROR_LINE_RE = /^\w*error\b/i;
 var PATH_RE = /(?<![\w:/.\\])(?:file:\/\/\/?(?:[A-Za-z]:)?|[A-Za-z]:(?=\\))?(?:[/\\][^\s/\\:'"()]+)+/g;
 function failureDetail(tool, r) {
   const lines = [];
-  let source = false;
+  let source2 = false;
   let props = false;
   for (const raw of (r.stderr ?? "").split(/\r?\n/)) {
     const l = raw.trim();
-    if (source) source = false;
+    if (source2) source2 = false;
     else if (props) props = l !== "}";
-    else if (THROW_SITE_RE.test(l)) source = true;
+    else if (THROW_SITE_RE.test(l)) source2 = true;
     else if (l.startsWith("at ") && l.endsWith("{")) props = true;
     else if (l && !NOISE_RE.test(l)) lines.push(l);
   }
@@ -1780,6 +1780,577 @@ async function extractDocument(bytes, fmt, opts = {}) {
   return { text: "", reason: reason || "no document converter available" };
 }
 
+// src/video/url.ts
+var VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
+var YOUTUBE_HOSTS = ["youtube.com", "youtube-nocookie.com"];
+function parse(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" || u.protocol === "http:" ? u : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function isYoutubeHost(host) {
+  const h = host.toLowerCase();
+  return YOUTUBE_HOSTS.some((d) => h === d || h.endsWith(`.${d}`));
+}
+function youtubeVideoId(url) {
+  const u = parse(url);
+  if (!u) return void 0;
+  const host = u.hostname.toLowerCase();
+  let id;
+  if (host === "youtu.be" || host === "www.youtu.be") id = u.pathname.split("/")[1];
+  else if (isYoutubeHost(host)) {
+    if (u.pathname === "/watch") id = u.searchParams.get("v") ?? void 0;
+    else id = /^\/(?:shorts|embed|live|v)\/([^/]+)/.exec(u.pathname)?.[1];
+  }
+  return id && VIDEO_ID.test(id) ? id : void 0;
+}
+function youtubeListKind(url) {
+  const u = parse(url);
+  if (!u || !isYoutubeHost(u.hostname)) return void 0;
+  if (u.searchParams.get("list")) return "playlist";
+  if (/^\/(?:@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)/.test(u.pathname)) return "channel";
+  return void 0;
+}
+
+// src/video/ytdlp.ts
+import { mkdtempSync as mkdtempSync2, readdirSync as readdirSync2, readFileSync as readFileSync3, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "fs";
+import { tmpdir as tmpdir2 } from "os";
+import { join as join2 } from "path";
+
+// src/exec.ts
+import { spawn as spawn3, spawnSync as spawnSync2 } from "child_process";
+var STDOUT_CAP = 24 * 1024 * 1024;
+var defaultTimeoutMs = () => envInt("SH_TIMEOUT_MS", 6e4, 1e3);
+function toResult(status, stdout, stderr, err) {
+  const missing = err?.code === "ENOENT";
+  return {
+    ok: !missing && status === 0,
+    status: status ?? (missing ? 127 : 1),
+    stdout,
+    stderr: stderr || (err ? err.message : ""),
+    ...missing ? { missing: true } : {}
+  };
+}
+var havePresence = /* @__PURE__ */ new Map();
+function have(cmd) {
+  let hit = havePresence.get(cmd);
+  if (hit === void 0) {
+    const probe = spawnSync2(process.platform === "win32" ? "where" : "which", [cmd], { encoding: "utf8" });
+    hit = probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
+    havePresence.set(cmd, hit);
+  }
+  return hit;
+}
+function resetHaveCache() {
+  havePresence.clear();
+}
+function sh(cmd, args, opts = {}) {
+  let r;
+  try {
+    r = spawnSync2(cmd, args, {
+      cwd: opts.cwd,
+      input: opts.input,
+      timeout: opts.timeoutMs ?? defaultTimeoutMs(),
+      encoding: "utf8",
+      maxBuffer: STDOUT_CAP,
+      env: opts.env ?? process.env
+    });
+  } catch (e) {
+    return { ok: false, status: 1, stdout: "", stderr: e.message };
+  }
+  return toResult(r.status, String(r.stdout ?? ""), String(r.stderr ?? ""), r.error);
+}
+function shAsync(cmd, args, opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
+  if (opts.signal?.aborted) return Promise.resolve({ ok: false, status: 130, stdout: "", stderr: "aborted" });
+  return new Promise((resolve6) => {
+    let settled = false;
+    let timer;
+    let onAbort;
+    const done = (r) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (onAbort) opts.signal?.removeEventListener("abort", onAbort);
+      resolve6(r);
+    };
+    let child;
+    try {
+      child = spawn3(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      done({ ok: false, status: 1, stdout: "", stderr: e.message });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (d) => {
+      if (stdout.length < STDOUT_CAP) stdout += d;
+    });
+    child.stderr?.on("data", (d) => {
+      if (stderr.length < STDOUT_CAP) stderr += d;
+    });
+    timer = setTimeout(() => {
+      killTree(child);
+      done({ ok: false, status: 124, stdout, stderr: stderr || `timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+    if (opts.signal) {
+      onAbort = () => {
+        killTree(child);
+        done({ ok: false, status: 130, stdout, stderr: "aborted" });
+      };
+      opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    child.on("error", (e) => done(toResult(null, stdout, stderr, e)));
+    child.on("close", (code) => done(toResult(code, stdout, stderr)));
+  });
+}
+
+// src/video/ytdlp.ts
+var defaultVideoRunner = (cmd, args, opts) => shAsync(cmd, args, opts);
+var PROBE_TIMEOUT_MS = 12e4;
+var SUBTITLE_TIMEOUT_MS = 12e4;
+function ytdlpExtraArgs() {
+  return (env("YTDLP_ARGS") ?? "").split(/\s+/).filter(Boolean);
+}
+function runYtdlp(args, opts = {}) {
+  const argv = [...args, ...ytdlpExtraArgs(), ...opts.url ? ["--", opts.url] : []];
+  return (opts.run ?? defaultVideoRunner)("yt-dlp", argv, { timeoutMs: opts.timeoutMs ?? PROBE_TIMEOUT_MS, signal: opts.signal });
+}
+var str = (v) => typeof v === "string" && v.trim() ? v.trim() : void 0;
+var num = (v) => typeof v === "number" && Number.isFinite(v) ? v : void 0;
+function videoMetaFromInfo(info) {
+  const id = str(info.id);
+  if (!id) return void 0;
+  const date = str(info.upload_date);
+  const tracks = (v) => v && typeof v === "object" ? Object.keys(v).filter((k) => k !== "live_chat") : [];
+  const duration = num(info.duration);
+  const chapters = Array.isArray(info.chapters) ? info.chapters.map((c) => ({ start: num(c.start_time) ?? 0, end: num(c.end_time) ?? duration ?? 0, title: str(c.title) ?? "" })).filter((c) => c.title) : [];
+  return {
+    id,
+    title: str(info.title) ?? id,
+    channel: str(info.channel) ?? str(info.uploader),
+    uploadDate: date && /^\d{8}$/.test(date) ? `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}` : void 0,
+    duration,
+    language: str(info.language),
+    chapters,
+    subtitles: tracks(info.subtitles),
+    autoCaptions: tracks(info.automatic_captions),
+    webpageUrl: str(info.webpage_url) ?? `https://www.youtube.com/watch?v=${id}`,
+    ...info.live_status === "is_live" || info.is_live === true ? { live: "live" } : {},
+    ...info.live_status === "is_upcoming" ? { live: "upcoming" } : {}
+  };
+}
+async function probeVideo(url, run = defaultVideoRunner, signal) {
+  const r = await runYtdlp(["-J", "--skip-download", "--no-playlist", "--no-warnings"], { run, url, signal });
+  if (signal?.aborted) return { error: "cancelled" };
+  if (r.missing) return { error: "install yt-dlp (https://github.com/yt-dlp/yt-dlp) to read videos", missing: true };
+  if (!r.ok) return { error: classifyYtdlpError(r.stderr) };
+  try {
+    const meta = videoMetaFromInfo(JSON.parse(r.stdout));
+    return meta ? { meta, info: r.stdout } : { error: "yt-dlp returned no video for this URL" };
+  } catch {
+    return { error: "yt-dlp returned unreadable metadata" };
+  }
+}
+function classifyYtdlpError(stderr) {
+  const s = stderr || "";
+  const unblock = `update yt-dlp (\`${brand().cli} doctor\` shows how old it is) or set ${envName("YTDLP_ARGS")}="--cookies-from-browser firefox"`;
+  if (/private video/i.test(s)) return "private video";
+  if (/members[- ]only|join this channel/i.test(s)) return "members-only video";
+  if (/confirm your age|age[- ]restricted|inappropriate for some users/i.test(s)) {
+    return `age-restricted video \u2014 it needs a signed-in session: ${envName("YTDLP_ARGS")}="--cookies-from-browser firefox"`;
+  }
+  if (/not a bot|sign in to confirm|po[ _-]?token|HTTP Error 403/i.test(s)) return `YouTube refused yt-dlp \u2014 ${unblock}`;
+  if (/has been removed|account .*terminated|no longer available|copyright claim/i.test(s)) return "video removed";
+  if (/unavailable|not available/i.test(s)) return "video unavailable";
+  if (/timed out after/i.test(s)) return "yt-dlp timed out";
+  const line = s.split("\n").map((l) => l.trim()).find((l) => l.startsWith("ERROR:"));
+  return `yt-dlp failed: ${(line ?? s.trim().split("\n")[0] ?? "").replace(/^ERROR:\s*/, "").slice(0, 200) || "no output"}`;
+}
+async function withTempDir(label, fn) {
+  const dir = mkdtempSync2(join2(tmpdir2(), `${brand().name}-${label}-`));
+  try {
+    return await fn(dir);
+  } finally {
+    rmSync2(dir, { recursive: true, force: true });
+  }
+}
+async function downloadSubtitle(info, lang, auto, run = defaultVideoRunner, signal) {
+  return withTempDir("subs", async (dir) => {
+    const infoPath = join2(dir, "info.json");
+    writeFileSync2(infoPath, info);
+    const r = await runYtdlp(
+      [
+        "--load-info-json",
+        infoPath,
+        "--skip-download",
+        "--no-warnings",
+        auto ? "--write-auto-subs" : "--write-subs",
+        "--sub-langs",
+        lang,
+        "--sub-format",
+        "vtt",
+        "-o",
+        join2(dir, "sub.%(ext)s")
+      ],
+      { run, timeoutMs: SUBTITLE_TIMEOUT_MS, signal }
+    );
+    const file = readdirSync2(dir).find((f) => f.endsWith(".vtt"));
+    if (file) return { vtt: readFileSync3(join2(dir, file), "utf8") };
+    if (signal?.aborted) return { error: "cancelled" };
+    return { error: r.ok ? `yt-dlp wrote no ${lang} track` : classifyYtdlpError(r.stderr) };
+  });
+}
+async function ytdlpVersionAge(run = defaultVideoRunner, now = Date.now()) {
+  const r = await run("yt-dlp", ["--version"], { timeoutMs: 2e4 });
+  if (!r.ok) return void 0;
+  const version = r.stdout.trim().split("\n")[0] ?? "";
+  const m = /^(\d{4})\.(\d{2})\.(\d{2})/.exec(version);
+  if (!m) return { version };
+  const released = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return { version, ageDays: Math.max(0, Math.floor((now - released) / 864e5)) };
+}
+
+// src/video/vtt.ts
+var TIMING = /^((?:\d+:)?\d{1,2}:\d{2}\.\d{3})\s+-->\s+((?:\d+:)?\d{1,2}:\d{2}\.\d{3})/;
+var MIN_CUE_S = 0.05;
+function seconds(stamp) {
+  const parts = stamp.split(":").map(Number);
+  return parts.reduce((acc, p) => acc * 60 + p, 0);
+}
+var ENTITIES2 = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", lrm: "", rlm: "" };
+function decode(text) {
+  return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole2, name) => {
+    if (name[0] === "#") {
+      const code = name[1] === "x" || name[1] === "X" ? Number.parseInt(name.slice(2), 16) : Number(name.slice(1));
+      return Number.isFinite(code) && code > 0 && code <= 1114111 ? String.fromCodePoint(code) : whole2;
+    }
+    return ENTITIES2[name.toLowerCase()] ?? whole2;
+  });
+}
+var clean = (line) => decode(line.replace(/<[^>]*>/g, "")).replace(/\s+/g, " ").trim();
+function parseVtt(src, opts = {}) {
+  const text = src.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  if (!/^WEBVTT/.test(text)) return [];
+  const rolling = opts.rolling ?? (/<\d{2}:\d{2}[:.]\d/.test(text) || /<c>/.test(text));
+  const out = [];
+  let shown = [];
+  for (const block of text.split(/\n{2,}/)) {
+    const raw = block.split("\n");
+    const at = raw.findIndex((l) => TIMING.test(l));
+    if (at < 0) continue;
+    const m = TIMING.exec(raw[at]);
+    const start = seconds(m[1]);
+    const end = seconds(m[2]);
+    const lines = raw.slice(at + 1).map(clean).filter(Boolean);
+    const previous = shown;
+    shown = lines;
+    if (end - start < MIN_CUE_S) continue;
+    let fresh = lines;
+    if (rolling) {
+      fresh = lines.slice(repeatedLead(lines, previous));
+      const last = previous[previous.length - 1];
+      if (last && fresh[0]?.startsWith(`${last} `)) fresh = [fresh[0].slice(last.length + 1), ...fresh.slice(1)];
+    }
+    if (fresh.length) out.push({ start, end, text: fresh.join(" ") });
+  }
+  return out;
+}
+function repeatedLead(lines, previous) {
+  for (let n = Math.min(lines.length, previous.length); n > 0; n--) {
+    const tail = previous.slice(previous.length - n);
+    if (tail.every((l, i) => l === lines[i])) return n;
+  }
+  return 0;
+}
+var SENTENCE_END = /[.!?…]+["'”’)\]]*(?=\s|$)/g;
+var MAX_SEGMENT_S = 30;
+var MAX_SENTENCES = 3;
+var PAUSE_S = 5;
+var WORDS_TO_CLOSE = 25;
+var BREAK_SLACK_S = 0.5;
+function mergeSegments(cues, breaks = []) {
+  const out = [];
+  let cur;
+  const flush = () => {
+    if (cur) out.push(cur);
+    cur = void 0;
+  };
+  const crossesBreak = (from, to) => breaks.some((b) => b > from + BREAK_SLACK_S && b <= to + BREAK_SLACK_S);
+  for (const cue of cues) {
+    if (cur && (cue.start - cur.end > PAUSE_S || cue.end - cur.start > MAX_SEGMENT_S || crossesBreak(cur.start, cue.start))) flush();
+    cur = cur ? { start: cur.start, end: Math.max(cur.end, cue.end), text: `${cur.text} ${cue.text}` } : { ...cue };
+    const sentences = cur.text.match(SENTENCE_END)?.length ?? 0;
+    const endsSentence = /[.!?…]+["'”’)\]]*$/.test(cur.text);
+    const words = cur.text.split(/\s+/).length;
+    if (sentences >= MAX_SENTENCES || endsSentence && words >= WORDS_TO_CLOSE) flush();
+  }
+  flush();
+  return out;
+}
+
+// src/video/whisper.ts
+import { existsSync as existsSync2, readdirSync as readdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "fs";
+import { join as join3 } from "path";
+var DEFAULT_MAX = 3;
+var DEFAULT_TIMEOUT_MS2 = 30 * 6e4;
+var DEFAULT_MODEL = "small";
+var PYAV_PIN = "av<18";
+var spent2 = 0;
+function resetWhisperBudget() {
+  spent2 = 0;
+}
+function whisperBudgetLeft() {
+  return Math.max(0, envInt("WHISPER_MAX", DEFAULT_MAX) - spent2);
+}
+function whisperModel() {
+  return env("WHISPER_MODEL") ?? DEFAULT_MODEL;
+}
+function whisperSegments(json) {
+  try {
+    const parsed = JSON.parse(json);
+    return (parsed.segments ?? []).map((s) => ({
+      start: Number(s.start),
+      end: Number(s.end),
+      text: String(s.text ?? "").replace(/\s+/g, " ").trim()
+    })).filter((s) => Number.isFinite(s.start) && Number.isFinite(s.end) && s.text);
+  } catch {
+    return [];
+  }
+}
+function whisperLanguage(tag) {
+  const base2 = tag?.toLowerCase().split(/[-_]/)[0];
+  return base2 && /^[a-z]{2,3}$/.test(base2) ? base2 : void 0;
+}
+async function whisperTranscribe(info, language, run, signal) {
+  if (whisperBudgetLeft() <= 0) return { declined: "budget" };
+  spent2++;
+  const refund = (r) => {
+    spent2 = Math.max(0, spent2 - 1);
+    return r;
+  };
+  const budgetMs = envInt("WHISPER_TIMEOUT_MS", DEFAULT_TIMEOUT_MS2, 1e3);
+  const deadline = Date.now() + budgetMs;
+  const left = () => Math.max(1e3, deadline - Date.now());
+  const timedOut = { failed: `whisper: timed out after ${Math.round(budgetMs / 6e4)} min (${envName("WHISPER_TIMEOUT_MS")})` };
+  return withTempDir("whisper", async (dir) => {
+    const infoPath = join3(dir, "info.json");
+    writeFileSync3(infoPath, info);
+    const dl = await runYtdlp(["--load-info-json", infoPath, "-f", "bestaudio/best", "--no-warnings", "-o", join3(dir, "audio.%(ext)s")], {
+      run,
+      timeoutMs: left(),
+      signal
+    });
+    if (signal?.aborted) return refund({ failed: "whisper: cancelled" });
+    if (dl.status === 124) return timedOut;
+    const audio = readdirSync3(dir).find((f) => f.startsWith("audio.") && !f.endsWith(".part"));
+    if (!audio) return refund({ failed: `whisper: the audio download failed${dl.stderr ? ` (${dl.stderr.trim().split("\n").pop()})` : ""}` });
+    const wav = join3(dir, "speech.wav");
+    const ff = await run("ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", join3(dir, audio), "-ar", "16000", "-ac", "1", wav], {
+      timeoutMs: left(),
+      signal
+    });
+    if (ff.missing) return refund({ failed: "whisper needs ffmpeg", unavailable: true });
+    if (signal?.aborted) return refund({ failed: "whisper: cancelled" });
+    if (ff.status === 124) return timedOut;
+    if (!ff.ok || !existsSync2(wav)) return refund({ failed: "whisper: ffmpeg could not convert the audio" });
+    const args = ["--with", PYAV_PIN, "whisper-ctranslate2", wav, "--model", whisperModel(), "--output_format", "json", "--output_dir", dir];
+    const lang = whisperLanguage(language);
+    if (lang) args.push("--language", lang);
+    const w = await run("uvx", args, { timeoutMs: left(), cwd: dir, signal });
+    if (w.missing) return refund({ failed: "whisper needs uvx", unavailable: true });
+    if (signal?.aborted) return { failed: "whisper: cancelled" };
+    if (w.status === 124) return timedOut;
+    const out = join3(dir, "speech.json");
+    if (!w.ok || !existsSync2(out)) return { failed: `whisper: ${w.stderr.trim().split("\n").pop() || "failed"}` };
+    return { segments: whisperSegments(readFileSync4(out, "utf8")) };
+  });
+}
+
+// src/video/ladder.ts
+var VIDEO_TRANSCRIBERS = ["manual-subs", "auto-subs", "whisper"];
+var processDeps = {};
+function setVideoDeps(deps = {}) {
+  processDeps = deps;
+}
+function videoDeps(own) {
+  return { run: own?.run ?? processDeps.run ?? defaultVideoRunner, have: own?.have ?? processDeps.have ?? have };
+}
+var dead3 = /* @__PURE__ */ new Map();
+function resetVideoLadderCache() {
+  dead3.clear();
+  resetWhisperBudget();
+}
+function enabledTranscribers(engines) {
+  return engines ?? enginesFromEnv("VIDEO_ENGINES", VIDEO_TRANSCRIBERS) ?? VIDEO_TRANSCRIBERS;
+}
+var MIN_WORDS_PER_MINUTE = 5;
+function assessTranscript(segments, duration) {
+  const words = segments.reduce((n, s) => n + s.text.split(/\s+/).filter(Boolean).length, 0);
+  if (!words) return { ok: false, reason: "empty transcript" };
+  if (duration && duration > 60) {
+    const minutes = duration / 60;
+    if (words / minutes < MIN_WORDS_PER_MINUTE) {
+      return { ok: false, reason: `transcript too sparse: ${words} words over ${Math.round(minutes)} min \u2014 music or a silent video?` };
+    }
+  }
+  return { ok: true };
+}
+var base = (tag) => tag.toLowerCase().split(/[-_]/)[0];
+function pickManualTrack(meta, lang) {
+  const tracks = meta.subtitles;
+  if (!tracks.length) return void 0;
+  for (const want of [lang, meta.language, "en"]) {
+    if (!want) continue;
+    const exact = tracks.find((t) => t.toLowerCase() === want.toLowerCase());
+    if (exact) return exact;
+    const sameBase = tracks.find((t) => base(t) === base(want));
+    if (sameBase) return sameBase;
+  }
+  return tracks[0];
+}
+function pickAutoTrack(meta) {
+  const tracks = meta.autoCaptions;
+  const lang = meta.language;
+  if (lang) {
+    for (const want of [`${lang}-orig`, lang]) {
+      const hit = tracks.find((t) => t.toLowerCase() === want.toLowerCase());
+      if (hit) return hit;
+    }
+    const orig = tracks.find((t) => t.endsWith("-orig") && base(t) === base(lang));
+    if (orig) return orig;
+    return void 0;
+  }
+  const origs = tracks.filter((t) => t.endsWith("-orig"));
+  return origs.length === 1 ? origs[0] : void 0;
+}
+var chapterStarts = (meta) => meta.chapters.map((c) => c.start);
+async function subtitleRung(auto, meta, info, opts, deps) {
+  const track = auto ? pickAutoTrack(meta) : pickManualTrack(meta, opts.lang);
+  if (!track) return { failure: auto ? "no auto-captions in the video's language" : "no manual subtitles", noTrack: true };
+  const got = await downloadSubtitle(info, track, auto, deps.run, opts.signal);
+  if ("error" in got) return { failure: `${auto ? "auto-captions" : "subtitles"} (${track}): ${got.error}` };
+  return { segments: mergeSegments(parseVtt(got.vtt, { rolling: auto }), chapterStarts(meta)), track };
+}
+async function whisperRung(meta, info, opts, deps) {
+  const missing = ["uvx", "ffmpeg"].filter((c) => !deps.have(c));
+  if (missing.length) return { failure: "whisper needs uvx and ffmpeg", unavailable: true };
+  if (whisperBudgetLeft() <= 0) return { failure: `this run's whisper budget is spent (raise ${envName("WHISPER_MAX")})` };
+  const r = await whisperTranscribe(info, meta.language, deps.run, opts.signal);
+  if ("segments" in r) return { segments: mergeSegments(r.segments, chapterStarts(meta)) };
+  if ("declined" in r) return { failure: `this run's whisper budget is spent (raise ${envName("WHISPER_MAX")})` };
+  return { failure: r.failed, unavailable: r.unavailable };
+}
+var plain = (segments) => segments.map((s) => s.text).join("\n");
+async function transcribeVideo(url, opts = {}) {
+  const none = (reason2, meta2) => ({
+    text: "",
+    segments: [],
+    chapters: meta2?.chapters ?? [],
+    ...meta2 ? { meta: meta2 } : {},
+    reason: reason2
+  });
+  const id = youtubeVideoId(url);
+  if (!id) return none(`not a YouTube video URL: ${url}`);
+  const deps = videoDeps(opts.deps);
+  const rungs = enabledTranscribers(opts.engines);
+  if (!rungs.length) return none(`every transcript rung is switched off (${envName("VIDEO_ENGINES")})`);
+  const probe = await probeVideo(`https://www.youtube.com/watch?v=${id}`, deps.run, opts.signal);
+  if ("error" in probe) return none(probe.error);
+  const { meta, info } = probe;
+  if (meta.live) return none(`live stream ${meta.live === "live" ? "in progress" : "not started yet"} \u2014 read it once it has ended`, meta);
+  const failures = [];
+  let noTrack = 0;
+  let subtitleRungs = 0;
+  let whisperMissing = false;
+  let gateReason;
+  for (const rung of rungs) {
+    if (opts.signal?.aborted) return none("cancelled", meta);
+    if (rung !== "whisper") subtitleRungs++;
+    const known = dead3.get(rung);
+    let got;
+    if (known) got = { failure: known, unavailable: true };
+    else {
+      try {
+        got = rung === "whisper" ? await whisperRung(meta, info, opts, deps) : await subtitleRung(rung === "auto-subs", meta, info, opts, deps);
+      } catch (e) {
+        got = { failure: `${rung}: ${e.message}` };
+      }
+    }
+    if (opts.signal?.aborted) return none("cancelled", meta);
+    if ("failure" in got) {
+      if (got.unavailable) dead3.set(rung, got.failure);
+      if (rung === "whisper" && got.unavailable) whisperMissing = true;
+      if (got.noTrack) noTrack++;
+      failures.push(got.failure);
+      continue;
+    }
+    const verdict = assessTranscript(got.segments, meta.duration);
+    if (verdict.ok)
+      return { text: plain(got.segments), segments: got.segments, chapters: meta.chapters, meta, via: rung, ...got.track ? { track: got.track } : {} };
+    gateReason = verdict.reason;
+  }
+  let reason;
+  if (subtitleRungs && noTrack === subtitleRungs && whisperMissing && !gateReason) reason = "no subtitles, and whisper needs uvx and ffmpeg";
+  else reason = [...new Set([gateReason, ...failures].filter(Boolean))].join("; ");
+  return none(reason || "no transcript", meta);
+}
+
+// src/video/markdown.ts
+function formatStamp(seconds3) {
+  const t = Math.max(0, Math.floor(Number.isFinite(seconds3) ? seconds3 : 0));
+  const pad2 = (n) => String(n).padStart(2, "0");
+  const h = Math.floor(t / 3600);
+  const m = Math.floor(t % 3600 / 60);
+  const s = t % 60;
+  return h ? `${h}:${pad2(m)}:${pad2(s)}` : `${pad2(m)}:${pad2(s)}`;
+}
+var VIA_LABEL = {
+  "manual-subs": "manual subtitles",
+  "auto-subs": "YouTube auto-captions",
+  whisper: "local whisper transcription"
+};
+var paragraph = (s) => `[${formatStamp(s.start)}] ${s.text}`;
+var baseLang = (tag) => tag.toLowerCase().replace(/-orig$/, "").split(/[-_]/)[0];
+function source(t) {
+  if (!t.via) return void 0;
+  const how = `${VIA_LABEL[t.via] ?? t.via} (${t.via}${t.track ? `, track ${t.track}` : ""})`;
+  const spoken = t.meta?.language;
+  if (t.track && spoken && baseLang(t.track) !== baseLang(spoken)) return `${how} \u2014 a translation: the video speaks ${spoken}`;
+  return how;
+}
+function transcriptMarkdown(t) {
+  if (!t.segments.length) return "";
+  const meta = t.meta;
+  const head = [`# ${meta?.title ?? "Video transcript"}`, ""];
+  if (meta) {
+    const facts = [
+      meta.channel && `- Channel: ${meta.channel}`,
+      meta.uploadDate && `- Published: ${meta.uploadDate}`,
+      meta.duration !== void 0 && `- Duration: ${formatStamp(meta.duration)}`,
+      `- URL: ${meta.webpageUrl}`,
+      t.via && `- Transcript: ${source(t)}`
+    ].filter(Boolean);
+    head.push(...facts, "");
+  }
+  const body = [];
+  const chapters = [...t.chapters].sort((a, b) => a.start - b.start);
+  let c = -1;
+  for (const seg of t.segments) {
+    while (c + 1 < chapters.length && chapters[c + 1].start <= seg.start + 0.5) {
+      c++;
+      body.push(`## ${chapters[c].title}`, "");
+    }
+    body.push(paragraph(seg), "");
+  }
+  return [...head, ...body].join("\n").trimEnd() + "\n";
+}
+
 // src/mime.ts
 var AMBIGUOUS_TYPES = /* @__PURE__ */ new Set([
   "",
@@ -2486,7 +3057,7 @@ function keywords(question) {
   return out;
 }
 function rankedKeywords(question) {
-  const base = keywords(question);
+  const base2 = keywords(question);
   const score = (raw) => {
     let s = 0;
     if (/\d/.test(raw)) s += 3;
@@ -2496,7 +3067,7 @@ function rankedKeywords(question) {
     else if (raw.length >= 5) s += 0.5;
     return s;
   };
-  return base.map((k, i) => ({ k, s: score(k), i })).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.k);
+  return base2.map((k, i) => ({ k, s: score(k), i })).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.k);
 }
 var ACCENT_CLASSES = {
   a: "a\xE0\xE1\xE2\xE3\xE4\xE5\u0101\u0103\u0105",
@@ -2516,8 +3087,8 @@ var ACCENT_CLASSES = {
   z: "z\u017A\u017C\u017E"
 };
 var BASE_OF = /* @__PURE__ */ new Map();
-for (const [base, cls] of Object.entries(ACCENT_CLASSES)) {
-  for (const ch of cls) BASE_OF.set(ch, base);
+for (const [base2, cls] of Object.entries(ACCENT_CLASSES)) {
+  for (const ch of cls) BASE_OF.set(ch, base2);
 }
 function baseChar(ch) {
   const known = BASE_OF.get(ch);
@@ -2562,10 +3133,10 @@ function expandTokens(tokens, max = 8) {
     if (byCanonical.size >= max) break;
     const canonical = foldTerm(raw);
     if (!canonical || byCanonical.has(canonical)) continue;
-    const plain = deaccent(raw.toLowerCase());
+    const plain2 = deaccent(raw.toLowerCase());
     const variants = [{ text: raw.toLowerCase(), kind: "original" }];
-    if (canonical !== plain) variants.push({ text: canonical, kind: "folded" });
-    if (plain.length > 4 && plain.endsWith("ies")) variants.push({ text: plain.slice(0, -1), kind: "folded" });
+    if (canonical !== plain2) variants.push({ text: canonical, kind: "folded" });
+    if (plain2.length > 4 && plain2.endsWith("ies")) variants.push({ text: plain2.slice(0, -1), kind: "folded" });
     for (const sub of subtokens(raw)) variants.push({ text: sub, kind: "subtoken" });
     byCanonical.set(canonical, { canonical, original: raw, variants });
   }
@@ -2611,23 +3182,23 @@ function accentPattern(text) {
   return out;
 }
 var SHORT_VARIANT = 3;
-function lineRegex(source, text) {
+function lineRegex(source2, text) {
   if ([...text].length <= SHORT_VARIANT && !CJK_CHAR.test(text)) {
     try {
-      return new RegExp(`(?<![\\p{L}\\p{M}\\p{N}])(?:${source})s?(?![\\p{L}\\p{M}])`, "iu");
+      return new RegExp(`(?<![\\p{L}\\p{M}\\p{N}])(?:${source2})s?(?![\\p{L}\\p{M}])`, "iu");
     } catch {
     }
   }
-  return new RegExp(source, "i");
+  return new RegExp(source2, "i");
 }
 function makeMatcher(expanded) {
   const variants = expanded.flatMap((ek) => ek.variants.map((v) => ({ text: v.text, source: accentPattern(v.text), canonical: ek.canonical })));
-  const regexes = variants.map(({ text, source, canonical }) => ({ re: lineRegex(source, text), canonical }));
-  const anchored = variants.map(({ source, canonical }) => ({ re: new RegExp(`^(?:${source})$`, "i"), canonical }));
+  const regexes = variants.map(({ text, source: source2, canonical }) => ({ re: lineRegex(source2, text), canonical }));
+  const anchored = variants.map(({ source: source2, canonical }) => ({ re: new RegExp(`^(?:${source2})$`, "i"), canonical }));
   return {
     expanded,
     canonicals: expanded.map((e) => e.canonical),
-    patterns: variants.map(({ source, canonical }) => ({ source, canonical })),
+    patterns: variants.map(({ source: source2, canonical }) => ({ source: source2, canonical })),
     canonicalOf: (span) => anchored.find(({ re }) => re.test(span))?.canonical,
     matchLine: (line) => {
       const hit = /* @__PURE__ */ new Set();
@@ -2878,7 +3449,7 @@ function tableToMarkdown(table) {
 function htmlToMarkdown(html, opts = {}) {
   return markdownAgainst(html, documentBaseUrl(withoutNul(html), opts.baseUrl), opts.fullPage);
 }
-function markdownAgainst(html, base, fullPage) {
+function markdownAgainst(html, base2, fullPage) {
   const src = withoutNul(html);
   const hidden = fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
   let s = dropElements(src, hidden, RAW_TEXT_ELEMENTS);
@@ -2991,7 +3562,7 @@ function markdownAgainst(html, base, fullPage) {
         w.hardBreak();
         continue;
       case "img":
-        w.image(htmlAttributes(t), base);
+        w.image(htmlAttributes(t), base2);
         continue;
     }
     const kind = INLINE_KIND[name];
@@ -3004,7 +3575,7 @@ function markdownAgainst(html, base, fullPage) {
       if (kind === "a") {
         w.close("a");
         const href = htmlAttributes(t).get("href");
-        w.open("a", linkTarget(href, base), href?.trimStart().startsWith("#"));
+        w.open("a", linkTarget(href, base2), href?.trimStart().startsWith("#"));
       } else w.open(kind);
       continue;
     }
@@ -3078,9 +3649,9 @@ var Writer = class {
     if (i < 0) return;
     while (this.frames.length > i) this.wrap(this.frames.pop());
   }
-  image(attrs, base) {
+  image(attrs, base2) {
     const candidates = [attrs.get("src"), attrs.get("data-src"), attrs.get("data-original"), attrs.get("srcset")?.trim().split(/\s+/)[0]];
-    const src = candidates.map((c) => linkTarget(c, base)).find((u) => u !== void 0);
+    const src = candidates.map((c) => linkTarget(c, base2)).find((u) => u !== void 0);
     const pixel = ["width", "height"].some((d) => /^[01]$/.test(attrs.get(d)?.trim() ?? ""));
     if (!src || pixel || this.inCode()) {
       this.space();
@@ -3361,14 +3932,14 @@ function longestRun(s, ch) {
   }
   return best;
 }
-function linkTarget(raw, base) {
+function linkTarget(raw, base2) {
   const href = raw === void 0 ? "" : afterControls(decodeEntities(raw).replace(/[\t\n\r]/g, "")).trim();
   if (!href || UNFOLLOWABLE.test(href)) return void 0;
   try {
-    const url = new URL(href, base);
+    const url = new URL(href, base2);
     return UNFOLLOWABLE.test(url.protocol) ? void 0 : url.href;
   } catch {
-    return base === void 0 ? href : void 0;
+    return base2 === void 0 ? href : void 0;
   }
 }
 var UNFOLLOWABLE = /^(?:javascript|vbscript|data):/i;
@@ -3393,8 +3964,8 @@ function documentBaseUrl(html, pageUrl) {
     const href = htmlAttributes(m[0]).get("href");
     if (href === void 0) continue;
     try {
-      const base = new URL(decodeEntities(href).trim(), pageUrl);
-      return base.protocol === "data:" || base.protocol === "javascript:" ? pageUrl : base.href;
+      const base2 = new URL(decodeEntities(href).trim(), pageUrl);
+      return base2.protocol === "data:" || base2.protocol === "javascript:" ? pageUrl : base2.href;
     } catch {
       return pageUrl;
     }
@@ -3512,7 +4083,7 @@ function parseTag(tag) {
   const region = /^(?:[a-z]{2}|\d{3})$/i.test(parts[i] ?? "") ? parts[i].toLowerCase() : void 0;
   return { lang, script, region };
 }
-function baseLang(lang) {
+function baseLang2(lang) {
   return parseTag(lang).lang;
 }
 function resolveRegion(lang, region) {
@@ -3525,7 +4096,7 @@ function resolveRegion(lang, region) {
 function ddgRegion(lang, region) {
   const r = resolveRegion(lang, region);
   if (r === NO_REGION) return "wt-wt";
-  const l = baseLang(lang);
+  const l = baseLang2(lang);
   return DDG_KL[`${l}-${r}`] ?? DDG_KL[l] ?? `${REGION_ALIASES[r] ?? r}-${DDG_LANG_ALIASES[l] ?? l}`;
 }
 function searxngLanguage(lang, region) {
@@ -3536,7 +4107,7 @@ function searxngLanguage(lang, region) {
   return country && /^[a-z]{2}$/.test(country) && country !== NO_REGION ? `${t.lang}-${country.toUpperCase()}` : t.lang;
 }
 function acceptLanguageHeader(lang, region) {
-  const l = baseLang(lang);
+  const l = baseLang2(lang);
   const r = resolveRegion(lang, region);
   if (r === NO_REGION) return l === "en" ? "en" : `${l},en;q=0.5`;
   const R = r.toUpperCase();
@@ -3546,7 +4117,7 @@ function acceptLanguageHeader(lang, region) {
 
 // src/firecrawl.ts
 var FIRECRAWL_DEFAULT_BASE = "http://localhost:3002";
-var PROBE_TIMEOUT_MS = 2e3;
+var PROBE_TIMEOUT_MS2 = 2e3;
 var SCRAPE_TIMEOUT_MS = 45e3;
 var SEARCH_TIMEOUT_MS = 3e4;
 var SERVER_MARGIN_MS = { scrape: 5e3, search: 2e3 };
@@ -3588,19 +4159,19 @@ var probeCache = new ProbeMemo();
 function resetFirecrawlProbeCache() {
   probeCache.clear();
 }
-function markFirecrawlDown(base) {
-  for (const explicit of [true, false]) probeCache.markDown(`${base}|${explicit}`);
+function markFirecrawlDown(base2) {
+  for (const explicit of [true, false]) probeCache.markDown(`${base2}|${explicit}`);
 }
 function looksLikeFirecrawl(contentType, body) {
   if (/firecrawl/i.test(body.slice(0, 4096))) return true;
   return !/^\s*text\/html/i.test(contentType ?? "");
 }
-function probeFirecrawl(base, explicit = false) {
-  return probeCache.get(`${base}|${explicit}`, async () => {
+function probeFirecrawl(base2, explicit = false) {
+  return probeCache.get(`${base2}|${explicit}`, async () => {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+    const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS2);
     try {
-      const res = await fetch(`${base}/`, { signal: ctrl.signal });
+      const res = await fetch(`${base2}/`, { signal: ctrl.signal });
       const body = await res.text().catch(() => "");
       return explicit || looksLikeFirecrawl(res.headers.get("content-type"), body);
     } catch {
@@ -3611,16 +4182,16 @@ function probeFirecrawl(base, explicit = false) {
   });
 }
 var prefixCache = /* @__PURE__ */ new Map();
-function apiPrefix(base) {
-  return prefixCache.get(base) ?? "/v2";
+function apiPrefix(base2) {
+  return prefixCache.get(base2) ?? "/v2";
 }
-async function postJson(base, path, body, opts) {
+async function postJson(base2, path, body, opts) {
   const req = { timeoutMs: opts.timeoutMs, retries: opts.retries, headers: authHeaders() };
-  const prefix = apiPrefix(base);
-  const first = await httpJson("POST", `${base}${prefix}${path}`, body(prefix), req);
+  const prefix = apiPrefix(base2);
+  const first = await httpJson("POST", `${base2}${prefix}${path}`, body(prefix), req);
   if (first.status !== 404 || prefix !== "/v2") return first;
-  prefixCache.set(base, "/v1");
-  return httpJson("POST", `${base}/v1${path}`, body("/v1"), req);
+  prefixCache.set(base2, "/v1");
+  return httpJson("POST", `${base2}/v1${path}`, body("/v1"), req);
 }
 function serverReason(data) {
   const raw = typeof data === "string" ? data : typeof data?.error === "string" ? data.error : "";
@@ -3668,13 +4239,13 @@ function mapSearchResponse(json) {
   return out;
 }
 async function scrapeViaFirecrawl(url, opts = {}) {
-  const base = firecrawlBase(opts);
-  if (!base) return {};
-  if (!await probeFirecrawl(base, firecrawlIsExplicit(opts))) {
-    return firecrawlIsExplicit(opts) ? { why: `Firecrawl not reachable at ${base} \u2014 used the built-in extractor.` } : {};
+  const base2 = firecrawlBase(opts);
+  if (!base2) return {};
+  if (!await probeFirecrawl(base2, firecrawlIsExplicit(opts))) {
+    return firecrawlIsExplicit(opts) ? { why: `Firecrawl not reachable at ${base2} \u2014 used the built-in extractor.` } : {};
   }
   const r = await postJson(
-    base,
+    base2,
     "/scrape",
     () => ({
       url,
@@ -3690,7 +4261,7 @@ async function scrapeViaFirecrawl(url, opts = {}) {
     { timeoutMs: SCRAPE_TIMEOUT_MS, retries: 0 }
   );
   if (!r.ok) {
-    if (!r.status) markFirecrawlDown(base);
+    if (!r.status) markFirecrawlDown(base2);
     const why = r.status ? `status ${r.status}` : r.error ?? "no response";
     return { why: `Firecrawl could not scrape ${url} (${why}) \u2014 fell back to the built-in extractor.` };
   }
@@ -3699,21 +4270,21 @@ async function scrapeViaFirecrawl(url, opts = {}) {
   return { data };
 }
 async function searchViaFirecrawl(query, limit, opts = {}) {
-  const base = firecrawlBase(opts);
-  if (!base) return { why: `Firecrawl disabled (--firecrawl off / ${envName("FIRECRAWL")}=off). Skipping.` };
-  if (!await probeFirecrawl(base, firecrawlIsExplicit(opts))) {
-    return { why: `Firecrawl not reachable at ${base} (bring it up with \`${brand().cli} firecrawl up\`). Skipping.`, status: 0 };
+  const base2 = firecrawlBase(opts);
+  if (!base2) return { why: `Firecrawl disabled (--firecrawl off / ${envName("FIRECRAWL")}=off). Skipping.` };
+  if (!await probeFirecrawl(base2, firecrawlIsExplicit(opts))) {
+    return { why: `Firecrawl not reachable at ${base2} (bring it up with \`${brand().cli} firecrawl up\`). Skipping.`, status: 0 };
   }
   const n = Number.isFinite(limit) ? Math.min(100, Math.max(1, Math.trunc(limit))) : 10;
   const locale = {};
   if (opts.lang || opts.region) {
-    if (opts.lang) locale.lang = baseLang(opts.lang);
+    if (opts.lang) locale.lang = baseLang2(opts.lang);
     const country = resolveRegion(opts.lang, opts.region);
     if (/^[a-z]{2}$/.test(country) && country !== "wt") locale.country = country;
   }
   const timeoutMs = Math.max(1, Math.round(Math.min(SEARCH_TIMEOUT_MS, opts.budgetMs ?? SEARCH_TIMEOUT_MS)));
   const r = await postJson(
-    base,
+    base2,
     "/search",
     // `sources` is v2's; v1's strict schema rejects any key it does not know.
     // `timeout` tells Firecrawl to stop just before we do: its own default is
@@ -3731,17 +4302,17 @@ async function searchViaFirecrawl(query, limit, opts = {}) {
   );
   if (!r.ok) {
     const budgetRanOut = r.timedOut === true && timeoutMs < SEARCH_TIMEOUT_MS;
-    if (!r.status && !budgetRanOut) markFirecrawlDown(base);
+    if (!r.status && !budgetRanOut) markFirecrawlDown(base2);
     const reason = serverReason(r.data);
     const why = r.status === 429 || r.status === 503 ? `rate-limited (HTTP ${r.status})` : !r.status ? `unreachable (${r.error ?? "no response"})` : (
       // It answered: a 4xx is this request refused (a bad field, a key a
       // Cloud base wants), which "unreachable" misreported as an outage.
       `${r.status < 500 ? "rejected the request" : "failed"} (HTTP ${r.status}${reason ? `: ${reason}` : ""})`
     );
-    return { why: `Firecrawl search ${why} at ${base}.`, status: r.status };
+    return { why: `Firecrawl search ${why} at ${base2}.`, status: r.status };
   }
   if (r.data?.success === false) {
-    return { why: `Firecrawl search failed at ${base}${serverReason(r.data) ? `: ${serverReason(r.data)}` : ""}.`, status: r.status };
+    return { why: `Firecrawl search failed at ${base2}${serverReason(r.data) ? `: ${serverReason(r.data)}` : ""}.`, status: r.status };
   }
   return { hits: mapSearchResponse(r.data) };
 }
@@ -3759,7 +4330,7 @@ function defaultUa() {
   return brand().defaultUa === "contact" ? contactUa() : browserUa();
 }
 var RETRY_STATUS = /* @__PURE__ */ new Set([429, 503, 502, 504]);
-var defaultTimeoutMs = () => envInt("TIMEOUT_MS", 2e4, 1e3, 3e5);
+var defaultTimeoutMs2 = () => envInt("TIMEOUT_MS", 2e4, 1e3, 3e5);
 function pageDelayMs() {
   return envInt("PAGE_DELAY_MS", 350, 0, 5e3);
 }
@@ -3851,8 +4422,8 @@ function dispositionFilename(header2) {
     }
   }
   if (name === void 0) {
-    const plain = /filename\s*=\s*(?:"((?:\\.|[^"\\])*)"|([^;]+))/i.exec(header2);
-    name = plain ? plain[1]?.replace(/\\(.)/g, "$1") ?? plain[2].trim() : void 0;
+    const plain2 = /filename\s*=\s*(?:"((?:\\.|[^"\\])*)"|([^;]+))/i.exec(header2);
+    name = plain2 ? plain2[1]?.replace(/\\(.)/g, "$1") ?? plain2[2].trim() : void 0;
   }
   return name?.split(/[\\/]/).pop() || void 0;
 }
@@ -3893,7 +4464,7 @@ async function authorizedGet(url, init, authorize) {
 async function httpGet(url, opts = {}) {
   const attempts = attemptsFor(opts.retries);
   let last = { ok: false, status: 0, body: "", contentType: "", url };
-  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs2();
   const cancelled = () => ({ ok: false, status: 0, body: "", contentType: "", url, error: "cancelled" });
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (opts.signal?.aborted) return cancelled();
@@ -4013,7 +4584,7 @@ async function httpGet(url, opts = {}) {
 async function httpJson(method, url, body, opts = {}) {
   const attempts = attemptsFor(opts.retries);
   let last = { ok: false, status: 0, data: void 0 };
-  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs2();
   for (let attempt = 0; attempt < attempts; attempt++) {
     const ctrl = new AbortController();
     let timedOut = false;
@@ -4196,13 +4767,13 @@ function metaContent(html, keys) {
   return keys.map((k) => found.get(k)).find(Boolean);
 }
 function pageTitle(html) {
-  const clean2 = dropElements(html, NOT_TITLE);
-  return firstElementText(clean2, "title") ?? metaContent(clean2, ["og:title", "twitter:title"]) ?? firstElementText(clean2, "h1");
+  const clean3 = dropElements(html, NOT_TITLE);
+  return firstElementText(clean3, "title") ?? metaContent(clean3, ["og:title", "twitter:title"]) ?? firstElementText(clean3, "h1");
 }
 function htmlCanonicalUrl(html) {
-  const clean2 = dropElements(html, ["script", "style", "template"]);
-  const end = clean2.search(/<\/head\s*>|<body(?=[\s/>])/i);
-  const head = end < 0 ? clean2 : clean2.slice(0, end);
+  const clean3 = dropElements(html, ["script", "style", "template"]);
+  const end = clean3.search(/<\/head\s*>|<body(?=[\s/>])/i);
+  const head = end < 0 ? clean3 : clean3.slice(0, end);
   let og;
   for (const m of head.matchAll(/<(link|meta)(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi)) {
     const attrs = htmlAttributes(m[0]);
@@ -4215,10 +4786,10 @@ function htmlCanonicalUrl(html) {
   }
   return og && decodeEntities(og);
 }
-function absoluteCanonical(href, base) {
+function absoluteCanonical(href, base2) {
   if (!href) return void 0;
   try {
-    const u = new URL(href, base);
+    const u = new URL(href, base2);
     return u.protocol === "http:" || u.protocol === "https:" ? u.href : void 0;
   } catch {
     return void 0;
@@ -4268,32 +4839,32 @@ function blockKind(open) {
   return `${tag} ${firstClass.replace(/\d+/g, "0")}`;
 }
 function extractMainHtml(html) {
-  const clean2 = dropElements(html, ["script", "style", "template", "svg"]);
+  const clean3 = dropElements(html, ["script", "style", "template", "svg"]);
   const roleMainTags = /* @__PURE__ */ new Set(["main"]);
-  for (const m of clean2.matchAll(ROLE_MAIN_TAG)) roleMainTags.add(m[1].toLowerCase());
+  for (const m of clean3.matchAll(ROLE_MAIN_TAG)) roleMainTags.add(m[1].toLowerCase());
   const tiers = [
     { tags: [...roleMainTags], isCandidate: (open) => /^<main[\s/>]/i.test(open) || ROLE_MAIN.test(open) },
     { tags: ["article"], isCandidate: () => true },
     { tags: ["div", "section"], isCandidate: isContentContainer }
   ];
   for (const tier of tiers) {
-    const regions = tier.tags.flatMap((tag) => balancedRegions(clean2, tag, tier.isCandidate)).sort((a, b) => a.start - b.start);
+    const regions = tier.tags.flatMap((tag) => balancedRegions(clean3, tag, tier.isCandidate)).sort((a, b) => a.start - b.start);
     if (!regions.length) continue;
     const outer = [];
     let reach = -1;
     for (const r of regions) {
       if (r.start < reach) continue;
       reach = r.end;
-      outer.push({ ...r, len: visibleLength(clean2.slice(r.start, r.end)) });
+      outer.push({ ...r, len: visibleLength(clean3.slice(r.start, r.end)) });
     }
     let best = outer[0];
     for (const r of outer) if (r.len > best.len) best = r;
     const kind = blockKind(best.open);
     const kept = outer.filter((r) => r === best || blockKind(r.open) === kind);
     const keptLen = kept.reduce((n, r) => n + r.len, 0);
-    if (keptLen < 500 && keptLen < visibleLength(clean2) * 0.3) return html;
-    if (kept.length === 1) return clean2.slice(best.start, best.end);
-    return kept.map((r) => `<div>${clean2.slice(r.start, r.end)}</div>`).join("\n");
+    if (keptLen < 500 && keptLen < visibleLength(clean3) * 0.3) return html;
+    if (kept.length === 1) return clean3.slice(best.start, best.end);
+    return kept.map((r) => `<div>${clean3.slice(r.start, r.end)}</div>`).join("\n");
   }
   return html;
 }
@@ -4309,6 +4880,21 @@ var DOC_FETCH_OPTS = { accept: "*/*", binary: true, maxBytes: 16 * 1024 * 1024 }
 async function fetchAndExtract(url, opts = {}) {
   const cancelled = () => ({ text: "", finalUrl: url, status: 0, note: `Fetching ${url} was cancelled.` });
   if (opts.signal?.aborted) return cancelled();
+  if (youtubeVideoId(url)) {
+    if (opts.authorizeUrl && !await opts.authorizeUrl(url)) return { text: "", finalUrl: url, status: 0, note: `Refused ${url}: not a public address.` };
+    const t = await transcribeVideo(url, { lang: opts.acceptLanguage?.split(/[,;]/)[0]?.trim() || void 0, signal: opts.signal });
+    if (opts.signal?.aborted) return cancelled();
+    const text = transcriptMarkdown(t);
+    return {
+      text,
+      title: t.meta?.title,
+      finalUrl: t.meta?.webpageUrl ?? url,
+      status: text ? 200 : 0,
+      documentType: "video",
+      ...t.via ? { extractor: t.via } : {},
+      ...t.reason ? { note: `No transcript for ${url}: ${t.reason}.` } : {}
+    };
+  }
   const wantsPdf = looksLikePdfUrl(url);
   const wantsDoc = wantsPdf ? void 0 : docFormatForUrl(url);
   let firecrawlNote;
@@ -4325,9 +4911,9 @@ async function fetchAndExtract(url, opts = {}) {
     }
     firecrawlNote = fc.data ? `Firecrawl got HTTP ${fc.data.statusCode} for ${url} \u2014 fell back to the built-in extractor.` : fc.why;
   }
-  const base = wantsPdf ? PDF_FETCH_OPTS : wantsDoc ? DOC_FETCH_OPTS : { accept: "text/html,text/plain,*/*", acceptLanguage: opts.acceptLanguage };
+  const base2 = wantsPdf ? PDF_FETCH_OPTS : wantsDoc ? DOC_FETCH_OPTS : { accept: "text/html,text/plain,*/*", acceptLanguage: opts.acceptLanguage };
   const fetchOpts = {
-    ...base,
+    ...base2,
     maxDocumentBytes: PDF_FETCH_OPTS.maxBytes,
     headers: opts.headers,
     authorizeUrl: opts.authorizeUrl,
@@ -4664,7 +5250,7 @@ function doiFromUrl(url) {
   } catch {
     return void 0;
   }
-  const decode = (s) => {
+  const decode2 = (s) => {
     try {
       return decodeURIComponent(s);
     } catch {
@@ -4672,14 +5258,14 @@ function doiFromUrl(url) {
     }
   };
   if (/(^|\.)(dx\.)?doi\.org$/.test(host)) {
-    const doi2 = normalizeDoi(decode(trimTrailing(path.replace(/^\/+/, ""), "/")));
+    const doi2 = normalizeDoi(decode2(trimTrailing(path.replace(/^\/+/, ""), "/")));
     return /^10\.\d{4,9}\//.test(doi2) ? doi2 : void 0;
   }
   const m = /\/doi(?:\/(?:abs|full|pdf|epdf|e?pub))?\/(10\.\d{4,9}\/[^\s?#]+)/i.exec(path);
-  if (m) return normalizeDoi(trimTrailing(decode(m[1]), "/"));
+  if (m) return normalizeDoi(trimTrailing(decode2(m[1]), "/"));
   const loose = /(?:^|[/=])(10\.\d{4,9}\/[^\s?#&]+)/.exec(`${path}${search2}`);
   if (!loose) return void 0;
-  let doi = normalizeDoi(trimTrailing(decode(loose[1]), "/")).replace(/\.pdf$/, "");
+  let doi = normalizeDoi(trimTrailing(decode2(loose[1]), "/")).replace(/\.pdf$/, "");
   if (doi.startsWith("10.1101/")) doi = doi.replace(/\.(?:full|abstract|supplementary-material|article-info|article-metrics)$/, "").replace(/v\d+$/, "");
   return doi;
 }
@@ -5215,91 +5801,11 @@ function resolveEutils(raw, op) {
   return { citeUrl: raw };
 }
 
-// src/exec.ts
-import { spawn as spawn3, spawnSync as spawnSync2 } from "child_process";
-var STDOUT_CAP = 24 * 1024 * 1024;
-var defaultTimeoutMs2 = () => envInt("SH_TIMEOUT_MS", 6e4, 1e3);
-function toResult(status, stdout, stderr, err) {
-  const missing = err?.code === "ENOENT";
-  return {
-    ok: !missing && status === 0,
-    status: status ?? (missing ? 127 : 1),
-    stdout,
-    stderr: stderr || (err ? err.message : ""),
-    ...missing ? { missing: true } : {}
-  };
-}
-var havePresence = /* @__PURE__ */ new Map();
-function have(cmd) {
-  let hit = havePresence.get(cmd);
-  if (hit === void 0) {
-    const probe = spawnSync2(process.platform === "win32" ? "where" : "which", [cmd], { encoding: "utf8" });
-    hit = probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
-    havePresence.set(cmd, hit);
-  }
-  return hit;
-}
-function resetHaveCache() {
-  havePresence.clear();
-}
-function sh(cmd, args, opts = {}) {
-  let r;
-  try {
-    r = spawnSync2(cmd, args, {
-      cwd: opts.cwd,
-      input: opts.input,
-      timeout: opts.timeoutMs ?? defaultTimeoutMs2(),
-      encoding: "utf8",
-      maxBuffer: STDOUT_CAP,
-      env: opts.env ?? process.env
-    });
-  } catch (e) {
-    return { ok: false, status: 1, stdout: "", stderr: e.message };
-  }
-  return toResult(r.status, String(r.stdout ?? ""), String(r.stderr ?? ""), r.error);
-}
-function shAsync(cmd, args, opts = {}) {
-  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs2();
-  return new Promise((resolve6) => {
-    let settled = false;
-    let timer;
-    const done = (r) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve6(r);
-    };
-    let child;
-    try {
-      child = spawn3(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] });
-    } catch (e) {
-      done({ ok: false, status: 1, stdout: "", stderr: e.message });
-      return;
-    }
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (d) => {
-      if (stdout.length < STDOUT_CAP) stdout += d;
-    });
-    child.stderr?.on("data", (d) => {
-      if (stderr.length < STDOUT_CAP) stderr += d;
-    });
-    timer = setTimeout(() => {
-      killTree(child);
-      done({ ok: false, status: 124, stdout, stderr: stderr || `timed out after ${timeoutMs}ms` });
-    }, timeoutMs);
-    child.on("error", (e) => done(toResult(null, stdout, stderr, e)));
-    child.on("close", (code) => done(toResult(code, stdout, stderr)));
-  });
-}
-
 // src/repo.ts
 import { createHash, randomBytes } from "crypto";
-import { existsSync as existsSync2, mkdirSync, readdirSync as readdirSync2, renameSync, rmSync as rmSync2, statSync } from "fs";
-import { tmpdir as tmpdir2 } from "os";
-import { basename, join as join2, resolve } from "path";
+import { existsSync as existsSync3, mkdirSync, readdirSync as readdirSync4, renameSync, rmSync as rmSync3, statSync } from "fs";
+import { tmpdir as tmpdir3 } from "os";
+import { basename, join as join4, resolve } from "path";
 
 // src/forge-host.ts
 var KINDS = /* @__PURE__ */ new Set(["github", "gitlab", "gitea"]);
@@ -5331,7 +5837,7 @@ function hostForgeKind(host) {
 
 // src/repo.ts
 function repoCacheRoot() {
-  return env("REPO_DIR") ?? brand().repoDir ?? join2(tmpdir2(), brand().name, "repos");
+  return env("REPO_DIR") ?? brand().repoDir ?? join4(tmpdir3(), brand().name, "repos");
 }
 var cloneTimeoutMs = () => envInt("GIT_CLONE_TIMEOUT_MS", 3e5, 1e3);
 var fetchTimeoutMs = () => envInt("GIT_FETCH_TIMEOUT_MS", 12e4, 1e3);
@@ -5340,7 +5846,7 @@ function resolveRepo(raw, opts = {}) {
   const trimmed = raw.trim();
   if (trimmed && opts.local !== false) {
     const asPath = resolve(trimmed);
-    if (existsSync2(asPath) && statSync(asPath).isDirectory()) {
+    if (existsSync3(asPath) && statSync(asPath).isDirectory()) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename(asPath)}-${asPath}`)}` };
     }
   }
@@ -5450,7 +5956,7 @@ async function ensureClone(ref, opts = {}) {
   if (!have("git")) throw new Error(`git is not installed or not on PATH \u2014 cannot clone ${ref.cloneUrl}`);
   const branch = opts.branch?.trim() || void 0;
   if (branch?.startsWith("-")) throw new Error(`"${branch}" is not a branch name`);
-  const dir = join2(repoCacheRoot(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
+  const dir = join4(repoCacheRoot(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
   const pending = inflight.get(dir);
   if (pending && !opts.refresh) {
     return pending.catch((e) => {
@@ -5471,17 +5977,17 @@ function branchSlug(branch) {
 }
 async function obtainClone(ref, dir, opts) {
   let target = dir;
-  if (!existsSync2(join2(dir, ".git")) && !opts.branch) {
+  if (!existsSync3(join4(dir, ".git")) && !opts.branch) {
     for (const old of legacySlugs(ref)) {
-      const legacy = join2(repoCacheRoot(), old);
-      const origin = existsSync2(join2(legacy, ".git")) ? originUrl(legacy) : void 0;
+      const legacy = join4(repoCacheRoot(), old);
+      const origin = existsSync3(join4(legacy, ".git")) ? originUrl(legacy) : void 0;
       if (origin && resolveRepo(origin).slug === ref.slug) {
         target = legacy;
         break;
       }
     }
   }
-  if (existsSync2(join2(target, ".git"))) return opts.refresh ? refreshClone(ref, target, opts.branch) : target;
+  if (existsSync3(join4(target, ".git"))) return opts.refresh ? refreshClone(ref, target, opts.branch) : target;
   return freshClone(ref, dir, opts.branch);
 }
 async function refreshClone(ref, dir, branch) {
@@ -5504,25 +6010,25 @@ async function refreshClone(ref, dir, branch) {
 var STALE_STAGING_MS = 24 * 60 * 60 * 1e3;
 function discard(path) {
   try {
-    rmSync2(path, { recursive: true, force: true });
+    rmSync3(path, { recursive: true, force: true });
   } catch {
   }
 }
 function sweepStaging(staging) {
   try {
-    for (const name of readdirSync2(staging)) {
-      const at = join2(staging, name);
-      if (Date.now() - statSync(at).mtimeMs > STALE_STAGING_MS) rmSync2(at, { recursive: true, force: true });
+    for (const name of readdirSync4(staging)) {
+      const at = join4(staging, name);
+      if (Date.now() - statSync(at).mtimeMs > STALE_STAGING_MS) rmSync3(at, { recursive: true, force: true });
     }
   } catch {
   }
 }
 async function freshClone(ref, dir, branch) {
-  const staging = join2(repoCacheRoot(), ".partial");
+  const staging = join4(repoCacheRoot(), ".partial");
   mkdirSync(staging, { recursive: true });
   sweepStaging(staging);
   const attempt = async (filter) => {
-    const tmp = join2(staging, `${basename(dir)}-${process.pid}-${randomBytes(4).toString("hex")}`);
+    const tmp = join4(staging, `${basename(dir)}-${process.pid}-${randomBytes(4).toString("hex")}`);
     const args = ["clone", "--depth", "1", ...filter ? ["--filter=blob:none"] : [], ...branch ? ["--branch", branch] : [], "--", ref.cloneUrl, tmp];
     const r = await shAsync("git", args, { timeoutMs: cloneTimeoutMs() });
     if (!r.ok) discard(tmp);
@@ -5542,13 +6048,13 @@ async function freshClone(ref, dir, branch) {
       );
     }
   }
-  if (!existsSync2(done.tmp) || readdirSync2(done.tmp).length === 0) throw new Error(`clone produced an empty tree for ${ref.cloneUrl}`);
-  if (existsSync2(dir) && !existsSync2(join2(dir, ".git"))) rmSync2(dir, { recursive: true, force: true });
+  if (!existsSync3(done.tmp) || readdirSync4(done.tmp).length === 0) throw new Error(`clone produced an empty tree for ${ref.cloneUrl}`);
+  if (existsSync3(dir) && !existsSync3(join4(dir, ".git"))) rmSync3(dir, { recursive: true, force: true });
   try {
     renameSync(done.tmp, dir);
   } catch (e) {
     discard(done.tmp);
-    if (!existsSync2(join2(dir, ".git"))) throw new Error(`could not move the clone of ${ref.cloneUrl} into ${dir}: ${e.message}`);
+    if (!existsSync3(join4(dir, ".git"))) throw new Error(`could not move the clone of ${ref.cloneUrl} into ${dir}: ${e.message}`);
   }
   return dir;
 }
@@ -5999,48 +6505,48 @@ async function repoFactsResult(ref, opts = {}) {
   if (!r.data || typeof r.data !== "object") return { status: r.status, note: `${ref.host} answered with something other than a repository record.` };
   return { status: r.status, facts: mapRepoFacts(forge, r.data) };
 }
-var str = (v) => typeof v === "string" && v.trim() ? v : void 0;
-var num = (v) => typeof v === "number" ? v : void 0;
+var str2 = (v) => typeof v === "string" && v.trim() ? v : void 0;
+var num2 = (v) => typeof v === "number" ? v : void 0;
 function mapRepoFacts(forge, d) {
   const topics = (v) => Array.isArray(v) ? v.filter((t) => typeof t === "string") : [];
   const shared = {
-    description: str(d.description),
-    forks: num(d.forks_count),
-    openIssues: num(d.open_issues_count),
-    defaultBranch: str(d.default_branch),
+    description: str2(d.description),
+    forks: num2(d.forks_count),
+    openIssues: num2(d.open_issues_count),
+    defaultBranch: str2(d.default_branch),
     archived: typeof d.archived === "boolean" ? d.archived : void 0
   };
   if (forge === "gitlab") {
     return {
       ...shared,
-      fullName: str(d.path_with_namespace),
+      fullName: str2(d.path_with_namespace),
       // A project has no homepage field; its page is the closest thing it states.
-      homepage: str(d.web_url),
-      license: str(d.license?.name) ?? str(d.license?.key),
-      stars: num(d.star_count),
-      pushedAt: str(d.last_activity_at),
+      homepage: str2(d.web_url),
+      license: str2(d.license?.name) ?? str2(d.license?.key),
+      stars: num2(d.star_count),
+      pushedAt: str2(d.last_activity_at),
       topics: topics(d.topics).length ? topics(d.topics) : topics(d.tag_list)
     };
   }
   if (forge === "gitea") {
     return {
       ...shared,
-      fullName: str(d.full_name),
-      homepage: str(d.website),
-      license: Array.isArray(d.licenses) ? str(d.licenses[0]) : void 0,
-      stars: num(d.stars_count),
-      pushedAt: str(d.updated_at),
+      fullName: str2(d.full_name),
+      homepage: str2(d.website),
+      license: Array.isArray(d.licenses) ? str2(d.licenses[0]) : void 0,
+      stars: num2(d.stars_count),
+      pushedAt: str2(d.updated_at),
       topics: topics(d.topics)
     };
   }
-  const spdx = str(d.license?.spdx_id);
+  const spdx = str2(d.license?.spdx_id);
   return {
     ...shared,
-    fullName: str(d.full_name),
-    homepage: str(d.homepage),
-    license: spdx && spdx !== "NOASSERTION" ? spdx : str(d.license?.name),
-    stars: num(d.stargazers_count),
-    pushedAt: str(d.pushed_at),
+    fullName: str2(d.full_name),
+    homepage: str2(d.homepage),
+    license: spdx && spdx !== "NOASSERTION" ? spdx : str2(d.license?.name),
+    stars: num2(d.stargazers_count),
+    pushedAt: str2(d.pushed_at),
     topics: topics(d.topics)
   };
 }
@@ -6145,10 +6651,10 @@ function record(r) {
   return r.ok && r.data && typeof r.data === "object" && !Array.isArray(r.data) ? r.data : void 0;
 }
 var ABSENT = /* @__PURE__ */ new Set([400, 404, 410]);
-var str2 = (v) => typeof v === "string" && v.trim() ? v.trim() : void 0;
+var str3 = (v) => typeof v === "string" && v.trim() ? v.trim() : void 0;
 function miss(r) {
   if (ABSENT.has(r.status)) return { status: r.status };
-  const said = r.data && typeof r.data === "object" ? str2(r.data.errors?.[0]?.detail) ?? str2(r.data.message) ?? str2(r.data.error) : void 0;
+  const said = r.data && typeof r.data === "object" ? str3(r.data.errors?.[0]?.detail) ?? str3(r.data.message) ?? str3(r.data.error) : void 0;
   return { status: r.status, error: r.error ?? said ?? (r.ok ? "the registry answered with something other than a package record" : `status ${r.status}`) };
 }
 async function lookupPackage(registry, name, version) {
@@ -6169,13 +6675,13 @@ async function npmLookup(n, version) {
   if (!d) return miss(r);
   const asked = version ?? "latest";
   const tags = d["dist-tags"] ?? {};
-  const resolved = str2(d.version) ?? (typeof tags[asked] === "string" ? tags[asked] : void 0) ?? (d.versions?.[asked] ? asked : void 0);
+  const resolved = str3(d.version) ?? (typeof tags[asked] === "string" ? tags[asked] : void 0) ?? (d.versions?.[asked] ? asked : void 0);
   const v = resolved && d.versions?.[resolved] || d;
   const stated = resolved ? d.time?.[resolved] : void 0;
   const publishedAt = typeof stated === "string" ? stated : await npmPublishedAt(NPM(n), resolved);
   const deprecated = typeof v.deprecated === "string" ? v.deprecated : v.deprecated === true ? "deprecated" : void 0;
   const repository = v.repository ?? d.repository;
-  const directory = str2(repository?.directory);
+  const directory = str3(repository?.directory);
   return {
     status: r.status,
     facts: {
@@ -6205,9 +6711,9 @@ function projectUrls(raw) {
   return out;
 }
 function pypiLicense(info, classifiers) {
-  const expression = str2(info.license_expression);
+  const expression = str3(info.license_expression);
   if (expression) return expression;
-  const license = str2(info.license);
+  const license = str3(info.license);
   if (license && license.length <= 100 && !license.includes("\n")) return license;
   const named = classifiers.filter((c) => c.startsWith("License ::")).map((c) => c.split("::").pop().trim());
   return named.filter(Boolean).join(", ") || void 0;
@@ -6219,11 +6725,11 @@ async function pypiLookup(n, version) {
   const info = d.info ?? {};
   const urls = projectUrls(info.project_urls);
   const classifiers = Array.isArray(info.classifiers) ? info.classifiers.filter((c) => typeof c === "string") : [];
-  const homepage = str2(info.home_page) ?? urls.get("homepage");
+  const homepage = str3(info.home_page) ?? urls.get("homepage");
   const labelled = PYPI_REPO_LABELS.map((k) => urls.get(k)).find(Boolean);
   const repository = labelled ?? [info.home_page, urls.get("homepage")].find((u) => typeof u === "string" && FORGE_URL.test(u));
   const filesYanked = Array.isArray(d.urls) && d.urls.length ? d.urls.every((u) => u.yanked) : false;
-  const yanked = info.yanked === true ? `this release is yanked${str2(info.yanked_reason) ? `: ${str2(info.yanked_reason)}` : ""}` : filesYanked ? "every file for this release is yanked" : void 0;
+  const yanked = info.yanked === true ? `this release is yanked${str3(info.yanked_reason) ? `: ${str3(info.yanked_reason)}` : ""}` : filesYanked ? "every file for this release is yanked" : void 0;
   const inactive = classifiers.find((c) => /^Development Status :: 7 - Inactive/.test(c));
   const deprecated = yanked ?? (inactive ? `the project declares itself inactive (${inactive})` : void 0);
   return {
@@ -6235,7 +6741,7 @@ async function pypiLookup(n, version) {
       description: info.summary,
       homepage,
       repository: normalizeRepoUrl(repository),
-      documentation: str2(info.docs_url) ?? urls.get("documentation") ?? urls.get("docs"),
+      documentation: str3(info.docs_url) ?? urls.get("documentation") ?? urls.get("docs"),
       license: pypiLicense(info, classifiers),
       ...deprecated ? { deprecated } : {}
     }
@@ -6255,24 +6761,24 @@ async function cratesLookup(n, version) {
     v = pinned.version ?? {};
   }
   const c = d.crate ?? {};
-  const listed = Array.isArray(d.versions) ? str2(d.versions[0]?.num) : void 0;
-  const newest = str2(c.newest_version) === "0.0.0" ? void 0 : str2(c.newest_version);
-  const num2 = version ? str2(v?.num) ?? version : str2(c.default_version) ?? listed ?? str2(c.max_stable_version) ?? newest;
-  v ??= Array.isArray(d.versions) ? d.versions.find((x) => x?.num === num2) : void 0;
-  const yanked = v?.yanked === true ? `this version is yanked${str2(v.yank_message) ? `: ${str2(v.yank_message)}` : ""}` : void 0;
+  const listed = Array.isArray(d.versions) ? str3(d.versions[0]?.num) : void 0;
+  const newest = str3(c.newest_version) === "0.0.0" ? void 0 : str3(c.newest_version);
+  const num3 = version ? str3(v?.num) ?? version : str3(c.default_version) ?? listed ?? str3(c.max_stable_version) ?? newest;
+  v ??= Array.isArray(d.versions) ? d.versions.find((x) => x?.num === num3) : void 0;
+  const yanked = v?.yanked === true ? `this version is yanked${str3(v.yank_message) ? `: ${str3(v.yank_message)}` : ""}` : void 0;
   return {
     status: crateAnswer.status,
     facts: {
       registry: "crates",
       name: c.name ?? n,
-      version: num2,
-      description: str2(c.description) ?? str2(v?.description),
-      homepage: str2(c.homepage) ?? str2(v?.homepage),
+      version: num3,
+      description: str3(c.description) ?? str3(v?.description),
+      homepage: str3(c.homepage) ?? str3(v?.homepage),
       repository: normalizeRepoUrl(c.repository ?? v?.repository),
-      documentation: str2(c.documentation) ?? str2(v?.documentation),
-      license: str2(v?.license),
+      documentation: str3(c.documentation) ?? str3(v?.documentation),
+      license: str3(v?.license),
       downloads: typeof c.downloads === "number" ? c.downloads : void 0,
-      publishedAt: str2(v?.created_at) ?? (version ? void 0 : str2(c.updated_at)),
+      publishedAt: str3(v?.created_at) ?? (version ? void 0 : str3(c.updated_at)),
       ...yanked ? { deprecated: yanked } : {}
     }
   };
@@ -6701,9 +7207,9 @@ function pageMetadata(html, opts = {}) {
   return out;
 }
 var MAX_AUTHORS = 1e4;
-function resolveUrl(url, base) {
+function resolveUrl(url, base2) {
   try {
-    const abs = new URL(url, base);
+    const abs = new URL(url, base2);
     return abs.protocol === "http:" || abs.protocol === "https:" ? abs.href : void 0;
   } catch {
     return void 0;
@@ -6813,10 +7319,10 @@ var SUMMARY_MAX = 500;
 function clip2(s) {
   return s && s.length > SUMMARY_MAX ? `${s.slice(0, SUMMARY_MAX).trimEnd()}\u2026` : s;
 }
-function resolveUrl2(href, base) {
-  if (!base) return href;
+function resolveUrl2(href, base2) {
+  if (!base2) return href;
   try {
-    return new URL(href, base).href;
+    return new URL(href, base2).href;
   } catch {
     return href;
   }
@@ -6849,7 +7355,7 @@ function rootElement(xml) {
   }
 }
 var NOT_THE_PAGE = /* @__PURE__ */ new Set(["self", "edit", "replies", "enclosure", "via", "related", "license"]);
-function itemUrl(block, base) {
+function itemUrl(block, base2) {
   const links = openTags(block, "link").map(htmlAttributes);
   const hrefOf = (attrs) => {
     const href2 = attrs.get("href");
@@ -6858,9 +7364,9 @@ function itemUrl(block, base) {
   const rels = (attrs) => attrs.get("rel")?.toLowerCase().split(/\s+/) ?? [];
   const pick = links.find((a) => hrefOf(a) && (rels(a).length === 0 || rels(a).includes("alternate"))) ?? links.find((a) => hrefOf(a) && !rels(a).some((r) => NOT_THE_PAGE.has(r))) ?? links.find((a) => hrefOf(a));
   const href = pick && hrefOf(pick);
-  if (href) return resolveUrl2(href, base);
+  if (href) return resolveUrl2(href, base2);
   const text = tagText(block, "link");
-  if (text) return resolveUrl2(text, base);
+  if (text) return resolveUrl2(text, base2);
   const guid = elements(block, "guid", 1)[0];
   if (!guid || htmlAttributes(guid.attrs).get("ispermalink")?.toLowerCase() === "false") return void 0;
   const value = collapse2(xmlText(guid.inner));
@@ -6916,26 +7422,26 @@ function parseJsonFeed(text, baseUrl) {
   if (!doc || typeof doc !== "object" || Array.isArray(doc)) return void 0;
   const feed = doc;
   if (typeof feed.version !== "string" || !feed.version.startsWith("https://jsonfeed.org/version/")) return void 0;
-  const str3 = (v) => typeof v === "string" && v.trim() ? v.trim() : void 0;
+  const str4 = (v) => typeof v === "string" && v.trim() ? v.trim() : void 0;
   const items = [];
   for (const raw of Array.isArray(feed.items) ? feed.items : []) {
     if (!raw || typeof raw !== "object") continue;
     const entry = raw;
     const it = {};
-    const id = typeof entry.id === "number" ? String(entry.id) : str3(entry.id);
+    const id = typeof entry.id === "number" ? String(entry.id) : str4(entry.id);
     if (id) it.id = id;
-    const url = str3(entry.url) ?? str3(entry.external_url);
+    const url = str4(entry.url) ?? str4(entry.external_url);
     if (url) it.url = resolveUrl2(url, baseUrl);
-    const title2 = str3(entry.title);
+    const title2 = str4(entry.title);
     if (title2) it.title = title2;
-    const published = str3(entry.date_published) ?? str3(entry.date_modified);
+    const published = str4(entry.date_published) ?? str4(entry.date_modified);
     if (published) it.published = published;
-    const html = str3(entry.content_html);
-    const summary = str3(entry.summary) ?? clip2(str3(entry.content_text) ?? (html ? fragmentText2(html) : void 0));
+    const html = str4(entry.content_html);
+    const summary = str4(entry.summary) ?? clip2(str4(entry.content_text) ?? (html ? fragmentText2(html) : void 0));
     if (summary) it.summary = summary;
     if (it.title || it.url) items.push(it);
   }
-  const title = str3(feed.title);
+  const title = str4(feed.title);
   return { kind: "json", items, ...title ? { title } : {} };
 }
 var FEED_TYPES = /* @__PURE__ */ new Set(["application/rss+xml", "application/atom+xml", "application/feed+json"]);
@@ -7274,7 +7780,7 @@ async function searchViaKeyless(engine, query, opts = {}) {
   const localised = !!(opts.lang || opts.region);
   const kl = localised ? ddgRegion(opts.lang, opts.region) : "wt-wt";
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
-  const locale = localised ? { lang: baseLang(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : void 0;
+  const locale = localised ? { lang: baseLang2(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : void 0;
   const seen = /* @__PURE__ */ new Set();
   const hits = [];
   const deadline = opts.budgetMs === void 0 ? Number.POSITIVE_INFINITY : Date.now() + opts.budgetMs;
@@ -7330,7 +7836,7 @@ async function searchViaKeyless(engine, query, opts = {}) {
 
 // src/search.ts
 var SEARXNG_DEFAULT_BASE = "http://localhost:8888";
-var PROBE_TIMEOUT_MS2 = 2e3;
+var PROBE_TIMEOUT_MS3 = 2e3;
 var QUERY_TIMEOUT_MS = 8e3;
 function searxngBase(opts = {}) {
   const raw = (opts.searxng ?? env("SEARXNG") ?? SEARXNG_DEFAULT_BASE).trim();
@@ -7344,12 +7850,12 @@ var probeCache2 = new ProbeMemo();
 function resetSearxngProbeCache() {
   probeCache2.clear();
 }
-function probeSearxng(base, explicit = false) {
-  return probeCache2.get(`${base}|${explicit}`, async () => {
+function probeSearxng(base2, explicit = false) {
+  return probeCache2.get(`${base2}|${explicit}`, async () => {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS2);
+    const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS3);
     try {
-      const res = await fetch(`${base}/healthz`, { signal: ctrl.signal });
+      const res = await fetch(`${base2}/healthz`, { signal: ctrl.signal });
       const body = await res.text().catch(() => "");
       return explicit || res.ok && /^\s*ok\s*$/i.test(body);
     } catch {
@@ -7360,16 +7866,16 @@ function probeSearxng(base, explicit = false) {
   });
 }
 async function searchViaSearxng(query, opts = {}) {
-  const base = searxngBase(opts);
-  if (!base) return rungResult("searxng", "disabled", [], [`SearXNG disabled (--searxng off / ${envName("SEARXNG")}=off).`]);
+  const base2 = searxngBase(opts);
+  if (!base2) return rungResult("searxng", "disabled", [], [`SearXNG disabled (--searxng off / ${envName("SEARXNG")}=off).`]);
   const deadline = budgetDeadline(opts);
-  if (!await probeSearxng(base, searxngIsExplicit(opts))) {
+  if (!await probeSearxng(base2, searxngIsExplicit(opts))) {
     return rungResult(
       "searxng",
       "unreachable",
       [],
       [
-        searxngIsExplicit(opts) ? `SearXNG not reachable at ${base}.` : `SearXNG not running at ${base} \u2014 start it with \`${brand().cli} searxng up\` for local, keyless discovery.`
+        searxngIsExplicit(opts) ? `SearXNG not reachable at ${base2}.` : `SearXNG not running at ${base2} \u2014 start it with \`${brand().cli} searxng up\` for local, keyless discovery.`
       ]
     );
   }
@@ -7377,7 +7883,7 @@ async function searchViaSearxng(query, opts = {}) {
   const limit = Math.max(1, opts.limit ?? 10);
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
   const language = searxngLanguage(opts.lang, opts.region);
-  const root = `${base}/search?q=${encodeURIComponent(query)}&format=json&safesearch=1` + (language ? `&language=${encodeURIComponent(language)}` : "");
+  const root = `${base2}/search?q=${encodeURIComponent(query)}&format=json&safesearch=1` + (language ? `&language=${encodeURIComponent(language)}` : "");
   const notes = [];
   const seen = /* @__PURE__ */ new Set();
   const hits = [];
@@ -7574,16 +8080,16 @@ function closingNote(rungs, cancelled) {
 
 // src/stack.ts
 import { spawnSync as spawnSync3 } from "child_process";
-import { existsSync as existsSync4, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync4, statSync as statSync3, writeFileSync as writeFileSync3 } from "fs";
-import { dirname as dirname2, join as join4, resolve as resolve3 } from "path";
+import { existsSync as existsSync5, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync6, statSync as statSync3, writeFileSync as writeFileSync5 } from "fs";
+import { dirname as dirname2, join as join6, resolve as resolve3 } from "path";
 
 // src/cache.ts
-import { chmodSync, existsSync as existsSync3, lstatSync, mkdirSync as mkdirSync3, readFileSync as readFileSync3, readdirSync as readdirSync3, rmSync as rmSync3, statSync as statSync2 } from "fs";
-import { dirname, join as join3 } from "path";
-import { tmpdir as tmpdir3 } from "os";
+import { chmodSync, existsSync as existsSync4, lstatSync, mkdirSync as mkdirSync3, readFileSync as readFileSync5, readdirSync as readdirSync5, rmSync as rmSync4, statSync as statSync2 } from "fs";
+import { dirname, join as join5 } from "path";
+import { tmpdir as tmpdir4 } from "os";
 
 // src/no-write.ts
-import { mkdirSync as mkdirSync2, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
+import { mkdirSync as mkdirSync2, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "fs";
 var flagged = false;
 function setNoWrite(on) {
   flagged = on;
@@ -7610,7 +8116,7 @@ var tmpCounter = 0;
 function writeFileAtomic(path, content) {
   const tmp = `${path}.${process.pid}.${tmpCounter++}.tmp`;
   try {
-    writeFileSync2(tmp, content);
+    writeFileSync4(tmp, content);
     renameSync2(tmp, path);
   } catch (e) {
     try {
@@ -7631,7 +8137,7 @@ function resetNoWrite() {
 // src/cache.ts
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
-  return namedCacheDir() ?? join3(tmpdir3(), userScoped(brand().name), "cache");
+  return namedCacheDir() ?? join5(tmpdir4(), userScoped(brand().name), "cache");
 }
 var namedCacheDir = () => env("CACHE_DIR") ?? brand().cacheDir;
 function userScoped(name) {
@@ -7642,7 +8148,7 @@ function cachePath(url, acceptLanguage = "", extractor = "native", variant = "")
   const canon = canonicalizeUrl(url);
   const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
   const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
-  return join3(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
+  return join5(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
 }
 var TEXT_VARIANTS = ["", "consent", "full"];
 var MARKDOWN_VARIANTS = ["md", "consent-md", "full-md"];
@@ -7655,17 +8161,19 @@ function variantOf(opts) {
 var sameFormat = (variant) => MARKDOWN_VARIANTS.includes(variant) ? MARKDOWN_VARIANTS : TEXT_VARIANTS;
 var PDF_CACHE_NS = "pdf";
 var DOC_CACHE_NS = "doc";
+var VIDEO_CACHE_NS = "video";
 async function currentExtractor(opts, url) {
   if (looksLikePdfUrl(url)) return PDF_CACHE_NS;
+  if (youtubeVideoId(url)) return VIDEO_CACHE_NS;
   if (docFormatForUrl(url)) return DOC_CACHE_NS;
   if (opts.fullPage) return "native";
-  const base = firecrawlBase(opts);
-  return base && await probeFirecrawl(base, firecrawlIsExplicit(opts)) ? "firecrawl" : "native";
+  const base2 = firecrawlBase(opts);
+  return base2 && await probeFirecrawl(base2, firecrawlIsExplicit(opts)) ? "firecrawl" : "native";
 }
-var DOCUMENT_NAMESPACES = [PDF_CACHE_NS, DOC_CACHE_NS, "pdf-inspector", "pdftotext", "anydoc", "ocr"];
+var DOCUMENT_NAMESPACES = [PDF_CACHE_NS, DOC_CACHE_NS, VIDEO_CACHE_NS, "pdf-inspector", "pdftotext", "anydoc", "ocr"];
 var WRITTEN_NAMESPACES = ["native", "firecrawl", ...DOCUMENT_NAMESPACES];
 function namespaceFor(result, predicted) {
-  return result.documentType ?? (predicted === PDF_CACHE_NS || predicted === DOC_CACHE_NS ? predicted : result.extractor ?? "native");
+  return result.documentType ?? (predicted === PDF_CACHE_NS || predicted === DOC_CACHE_NS || predicted === VIDEO_CACHE_NS ? predicted : result.extractor ?? "native");
 }
 function readAnyNamespace(url, acceptLanguage, namespaces = WRITTEN_NAMESPACES, variants = PLAIN) {
   let best;
@@ -7715,11 +8223,11 @@ function entryPaths(url, acceptLanguage, extractor, variant) {
 function readCache(url, acceptLanguage = "", extractor = "native", variant = "") {
   if (!entryDir(false)) return void 0;
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
-  if (!existsSync3(meta)) return void 0;
+  if (!existsSync4(meta)) return void 0;
   try {
-    const entry = JSON.parse(readFileSync3(meta, "utf8"));
+    const entry = JSON.parse(readFileSync5(meta, "utf8"));
     if (typeof entry.cachedAt !== "number") return void 0;
-    const text = existsSync3(body) ? readFileSync3(body, "utf8") : entry.text;
+    const text = existsSync4(body) ? readFileSync5(body, "utf8") : entry.text;
     if (!text?.trim()) return void 0;
     return { ...entry, text };
   } catch {
@@ -7859,17 +8367,17 @@ function lookup(url, acceptLanguage, ns, variant) {
 var WRITER_TMP = /\.\d+\.\d+\.tmp$/;
 function ownFile(name) {
   const tmp = WRITER_TMP.exec(name);
-  const base = tmp ? name.slice(0, tmp.index) : name;
-  const ext = base.endsWith(".json") ? "json" : base.endsWith(".body") ? "body" : void 0;
+  const base2 = tmp ? name.slice(0, tmp.index) : name;
+  const ext = base2.endsWith(".json") ? "json" : base2.endsWith(".body") ? "body" : void 0;
   if (!ext) return void 0;
-  const stem = base.slice(0, -5);
+  const stem = base2.slice(0, -5);
   const dash = stem.lastIndexOf("-");
   if (dash < 1 || !/^[0-9a-f]{1,16}$/.test(stem.slice(dash + 1)) || !/^[\w.-]+$/.test(stem.slice(0, dash))) return void 0;
   return { kind: tmp ? "tmp" : ext, stem };
 }
 function readEntryMeta(abs) {
   try {
-    const entry = JSON.parse(readFileSync3(abs, "utf8"));
+    const entry = JSON.parse(readFileSync5(abs, "utf8"));
     return entry && typeof entry.cachedAt === "number" && typeof entry.finalUrl === "string" ? entry : void 0;
   } catch {
     return void 0;
@@ -7888,13 +8396,13 @@ function cacheStats(now = Date.now()) {
   const out = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
   const { refused } = openCacheDir(false);
   if (refused) return { ...out, refused };
-  if (!existsSync3(dir)) return out;
+  if (!existsSync4(dir)) return out;
   let oldest = Number.POSITIVE_INFINITY;
   let newest = 0;
-  for (const name of readdirSync3(dir)) {
+  for (const name of readdirSync5(dir)) {
     const own = ownFile(name);
     if (!own) continue;
-    const abs = join3(dir, name);
+    const abs = join5(dir, name);
     if (own.kind !== "json") {
       out.bytes += sizeOf(abs);
       continue;
@@ -7916,12 +8424,12 @@ function cacheStats(now = Date.now()) {
 }
 function cacheClean(all = false, now = Date.now()) {
   const dir = cacheDir();
-  if (isNoWrite() || !openCacheDir(false).dir || !existsSync3(dir)) return 0;
-  const names = readdirSync3(dir);
+  if (isNoWrite() || !openCacheDir(false).dir || !existsSync4(dir)) return 0;
+  const names = readdirSync5(dir);
   const present = new Set(names);
   const remove = (name) => {
     try {
-      rmSync3(join3(dir, name), { force: true });
+      rmSync4(join5(dir, name), { force: true });
       return true;
     } catch {
       return false;
@@ -7929,7 +8437,7 @@ function cacheClean(all = false, now = Date.now()) {
   };
   const abandoned = (name) => {
     try {
-      return all || now - statSync2(join3(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
+      return all || now - statSync2(join5(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
     } catch {
       return false;
     }
@@ -7939,7 +8447,7 @@ function cacheClean(all = false, now = Date.now()) {
     const own = ownFile(name);
     if (!own) continue;
     if (own.kind === "json") {
-      const entry = readEntryMeta(join3(dir, name));
+      const entry = readEntryMeta(join5(dir, name));
       if (!entry || !all && isCacheFresh(entry, now) || !remove(name)) continue;
       remove(`${own.stem}.body`);
       removed++;
@@ -8211,11 +8719,11 @@ function renderAsset(template) {
   return template.replaceAll("{{CLI}}", brand().cli);
 }
 function composeAssets() {
-  const base = join4(cacheDir(), "compose");
+  const base2 = join6(cacheDir(), "compose");
   return [
-    { path: join4(base, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
-    { path: join4(base, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
-    { path: join4(base, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
+    { path: join6(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
+    { path: join6(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
+    { path: join6(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
   ];
 }
 function ensureComposeMaterialized() {
@@ -8228,7 +8736,7 @@ function untrustedStack() {
   for (const a of assets) {
     let body;
     try {
-      body = readFileSync4(a.path, "utf8");
+      body = readFileSync6(a.path, "utf8");
     } catch {
     }
     if (body !== a.content) return `${a.path} does not hold the stack this binary ships, and could not be rewritten`;
@@ -8256,9 +8764,9 @@ function untrustedStack() {
 }
 function writeIfChanged(path, content) {
   try {
-    if (existsSync4(path) && readFileSync4(path, "utf8") === content) return;
+    if (existsSync5(path) && readFileSync6(path, "utf8") === content) return;
     mkdirSync4(dirname2(path), { recursive: true, mode: 448 });
-    writeFileSync3(path, content);
+    writeFileSync5(path, content);
   } catch {
   }
 }
@@ -8439,8 +8947,8 @@ function resetRunLocks() {
 }
 
 // src/run.ts
-import { join as join5 } from "path";
-import { readFileSync as readFileSync5 } from "fs";
+import { join as join7 } from "path";
+import { readFileSync as readFileSync7 } from "fs";
 function pad(n) {
   return String(n).padStart(2, "0");
 }
@@ -8452,16 +8960,16 @@ function shq(s) {
 }
 function readJsonSafe(path) {
   try {
-    return JSON.parse(readFileSync5(path, "utf8"));
+    return JSON.parse(readFileSync7(path, "utf8"));
   } catch {
     return void 0;
   }
 }
 function readManifest(dir, file = "manifest.json") {
-  return readJsonSafe(join5(dir, file));
+  return readJsonSafe(join7(dir, file));
 }
 function writeManifest(dir, value, file = "manifest.json") {
-  return writeArtifact(join5(dir, file), `${JSON.stringify(value, null, 2)}
+  return writeArtifact(join7(dir, file), `${JSON.stringify(value, null, 2)}
 `);
 }
 
@@ -8581,7 +9089,7 @@ function backOffHost(url, ms, now = Date.now()) {
 var LINK_TAG_RE = /<(a|area)(?=[\s/>])[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/gi;
 var INERT_ELEMENTS = ["script", "style", "template"];
 function linksFrom(html, baseUrl) {
-  const base = documentBaseUrl(html, baseUrl) ?? baseUrl;
+  const base2 = documentBaseUrl(html, baseUrl) ?? baseUrl;
   const hrefs = [];
   for (const m of dropElements(html, INERT_ELEMENTS, RAW_TEXT_ELEMENTS).matchAll(LINK_TAG_RE)) {
     const href = htmlAttributes(m[0]).get("href");
@@ -8593,7 +9101,7 @@ function linksFrom(html, baseUrl) {
     if (!raw || raw.startsWith("#")) continue;
     if (/^(mailto|tel|javascript|data):/i.test(raw)) continue;
     try {
-      const abs = new URL(raw, base);
+      const abs = new URL(raw, base2);
       if (abs.protocol !== "http:" && abs.protocol !== "https:") continue;
       abs.hash = "";
       const canon = canonicalizeUrl(abs.href);
@@ -8653,7 +9161,7 @@ function crawlConcurrency() {
 function whole(n, fallback, min) {
   return typeof n === "number" && !Number.isNaN(n) ? Math.max(min, Math.floor(n)) : fallback;
 }
-var seconds = (ms) => `${ms / 1e3} s`;
+var seconds2 = (ms) => `${ms / 1e3} s`;
 async function crawlSite(seed, opts = {}) {
   const maxPages = whole(opts.maxPages, 20, 1);
   const maxDepth = whole(opts.maxDepth, 2, 0);
@@ -8705,7 +9213,7 @@ async function crawlSite(seed, opts = {}) {
     if (!tooSlow.has(home)) {
       tooSlow.add(home);
       notes.push(
-        `${home} asks for a Crawl-delay of ${seconds(r.crawlDelayMs)} between requests \u2014 over the ${seconds(ceiling)} this crawl will wait (${envName("MAX_CRAWL_DELAY_MS")}), so none of its pages were fetched.`
+        `${home} asks for a Crawl-delay of ${seconds2(r.crawlDelayMs)} between requests \u2014 over the ${seconds2(ceiling)} this crawl will wait (${envName("MAX_CRAWL_DELAY_MS")}), so none of its pages were fetched.`
       );
     }
     return true;
@@ -8946,18 +9454,18 @@ var probed = /* @__PURE__ */ new Map();
 function resetOllamaProbe() {
   probed.clear();
 }
-async function probeOllama(base = ollamaBase()) {
-  const key = base.replace(/\/+$/, "");
+async function probeOllama(base2 = ollamaBase()) {
+  const key = base2.replace(/\/+$/, "");
   if (key.toLowerCase() === "off") return false;
   return cachedProbe(probed, key, async () => (await httpJson("GET", `${key}/api/tags`, void 0, { timeoutMs: 2e3, retries: 0 })).ok);
 }
 async function embed(texts, opts = {}) {
   const model = opts.model ?? embedModel();
   if (texts.length === 0) return { vectors: [], model };
-  const base = (opts.base ?? ollamaBase()).replace(/\/+$/, "");
-  if (base.toLowerCase() === "off") return { vectors: [], model, note: "embeddings are disabled (OLLAMA=off)." };
-  if (!await probeOllama(base)) {
-    return { vectors: [], model, note: `no embedding server at ${base} \u2014 \`${brand().cli} semantic up\` starts Ollama and pulls ${model}.` };
+  const base2 = (opts.base ?? ollamaBase()).replace(/\/+$/, "");
+  if (base2.toLowerCase() === "off") return { vectors: [], model, note: "embeddings are disabled (OLLAMA=off)." };
+  if (!await probeOllama(base2)) {
+    return { vectors: [], model, note: `no embedding server at ${base2} \u2014 \`${brand().cli} semantic up\` starts Ollama and pulls ${model}.` };
   }
   const batches = [];
   const width = embedBatch();
@@ -8966,11 +9474,11 @@ async function embed(texts, opts = {}) {
   let failed2 = false;
   const results = await mapLimit(batches, opts.concurrency ?? embedConcurrency(), async (batch) => {
     if (failed2) return void 0;
-    const r = await httpJson("POST", `${base}/api/embed`, { model, input: batch }, { timeoutMs: 6e4 });
+    const r = await httpJson("POST", `${base2}/api/embed`, { model, input: batch }, { timeoutMs: 6e4 });
     const got = r.ok ? r.data?.embeddings : void 0;
     if (!got || got.length !== batch.length) {
       failed2 = true;
-      note ??= embedFailure(base, model, r);
+      note ??= embedFailure(base2, model, r);
       return void 0;
     }
     return got;
@@ -8978,12 +9486,12 @@ async function embed(texts, opts = {}) {
   if (results.some((r) => r === void 0)) return { vectors: [], model, ...note ? { note } : {} };
   return { vectors: results.flat(), model };
 }
-function embedFailure(base, model, r) {
+function embedFailure(base2, model, r) {
   const said = typeof r.data?.error === "string" ? r.data.error : void 0;
   const why = r.error ?? (said ? `status ${r.status}: ${said}` : r.ok ? "the response held no vectors for this batch" : `status ${r.status}`);
   const missing = r.status === 404 || /not found/i.test(said ?? "");
   const hint = missing ? ` \u2014 \`ollama pull ${model}\`, or \`${brand().cli} semantic up\`, pulls it.` : ".";
-  return `embedding failed at ${base} (${why})${hint}`;
+  return `embedding failed at ${base2} (${why})${hint}`;
 }
 var PREFIXES = [
   { model: /nomic-embed/i, query: "search_query: ", doc: "search_document: " },
@@ -9033,22 +9541,22 @@ function normalize(v) {
 function qdrantBase() {
   return env("QDRANT") ?? "http://localhost:6333";
 }
-var clean = (base) => base.replace(/\/+$/, "");
+var clean2 = (base2) => base2.replace(/\/+$/, "");
 var probed2 = /* @__PURE__ */ new Map();
 function resetQdrantProbe() {
   probed2.clear();
 }
-async function probeQdrant(base = qdrantBase()) {
-  const key = clean(base);
+async function probeQdrant(base2 = qdrantBase()) {
+  const key = clean2(base2);
   if (key.toLowerCase() === "off") return false;
   return cachedProbe(probed2, key, async () => (await httpJson("GET", `${key}/collections`, void 0, { timeoutMs: 2e3, retries: 0 })).ok);
 }
 async function ensureCollection(name, size, opts = {}) {
-  const base = clean(opts.base ?? qdrantBase());
-  if (base.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
-  if (!await probeQdrant(base)) return { ok: false, note: unreachable(base) };
+  const base2 = clean2(opts.base ?? qdrantBase());
+  if (base2.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
+  if (!await probeQdrant(base2)) return { ok: false, note: unreachable(base2) };
   const distance = opts.distance ?? "Cosine";
-  const existing = await httpJson("GET", `${base}/collections/${encodeURIComponent(name)}`, void 0, { retries: 0 });
+  const existing = await httpJson("GET", `${base2}/collections/${encodeURIComponent(name)}`, void 0, { retries: 0 });
   if (existing.ok) {
     const have2 = existing.data?.result?.config?.params?.vectors;
     if (typeof have2?.size === "number" && have2.size !== size) {
@@ -9062,18 +9570,18 @@ async function ensureCollection(name, size, opts = {}) {
     }
     return { ok: true };
   }
-  const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}`, { vectors: { size, distance } });
-  return r.ok ? { ok: true } : { ok: false, note: `could not create collection "${name}" at ${base}: ${r.error ?? `status ${r.status}`}` };
+  const r = await httpJson("PUT", `${base2}/collections/${encodeURIComponent(name)}`, { vectors: { size, distance } });
+  return r.ok ? { ok: true } : { ok: false, note: `could not create collection "${name}" at ${base2}: ${r.error ?? `status ${r.status}`}` };
 }
 async function upsert(name, points, opts = {}) {
   if (points.length === 0) return { ok: true };
-  const base = clean(opts.base ?? qdrantBase());
-  if (base.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
-  if (!await probeQdrant(base)) return { ok: false, note: unreachable(base) };
+  const base2 = clean2(opts.base ?? qdrantBase());
+  if (base2.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
+  if (!await probeQdrant(base2)) return { ok: false, note: unreachable(base2) };
   const width = Math.max(1, envInt("QDRANT_UPSERT_BATCH", 256));
   for (let i = 0; i < points.length; i += width) {
     const chunk = points.slice(i, i + width);
-    const r = await httpJson("PUT", `${base}/collections/${encodeURIComponent(name)}/points?wait=true`, { points: chunk }, { timeoutMs: 6e4 });
+    const r = await httpJson("PUT", `${base2}/collections/${encodeURIComponent(name)}/points?wait=true`, { points: chunk }, { timeoutMs: 6e4 });
     if (!r.ok) {
       const which = points.length > width ? ` at points ${i + 1}\u2013${i + chunk.length} of ${points.length}` : "";
       return { ok: false, note: `upsert into "${name}" failed${which}: ${r.error ?? `status ${r.status}`}` };
@@ -9082,23 +9590,23 @@ async function upsert(name, points, opts = {}) {
   return { ok: true };
 }
 async function searchVectors(name, vector, opts = {}) {
-  const base = clean(opts.base ?? qdrantBase());
-  if (base.toLowerCase() === "off") return { hits: [], note: "the vector store is disabled (QDRANT=off)." };
-  if (!await probeQdrant(base)) return { hits: [], note: unreachable(base) };
+  const base2 = clean2(opts.base ?? qdrantBase());
+  if (base2.toLowerCase() === "off") return { hits: [], note: "the vector store is disabled (QDRANT=off)." };
+  if (!await probeQdrant(base2)) return { hits: [], note: unreachable(base2) };
   const body = { vector: [...vector], limit: opts.limit ?? 10, with_payload: true, ...opts.filter ? { filter: opts.filter } : {} };
-  const r = await httpJson("POST", `${base}/collections/${encodeURIComponent(name)}/points/search`, body);
+  const r = await httpJson("POST", `${base2}/collections/${encodeURIComponent(name)}/points/search`, body);
   if (!r.ok) return { hits: [], note: `search in "${name}" failed: ${r.error ?? `status ${r.status}`}` };
   const raw = r.data?.result ?? [];
   return { hits: raw.map((h) => ({ id: h.id, score: h.score, ...h.payload ? { payload: h.payload } : {} })) };
 }
 async function deleteCollection(name, opts = {}) {
-  const base = clean(opts.base ?? qdrantBase());
-  if (base.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
-  const r = await httpJson("DELETE", `${base}/collections/${encodeURIComponent(name)}`, void 0, { retries: 0 });
+  const base2 = clean2(opts.base ?? qdrantBase());
+  if (base2.toLowerCase() === "off") return { ok: false, note: "the vector store is disabled (QDRANT=off)." };
+  const r = await httpJson("DELETE", `${base2}/collections/${encodeURIComponent(name)}`, void 0, { retries: 0 });
   return r.ok ? { ok: true } : { ok: false, note: `could not delete "${name}": ${r.error ?? `status ${r.status}`}` };
 }
-function unreachable(base) {
-  return `no vector store at ${base} \u2014 \`${brand().cli} semantic up\` starts Qdrant.`;
+function unreachable(base2) {
+  return `no vector store at ${base2} \u2014 \`${brand().cli} semantic up\` starts Qdrant.`;
 }
 async function hybridSearch(question, docs, opts = {}) {
   if (docs.length === 0) return { hits: [] };
@@ -9402,11 +9910,11 @@ function extractNumerals(text, max = 8) {
 }
 
 // src/orchestrate.ts
-import { existsSync as existsSync5 } from "fs";
-import { join as join7, resolve as resolve4 } from "path";
+import { existsSync as existsSync6 } from "fs";
+import { join as join9, resolve as resolve4 } from "path";
 
 // src/orchestrate/templates.ts
-import { join as join6 } from "path";
+import { join as join8 } from "path";
 var WORKFLOW_FORBIDDEN = ["Date.now(", "Math.random(", "new Date("];
 function oneWriterFooter(runAbs, opts = {}) {
   const forbidden = opts.writingCommands?.length ? ` Do not run any engine command that writes (${opts.writingCommands.map((c) => `\`${c}\``).join(", ")}).` : "";
@@ -9417,7 +9925,7 @@ Return ONLY the structured output specified above. Do NOT write, edit, or delete
 
 One sanctioned exception: ${opts.sanctioned}` : ""}
 
-Exception for oversized prose: if a note is too large to return, write ONLY to \`${join6(runAbs, "orchestration", "out")}/<role>-<batch>.md\` \u2014 a file namespaced to you alone \u2014 and return its path.
+Exception for oversized prose: if a note is too large to return, write ONLY to \`${join8(runAbs, "orchestration", "out")}/<role>-<batch>.md\` \u2014 a file namespaced to you alone \u2014 and return its path.
 `;
 }
 var SMALL_WORKLIST = 3;
@@ -9442,7 +9950,7 @@ function assertWorkflowSafe(script, phaseName) {
 }
 function emitWorkflowScript(phase, emission, runAbs, engineAbs, smallWorklist, constants = {}) {
   const cli = brand().cli;
-  const scriptPath = join6(runAbs, "orchestration", `${phase.name}.workflow.mjs`);
+  const scriptPath = join8(runAbs, "orchestration", `${phase.name}.workflow.mjs`);
   const meta = { name: `${cli}-${phase.name}`, description: emission.description(phase.items), phases: [{ title: emission.title }] };
   const batches = phaseBatches(phase, emission, smallWorklist);
   const hint = emission.applyHint(runAbs, engineAbs, phase);
@@ -9522,7 +10030,7 @@ function runbookMd(phases, defs, runAbs, engineAbs, cli, preamble = [], smallWor
       const batches = phaseBatches(ph, emission, smallWorklist);
       const widest = batches.reduce((w, b) => Math.max(w, b.length), 0);
       lines.push(
-        `Fan out: \`Workflow({ scriptPath: "${join6(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
+        `Fan out: \`Workflow({ scriptPath: "${join8(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
         `(${batches.length} agent(s) of at most ${widest} item(s), contract \`agents/${emission.role}.md\`).`,
         ``,
         `Sequentially instead: play \`agents/${emission.role}.md\` yourself over ${shq(ph.ids.join(","))}.`,
@@ -9543,7 +10051,7 @@ var BATCH_SIZE = 8;
 function listPhases(runDir, engineAbs, defs) {
   const run = resolve4(runDir);
   return defs.map((def) => {
-    const worklist = join7(run, def.worklist);
+    const worklist = join9(run, def.worklist);
     const parsed = readJsonSafe(worklist);
     const ids = def.ids(parsed, run, engineAbs);
     const ready = ids !== void 0;
@@ -9560,7 +10068,7 @@ function listPhases(runDir, engineAbs, defs) {
 }
 function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
   const run = resolve4(runDir);
-  if (!existsSync5(run)) {
+  if (!existsSync6(run)) {
     return { exitCode: 2, written: [], notices: [], errors: [`run dir not found: ${run}`], phases: [] };
   }
   const phases = listPhases(run, engineAbs, defs);
@@ -9589,14 +10097,14 @@ function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
     }
     selected = [ph];
   }
-  const orchDir = join7(run, "orchestration");
-  const agentsDir = join7(orchDir, "agents");
-  ensureDir(join7(orchDir, "out"));
+  const orchDir = join9(run, "orchestration");
+  const agentsDir = join9(orchDir, "agents");
+  ensureDir(join9(orchDir, "out"));
   ensureDir(agentsDir);
   const written = [];
   const notices = [];
   for (const [name, content] of Object.entries(contracts(run, engineAbs, phases))) {
-    written.push(writeArtifact(join7(agentsDir, `${name}.md`), content));
+    written.push(writeArtifact(join9(agentsDir, `${name}.md`), content));
   }
   if (!opts.eco) {
     for (const ph of selected) {
@@ -9610,10 +10118,10 @@ function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
       if (ph.items <= floor) {
         notices.push(`phase "${ph.name}": only ${ph.items} item(s) \u2014 the sequential --eco path is equivalent and cheaper.`);
       }
-      written.push(writeArtifact(join7(orchDir, `${ph.name}.workflow.mjs`), emitWorkflowScript(ph, def, run, engineAbs, small, opts.constants)));
+      written.push(writeArtifact(join9(orchDir, `${ph.name}.workflow.mjs`), emitWorkflowScript(ph, def, run, engineAbs, small, opts.constants)));
     }
   }
-  written.push(writeArtifact(join7(orchDir, "RUNBOOK.md"), runbookMd(phases, defs, run, engineAbs, brand().cli, opts.runbookPreamble, small)));
+  written.push(writeArtifact(join9(orchDir, "RUNBOOK.md"), runbookMd(phases, defs, run, engineAbs, brand().cli, opts.runbookPreamble, small)));
   return { exitCode: 0, written, notices, errors: [], phases };
 }
 
@@ -9840,8 +10348,8 @@ function isOriginAllowed(origin, allowed = []) {
 }
 
 // src/mcp/resources.ts
-import { existsSync as existsSync6, readdirSync as readdirSync4, readFileSync as readFileSync6, realpathSync, statSync as statSync4 } from "fs";
-import { basename as basename3, dirname as dirname3, join as join8, relative, resolve as resolve5, sep } from "path";
+import { existsSync as existsSync7, readdirSync as readdirSync6, readFileSync as readFileSync8, realpathSync, statSync as statSync4 } from "fs";
+import { basename as basename3, dirname as dirname3, join as join10, relative, resolve as resolve5, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
@@ -9849,17 +10357,17 @@ function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname3(fileURLToPath(import.meta.url));
   const name = brand().name;
   const candidates = [resolve5(here, ".."), resolve5(here, "..", "skills", name), resolve5(here, "..", "..", "skills", name)];
-  return candidates.find((dir) => existsSync6(join8(dir, "SKILL.md")));
+  return candidates.find((dir) => existsSync7(join10(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
-  const refDir = join8(root, "references");
-  if (!existsSync6(refDir)) return out;
-  for (const file of readdirSync4(refDir).sort()) {
+  const refDir = join10(root, "references");
+  if (!existsSync7(refDir)) return out;
+  for (const file of readdirSync6(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join8("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
+    out.push(describe(root, join10("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
   }
   return out;
 }
@@ -9887,7 +10395,7 @@ function readResource(uri, moduleDir) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
   if (!statSync4(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
-  return { uri, mimeType: "text/markdown", text: readFileSync6(targetReal, "utf8") };
+  return { uri, mimeType: "text/markdown", text: readFileSync8(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
 };
@@ -9898,14 +10406,14 @@ function describe(root, rel, fallbackTitle) {
     title: fallbackTitle,
     mimeType: "text/markdown"
   };
-  const summary = firstProse(join8(root, rel));
+  const summary = firstProse(join10(root, rel));
   if (summary) decl.description = summary;
   return decl;
 }
 function firstProse(file) {
   let text;
   try {
-    text = readFileSync6(file, "utf8");
+    text = readFileSync8(file, "utf8");
   } catch {
     return void 0;
   }
@@ -10122,8 +10630,8 @@ function createServer(adapter, opts = {}) {
   };
 }
 function forRevision(decl, protocol) {
-  const { title, outputSchema, annotations, ...base } = decl;
-  const out = { ...base };
+  const { title, outputSchema, annotations, ...base2 } = decl;
+  const out = { ...base2 };
   if (protocol >= RICH_TOOLS_SINCE) {
     if (title !== void 0) out.title = title;
     if (outputSchema !== void 0) out.outputSchema = outputSchema;
@@ -10502,6 +11010,7 @@ export {
   TOKEN_RE2 as TOKEN_RE,
   ToolError,
   UsageError,
+  VIDEO_TRANSCRIBERS,
   WORKFLOW_FORBIDDEN,
   accentPattern,
   acceptLanguageHeader,
@@ -10518,9 +11027,10 @@ export {
   arxivIdFromUrl,
   assessExtractedText,
   assessPdfText,
+  assessTranscript,
   awaitHostSlot,
   backOffHost,
-  baseLang,
+  baseLang2 as baseLang,
   batchRefusal,
   bestExcerpt,
   bm25MatchedTerms,
@@ -10545,6 +11055,7 @@ export {
   charsetFromContentType,
   charsetFromHtml,
   citationTokensIn,
+  classifyYtdlpError,
   cleanInline,
   codeMask,
   collectCitations,
@@ -10577,6 +11088,7 @@ export {
   documentedFlags,
   doiFromUrl,
   domainOf,
+  downloadSubtitle,
   embed,
   embedModel,
   embedOne,
@@ -10585,6 +11097,7 @@ export {
   emitWorkflowScript,
   enabledDocExtractors,
   enabledExtractors,
+  enabledTranscribers,
   ensureClone,
   ensureCollection,
   ensureComposeMaterialized,
@@ -10620,6 +11133,7 @@ export {
   forgeAuthHeaders,
   forgeKind,
   forgeRef,
+  formatStamp,
   hammingDistance,
   hasChanged,
   have,
@@ -10665,6 +11179,7 @@ export {
   markedQuoteMask,
   matcherFromTokens,
   maxCrawlDelayMs,
+  mergeSegments,
   metaDescriptionOf,
   missingFromHelp,
   nearestHeading,
@@ -10693,6 +11208,7 @@ export {
   parseRetryAfter,
   parseRobots,
   parseSitemap,
+  parseVtt,
   pdfToText,
   pipedEnum,
   politeDelayMs,
@@ -10701,6 +11217,7 @@ export {
   probeOllama,
   probeQdrant,
   probeSearxng,
+  probeVideo,
   pubmedAbstractUrl,
   qdrantBase,
   rankedKeywords,
@@ -10732,6 +11249,7 @@ export {
   resetRobotsCache,
   resetRunLocks,
   resetSearxngProbeCache,
+  resetVideoLadderCache,
   resolvePackage,
   resolvePackageResult,
   resolveProvider,
@@ -10757,6 +11275,7 @@ export {
   searxngLanguage,
   setCacheMode,
   setNoWrite,
+  setVideoDeps,
   sh,
   shAsync,
   shq,
@@ -10777,14 +11296,22 @@ export {
   takeArtifacts,
   throttleReason,
   toBatches,
+  transcribeVideo,
+  transcriptMarkdown,
   uncitedIds,
   unitTexts,
   unknownEngines,
   upsert,
   urlDeclaresIdentity,
   validateArgs,
+  videoMetaFromInfo,
+  whisperBudgetLeft,
+  whisperModel,
   withRunLock,
   writeArtifact,
   writeFileAtomic,
-  writeManifest
+  writeManifest,
+  youtubeListKind,
+  youtubeVideoId,
+  ytdlpVersionAge
 };

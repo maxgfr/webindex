@@ -22,6 +22,8 @@ import { decodeLocal } from "./charset.js";
 import { ENGINE_VERSION } from "./version.js";
 import { DOC_EXTRACTORS, docFormatForUrl, extractDocument, enabledDocExtractors, sniffDocument } from "./doc.js";
 import { enabledExtractors, extractPdf, ocrBudgetLeft, ocrTools, PDF_EXTRACTORS } from "./pdf.js";
+import { enabledTranscribers, VIDEO_TRANSCRIBERS, whisperBudgetLeft, whisperModel, ytdlpVersionAge } from "./video.js";
+import { videoDeps } from "./video/ladder.js";
 import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./pdf/exec.js";
 import { enginesFromEnv } from "./pdf/ladder.js";
 import { npxCacheState } from "./pdf/npx.js";
@@ -161,7 +163,11 @@ COMMANDS
              (WEBINDEX_FETCH_CONCURRENCY), each printed under a "==> <url> <=="
              header in the order given, or as one --json array; a URL with
              nothing readable is named on stderr, and the run fails only when
-             every one of them did.
+             every one of them did. A YouTube video URL returns its transcript
+             as Markdown, one [mm:ss] stamp per paragraph and a heading per
+             chapter: manual subtitles, else the video's own auto-captions
+             (never a machine translation), else a local whisper transcription
+             — through yt-dlp, which has to be installed.
   extract    Same extraction, on a file already on disk (- reads stdin),
              recognised by its bytes when its name says otherwise. --full-page
              keeps the whole HTML page, navigation and consent banners included;
@@ -278,7 +284,8 @@ COMMANDS
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which
              variable). The npx rungs are checked against npm's cache, never
-             installed.
+             installed. The video rungs show yt-dlp's age, flagged past 60
+             days, and whether whisper has uvx and ffmpeg.
 
 ENVIRONMENT
   WEBINDEX_SEARXNG       SearXNG base URL, or "off"   (default http://localhost:8888)
@@ -297,6 +304,12 @@ ENVIRONMENT
   WEBINDEX_OCR_MAX       documents this process may OCR (default 3)
   WEBINDEX_OCR_LANG, WEBINDEX_OCR_TIMEOUT_MS
                          tesseract's language (default eng), one document's budget (300000)
+  WEBINDEX_VIDEO_ENGINES the transcript rungs to run, in order: a comma list of
+                         manual-subs|auto-subs|whisper, or "none"
+  WEBINDEX_WHISPER_MODEL, WEBINDEX_WHISPER_MAX, WEBINDEX_WHISPER_TIMEOUT_MS
+                         whisper's model (default small), videos one process may
+                         transcribe (3), one video's budget (1800000)
+  WEBINDEX_YTDLP_ARGS    extra yt-dlp flags on every call: browser cookies, a proxy
   WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
   WEBINDEX_QDRANT        vector store base URL, or "off"      (default http://localhost:6333)
   WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
@@ -430,6 +443,9 @@ const SPEC: CliSpec = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: 
 
 /** What `webindex skill` does. The last three are the repin workflow's steps (.github/workflows/skill-repin.yml). */
 const SKILL_ACTIONS = ["check", "bundle", "vendor", "copy", "doctor", "init", "repin", "finish", "recall"];
+
+/** A yt-dlp release older than this is flagged by doctor: YouTube breaks old ones. */
+const YTDLP_STALE_DAYS = 60;
 
 function fail(msg: string): never {
   process.stderr.write(`webindex: ${msg}\n`);
@@ -1055,6 +1071,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
           title: "Fetch a URL as clean text",
           description:
             "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR) and office documents (anydoc → Firecrawl → a built-in OOXML/OpenDocument reader), " +
+            "YouTube videos (a timestamped, chaptered transcript: manual subtitles → the video's own auto-captions → a local whisper transcription, which can take minutes for a long video with no subtitles), " +
             "and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text, then a trailer with the final URL after redirects, the page's canonical URL and title, any note, and which rung produced it — never raw bytes. " +
             "Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
           inputSchema: {
@@ -2463,7 +2480,7 @@ async function dispatch(argv: string[]): Promise<void> {
     // install: doctor must not download 10 MB to say what a run would do.
     const cacheState = (id: string, spec: string) =>
       (pdfRungs as string[]).includes(id) || (docRungs as string[]).includes(id) ? npxCacheState(spec) : undefined;
-    const [fc, sxUp, olUp, qdUp, inspectorCache, anydocCache, ocr] = await Promise.all([
+    const [fc, sxUp, olUp, qdUp, inspectorCache, anydocCache, ocr, ytdlp] = await Promise.all([
       base ? probeFirecrawl(base) : false,
       sx ? probeSearxng(sx, searxngIsExplicit()) : false,
       probeOllama(ol),
@@ -2471,8 +2488,15 @@ async function dispatch(argv: string[]): Promise<void> {
       cacheState("pdf-inspector", PDF_INSPECTOR_SPEC),
       cacheState("anydoc", ANYDOC_SPEC),
       ocrTools(),
+      ytdlpVersionAge(videoDeps().run),
     ]);
     const off = (s: string) => s.toLowerCase() === "off";
+    // yt-dlp breaks when YouTube changes and is fixed within days, so its age
+    // is the first thing to check when videos stop reading.
+    const ytdlpStale = (ytdlp?.ageDays ?? 0) > YTDLP_STALE_DAYS;
+    const ytdlpState = ytdlp
+      ? `yt-dlp ${ytdlp.version}${ytdlp.ageDays !== undefined ? ` (${ytdlp.ageDays} days old${ytdlpStale ? " — update it: `yt-dlp -U`, or your package manager" : ""})` : ""}`
+      : "";
     const npxRung = (state: Awaited<ReturnType<typeof npxCacheState>> | undefined) =>
       state === "cached"
         ? "installed (npx cache)"
@@ -2494,6 +2518,15 @@ async function dispatch(argv: string[]): Promise<void> {
           : `unavailable (copyable-pdf: ${ocr.copyablePdf ? "yes" : "no"}, tesseract: ${ocr.tesseract ? "yes" : "no"})`;
       }
       if (id === "builtin") return "built-in (OOXML and OpenDocument)";
+      if (id === "manual-subs" || id === "auto-subs") return ytdlp ? ytdlpState : "yt-dlp not installed";
+      if (id === "whisper") {
+        if (!ytdlp) return "yt-dlp not installed";
+        if (whisperBudgetLeft() <= 0) return `off (${envName("WHISPER_MAX")}=${env("WHISPER_MAX")})`;
+        const tools = { uvx: videoDeps().have("uvx"), ffmpeg: videoDeps().have("ffmpeg") };
+        return tools.uvx && tools.ffmpeg
+          ? `available (model ${whisperModel()})`
+          : `unavailable (uvx: ${tools.uvx ? "yes" : "no"}, ffmpeg: ${tools.ffmpeg ? "yes" : "no"})`;
+      }
       return "built-in";
     };
     // The ladder in the order it runs, then the rungs the environment switched
@@ -2510,6 +2543,7 @@ async function dispatch(argv: string[]): Promise<void> {
     };
     const pdf = rungRows(PDF_EXTRACTORS, pdfRungs, "PDF_ENGINE");
     const doc = rungRows(DOC_EXTRACTORS, docRungs, "DOC_ENGINE");
+    const video = rungRows(VIDEO_TRANSCRIBERS, enabledTranscribers(), "VIDEO_ENGINES");
     if (argBool(args, "json")) {
       const service = (base: string | null | undefined, up: boolean, extra: Record<string, string> = {}) =>
         base ? { state: up ? "answering" : "unreachable", base, ...(up ? extra : {}) } : { state: "disabled" };
@@ -2522,7 +2556,8 @@ async function dispatch(argv: string[]): Promise<void> {
             ollama: service(off(ol) ? undefined : ol, olUp, { model: embedModel() }),
             qdrant: service(off(qd) ? undefined : qd, qdUp),
           },
-          rungs: { pdf, doc },
+          rungs: { pdf, doc, video },
+          ytdlp: ytdlp ? { ...ytdlp, stale: ytdlpStale } : { state: "not installed" },
         }),
       );
       return;
@@ -2537,6 +2572,7 @@ async function dispatch(argv: string[]): Promise<void> {
       `  qdrant      ${off(qd) ? "disabled" : qdUp ? `answering at ${qd}` : `not reachable at ${qd} — \`webindex semantic up\` starts it`}`,
       ...rungLines("pdf rungs", pdf),
       ...rungLines("doc rungs", doc),
+      ...rungLines("video rungs", video),
       "",
       "  Everything optional degrades to a note — nothing above is required, and none of it needs a key.",
     ];

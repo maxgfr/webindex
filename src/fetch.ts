@@ -30,6 +30,7 @@ import { extractDocument, docFormatForUrl, docFormatForContentType, sniffDocumen
 // is where the extraction seam lives. Safe because neither module calls into the
 // other at module-evaluation time — only from inside function bodies.
 import { scrapeViaFirecrawl } from "./firecrawl.js";
+import { transcribeVideo, transcriptMarkdown, youtubeVideoId } from "./video.js";
 
 // ── Tunables ────────────────────────────────────────────────────────────────
 //
@@ -1070,7 +1071,10 @@ const DOC_FETCH_OPTS = { accept: "*/*", binary: true, maxBytes: 16 * 1024 * 1024
 // reported so a dossier can say which tool read a paper, but PDFs and office
 // documents each share a single cache namespace — see the note on
 // currentExtractor in src/cache.ts.
-export type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext" | "anydoc" | "ocr" | "builtin";
+//
+// `manual-subs`, `auto-subs` and `whisper` are the video transcript rungs
+// (src/video/ladder.ts); a YouTube video never reaches the other extractors.
+export type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext" | "anydoc" | "ocr" | "builtin" | "manual-subs" | "auto-subs" | "whisper";
 
 export interface ExtractResult {
   text: string;
@@ -1081,7 +1085,7 @@ export interface ExtractResult {
   status: number;
   extractor?: ExtractorId;
   /** Document type detected from the URL or response, independent of converter. */
-  documentType?: "pdf" | "doc";
+  documentType?: "pdf" | "doc" | "video";
   canonical?: string; // the url the page declares for itself (rel=canonical / og:url)
   /**
    * The page's own one-line summary (`<meta name=description>`, else
@@ -1182,6 +1186,24 @@ export async function fetchAndExtract(
 ): Promise<ExtractResult> {
   const cancelled = (): ExtractResult => ({ text: "", finalUrl: url, status: 0, note: `Fetching ${url} was cancelled.` });
   if (opts.signal?.aborted) return cancelled();
+  // A YouTube video is read by the transcript ladder, not as a page: the watch
+  // page's HTML holds no transcript at all. The URL is approved first, as any
+  // other would be, since yt-dlp is about to fetch it.
+  if (youtubeVideoId(url)) {
+    if (opts.authorizeUrl && !(await opts.authorizeUrl(url))) return { text: "", finalUrl: url, status: 0, note: `Refused ${url}: not a public address.` };
+    const t = await transcribeVideo(url, { lang: opts.acceptLanguage?.split(/[,;]/)[0]?.trim() || undefined, signal: opts.signal });
+    if (opts.signal?.aborted) return cancelled();
+    const text = transcriptMarkdown(t);
+    return {
+      text,
+      title: t.meta?.title,
+      finalUrl: t.meta?.webpageUrl ?? url,
+      status: text ? 200 : 0,
+      documentType: "video",
+      ...(t.via ? { extractor: t.via } : {}),
+      ...(t.reason ? { note: `No transcript for ${url}: ${t.reason}.` } : {}),
+    };
+  }
   const wantsPdf = looksLikePdfUrl(url);
   // An office document skips the HTML Firecrawl path for the same reason a PDF
   // does (see looksLikePdfUrl above): handing it to Firecrawl first would
