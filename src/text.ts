@@ -711,7 +711,15 @@ export function slugify(input: string, opts: { max?: number; fallback?: string }
     .replace(/\.git$/, "");
   const s = trimDashes(normalized.replace(/[^a-z0-9._-]+/g, "-"));
   if (!/[\u0080-\uffff]/.test(normalized) && s.length <= max) return s || (opts.fallback ?? "");
-  const tag = fnv1a64(normalized).toString(16).padStart(16, "0").slice(0, 8);
-  const head = s.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");
+  // The hash is of the input as the slug reads it — case and the separators
+  // around words ignored, letters kept — so "Düsseldorf" and "DÜSSELDORF "
+  // share a key, as "Hebden Bridge" and "HEBDEN BRIDGE " always did, while
+  // 项目 and 文档 stay apart.
+  const canonical = trimDashes(normalized.replace(/[^\p{L}\p{N}._-]+/gu, "-"));
+  const tag = fnv1a64(canonical).toString(16).padStart(16, "0").slice(0, 8);
+  // Runs of dashes left where letters were dropped are folded — only for an
+  // input that had such letters: every ASCII slug keeps its historical name.
+  const readable = /[\u0080-\uffff]/.test(normalized) ? s.replace(/-{2,}/g, "-") : s;
+  const head = readable.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");
   return head ? `${head}-${tag}` : tag;
 }

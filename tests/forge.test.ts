@@ -249,6 +249,17 @@ describe("slugify", () => {
     expect(slugify("github.com/expressjs/express")).toBe("github.com-expressjs-express");
     expect(slugify("What is the C++ memory model?")).toBe("what-is-the-c-memory-model");
   });
+
+  it("gives one key to spellings of a non-ASCII name that differ only in case and separators", () => {
+    // "Düsseldorf" and "DÜSSELDORF " had two keys once the hash suffix
+    // appeared, while "Hebden Bridge" and "HEBDEN BRIDGE " always shared one:
+    // a consumer keying its snapshots by place name lost them.
+    expect(slugify("Düsseldorf")).toBe(slugify("DÜSSELDORF "));
+    expect(slugify("Saint-Étienne")).toBe(slugify("saint étienne"));
+    expect(slugify("Hebden Bridge")).toBe(slugify("HEBDEN BRIDGE "));
+    expect(slugify("Düsseldorf")).not.toBe(slugify("Dusseldorf"));
+    expect(slugify("项目")).not.toBe(slugify("文档"));
+  });
 });
 
 describe("forge routing", () => {
