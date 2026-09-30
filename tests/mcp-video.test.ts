@@ -37,6 +37,7 @@ const LISTING = {
     { _type: "url", ie_key: "Youtube", id: "bbbbbbbbbbb", title: "Giraffes explained", duration: 60 },
     { _type: "url", ie_key: "Youtube", id: "ccccccccccc", title: "A private one", duration: 60 },
     { _type: "playlist", id: "UCnotavideo", title: "a tab" },
+    { _type: "url", ie_key: "YoutubeTab", id: "PLsomething", title: "Playlists", url: "https://www.youtube.com/playlist?list=PLsomething" },
     { _type: "url", ie_key: "Youtube", id: "aaaaaaaaaaa", title: "Elephants at the zoo, again", duration: 60 },
   ],
 };
@@ -183,6 +184,13 @@ describe("the MCP video tools", () => {
     await expect(guarded.callTool("webindex_video_fetch", { url: "https://example.com/talk" })).rejects.toThrow("a video on a host this server reads");
     await expect(guarded.callTool("webindex_video_list", { url: "https://vimeo.com/showcase/123" })).rejects.toThrow("YouTube playlist or channel");
     expect(calls).toEqual([]);
+  });
+
+  it("without a policy, takes a YouTube list that also names a video", async () => {
+    const r = JSON.parse(
+      (await webindexAdapter().callTool("webindex_video_list", { url: "https://www.youtube.com/watch?v=aaaaaaaaaaa&list=PLx", limit: 1 })).text ?? "",
+    );
+    expect(r.videos[0].label).toBe("V1");
   });
 
   it("keeps a relative dir under the video root, never the server's working directory", async () => {

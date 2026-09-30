@@ -154,6 +154,9 @@ const DOCUMENT_NAMESPACES: CacheNamespace[] = [PDF_CACHE_NS, DOC_CACHE_NS, VIDEO
 const WRITTEN_NAMESPACES: CacheNamespace[] = ["native", "firecrawl", ...DOCUMENT_NAMESPACES];
 
 function namespaceFor(result: Extract, predicted: CacheNamespace): CacheNamespace {
+  // A video host's page read as a page (no video on it) is a page: filed where
+  // pages are, with its format and read mode, not under the video namespace.
+  if (predicted === VIDEO_CACHE_NS && result.documentType !== "video") return result.extractor ?? "native";
   return (
     result.documentType ??
     (predicted === PDF_CACHE_NS || predicted === DOC_CACHE_NS || predicted === VIDEO_CACHE_NS ? predicted : (result.extractor ?? "native"))
@@ -552,6 +555,8 @@ export async function cachedFetchAndExtract(
 // failed on, which is still the best this page has.
 function lookup(url: string, acceptLanguage: string, ns: CacheNamespace, variant: CacheVariant): CacheEntry | undefined {
   const best = readAnyNamespace(url, acceptLanguage, [...new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
+  // ...and found there again, in its own variant.
+  if (ns === VIDEO_CACHE_NS && !best) return readCache(url, acceptLanguage, "native", variant);
   if (ns !== "firecrawl") return best;
   const fallback = readCache(url, acceptLanguage, "native", variant);
   return fallback?.fallbackFrom === "firecrawl" && (!best || fallback.cachedAt > best.cachedAt) ? fallback : best;

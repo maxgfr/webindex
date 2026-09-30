@@ -88,6 +88,11 @@ describe("parseVtt", () => {
     ]);
   });
 
+  it("reads SRT with trailing spaces, dotted milliseconds and positioning codes", () => {
+    const srt = "1  \n00:00:01.500 --> 00:00:03.000\n{\\an8}Top of the screen\n";
+    expect(parseVtt(srt)).toEqual([{ start: 1.5, end: 3, text: "Top of the screen" }]);
+  });
+
   it("returns nothing for something that is not WebVTT", () => {
     expect(parseVtt("")).toEqual([]);
     expect(parseVtt("<html>blocked</html>")).toEqual([]);

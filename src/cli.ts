@@ -1130,7 +1130,12 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
   // the public-address check's sight, so an arbitrary page is not handed to it.
   const videoUrl = async (raw: unknown, what: "video" | "list"): Promise<string> => {
     const url = String(raw ?? "");
-    const ok = what === "video" ? videoSource(url, { anySite: !guarded }) : guarded ? youtubeListKind(url) : /^https?:\/\//i.test(url) && !knownVideo(url);
+    const ok =
+      what === "video"
+        ? videoSource(url, { anySite: !guarded })
+        : guarded
+          ? youtubeListKind(url)
+          : youtubeListKind(url) || (/^https?:\/\//i.test(url) && !knownVideo(url));
     if (!ok) {
       throw new ToolError(
         what === "video"
@@ -1422,7 +1427,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
           title: "Read a video, and keep it",
           description:
             "Read a video — YouTube, Vimeo, Dailymotion or any page yt-dlp reads (only the known video hosts under this server's public-only policy) — into a run directory and return its transcript as Markdown: a header (title, channel, date, duration, which track), a heading per chapter, and a [mm:ss] stamp on every paragraph — cite by stamp. " +
-            "Manual subtitles first, then the video's own auto-captions, then a local whisper transcription (minutes for a long video). The run is kept: a second call, and webindex_video_search, read it without touching YouTube.",
+            "Manual subtitles first, then the video's own auto-captions, then a local whisper transcription (minutes for a long video). The run is kept: a second call, and webindex_video_search, read it without touching the site.",
           inputSchema: {
             type: "object",
             properties: {
@@ -1769,7 +1774,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
         if (!(effort in FRAME_EFFORT)) throw new ToolError("`effort` must be low, med or high.");
         const run = await fetchVideoRun(url, videoDir(args.dir), { signal, knownHostsOnly: guarded });
         if (!run.ok) throw new ToolError(`No transcript for ${url}: ${run.reason}.`);
-        const r = await extractFrames(run.dir, { effort: effort as FrameEffort, signal });
+        const r = await extractFrames(run.dir, { effort: effort as FrameEffort, signal, url, knownHostsOnly: guarded });
         if (!r.ok) throw new ToolError(r.reason);
         const frames = r.frames.map((f) => ({ image: join(run.dir, f.file), stamp: f.stamp, chapter: f.chapter, kind: f.kind, said: f.text }));
         return { text: JSON.stringify({ markdown: r.markdown, candidates: r.candidates, duplicates: r.duplicates, frames }, null, 2) };

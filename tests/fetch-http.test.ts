@@ -1251,7 +1251,24 @@ describe("fetchAndExtract on a YouTube video", () => {
     const r = await fetchAndExtract("https://x.com/someone/status/1");
     expect(r.documentType).toBeUndefined();
     expect(r.text).toContain("Just words in this post");
-    expect(r.note).toContain("holds no video yt-dlp can read; read as a page.");
+    expect(r.note).toContain("(no video at this URL (yt-dlp found none)); read as a page.");
+  });
+
+  it("reads a post as a page when yt-dlp is missing or wants a login, but keeps a pure video host's reason", async () => {
+    installFetchMock(
+      routes([["x.com/someone/status/2", { body: "<html><body><article><p>Another post with enough words to be kept as text.</p></article></body></html>" }]]),
+    );
+    setVideoDeps({ run: async () => ({ ok: false, status: 127, stdout: "", stderr: "", missing: true }), have: () => true });
+    const r = await fetchAndExtract("https://x.com/someone/status/2");
+    expect(r.text).toContain("Another post");
+    expect(r.note).toContain("install yt-dlp");
+    setVideoDeps({
+      run: async () => ({ ok: false, status: 1, stdout: "", stderr: "ERROR: [vimeo] 1: The web client only works when logged-in." }),
+      have: () => true,
+    });
+    const vimeo = await fetchAndExtract("https://vimeo.com/76979871");
+    expect(vimeo).toMatchObject({ text: "", documentType: "video" });
+    expect(vimeo.note).toContain("log in");
   });
 
   it("asks authorizeUrl before yt-dlp runs", async () => {

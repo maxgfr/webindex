@@ -75,6 +75,26 @@ describe("cache on a YouTube video", () => {
     expect(http).not.toHaveBeenCalled();
   });
 
+  it("files a video host's page, read as a page, with its format — not under the video namespace", async () => {
+    const POST = "https://x.com/someone/status/3";
+    installFetchMock(() => ({
+      body: "<html><body><article><h1>Title</h1><p>A post with <a href='/x'>a link</a> and enough words to keep.</p></article></body></html>",
+    }));
+    setVideoDeps({
+      run: async () => ({ ok: false, status: 1, stdout: "", stderr: "ERROR: [twitter] 3: No video could be found in this tweet" }),
+      have: () => true,
+    });
+    const text = await cachedFetchAndExtract(POST, {}, true, 1000);
+    expect(text.text).toContain("A post with");
+    const md = await cachedFetchAndExtract(POST, { format: "markdown" }, true, 1500);
+    // The Markdown read is not served the plain-text copy.
+    expect(md.cached).toBeUndefined();
+    expect(md.text).toContain("[a link](https://x.com/x)");
+    const again = await cachedFetchAndExtract(POST, { format: "markdown" }, true, 2000);
+    expect(again.cached).toBe(true);
+    expect(again.text).toBe(md.text);
+  });
+
   it("never caches a video it could not read", async () => {
     installFetchMock(() => ({ status: 500, body: "" }));
     setVideoDeps({ run: async () => ({ ok: false, status: 1, stdout: "", stderr: "ERROR: [youtube] x: Private video" }), have: () => true });

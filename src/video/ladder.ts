@@ -162,7 +162,7 @@ type RungOutcome = { segments: VideoSegment[]; track?: string } | { failure: str
 async function subtitleRung(auto: boolean, meta: VideoMeta, info: string, opts: VideoLadderOptions, deps: VideoDeps): Promise<RungOutcome> {
   const track = auto ? pickAutoTrack(meta) : pickManualTrack(meta, opts.lang);
   if (!track) return { failure: auto ? "no auto-captions in the video's language" : "no manual subtitles", noTrack: true };
-  const got = await downloadSubtitle(info, track, auto, deps.run, opts.signal);
+  const got = await downloadSubtitle(info, track, auto, deps.run, opts.signal, opts.knownHostsOnly);
   if ("error" in got) return { failure: `${auto ? "auto-captions" : "subtitles"} (${track}): ${got.error}` };
   // Only an auto track rolls; a manual one that repeats a line means it.
   return { segments: mergeSegments(parseVtt(got.vtt, { rolling: auto }), chapterStarts(meta)), track };
@@ -172,7 +172,7 @@ async function whisperRung(meta: VideoMeta, info: string, opts: VideoLadderOptio
   const missing = ["uvx", "ffmpeg"].filter((c) => !deps.have(c));
   if (missing.length) return { failure: "whisper needs uvx and ffmpeg", unavailable: true };
   if (whisperBudgetLeft() <= 0) return { failure: `this run's whisper budget is spent (raise ${envName("WHISPER_MAX")})` };
-  const r = await whisperTranscribe(info, meta.language, deps.run, opts.signal);
+  const r = await whisperTranscribe(info, meta.language, deps.run, opts.signal, opts.knownHostsOnly);
   if ("segments" in r) return { segments: mergeSegments(r.segments, chapterStarts(meta)) };
   if ("declined" in r) return { failure: `this run's whisper budget is spent (raise ${envName("WHISPER_MAX")})` };
   return { failure: r.failed, unavailable: r.unavailable };
@@ -203,7 +203,7 @@ export async function transcribeVideo(url: string, opts: VideoLadderOptions = {}
   const rungs = enabledTranscribers(opts.engines);
   if (!rungs.length) return none(`every transcript rung is switched off (${envName("VIDEO_ENGINES")})`);
 
-  const probe = opts.probed ?? (await probeVideo(source.url, deps.run, opts.signal));
+  const probe = opts.probed ?? (await probeVideo(source.url, deps.run, opts.signal, opts.knownHostsOnly));
   if ("error" in probe) return none(probe.error);
   const { meta, info } = probe;
   // A stream on air has no end to transcribe, and whisper would record it

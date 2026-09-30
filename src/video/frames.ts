@@ -21,9 +21,9 @@ export const FRAME_EFFORT = { low: 20, med: 50, high: 100 } as const;
 export type FrameEffort = keyof typeof FRAME_EFFORT;
 
 const SCENE_THRESHOLD = 0.3;
-// 720p at most, and never a DRM-protected format: some sites (Vimeo) list one
-// first, and ffmpeg can read nothing from it.
-export const VIDEO_FORMAT = "bv*[height<=720][has_drm!=?true]/b[height<=720][has_drm!=?true]/bv*[has_drm!=?true]/b[has_drm!=?true]";
+// 720p at most. yt-dlp already leaves out formats it knows to be under DRM;
+// one it only discovers when downloading (Vimeo's) is reported as such.
+export const VIDEO_FORMAT = "bv*[height<=720]/b[height<=720]/bv*/b";
 const FRAMES_TIMEOUT_MS = 30 * 60_000;
 // A video with (almost) no scene change and no chapters — a talking head, a
 // slide deck with fades — still gets this many frames, evenly spaced.
@@ -86,7 +86,15 @@ const fileStamp = (t: number) => formatStamp(t).replace(/:/g, "-");
  */
 export async function extractFrames(
   runDir: string,
-  opts: { effort?: FrameEffort; deps?: Partial<VideoDeps>; signal?: AbortSignal } = {},
+  opts: {
+    effort?: FrameEffort;
+    deps?: Partial<VideoDeps>;
+    signal?: AbortSignal;
+    /** The video's URL, as the caller approved it; else the page the run was read from. */
+    url?: string;
+    /** Only the known video hosts, and never yt-dlp's catch-all extractor (an MCP policy). */
+    knownHostsOnly?: boolean;
+  } = {},
 ): Promise<FramesResult> {
   // JPEGs are binary files, and the no-write gate collects text: there is
   // nothing honest to print instead of them. Said first, since under it no
@@ -98,15 +106,18 @@ export async function extractFrames(
   if (!deps.have("ffmpeg")) return { ok: false, reason: "frames need ffmpeg" };
   const effort = opts.effort ?? "med";
   const { meta, segments } = run;
-  // The page the transcript was read from, as the ladder would hand it to yt-dlp.
-  const source = videoSource(meta.webpageUrl, { anySite: true });
-  if (!source) return { ok: false, reason: `the run in ${runDir} names no page to download the video from` };
+  // The page to download from: the caller's own URL when it has one — a
+  // meta.json on disk is not something to trust with a download — else the
+  // page the run was read from, under the same rules as any other URL.
+  const source = videoSource(opts.url ?? meta.webpageUrl, { anySite: !opts.knownHostsOnly });
+  if (!source) return { ok: false, reason: `the run in ${runDir} names no page this may download the video from` };
   const duration = meta.duration ?? 0;
 
   return withTempDir("frames", async (tmp) => {
     const dl = await downloadMedia(["-f", VIDEO_FORMAT, "--no-playlist"], tmp, "video", {
       run: deps.run,
       url: source.url,
+      knownOnly: opts.knownHostsOnly,
       timeoutMs: FRAMES_TIMEOUT_MS,
       signal: opts.signal,
     });

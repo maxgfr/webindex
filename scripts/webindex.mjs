@@ -2314,6 +2314,72 @@ async function extractDocument(bytes, fmt, opts = {}) {
   return { text: "", reason: reason || "no document converter available" };
 }
 
+// src/url.ts
+var TRACKING_PARAMS = /^(utm_|fbclid$|gclid$|gclsrc$|dclid$|msclkid$|yclid$|twclid$|ttclid$|li_fat_id$|mkt_tok$|_gl$|mc_|ref_src$|ref_url$|spm$|_hsenc$|_hsmi$|igshid$|igsh$)/i;
+var SHARE_SI_HOSTS = /(^|\.)(youtube\.com|youtu\.be|spotify\.com)$/;
+function canonicalizeUrl(raw) {
+  try {
+    const u = new URL(raw.trim());
+    const proto = u.protocol.toLowerCase();
+    const host = u.hostname.toLowerCase().replace(/^www\./, "");
+    let port = u.port;
+    if (proto === "http:" && port === "80" || proto === "https:" && port === "443") port = "";
+    const path = u.pathname.replace(/\/+$/, "");
+    const keep = [];
+    const shareSi = SHARE_SI_HOSTS.test(host);
+    for (const [k, v] of u.searchParams) {
+      if (!TRACKING_PARAMS.test(k) && !(shareSi && k === "si")) keep.push([k, v]);
+    }
+    keep.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+    const search2 = keep.length ? "?" + keep.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&") : "";
+    return `${proto}//${host}${port ? ":" + port : ""}${path}${search2}`.replace(/\/$/, "");
+  } catch {
+    return raw.trim().replace(/#.*$/, "").replace(/\/$/, "");
+  }
+}
+function domainOf(raw) {
+  try {
+    const u = new URL(raw);
+    if (u.protocol === "file:") return LOCAL_FILE_DOMAIN;
+    return u.hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+var LOCAL_FILE_DOMAIN = "local file";
+var FNV_OFFSET_HI = 3421674724;
+var FNV_OFFSET_LO = 2216829733;
+var FNV_PRIME_LOW = 435;
+var laneHi = 0;
+var laneLo = 0;
+function fnvMix(s) {
+  let hi = laneHi;
+  let lo = laneLo;
+  for (let i = 0; i < s.length; i++) {
+    lo = (lo ^ s.charCodeAt(i)) >>> 0;
+    const bP = (lo & 65535) * FNV_PRIME_LOW;
+    const aP = (lo >>> 16) * FNV_PRIME_LOW + (bP >>> 16);
+    const carry = aP >>> 16;
+    hi = carry + Math.imul(hi, FNV_PRIME_LOW) + (lo << 8) >>> 0;
+    lo = ((aP & 65535) << 16 | bP & 65535) >>> 0;
+  }
+  laneHi = hi;
+  laneLo = lo;
+}
+function fnv1a64(s) {
+  laneHi = FNV_OFFSET_HI;
+  laneLo = FNV_OFFSET_LO;
+  fnvMix(s);
+  return BigInt(laneHi) << 32n | BigInt(laneLo);
+}
+function fnv1a64Words(pieces, out) {
+  laneHi = FNV_OFFSET_HI;
+  laneLo = FNV_OFFSET_LO;
+  for (const p of pieces) fnvMix(p);
+  out[0] = laneHi;
+  out[1] = laneLo;
+}
+
 // src/video/url.ts
 var VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 var YOUTUBE_HOSTS = ["youtube.com", "youtube-nocookie.com"];
@@ -2375,19 +2441,48 @@ var HOSTS = [
     video: /^\/([a-z0-9]{5,})\/?$/i,
     canonical: (m) => ({ id: m[1], url: `https://www.dailymotion.com/video/${m[1]}` })
   },
-  { site: "twitch", domains: ["twitch.tv"], video: /^\/(?:videos\/\d+|[^/]+\/clip\/[^/]+)\/?$/ },
-  { site: "ted", domains: ["ted.com"], video: /^\/talks\/[^/]+\/?$/ },
-  { site: "loom", domains: ["loom.com"], video: /^\/(?:share|embed)\/[0-9a-f]{16,}\/?$/ },
-  { site: "tiktok", domains: ["tiktok.com"], video: /^\/@[^/]+\/video\/\d+\/?$/ },
+  // Where the URL names the video, its key does too: a video read once is
+  // reused with no yt-dlp call at all, as on YouTube.
+  {
+    site: "twitch",
+    domains: ["twitch.tv"],
+    video: /^\/videos\/(\d+)\/?$/,
+    canonical: (m) => ({ id: m[1], url: `https://www.twitch.tv/videos/${m[1]}` })
+  },
+  { site: "twitch", domains: ["twitch.tv"], video: /^\/[^/]+\/clip\/[^/]+\/?$/ },
+  {
+    site: "ted",
+    domains: ["ted.com"],
+    video: /^\/talks\/([\w-]+)\/?$/,
+    canonical: (m) => ({ id: m[1], url: `https://www.ted.com/talks/${m[1]}` })
+  },
+  {
+    site: "loom",
+    domains: ["loom.com"],
+    video: /^\/(?:share|embed)\/([0-9a-f]{16,})\/?$/,
+    canonical: (m) => ({ id: m[1], url: `https://www.loom.com/share/${m[1]}` })
+  },
+  {
+    site: "tiktok",
+    domains: ["tiktok.com"],
+    video: /^\/(@[^/]+)\/video\/(\d+)\/?$/,
+    canonical: (m) => ({ id: m[2], url: `https://www.tiktok.com/${m[1]}/video/${m[2]}` })
+  },
   { site: "instagram", domains: ["instagram.com"], video: /^\/(?:reel|reels|tv)\/[\w-]+\/?$/ },
   { site: "facebook", domains: ["facebook.com"], video: /^\/(?:[^/]+\/videos\/[^/]+|reel\/\d+)\/?$/ },
   { site: "facebook", domains: ["fb.watch"], video: /^\/[\w-]{6,}\/?$/ },
-  { site: "x", domains: ["x.com", "twitter.com"], video: /^\/[^/]+\/status\/\d+(?:\/video\/\d)?\/?$/ },
+  {
+    site: "x",
+    domains: ["x.com", "twitter.com"],
+    video: /^\/([^/]+)\/status\/(\d+)(?:\/video\/\d)?\/?$/,
+    canonical: (m) => ({ id: m[2], url: `https://x.com/${m[1]}/status/${m[2]}` })
+  },
   { site: "bilibili", domains: ["bilibili.com"], video: /^\/video\/(?:BV\w+|av\d+)\/?$/i },
   { site: "rumble", domains: ["rumble.com"], video: /^\/v[\w-]+\.html$/ },
   { site: "peertube", domains: ["framatube.org", "tilvids.com"], video: /^\/(?:w|videos\/watch)\/[\w-]+\/?$/ }
 ];
 var safeKey = (site, id) => `${site}-${id}`.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
+var shortHash = (text) => fnv1a64(text).toString(16).padStart(16, "0").slice(0, 8);
 function knownVideo(url) {
   const id = youtubeVideoId(url);
   if (id) return { site: "youtube", url: `https://www.youtube.com/watch?v=${id}`, key: id };
@@ -2411,8 +2506,11 @@ function videoSource(url, opts = {}) {
   const u = parse(url);
   return u ? { site: "web", url: u.toString() } : void 0;
 }
-function videoRunKey(site, id) {
-  return site === "youtube" && VIDEO_ID.test(id) ? id : safeKey(site, id);
+function videoRunKey(site, id, pageUrl) {
+  if (site === "youtube" && VIDEO_ID.test(id)) return id;
+  const key = safeKey(site, id);
+  const altered = key !== `${site}-${id}`;
+  return site === "web" || altered ? `${key.slice(0, 110)}-${shortHash(pageUrl ?? id)}` : key;
 }
 function videoUrlAt(webpageUrl, seconds3) {
   const t = Math.max(0, Math.floor(seconds3));
@@ -2527,17 +2625,38 @@ function ytdlpExtraArgs() {
   return (env("YTDLP_ARGS") ?? "").split(/\s+/).filter(Boolean);
 }
 function runYtdlp(args, opts = {}) {
-  const argv = [...args, ...ytdlpExtraArgs(), ...opts.url ? ["--", opts.url] : []];
+  const strict = opts.knownOnly ? ["--use-extractors", "default,-generic"] : [];
+  const argv = [...strict, ...args, ...ytdlpExtraArgs(), ...opts.url ? ["--", opts.url] : []];
   return (opts.run ?? defaultVideoRunner)("yt-dlp", argv, { timeoutMs: opts.timeoutMs ?? PROBE_TIMEOUT_MS, signal: opts.signal });
 }
 var str = (v) => typeof v === "string" && v.trim() ? v.trim() : void 0;
 var httpUrl = (v) => v && /^https?:\/\//i.test(v) ? v : void 0;
 var num = (v) => typeof v === "number" && Number.isFinite(v) ? v : void 0;
-function videoMetaFromInfo(info) {
+function siteOf(extractor) {
+  const e = extractor.toLowerCase().split(":")[0].replace(/[^a-z0-9]/g, "");
+  const known = [
+    ["youtube", "youtube"],
+    ["vimeo", "vimeo"],
+    ["dailymotion", "dailymotion"],
+    ["twitch", "twitch"],
+    ["twitter", "x"],
+    ["ted", "ted"],
+    ["loom", "loom"],
+    ["tiktok", "tiktok"],
+    ["instagram", "instagram"],
+    ["facebook", "facebook"],
+    ["bilibili", "bilibili"],
+    ["rumble", "rumble"],
+    ["peertube", "peertube"]
+  ];
+  if (!e || e === "generic") return "web";
+  return known.find(([prefix]) => e.startsWith(prefix))?.[1] ?? e;
+}
+function videoMetaFromInfo(info, sourceUrl) {
   const id = str(info.id);
   if (!id) return void 0;
-  const extractor = (str(info.extractor_key) ?? str(info.extractor) ?? "youtube").toLowerCase().split(":")[0];
-  const site = extractor === "generic" ? "web" : extractor.replace(/[^a-z0-9]/g, "") || "web";
+  const site = siteOf(str(info.extractor_key) ?? str(info.extractor) ?? "youtube");
+  const webpageUrl = httpUrl(str(info.webpage_url)) ?? httpUrl(str(info.original_url)) ?? httpUrl(sourceUrl) ?? `https://www.youtube.com/watch?v=${id}`;
   const date = str(info.upload_date);
   const tracks = (v) => v && typeof v === "object" ? Object.keys(v).filter((k) => k !== "live_chat") : [];
   const duration = num(info.duration);
@@ -2549,7 +2668,7 @@ function videoMetaFromInfo(info) {
   return {
     id,
     site,
-    key: videoRunKey(site, id),
+    key: videoRunKey(site, id, webpageUrl),
     title: str(info.title) ?? id,
     channel: str(info.channel) ?? str(info.uploader),
     uploadDate: date && /^\d{8}$/.test(date) ? `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}` : void 0,
@@ -2558,20 +2677,20 @@ function videoMetaFromInfo(info) {
     chapters,
     subtitles: tracks(info.subtitles),
     autoCaptions: tracks(info.automatic_captions),
-    webpageUrl: httpUrl(str(info.webpage_url)) ?? httpUrl(str(info.original_url)) ?? `https://www.youtube.com/watch?v=${id}`,
+    webpageUrl,
     ...info.live_status === "is_live" || info.is_live === true ? { live: "live" } : {},
     ...info.live_status === "is_upcoming" ? { live: "upcoming" } : {}
   };
 }
-async function probeVideo(url, run = defaultVideoRunner, signal) {
-  const r = await runYtdlp(["-J", "--skip-download", "--no-playlist", "--no-warnings"], { run, url, signal });
+async function probeVideo(url, run = defaultVideoRunner, signal, knownOnly = false) {
+  const r = await runYtdlp(["-J", "--skip-download", "--no-playlist", "--no-warnings"], { run, url, signal, knownOnly });
   if (signal?.aborted) return { error: "cancelled" };
   if (r.missing) return { error: "install yt-dlp (https://github.com/yt-dlp/yt-dlp) to read videos", missing: true };
   if (!r.ok) return { error: classifyYtdlpError(r.stderr) };
   try {
     const parsed = JSON.parse(r.stdout);
     if (parsed?._type === "playlist") return { error: "a list of videos, not one \u2014 read it with `video list`" };
-    const meta = parsed ? videoMetaFromInfo(parsed) : void 0;
+    const meta = parsed ? videoMetaFromInfo(parsed, url) : void 0;
     return meta ? { meta, info: r.stdout } : { error: "no video at this URL (yt-dlp found none)" };
   } catch {
     return { error: "yt-dlp returned unreadable metadata" };
@@ -2605,7 +2724,7 @@ async function withTempDir(label, fn) {
     rmSync2(dir, { recursive: true, force: true });
   }
 }
-async function downloadSubtitle(info, lang, auto, run = defaultVideoRunner, signal) {
+async function downloadSubtitle(info, lang, auto, run = defaultVideoRunner, signal, knownOnly = false) {
   return withTempDir("subs", async (dir) => {
     const infoPath = join8(dir, "info.json");
     writeFileSync4(infoPath, info);
@@ -2623,7 +2742,7 @@ async function downloadSubtitle(info, lang, auto, run = defaultVideoRunner, sign
         "-o",
         join8(dir, "sub.%(ext)s")
       ],
-      { run, timeoutMs: SUBTITLE_TIMEOUT_MS, signal }
+      { run, timeoutMs: SUBTITLE_TIMEOUT_MS, signal, knownOnly }
     );
     const file = readdirSync2(dir).find((f) => f.endsWith(".vtt")) ?? readdirSync2(dir).find((f) => f.endsWith(".srt"));
     if (file) return { vtt: readFileSync8(join8(dir, file), "utf8") };
@@ -2644,7 +2763,13 @@ async function downloadMedia(args, dir, stem, opts) {
   let stderr = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     const timeoutMs = typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
-    const r = await runYtdlp([...args, "--no-warnings", "-o", join8(dir, `${stem}.%(ext)s`)], { run: opts.run, url: opts.url, timeoutMs, signal: opts.signal });
+    const r = await runYtdlp([...args, "--no-warnings", "-o", join8(dir, `${stem}.%(ext)s`)], {
+      run: opts.run,
+      url: opts.url,
+      timeoutMs,
+      signal: opts.signal,
+      knownOnly: opts.knownOnly
+    });
     if (opts.signal?.aborted) return { error: "cancelled" };
     if (r.status === 124) return { error: "timed out", timedOut: true };
     const file = r.ok ? readdirSync2(dir).find((f) => f.startsWith(`${stem}.`) && !/\.part(?:-Frag\d+)?$|\.ytdl$|\.f\d+\.\w+$/.test(f)) : void 0;
@@ -2671,10 +2796,10 @@ function decode(text) {
     return ENTITIES2[name.toLowerCase()] ?? whole2;
   });
 }
-var clean = (line) => decode(line.replace(/<[^>]*>/g, "")).replace(/\s+/g, " ").trim();
+var clean = (line) => decode(line.replace(/<[^>]*>/g, "").replace(/\{\\[^}]*\}/g, "")).replace(/\s+/g, " ").trim();
 function parseVtt(src, opts = {}) {
   const text = src.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
-  const srt = !/^WEBVTT/.test(text) && /^\s*\d+\n\d{2}:\d{2}:\d{2},\d{3}\s+-->/.test(text);
+  const srt = !/^WEBVTT/.test(text) && /^\s*\d+[ \t]*\n\d{2}:\d{2}:\d{2}[,.]\d{3}\s+-->/.test(text);
   if (!/^WEBVTT/.test(text) && !srt) return [];
   const rolling = opts.rolling ?? (/<\d{2}:\d{2}[:.]\d/.test(text) || /<c>/.test(text));
   const out = [];
@@ -2740,7 +2865,7 @@ var DEFAULT_MAX = 3;
 var DEFAULT_TIMEOUT_MS2 = 30 * 6e4;
 var DEFAULT_MODEL = "small";
 var PYAV_PIN = "av<18";
-var AUDIO_FORMAT = "bestaudio[has_drm!=?true]/best[has_drm!=?true]";
+var AUDIO_FORMAT = "bestaudio/best";
 var spent2 = 0;
 function whisperBudgetLeft() {
   return Math.max(0, envInt("WHISPER_MAX", DEFAULT_MAX) - spent2);
@@ -2764,7 +2889,7 @@ function whisperLanguage(tag) {
   const base2 = tag?.toLowerCase().split(/[-_]/)[0];
   return base2 && /^[a-z]{2,3}$/.test(base2) ? base2 : void 0;
 }
-async function whisperTranscribe(info, language, run, signal) {
+async function whisperTranscribe(info, language, run, signal, knownOnly = false) {
   if (whisperBudgetLeft() <= 0) return { declined: "budget" };
   spent2++;
   const refund = (r) => {
@@ -2778,7 +2903,7 @@ async function whisperTranscribe(info, language, run, signal) {
   return withTempDir("whisper", async (dir) => {
     const infoPath = join9(dir, "info.json");
     writeFileSync5(infoPath, info);
-    const dl = await downloadMedia(["--load-info-json", infoPath, "-f", AUDIO_FORMAT], dir, "audio", { run, timeoutMs: left, signal });
+    const dl = await downloadMedia(["--load-info-json", infoPath, "-f", AUDIO_FORMAT], dir, "audio", { run, timeoutMs: left, signal, knownOnly });
     if (signal?.aborted) return refund({ failed: "whisper: cancelled" });
     if ("timedOut" in dl) return timedOut;
     if ("error" in dl) return refund({ failed: `whisper: the audio download failed (${dl.error})` });
@@ -2859,7 +2984,7 @@ var chapterStarts = (meta) => meta.chapters.map((c) => c.start);
 async function subtitleRung(auto, meta, info, opts, deps) {
   const track = auto ? pickAutoTrack(meta) : pickManualTrack(meta, opts.lang);
   if (!track) return { failure: auto ? "no auto-captions in the video's language" : "no manual subtitles", noTrack: true };
-  const got = await downloadSubtitle(info, track, auto, deps.run, opts.signal);
+  const got = await downloadSubtitle(info, track, auto, deps.run, opts.signal, opts.knownHostsOnly);
   if ("error" in got) return { failure: `${auto ? "auto-captions" : "subtitles"} (${track}): ${got.error}` };
   return { segments: mergeSegments(parseVtt(got.vtt, { rolling: auto }), chapterStarts(meta)), track };
 }
@@ -2867,7 +2992,7 @@ async function whisperRung(meta, info, opts, deps) {
   const missing = ["uvx", "ffmpeg"].filter((c) => !deps.have(c));
   if (missing.length) return { failure: "whisper needs uvx and ffmpeg", unavailable: true };
   if (whisperBudgetLeft() <= 0) return { failure: `this run's whisper budget is spent (raise ${envName("WHISPER_MAX")})` };
-  const r = await whisperTranscribe(info, meta.language, deps.run, opts.signal);
+  const r = await whisperTranscribe(info, meta.language, deps.run, opts.signal, opts.knownHostsOnly);
   if ("segments" in r) return { segments: mergeSegments(r.segments, chapterStarts(meta)) };
   if ("declined" in r) return { failure: `this run's whisper budget is spent (raise ${envName("WHISPER_MAX")})` };
   return { failure: r.failed, unavailable: r.unavailable };
@@ -2886,7 +3011,7 @@ async function transcribeVideo(url, opts = {}) {
   const deps = videoDeps(opts.deps);
   const rungs = enabledTranscribers(opts.engines);
   if (!rungs.length) return none(`every transcript rung is switched off (${envName("VIDEO_ENGINES")})`);
-  const probe = opts.probed ?? await probeVideo(source2.url, deps.run, opts.signal);
+  const probe = opts.probed ?? await probeVideo(source2.url, deps.run, opts.signal, opts.knownHostsOnly);
   if ("error" in probe) return none(probe.error);
   const { meta, info } = probe;
   if (meta.live) return none(`live stream ${meta.live === "live" ? "in progress" : "not started yet"} \u2014 read it once it has ended`, meta);
@@ -2983,72 +3108,6 @@ function transcriptMarkdown(t) {
 import { existsSync as existsSync3, readdirSync as readdirSync3, readFileSync as readFileSync10, statSync } from "fs";
 import { tmpdir as tmpdir3 } from "os";
 import { join as join10, resolve } from "path";
-
-// src/url.ts
-var TRACKING_PARAMS = /^(utm_|fbclid$|gclid$|gclsrc$|dclid$|msclkid$|yclid$|twclid$|ttclid$|li_fat_id$|mkt_tok$|_gl$|mc_|ref_src$|ref_url$|spm$|_hsenc$|_hsmi$|igshid$|igsh$)/i;
-var SHARE_SI_HOSTS = /(^|\.)(youtube\.com|youtu\.be|spotify\.com)$/;
-function canonicalizeUrl(raw) {
-  try {
-    const u = new URL(raw.trim());
-    const proto = u.protocol.toLowerCase();
-    const host = u.hostname.toLowerCase().replace(/^www\./, "");
-    let port = u.port;
-    if (proto === "http:" && port === "80" || proto === "https:" && port === "443") port = "";
-    const path = u.pathname.replace(/\/+$/, "");
-    const keep = [];
-    const shareSi = SHARE_SI_HOSTS.test(host);
-    for (const [k, v] of u.searchParams) {
-      if (!TRACKING_PARAMS.test(k) && !(shareSi && k === "si")) keep.push([k, v]);
-    }
-    keep.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-    const search2 = keep.length ? "?" + keep.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&") : "";
-    return `${proto}//${host}${port ? ":" + port : ""}${path}${search2}`.replace(/\/$/, "");
-  } catch {
-    return raw.trim().replace(/#.*$/, "").replace(/\/$/, "");
-  }
-}
-function domainOf(raw) {
-  try {
-    const u = new URL(raw);
-    if (u.protocol === "file:") return LOCAL_FILE_DOMAIN;
-    return u.hostname.toLowerCase().replace(/^www\./, "");
-  } catch {
-    return "";
-  }
-}
-var LOCAL_FILE_DOMAIN = "local file";
-var FNV_OFFSET_HI = 3421674724;
-var FNV_OFFSET_LO = 2216829733;
-var FNV_PRIME_LOW = 435;
-var laneHi = 0;
-var laneLo = 0;
-function fnvMix(s) {
-  let hi = laneHi;
-  let lo = laneLo;
-  for (let i = 0; i < s.length; i++) {
-    lo = (lo ^ s.charCodeAt(i)) >>> 0;
-    const bP = (lo & 65535) * FNV_PRIME_LOW;
-    const aP = (lo >>> 16) * FNV_PRIME_LOW + (bP >>> 16);
-    const carry = aP >>> 16;
-    hi = carry + Math.imul(hi, FNV_PRIME_LOW) + (lo << 8) >>> 0;
-    lo = ((aP & 65535) << 16 | bP & 65535) >>> 0;
-  }
-  laneHi = hi;
-  laneLo = lo;
-}
-function fnv1a64(s) {
-  laneHi = FNV_OFFSET_HI;
-  laneLo = FNV_OFFSET_LO;
-  fnvMix(s);
-  return BigInt(laneHi) << 32n | BigInt(laneLo);
-}
-function fnv1a64Words(pieces, out) {
-  laneHi = FNV_OFFSET_HI;
-  laneLo = FNV_OFFSET_LO;
-  for (const p of pieces) fnvMix(p);
-  out[0] = laneHi;
-  out[1] = laneLo;
-}
 
 // src/text.ts
 function escapeRegExp(s) {
@@ -3754,14 +3813,14 @@ async function fetchVideoRun(url, root, opts = {}) {
   }
   let probed3;
   if (!source2.key) {
-    const probe = await probeVideo(source2.url, videoDeps(opts.deps).run, opts.signal);
+    const probe = await probeVideo(source2.url, videoDeps(opts.deps).run, opts.signal, opts.knownHostsOnly);
     if ("error" in probe) return { ok: false, reason: probe.error };
     const reused = kept(probe.meta.key ?? probe.meta.id);
     if (reused) return reused;
     probed3 = probe;
   }
   const t = await transcribeVideo(url, { ...opts, ...probed3 ? { probed: probed3 } : {} });
-  const id = t.meta?.key ?? source2.key ?? t.meta?.id;
+  const id = source2.key ?? t.meta?.key ?? t.meta?.id;
   if (!t.via || !t.meta || !id) return { ok: false, ...id ? { id } : {}, reason: t.reason ?? "no transcript" };
   const dir = join10(root, id);
   const transcriptPath = join10(dir, "TRANSCRIPT.md");
@@ -3935,7 +3994,7 @@ function dhashStream(raw) {
 // src/video/frames.ts
 var FRAME_EFFORT = { low: 20, med: 50, high: 100 };
 var SCENE_THRESHOLD = 0.3;
-var VIDEO_FORMAT = "bv*[height<=720][has_drm!=?true]/b[height<=720][has_drm!=?true]/bv*[has_drm!=?true]/b[has_drm!=?true]";
+var VIDEO_FORMAT = "bv*[height<=720]/b[height<=720]/bv*/b";
 var FRAMES_TIMEOUT_MS = 30 * 6e4;
 var MIN_FRAMES = 3;
 var INTERVAL_FRAMES = 10;
@@ -3974,13 +4033,14 @@ async function extractFrames(runDir, opts = {}) {
   if (!deps.have("ffmpeg")) return { ok: false, reason: "frames need ffmpeg" };
   const effort = opts.effort ?? "med";
   const { meta, segments } = run;
-  const source2 = videoSource(meta.webpageUrl, { anySite: true });
-  if (!source2) return { ok: false, reason: `the run in ${runDir} names no page to download the video from` };
+  const source2 = videoSource(opts.url ?? meta.webpageUrl, { anySite: !opts.knownHostsOnly });
+  if (!source2) return { ok: false, reason: `the run in ${runDir} names no page this may download the video from` };
   const duration = meta.duration ?? 0;
   return withTempDir("frames", async (tmp) => {
     const dl = await downloadMedia(["-f", VIDEO_FORMAT, "--no-playlist"], tmp, "video", {
       run: deps.run,
       url: source2.url,
+      knownOnly: opts.knownHostsOnly,
       timeoutMs: FRAMES_TIMEOUT_MS,
       signal: opts.signal
     });
@@ -4109,7 +4169,8 @@ async function listVideos(url, opts = {}) {
     run: videoDeps(opts.deps).run,
     url: listingUrl(url),
     timeoutMs: LIST_TIMEOUT_MS,
-    signal: opts.signal
+    signal: opts.signal,
+    knownOnly: opts.knownHostsOnly
   });
   if (r.missing) return { error: "install yt-dlp (https://github.com/yt-dlp/yt-dlp) to read videos" };
   if (!r.ok) return { error: classifyYtdlpError(r.stderr) };
@@ -4117,17 +4178,18 @@ async function listVideos(url, opts = {}) {
     const info = JSON.parse(r.stdout);
     const videos = (info.entries ?? []).flatMap((e) => {
       const id = typeof e.id === "string" ? e.id : "";
-      if (!id || e._type === "playlist") return [];
+      const ie = typeof e.ie_key === "string" ? e.ie_key : "";
+      if (!id || e._type === "playlist" || /tab|playlist|channel|user|album|showcase/i.test(ie)) return [];
       const title = typeof e.title === "string" ? e.title : id;
       const duration = typeof e.duration === "number" ? { duration: e.duration } : {};
-      if (e.ie_key === "Youtube" || e.ie_key === void 0 && youtubeListKind(url)) {
+      if (youtubeListKind(url)) {
         const watch = `https://www.youtube.com/watch?v=${id}`;
-        return youtubeVideoId(watch) ? [{ id, key: id, title, ...duration, url: watch }] : [];
+        return (ie === "" || ie === "Youtube") && youtubeVideoId(watch) ? [{ id, key: id, title, ...duration, url: watch }] : [];
       }
       const entryUrl = [e.url, e.webpage_url].find((v) => typeof v === "string" && /^https?:\/\//i.test(v));
-      if (!entryUrl) return [];
+      if (!entryUrl || opts.knownHostsOnly && !knownVideo(entryUrl)) return [];
       const known = knownVideo(entryUrl);
-      return [{ id, ...known?.key ? { key: known.key } : {}, title, ...duration, url: entryUrl }];
+      return [{ id, ...known?.key ? { key: known.key } : {}, title, ...duration, url: known?.url ?? entryUrl }];
     });
     const unique = videos.filter((v, i) => videos.findIndex((w) => w.url === v.url) === i);
     return { ...info.title ? { title: info.title } : {}, videos: unique.slice(0, limit) };
@@ -5999,6 +6061,7 @@ function looksLikePdfUrl(url) {
 }
 var PDF_FETCH_OPTS = { accept: "application/pdf,*/*", binary: true, maxBytes: 16 * 1024 * 1024 };
 var DOC_FETCH_OPTS = { accept: "*/*", binary: true, maxBytes: 16 * 1024 * 1024 };
+var PURE_VIDEO_HOSTS = /* @__PURE__ */ new Set(["youtube", "vimeo", "dailymotion"]);
 async function fetchAndExtract(url, opts = {}) {
   const cancelled = () => ({ text: "", finalUrl: url, status: 0, note: `Fetching ${url} was cancelled.` });
   if (opts.signal?.aborted) return cancelled();
@@ -6012,9 +6075,9 @@ async function fetchAndExtract(url, opts = {}) {
     });
     if (opts.signal?.aborted) return cancelled();
     const text = transcriptMarkdown(t);
-    if (!text && video.site !== "youtube" && /no video at this URL|a list of videos/.test(t.reason ?? "")) {
+    if (!text && !PURE_VIDEO_HOSTS.has(video.site)) {
       const page = await fetchAndExtract(url, { ...opts, video: false });
-      return { ...page, note: [`${url} holds no video yt-dlp can read; read as a page.`, page.note].filter(Boolean).join(" ") };
+      return { ...page, note: [`No video read at ${url} (${t.reason ?? "no transcript"}); read as a page.`, page.note].filter(Boolean).join(" ") };
     }
     return {
       text,
@@ -6300,6 +6363,7 @@ async function currentExtractor(opts, url) {
 var DOCUMENT_NAMESPACES = [PDF_CACHE_NS, DOC_CACHE_NS, VIDEO_CACHE_NS, "pdf-inspector", "pdftotext", "anydoc", "ocr"];
 var WRITTEN_NAMESPACES = ["native", "firecrawl", ...DOCUMENT_NAMESPACES];
 function namespaceFor(result, predicted) {
+  if (predicted === VIDEO_CACHE_NS && result.documentType !== "video") return result.extractor ?? "native";
   return result.documentType ?? (predicted === PDF_CACHE_NS || predicted === DOC_CACHE_NS || predicted === VIDEO_CACHE_NS ? predicted : result.extractor ?? "native");
 }
 function readAnyNamespace(url, acceptLanguage, namespaces = WRITTEN_NAMESPACES, variants = PLAIN) {
@@ -6481,6 +6545,7 @@ async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date
 }
 function lookup(url, acceptLanguage, ns, variant) {
   const best = readAnyNamespace(url, acceptLanguage, [.../* @__PURE__ */ new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
+  if (ns === VIDEO_CACHE_NS && !best) return readCache(url, acceptLanguage, "native", variant);
   if (ns !== "firecrawl") return best;
   const fallback = readCache(url, acceptLanguage, "native", variant);
   return fallback?.fallbackFrom === "firecrawl" && (!best || fallback.cachedAt > best.cachedAt) ? fallback : best;
@@ -11680,7 +11745,7 @@ function webindexAdapter(policy = {}) {
   };
   const videoUrl = async (raw, what) => {
     const url = String(raw ?? "");
-    const ok = what === "video" ? videoSource(url, { anySite: !guarded }) : guarded ? youtubeListKind(url) : /^https?:\/\//i.test(url) && !knownVideo(url);
+    const ok = what === "video" ? videoSource(url, { anySite: !guarded }) : guarded ? youtubeListKind(url) : youtubeListKind(url) || /^https?:\/\//i.test(url) && !knownVideo(url);
     if (!ok) {
       throw new ToolError(
         what === "video" ? guarded ? "`url` must be a video on a host this server reads (YouTube, Vimeo, Dailymotion, Twitch, TED, Loom, TikTok\u2026)." : "`url` must be an http(s) URL of a video." : guarded ? "`url` must be a YouTube playlist or channel URL." : "`url` must be the http(s) URL of a playlist or channel."
@@ -11921,7 +11986,7 @@ function webindexAdapter(policy = {}) {
       {
         name: "webindex_video_fetch",
         title: "Read a video, and keep it",
-        description: "Read a video \u2014 YouTube, Vimeo, Dailymotion or any page yt-dlp reads (only the known video hosts under this server's public-only policy) \u2014 into a run directory and return its transcript as Markdown: a header (title, channel, date, duration, which track), a heading per chapter, and a [mm:ss] stamp on every paragraph \u2014 cite by stamp. Manual subtitles first, then the video's own auto-captions, then a local whisper transcription (minutes for a long video). The run is kept: a second call, and webindex_video_search, read it without touching YouTube.",
+        description: "Read a video \u2014 YouTube, Vimeo, Dailymotion or any page yt-dlp reads (only the known video hosts under this server's public-only policy) \u2014 into a run directory and return its transcript as Markdown: a header (title, channel, date, duration, which track), a heading per chapter, and a [mm:ss] stamp on every paragraph \u2014 cite by stamp. Manual subtitles first, then the video's own auto-captions, then a local whisper transcription (minutes for a long video). The run is kept: a second call, and webindex_video_search, read it without touching the site.",
         inputSchema: {
           type: "object",
           properties: {
@@ -12249,7 +12314,7 @@ via: ${r.meta.via}${r.reused ? " (already on disk)" : ""}` };
         if (!(effort in FRAME_EFFORT)) throw new ToolError("`effort` must be low, med or high.");
         const run = await fetchVideoRun(url, videoDir(args.dir), { signal, knownHostsOnly: guarded });
         if (!run.ok) throw new ToolError(`No transcript for ${url}: ${run.reason}.`);
-        const r = await extractFrames(run.dir, { effort, signal });
+        const r = await extractFrames(run.dir, { effort, signal, url, knownHostsOnly: guarded });
         if (!r.ok) throw new ToolError(r.reason);
         const frames = r.frames.map((f) => ({ image: join20(run.dir, f.file), stamp: f.stamp, chapter: f.chapter, kind: f.kind, said: f.text }));
         return { text: JSON.stringify({ markdown: r.markdown, candidates: r.candidates, duplicates: r.duplicates, frames }, null, 2) };

@@ -8,6 +8,7 @@ import {
   enabledTranscribers,
   resetVideoLadderCache,
   transcribeVideo,
+  siteOf,
   videoMetaFromInfo,
   ytdlpVersionAge,
   type VideoMeta,
@@ -106,10 +107,17 @@ describe("videoMetaFromInfo", () => {
     expect(vimeo).toMatchObject({ site: "vimeo", key: "vimeo-76979871", webpageUrl: "https://player.vimeo.com/video/76979871" });
     expect(videoMetaFromInfo({ id: "x", extractor_key: "Generic", webpage_url: "javascript:alert(1)", original_url: "https://example.com/v" })).toMatchObject({
       site: "web",
-      key: "web-x",
+      key: expect.stringMatching(/^web-x-[0-9a-f]{8}$/),
       webpageUrl: "https://example.com/v",
     });
     expect(videoMetaFromInfo({ id: "1", extractor: "twitch:vod" })!.site).toBe("twitch");
+    expect(siteOf("TwitchVod")).toBe("twitch");
+    expect(siteOf("Twitter")).toBe("x");
+    expect(siteOf("TedTalk")).toBe("ted");
+    expect(siteOf("YoutubeTab")).toBe("youtube");
+    expect(siteOf("Generic")).toBe("web");
+    // A page with no webpage_url of its own falls back to the URL it was read from, not to YouTube.
+    expect(videoMetaFromInfo({ id: "9", extractor_key: "Vimeo" }, "https://player.vimeo.com/video/9")!.webpageUrl).toBe("https://player.vimeo.com/video/9");
   });
 
   it("drops the live-chat pseudo track and refuses an entry with no id", () => {
@@ -279,6 +287,15 @@ describe("transcribeVideo", () => {
       expect(t.reason).toBe(`not a video URL: ${bad}`);
     }
     expect(calls).toEqual([]);
+  });
+
+  it("keeps yt-dlp's catch-all extractor out when only known hosts may be read", async () => {
+    const calls: string[][] = [];
+    await transcribeVideo("https://x.com/someone/status/1", { knownHostsOnly: true, deps: { run: runner({ probe: fail("x") }, calls), have: haveAll } });
+    expect(calls[0]!.slice(1, 3)).toEqual(["--use-extractors", "default,-generic"]);
+    const open: string[][] = [];
+    await transcribeVideo("https://x.com/someone/status/1", { deps: { run: runner({ probe: fail("x") }, open), have: haveAll } });
+    expect(open[0]).not.toContain("--use-extractors");
   });
 
   it("reads only known video hosts when asked to, and any page otherwise — always after --", async () => {

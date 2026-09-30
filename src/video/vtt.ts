@@ -43,8 +43,9 @@ function decode(text: string): string {
 }
 
 // Tags first, entities second: `&lt;show&gt;` is text, and must not be read as a tag.
+// Tags, and the SSA positioning codes SRT tracks carry (`{\an8}`).
 const clean = (line: string) =>
-  decode(line.replace(/<[^>]*>/g, ""))
+  decode(line.replace(/<[^>]*>/g, "").replace(/\{\\[^}]*\}/g, ""))
     .replace(/\s+/g, " ")
     .trim();
 
@@ -59,7 +60,7 @@ const clean = (line: string) =>
 export function parseVtt(src: string, opts: { rolling?: boolean } = {}): VideoSegment[] {
   const text = src.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
   // SRT has no header: it is recognised by a cue timing on one of its first lines.
-  const srt = !/^WEBVTT/.test(text) && /^\s*\d+\n\d{2}:\d{2}:\d{2},\d{3}\s+-->/.test(text);
+  const srt = !/^WEBVTT/.test(text) && /^\s*\d+[ \t]*\n\d{2}:\d{2}:\d{2}[,.]\d{3}\s+-->/.test(text);
   if (!/^WEBVTT/.test(text) && !srt) return [];
   const rolling = opts.rolling ?? (/<\d{2}:\d{2}[:.]\d/.test(text) || /<c>/.test(text));
   const out: VideoSegment[] = [];

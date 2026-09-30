@@ -250,6 +250,20 @@ describe("extractFrames", () => {
     expect(await extractFrames(run.dir)).toMatchObject({ ok: false, reason: expect.stringContaining("yt-dlp wrote no file") });
   });
 
+  it("downloads from the caller's URL, and never with the catch-all extractor under a policy", async () => {
+    const run = await fetchVideoRun("https://youtu.be/jNQXAC9IVRw", root);
+    if (!run.ok) throw new Error(run.reason);
+    // A meta.json on disk naming some other page is not what gets downloaded.
+    writeFileSync(join(run.dir, "meta.json"), JSON.stringify({ ...run.meta, webpageUrl: "https://attacker.example/x" }));
+    calls.length = 0;
+    await extractFrames(run.dir, { url: "https://youtu.be/jNQXAC9IVRw", knownHostsOnly: true });
+    const dl = calls.find((c) => c[0] === "yt-dlp" && c.includes(VIDEO_FORMAT))!;
+    expect(dl.slice(-2)).toEqual(["--", "https://www.youtube.com/watch?v=jNQXAC9IVRw"]);
+    expect(dl.slice(1, 3)).toEqual(["--use-extractors", "default,-generic"]);
+    // With no URL and a policy, an unknown page named on disk is refused outright.
+    expect(await extractFrames(run.dir, { knownHostsOnly: true })).toMatchObject({ ok: false, reason: expect.stringContaining("names no page") });
+  });
+
   it("caps the frames by effort", async () => {
     const run = await fetchVideoRun("https://youtu.be/jNQXAC9IVRw", root);
     if (!run.ok) throw new Error(run.reason);

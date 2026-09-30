@@ -170,6 +170,19 @@ describe("other sites", () => {
       return { ok: true, status: 0, stdout: "", stderr: "" };
     };
 
+  it("writes a run under the URL's own key, even when yt-dlp names the video differently", async () => {
+    const calls: string[][] = [];
+    // yt-dlp calls a Twitch VOD "v123"; the URL's key is twitch-123.
+    setVideoDeps({
+      run: other({ ...VIMEO, id: "v123", extractor_key: "TwitchVod", webpage_url: "https://www.twitch.tv/videos/123" }, calls),
+      have: () => true,
+    });
+    expect(await fetchVideoRun("https://www.twitch.tv/videos/123", root)).toMatchObject({ ok: true, id: "twitch-123" });
+    const n = calls.length;
+    expect(await fetchVideoRun("https://www.twitch.tv/videos/123", root)).toMatchObject({ ok: true, reused: true });
+    expect(calls.length).toBe(n);
+  });
+
   it("keeps a Vimeo video under vimeo-<id>, reads its SRT track, and reuses it with no yt-dlp", async () => {
     const calls: string[][] = [];
     setVideoDeps({ run: other(VIMEO, calls), have: () => true });
@@ -186,7 +199,8 @@ describe("other sites", () => {
     const calls: string[][] = [];
     setVideoDeps({ run: other(WEB, calls), have: () => true });
     const r = await fetchVideoRun("https://example.com/talk", root);
-    expect(r).toMatchObject({ ok: true, id: "generic-talk".replace("generic", "web"), reused: false });
+    expect(r.ok && r.id).toMatch(/^web-talk-[0-9a-f]{8}$/);
+    expect(r).toMatchObject({ ok: true, reused: false });
     expect(calls.filter((c) => c.includes("-J"))).toHaveLength(1);
     const again = await fetchVideoRun("https://example.com/talk", root);
     expect(again).toMatchObject({ ok: true, reused: true });

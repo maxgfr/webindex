@@ -27,8 +27,13 @@ sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md).
 - **Subtitles** in WebVTT or SRT (Dailymotion serves only SRT). Auto-captions
   are YouTube's; elsewhere a video without subtitles goes to whisper.
 - **Run keys**: a YouTube run is kept under its id, any other under
-  `<site>-<id>` (`vimeo-76979871`, `dailymotion-x7tgad0`). A known host's run is
-  reused with no yt-dlp call; any other page costs one probe to learn its key.
+  `<site>-<id>` (`vimeo-76979871`, `dailymotion-x7tgad0`, `twitch-2000000000`,
+  `x-1234567890`); a page read by yt-dlp's catch-all extractor also carries a
+  hash of its URL, since that extractor names two pages alike. A run whose URL
+  gives its key is reused with no yt-dlp call; any other page costs one probe.
+- **Cost**: `fetch` of a post that holds a video (a tweet, a reel) reads it
+  like any video — subtitles, else whisper, which takes minutes. Under a policy
+  yt-dlp never runs its catch-all "generic" extractor.
 - **Links** open at the second in each site's own form: YouTube `?t=`, Vimeo
   `#t=`, Dailymotion `?start=`, Twitch `?t=1h2m3s`.
 

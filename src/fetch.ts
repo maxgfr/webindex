@@ -1135,6 +1135,10 @@ export interface ExtractResult {
 // up is the normal case and a per-URL note about it would drown the dossier.
 // A Firecrawl that is up and still fails, or one the user asked for explicitly
 // and did not get, does emit a note (the caller decides which).
+// Hosts whose watch page holds nothing but the player: there, a video that
+// cannot be read is the answer, not a cue to read the page instead.
+const PURE_VIDEO_HOSTS = new Set(["youtube", "vimeo", "dailymotion"]);
+
 export async function fetchAndExtract(
   url: string,
   opts: {
@@ -1205,11 +1209,14 @@ export async function fetchAndExtract(
     });
     if (opts.signal?.aborted) return cancelled();
     const text = transcriptMarkdown(t);
-    // A post or a page on a video host that turns out to hold no video (a
-    // tweet with only text) is read as the page it is, and says so.
-    if (!text && video.site !== "youtube" && /no video at this URL|a list of videos/.test(t.reason ?? "")) {
+    // On a host that also carries posts and pages (a tweet, a reel, a talk
+    // page), a URL yt-dlp could not read as a video is read as the page it is,
+    // saying why — as it was before videos were read here at all. Only the
+    // pure video hosts, whose page holds nothing but the player, keep the
+    // video's reason.
+    if (!text && !PURE_VIDEO_HOSTS.has(video.site)) {
       const page = await fetchAndExtract(url, { ...opts, video: false });
-      return { ...page, note: [`${url} holds no video yt-dlp can read; read as a page.`, page.note].filter(Boolean).join(" ") };
+      return { ...page, note: [`No video read at ${url} (${t.reason ?? "no transcript"}); read as a page.`, page.note].filter(Boolean).join(" ") };
     }
     return {
       text,

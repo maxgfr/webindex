@@ -31,8 +31,15 @@ export function ytdlpExtraArgs(): string[] {
 }
 
 /** Run yt-dlp: its options, the escape-hatch arguments, then `--` and the URL when there is one. */
-export function runYtdlp(args: string[], opts: { run?: VideoRunner; timeoutMs?: number; url?: string; signal?: AbortSignal } = {}): Promise<ShResult> {
-  const argv = [...args, ...ytdlpExtraArgs(), ...(opts.url ? ["--", opts.url] : [])];
+export function runYtdlp(
+  args: string[],
+  opts: { run?: VideoRunner; timeoutMs?: number; url?: string; signal?: AbortSignal; knownOnly?: boolean } = {},
+): Promise<ShResult> {
+  // `knownOnly`: yt-dlp's own extractors and never its catch-all "generic"
+  // one, which fetches whatever URL a page (a tweet's player card, a redirect)
+  // names — private addresses included, out of any public-address check.
+  const strict = opts.knownOnly ? ["--use-extractors", "default,-generic"] : [];
+  const argv = [...strict, ...args, ...ytdlpExtraArgs(), ...(opts.url ? ["--", opts.url] : [])];
   return (opts.run ?? defaultVideoRunner)("yt-dlp", argv, { timeoutMs: opts.timeoutMs ?? PROBE_TIMEOUT_MS, signal: opts.signal });
 }
 
@@ -77,13 +84,42 @@ const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : unde
 const httpUrl = (v: string | undefined) => (v && /^https?:\/\//i.test(v) ? v : undefined);
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 
+/**
+ * The short site name of a yt-dlp extractor — the prefix knownVideo uses, so a
+ * run's key is the same whether it came from the URL or from the probe:
+ * "YoutubeTab" → youtube, "TwitchVod" → twitch, "Twitter" → x, "TedTalk" →
+ * ted, "Generic" → web.
+ */
+export function siteOf(extractor: string): string {
+  const e = extractor
+    .toLowerCase()
+    .split(":")[0]!
+    .replace(/[^a-z0-9]/g, "");
+  const known: [string, string][] = [
+    ["youtube", "youtube"],
+    ["vimeo", "vimeo"],
+    ["dailymotion", "dailymotion"],
+    ["twitch", "twitch"],
+    ["twitter", "x"],
+    ["ted", "ted"],
+    ["loom", "loom"],
+    ["tiktok", "tiktok"],
+    ["instagram", "instagram"],
+    ["facebook", "facebook"],
+    ["bilibili", "bilibili"],
+    ["rumble", "rumble"],
+    ["peertube", "peertube"],
+  ];
+  if (!e || e === "generic") return "web";
+  return known.find(([prefix]) => e.startsWith(prefix))?.[1] ?? e;
+}
+
 /** Project yt-dlp's info JSON onto VideoMeta. Undefined when it is not a single video. */
-export function videoMetaFromInfo(info: Record<string, unknown>): VideoMeta | undefined {
+export function videoMetaFromInfo(info: Record<string, unknown>, sourceUrl?: string): VideoMeta | undefined {
   const id = str(info.id);
   if (!id) return undefined;
-  // "Youtube", "Vimeo", "twitch:vod", "Generic" → youtube, vimeo, twitch, web.
-  const extractor = (str(info.extractor_key) ?? str(info.extractor) ?? "youtube").toLowerCase().split(":")[0]!;
-  const site = extractor === "generic" ? "web" : extractor.replace(/[^a-z0-9]/g, "") || "web";
+  const site = siteOf(str(info.extractor_key) ?? str(info.extractor) ?? "youtube");
+  const webpageUrl = httpUrl(str(info.webpage_url)) ?? httpUrl(str(info.original_url)) ?? httpUrl(sourceUrl) ?? `https://www.youtube.com/watch?v=${id}`;
   const date = str(info.upload_date);
   const tracks = (v: unknown) => (v && typeof v === "object" ? Object.keys(v as object).filter((k) => k !== "live_chat") : []);
   const duration = num(info.duration);
@@ -101,7 +137,7 @@ export function videoMetaFromInfo(info: Record<string, unknown>): VideoMeta | un
   return {
     id,
     site,
-    key: videoRunKey(site, id),
+    key: videoRunKey(site, id, webpageUrl),
     title: str(info.title) ?? id,
     channel: str(info.channel) ?? str(info.uploader),
     uploadDate: date && /^\d{8}$/.test(date) ? `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}` : undefined,
@@ -110,15 +146,15 @@ export function videoMetaFromInfo(info: Record<string, unknown>): VideoMeta | un
     chapters,
     subtitles: tracks(info.subtitles),
     autoCaptions: tracks(info.automatic_captions),
-    webpageUrl: httpUrl(str(info.webpage_url)) ?? httpUrl(str(info.original_url)) ?? `https://www.youtube.com/watch?v=${id}`,
+    webpageUrl,
     ...(info.live_status === "is_live" || info.is_live === true ? { live: "live" as const } : {}),
     ...(info.live_status === "is_upcoming" ? { live: "upcoming" as const } : {}),
   };
 }
 
 /** Read one video's metadata. Never throws: a failure is a reason. */
-export async function probeVideo(url: string, run: VideoRunner = defaultVideoRunner, signal?: AbortSignal): Promise<VideoProbe> {
-  const r = await runYtdlp(["-J", "--skip-download", "--no-playlist", "--no-warnings"], { run, url, signal });
+export async function probeVideo(url: string, run: VideoRunner = defaultVideoRunner, signal?: AbortSignal, knownOnly = false): Promise<VideoProbe> {
+  const r = await runYtdlp(["-J", "--skip-download", "--no-playlist", "--no-warnings"], { run, url, signal, knownOnly });
   if (signal?.aborted) return { error: "cancelled" };
   if (r.missing) return { error: "install yt-dlp (https://github.com/yt-dlp/yt-dlp) to read videos", missing: true };
   if (!r.ok) return { error: classifyYtdlpError(r.stderr) };
@@ -126,7 +162,7 @@ export async function probeVideo(url: string, run: VideoRunner = defaultVideoRun
     const parsed = JSON.parse(r.stdout) as Record<string, unknown> | null;
     // A page holding several videos (a playlist, an archive item) is a list, not a video.
     if (parsed?._type === "playlist") return { error: "a list of videos, not one — read it with `video list`" };
-    const meta = parsed ? videoMetaFromInfo(parsed) : undefined;
+    const meta = parsed ? videoMetaFromInfo(parsed, url) : undefined;
     return meta ? { meta, info: r.stdout } : { error: "no video at this URL (yt-dlp found none)" };
   } catch {
     return { error: "yt-dlp returned unreadable metadata" };
@@ -182,6 +218,7 @@ export async function downloadSubtitle(
   auto: boolean,
   run: VideoRunner = defaultVideoRunner,
   signal?: AbortSignal,
+  knownOnly = false,
 ): Promise<{ vtt: string } | { error: string }> {
   return withTempDir("subs", async (dir) => {
     const infoPath = join(dir, "info.json");
@@ -200,7 +237,7 @@ export async function downloadSubtitle(
         "-o",
         join(dir, "sub.%(ext)s"),
       ],
-      { run, timeoutMs: SUBTITLE_TIMEOUT_MS, signal },
+      { run, timeoutMs: SUBTITLE_TIMEOUT_MS, signal, knownOnly },
     );
     // WebVTT where the site has it, SRT otherwise (Dailymotion serves only SRT).
     const file = readdirSync(dir).find((f) => f.endsWith(".vtt")) ?? readdirSync(dir).find((f) => f.endsWith(".srt"));
@@ -231,12 +268,18 @@ export async function downloadMedia(
   args: string[],
   dir: string,
   stem: string,
-  opts: { run?: VideoRunner; url?: string; timeoutMs: number | (() => number); signal?: AbortSignal },
+  opts: { run?: VideoRunner; url?: string; timeoutMs: number | (() => number); signal?: AbortSignal; knownOnly?: boolean },
 ): Promise<{ file: string } | { error: string; timedOut?: boolean }> {
   let stderr = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     const timeoutMs = typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
-    const r = await runYtdlp([...args, "--no-warnings", "-o", join(dir, `${stem}.%(ext)s`)], { run: opts.run, url: opts.url, timeoutMs, signal: opts.signal });
+    const r = await runYtdlp([...args, "--no-warnings", "-o", join(dir, `${stem}.%(ext)s`)], {
+      run: opts.run,
+      url: opts.url,
+      timeoutMs,
+      signal: opts.signal,
+      knownOnly: opts.knownOnly,
+    });
     // Judged on the exit status first: a download killed half-way leaves
     // fragments behind (`.part`, `.part-Frag7`, `.ytdl`, `.f136.mp4`) that are
     // not the file, and reading one would transcribe half a video.

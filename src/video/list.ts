@@ -56,6 +56,7 @@ export async function listVideos(
     url: listingUrl(url),
     timeoutMs: LIST_TIMEOUT_MS,
     signal: opts.signal,
+    knownOnly: opts.knownHostsOnly,
   });
   if (r.missing) return { error: "install yt-dlp (https://github.com/yt-dlp/yt-dlp) to read videos" };
   if (!r.ok) return { error: classifyYtdlpError(r.stderr) };
@@ -63,18 +64,20 @@ export async function listVideos(
     const info = JSON.parse(r.stdout) as { title?: string; entries?: Record<string, unknown>[] };
     const videos = (info.entries ?? []).flatMap((e): ListedVideo[] => {
       const id = typeof e.id === "string" ? e.id : "";
-      // A channel tab or a nested playlist is not a video, whatever its id looks like.
-      if (!id || e._type === "playlist") return [];
+      const ie = typeof e.ie_key === "string" ? e.ie_key : "";
+      // A channel tab, a nested playlist or a user page is not a video, whatever its id looks like.
+      if (!id || e._type === "playlist" || /tab|playlist|channel|user|album|showcase/i.test(ie)) return [];
       const title = typeof e.title === "string" ? e.title : id;
       const duration = typeof e.duration === "number" ? { duration: e.duration } : {};
-      if (e.ie_key === "Youtube" || (e.ie_key === undefined && youtubeListKind(url))) {
+      if (youtubeListKind(url)) {
+        // A YouTube listing: only YouTube videos, by the id YouTube gave them.
         const watch = `https://www.youtube.com/watch?v=${id}`;
-        return youtubeVideoId(watch) ? [{ id, key: id, title, ...duration, url: watch }] : [];
+        return (ie === "" || ie === "Youtube") && youtubeVideoId(watch) ? [{ id, key: id, title, ...duration, url: watch }] : [];
       }
       const entryUrl = [e.url, e.webpage_url].find((v): v is string => typeof v === "string" && /^https?:\/\//i.test(v));
-      if (!entryUrl) return [];
+      if (!entryUrl || (opts.knownHostsOnly && !knownVideo(entryUrl))) return [];
       const known = knownVideo(entryUrl);
-      return [{ id, ...(known?.key ? { key: known.key } : {}), title, ...duration, url: entryUrl }];
+      return [{ id, ...(known?.key ? { key: known.key } : {}), title, ...duration, url: known?.url ?? entryUrl }];
     });
     // A playlist can hold one video twice: read once, labelled once.
     const unique = videos.filter((v, i) => videos.findIndex((w) => w.url === v.url) === i);

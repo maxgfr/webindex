@@ -9,11 +9,12 @@
 //
 // Callers want `transcribeVideo`, then `transcriptMarkdown`.
 
-export { isVideoList, knownVideo, videoRunKey, videoSource, videoUrlAt, youtubeListKind, youtubeVideoId, type VideoSource } from "./video/url.js";
+export { knownVideo, videoRunKey, videoSource, videoUrlAt, youtubeListKind, youtubeVideoId, type VideoSource } from "./video/url.js";
 export {
   classifyYtdlpError,
   downloadSubtitle,
   probeVideo,
+  siteOf,
   videoMetaFromInfo,
   ytdlpVersionAge,
   type VideoChapter,

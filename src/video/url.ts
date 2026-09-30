@@ -12,6 +12,8 @@
 // and the explicit video commands accept any http(s) URL, leaving it to
 // yt-dlp to say whether there is a video there.
 
+import { fnv1a64 } from "../url.js";
+
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 
 // youtube.com and its subdomains (www, m, music), and the privacy-enhanced
@@ -111,20 +113,49 @@ const HOSTS: HostRule[] = [
     video: /^\/([a-z0-9]{5,})\/?$/i,
     canonical: (m) => ({ id: m[1]!, url: `https://www.dailymotion.com/video/${m[1]}` }),
   },
-  { site: "twitch", domains: ["twitch.tv"], video: /^\/(?:videos\/\d+|[^/]+\/clip\/[^/]+)\/?$/ },
-  { site: "ted", domains: ["ted.com"], video: /^\/talks\/[^/]+\/?$/ },
-  { site: "loom", domains: ["loom.com"], video: /^\/(?:share|embed)\/[0-9a-f]{16,}\/?$/ },
-  { site: "tiktok", domains: ["tiktok.com"], video: /^\/@[^/]+\/video\/\d+\/?$/ },
+  // Where the URL names the video, its key does too: a video read once is
+  // reused with no yt-dlp call at all, as on YouTube.
+  {
+    site: "twitch",
+    domains: ["twitch.tv"],
+    video: /^\/videos\/(\d+)\/?$/,
+    canonical: (m) => ({ id: m[1]!, url: `https://www.twitch.tv/videos/${m[1]}` }),
+  },
+  { site: "twitch", domains: ["twitch.tv"], video: /^\/[^/]+\/clip\/[^/]+\/?$/ },
+  {
+    site: "ted",
+    domains: ["ted.com"],
+    video: /^\/talks\/([\w-]+)\/?$/,
+    canonical: (m) => ({ id: m[1]!, url: `https://www.ted.com/talks/${m[1]}` }),
+  },
+  {
+    site: "loom",
+    domains: ["loom.com"],
+    video: /^\/(?:share|embed)\/([0-9a-f]{16,})\/?$/,
+    canonical: (m) => ({ id: m[1]!, url: `https://www.loom.com/share/${m[1]}` }),
+  },
+  {
+    site: "tiktok",
+    domains: ["tiktok.com"],
+    video: /^\/(@[^/]+)\/video\/(\d+)\/?$/,
+    canonical: (m) => ({ id: m[2]!, url: `https://www.tiktok.com/${m[1]}/video/${m[2]}` }),
+  },
   { site: "instagram", domains: ["instagram.com"], video: /^\/(?:reel|reels|tv)\/[\w-]+\/?$/ },
   { site: "facebook", domains: ["facebook.com"], video: /^\/(?:[^/]+\/videos\/[^/]+|reel\/\d+)\/?$/ },
   { site: "facebook", domains: ["fb.watch"], video: /^\/[\w-]{6,}\/?$/ },
-  { site: "x", domains: ["x.com", "twitter.com"], video: /^\/[^/]+\/status\/\d+(?:\/video\/\d)?\/?$/ },
+  {
+    site: "x",
+    domains: ["x.com", "twitter.com"],
+    video: /^\/([^/]+)\/status\/(\d+)(?:\/video\/\d)?\/?$/,
+    canonical: (m) => ({ id: m[2]!, url: `https://x.com/${m[1]}/status/${m[2]}` }),
+  },
   { site: "bilibili", domains: ["bilibili.com"], video: /^\/video\/(?:BV\w+|av\d+)\/?$/i },
   { site: "rumble", domains: ["rumble.com"], video: /^\/v[\w-]+\.html$/ },
   { site: "peertube", domains: ["framatube.org", "tilvids.com"], video: /^\/(?:w|videos\/watch)\/[\w-]+\/?$/ },
 ];
 
 const safeKey = (site: string, id: string) => `${site}-${id}`.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
+const shortHash = (text: string) => fnv1a64(text).toString(16).padStart(16, "0").slice(0, 8);
 
 /**
  * A single video on a host this module knows — YouTube or one of the common
@@ -163,9 +194,18 @@ export function videoSource(url: string, opts: { anySite?: boolean } = {}): Vide
   return u ? { site: "web", url: u.toString() } : undefined;
 }
 
-/** The run key of a video yt-dlp has read: its YouTube id as is, else `<site>-<id>`. */
-export function videoRunKey(site: string, id: string): string {
-  return site === "youtube" && VIDEO_ID.test(id) ? id : safeKey(site, id);
+/**
+ * The run key of a video yt-dlp has read: its YouTube id as is, else
+ * `<site>-<id>`. yt-dlp's catch-all extractor names a page by its last path
+ * segment — `a.com/talks/intro` and `b.org/course/intro` are both `intro` — so
+ * a `web` key, and any id that had to be made filesystem-safe, also carries a
+ * hash of the page it came from: two pages never share a run.
+ */
+export function videoRunKey(site: string, id: string, pageUrl?: string): string {
+  if (site === "youtube" && VIDEO_ID.test(id)) return id;
+  const key = safeKey(site, id);
+  const altered = key !== `${site}-${id}`;
+  return site === "web" || altered ? `${key.slice(0, 110)}-${shortHash(pageUrl ?? id)}` : key;
 }
 
 /**
@@ -184,12 +224,4 @@ export function videoUrlAt(webpageUrl: string, seconds: number): string {
   else if (onHost(host, "twitch.tv")) u.searchParams.set("t", `${Math.floor(t / 3600)}h${Math.floor((t % 3600) / 60)}m${t % 60}s`);
   else return webpageUrl;
   return u.toString();
-}
-
-/** Whether a URL names a list of videos on any site: YouTube's forms, or a path other sites use for playlists and channels. */
-export function isVideoList(url: string): boolean {
-  if (youtubeListKind(url)) return true;
-  const u = parse(url);
-  if (!u || knownVideo(url)) return false;
-  return /\/(?:playlist|showcase|album|channels?|user|videos|sets|c)\b/i.test(u.pathname) || u.searchParams.has("list");
 }

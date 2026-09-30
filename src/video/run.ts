@@ -105,14 +105,15 @@ export async function fetchVideoRun(url: string, root: string, opts: VideoLadder
   // Any other page is probed first — once, the ladder reuses the probe — to learn its key.
   let probed: VideoLadderOptions["probed"];
   if (!source.key) {
-    const probe = await probeVideo(source.url, videoDeps(opts.deps).run, opts.signal);
+    const probe = await probeVideo(source.url, videoDeps(opts.deps).run, opts.signal, opts.knownHostsOnly);
     if ("error" in probe) return { ok: false, reason: probe.error };
     const reused = kept(probe.meta.key ?? probe.meta.id);
     if (reused) return reused;
     probed = probe;
   }
   const t: VideoTranscript = await transcribeVideo(url, { ...opts, ...(probed ? { probed } : {}) });
-  const id = t.meta?.key ?? source.key ?? t.meta?.id;
+  // Written where the next lookup will look: the URL's own key when it has one.
+  const id = source.key ?? t.meta?.key ?? t.meta?.id;
   if (!t.via || !t.meta || !id) return { ok: false, ...(id ? { id } : {}), reason: t.reason ?? "no transcript" };
   const dir = join(root, id);
   const transcriptPath = join(dir, "TRANSCRIPT.md");
