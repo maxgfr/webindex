@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.26.0](https://github.com/maxgfr/webindex/compare/v1.25.0...v1.26.0) (2026-09-30)
+
+
+### Bug Fixes
+
+* **video:** keep the catch-all extractor out under a policy, and pages apart ([9b76803](https://github.com/maxgfr/webindex/commit/9b76803fa5b41aacafbbde56e2cd8d61f505bdae))
+
+
+### Features
+
+* **video:** read any site yt-dlp supports, not only YouTube ([00dc339](https://github.com/maxgfr/webindex/commit/00dc3390b9640d1995908d8982b1f52504150730))
+
 # [1.25.0](https://github.com/maxgfr/webindex/compare/v1.24.0...v1.25.0) (2026-09-30)
 
 
