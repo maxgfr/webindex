@@ -3430,8 +3430,10 @@ function slugify(input, opts = {}) {
   const normalized = input.toLowerCase().replace(/^https?:\/\//, "").replace(/^git@/, "").replace(/\.git$/, "");
   const s = trimDashes(normalized.replace(/[^a-z0-9._-]+/g, "-"));
   if (!/[\u0080-\uffff]/.test(normalized) && s.length <= max) return s || (opts.fallback ?? "");
-  const tag = fnv1a64(normalized).toString(16).padStart(16, "0").slice(0, 8);
-  const head = s.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");
+  const canonical = trimDashes(normalized.replace(/[^\p{L}\p{N}._-]+/gu, "-"));
+  const tag = fnv1a64(canonical).toString(16).padStart(16, "0").slice(0, 8);
+  const readable = /[\u0080-\uffff]/.test(normalized) ? s.replace(/-{2,}/g, "-") : s;
+  const head = readable.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");
   return head ? `${head}-${tag}` : tag;
 }
 
