@@ -533,6 +533,10 @@ declare function videoRoot(out?: string): string;
 /** meta.json: the video's metadata plus how and when its transcript was made. */
 interface VideoRunMeta extends VideoMeta {
     via: VideoTranscriberId;
+    /** The subtitle track read (`en`, `fr`, `en-orig`); absent for whisper. */
+    track?: string;
+    /** The language the caller asked for, when it asked. */
+    lang?: string;
     fetchedAt: string;
 }
 type VideoRunResult = {
@@ -543,6 +547,8 @@ type VideoRunResult = {
     reused: boolean;
     meta: VideoRunMeta;
     segments: number;
+    /** The transcript itself, when nothing was written (NO_WRITE): `transcript` then names a file that does not exist. */
+    markdown?: string;
 } | {
     ok: false;
     id?: string;
@@ -554,9 +560,15 @@ declare function readVideoRun(dir: string): {
     segments: VideoSegment[];
 } | undefined;
 /**
- * Read a video into `<root>/<videoId>/`, or reuse the run already there
- * (`refresh` reads it again). Never throws: a video with no transcript comes
- * back as a reason, and nothing is written for it.
+ * Read a video into `<root>/<videoId>/`, or reuse the run already there —
+ * unless `refresh`, or the run was read in another language than `lang` asks.
+ * Never throws: a video with no transcript, or a run that cannot be written,
+ * comes back as a reason.
+ *
+ * meta.json is written last, so a run cut short is never taken for a whole
+ * one. Under NO_WRITE nothing is written, and nothing is collected either —
+ * the transcript comes back in `markdown`: a long-lived MCP server would
+ * otherwise keep every transcript it ever read in memory.
  */
 declare function fetchVideoRun(url: string, root: string, opts?: VideoLadderOptions & {
     refresh?: boolean;

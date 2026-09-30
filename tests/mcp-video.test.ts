@@ -37,6 +37,7 @@ const LISTING = {
     { _type: "url", ie_key: "Youtube", id: "bbbbbbbbbbb", title: "Giraffes explained", duration: 60 },
     { _type: "url", ie_key: "Youtube", id: "ccccccccccc", title: "A private one", duration: 60 },
     { _type: "playlist", id: "UCnotavideo", title: "a tab" },
+    { _type: "url", ie_key: "Youtube", id: "aaaaaaaaaaa", title: "Elephants at the zoo, again", duration: 60 },
   ],
 };
 
@@ -87,6 +88,19 @@ describe("listVideos", () => {
     const call = calls[0]!;
     expect(call.slice(call.indexOf("--playlist-end"), call.indexOf("--playlist-end") + 2)).toEqual(["--playlist-end", "5"]);
     expect(call.slice(-2)).toEqual(["--", "https://www.youtube.com/playlist?list=PLx"]);
+  });
+
+  it("returns a transcript kept on disk under no-write, and refuses a corpus", async () => {
+    await webindexAdapter().callTool("webindex_video_fetch", { url: "https://youtu.be/aaaaaaaaaaa" });
+    process.env[envName("NO_WRITE")] = "1";
+    try {
+      const r = await webindexAdapter().callTool("webindex_video_fetch", { url: "https://youtu.be/aaaaaaaaaaa" });
+      expect(r.text).toContain("# Elephants at the zoo");
+      await expect(webindexAdapter().callTool("webindex_video_list", { url: "https://www.youtube.com/playlist?list=PLx" })).rejects.toThrow("NO_WRITE");
+      await expect(webindexAdapter().callTool("webindex_video_frames", { url: "https://youtu.be/aaaaaaaaaaa" })).rejects.toThrow("NO_WRITE");
+    } finally {
+      delete process.env[envName("NO_WRITE")];
+    }
   });
 
   it("lists a channel's videos tab, and refuses a single video", async () => {

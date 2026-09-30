@@ -229,6 +229,27 @@ describe("extractFrames", () => {
     expect(downloads).toBe(2);
   });
 
+  it("never takes a download's leftover fragments for the video", async () => {
+    const run = await fetchVideoRun("https://youtu.be/jNQXAC9IVRw", root);
+    if (!run.ok) throw new Error(run.reason);
+    const base = runner();
+    const fragments =
+      (status: number): VideoRunner =>
+      async (cmd, args, opts) => {
+        if (cmd === "yt-dlp" && args.includes("bv*[height<=720]/b[height<=720]/bv*/b")) {
+          const dir = dirname(args[args.indexOf("-o") + 1]!);
+          writeFileSync(join(dir, "video.f136.mp4.part-Frag7"), "half");
+          writeFileSync(join(dir, "video.f136.mp4"), "video only, never merged");
+          return { ok: status === 0, status, stdout: "", stderr: status === 124 ? "timed out after 1000ms" : "" };
+        }
+        return base(cmd, args, opts);
+      };
+    setVideoDeps({ run: fragments(124), have: () => true });
+    expect(await extractFrames(run.dir)).toEqual({ ok: false, reason: "the video download failed: timed out" });
+    setVideoDeps({ run: fragments(0), have: () => true });
+    expect(await extractFrames(run.dir)).toMatchObject({ ok: false, reason: expect.stringContaining("yt-dlp wrote no file") });
+  });
+
   it("caps the frames by effort", async () => {
     const run = await fetchVideoRun("https://youtu.be/jNQXAC9IVRw", root);
     if (!run.ok) throw new Error(run.reason);

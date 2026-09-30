@@ -212,9 +212,6 @@ function writeFileAtomic(path, content) {
     throw e;
   }
 }
-function takeArtifacts() {
-  return collected.splice(0, collected.length);
-}
 
 // src/run.ts
 function readJsonSafe(path) {
@@ -2558,11 +2555,11 @@ async function downloadMedia(args, dir, stem, opts) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const timeoutMs = typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
     const r = await runYtdlp([...args, "--no-warnings", "-o", join8(dir, `${stem}.%(ext)s`)], { run: opts.run, url: opts.url, timeoutMs, signal: opts.signal });
-    const file = readdirSync2(dir).find((f) => f.startsWith(`${stem}.`) && !f.endsWith(".part") && !f.endsWith(".ytdl"));
-    if (file) return { file };
     if (opts.signal?.aborted) return { error: "cancelled" };
     if (r.status === 124) return { error: "timed out", timedOut: true };
-    stderr = r.stderr;
+    const file = r.ok ? readdirSync2(dir).find((f) => f.startsWith(`${stem}.`) && !/\.part(?:-Frag\d+)?$|\.ytdl$|\.f\d+\.\w+$/.test(f)) : void 0;
+    if (file) return { file };
+    stderr = r.ok ? "yt-dlp wrote no file" : r.stderr;
   }
   return { error: classifyYtdlpError(stderr) };
 }
@@ -3629,6 +3626,12 @@ function jaccardSorted(a, b) {
 function videoRoot(out) {
   return resolve(out ?? env("VIDEO_DIR") ?? join10(tmpdir3(), brand().name, "video"));
 }
+var baseLang2 = (tag) => tag.toLowerCase().replace(/-orig$/, "").split(/[-_]/)[0];
+function servesLang(meta, lang) {
+  if (!lang) return true;
+  const read2 = meta.track ?? meta.lang ?? meta.language;
+  return read2 !== void 0 && baseLang2(read2) === baseLang2(lang);
+}
 var readJson = (path) => {
   try {
     return JSON.parse(readFileSync10(path, "utf8"));
@@ -3649,19 +3652,32 @@ async function fetchVideoRun(url, root, opts = {}) {
   const transcriptPath = join10(dir, "TRANSCRIPT.md");
   if (!opts.refresh) {
     const kept = readVideoRun(dir);
-    if (kept && existsSync3(transcriptPath))
+    if (kept && existsSync3(transcriptPath) && servesLang(kept.meta, opts.lang))
       return { ok: true, id, dir, transcript: transcriptPath, reused: true, meta: kept.meta, segments: kept.segments.length };
   }
   const t = await transcribeVideo(url, opts);
   if (!t.via || !t.meta) return { ok: false, id, reason: t.reason ?? "no transcript" };
-  const meta = { ...t.meta, via: t.via, fetchedAt: (/* @__PURE__ */ new Date()).toISOString() };
-  ensureDir(dir);
-  writeArtifact(join10(dir, "segments.json"), `${JSON.stringify(t.segments, null, 1)}
+  const meta = {
+    ...t.meta,
+    via: t.via,
+    ...t.track ? { track: t.track } : {},
+    ...opts.lang ? { lang: opts.lang } : {},
+    fetchedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  const markdown = transcriptMarkdown(t);
+  const done = { ok: true, id, dir, transcript: transcriptPath, reused: false, meta, segments: t.segments.length };
+  if (isNoWrite()) return { ...done, markdown };
+  try {
+    ensureDir(dir);
+    writeArtifact(join10(dir, "segments.json"), `${JSON.stringify(t.segments, null, 1)}
 `);
-  writeArtifact(join10(dir, "meta.json"), `${JSON.stringify(meta, null, 2)}
+    writeArtifact(transcriptPath, markdown);
+    writeArtifact(join10(dir, "meta.json"), `${JSON.stringify(meta, null, 2)}
 `);
-  writeArtifact(transcriptPath, transcriptMarkdown(t));
-  return { ok: true, id, dir, transcript: transcriptPath, reused: false, meta, segments: t.segments.length };
+  } catch (e) {
+    return { ok: false, id, reason: `cannot write the run in ${dir}: ${e.message}` };
+  }
+  return done;
 }
 var PASSAGE_S = 45;
 function videoPassages(segments, chapterStarts2 = []) {
@@ -3750,7 +3766,7 @@ function searchVideoRuns(dir, query, opts = {}) {
 }
 
 // src/video/frames.ts
-import { copyFileSync, existsSync as existsSync4, mkdirSync as mkdirSync2, readdirSync as readdirSync4, readFileSync as readFileSync11, rmSync as rmSync3 } from "fs";
+import { copyFileSync, cpSync, existsSync as existsSync4, mkdirSync as mkdirSync2, readdirSync as readdirSync4, readFileSync as readFileSync11, renameSync as renameSync2, rmSync as rmSync3 } from "fs";
 import { join as join11 } from "path";
 
 // src/video/align.ts
@@ -3843,9 +3859,9 @@ function capFrames(frames, max) {
 var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 var fileStamp = (t) => formatStamp(t).replace(/:/g, "-");
 async function extractFrames(runDir, opts = {}) {
+  if (isNoWrite()) return { ok: false, reason: "frames are image files, and nothing may be written (NO_WRITE)" };
   const run = readVideoRun(runDir);
   if (!run) return { ok: false, reason: `no video run in ${runDir} \u2014 fetch the video first` };
-  if (isNoWrite()) return { ok: false, reason: "frames are image files, and nothing may be written (NO_WRITE)" };
   const deps = videoDeps(opts.deps);
   if (!deps.have("ffmpeg")) return { ok: false, reason: "frames need ffmpeg" };
   const effort = opts.effort ?? "med";
@@ -3908,21 +3924,29 @@ async function extractFrames(runDir, opts = {}) {
       kept.push({ ...c, ...hash !== void 0 ? { hash } : {} });
     }
     const chosen = capFrames(kept, FRAME_EFFORT[effort]);
-    const framesDir = join11(runDir, "frames");
-    rmSync3(framesDir, { recursive: true, force: true });
-    mkdirSync2(framesDir, { recursive: true });
+    const staged = join11(tmp, "frames");
+    mkdirSync2(staged);
     const placed = chosen.map((c, i) => {
       const file = `frames/${String(i + 1).padStart(4, "0")}_${fileStamp(c.time)}.jpg`;
-      copyFileSync(c.path, join11(runDir, file));
+      copyFileSync(c.path, join11(tmp, file));
       return { file, time: c.time, kind: c.kind };
     });
     const frames = alignFrames(placed, segments, meta.chapters ?? []);
     const dropped = candidates.length - kept.length;
     const note = `${plural(frames.length, "frame")} (effort ${effort}: at most ${FRAME_EFFORT[effort]}) from ${plural(candidates.length, "candidate")} \u2014 scene changes above ${SCENE_THRESHOLD}, one per chapter start, ${plural(dropped, "near-duplicate")} dropped`;
-    const markdown = writeArtifact(join11(runDir, "FRAMES.md"), framesMarkdown(meta, frames, note));
-    writeArtifact(join11(runDir, "frames.json"), `${JSON.stringify(frames, null, 2)}
+    const framesDir = join11(runDir, "frames");
+    try {
+      const incoming = `${framesDir}.${process.pid}.${Date.now()}.new`;
+      cpSync(staged, incoming, { recursive: true });
+      rmSync3(framesDir, { recursive: true, force: true });
+      renameSync2(incoming, framesDir);
+      writeArtifact(join11(runDir, "frames.json"), `${JSON.stringify(frames, null, 2)}
 `);
-    return { ok: true, dir: framesDir, markdown, frames, candidates: candidates.length, duplicates: candidates.length - kept.length, effort };
+      const markdown = writeArtifact(join11(runDir, "FRAMES.md"), framesMarkdown(meta, frames, note));
+      return { ok: true, dir: framesDir, markdown, frames, candidates: candidates.length, duplicates: dropped, effort };
+    } catch (e) {
+      return { ok: false, reason: `cannot write the frames in ${runDir}: ${e.message}` };
+    }
   });
 }
 
@@ -3986,7 +4010,8 @@ async function listVideos(url, opts = {}) {
       if (e._type === "playlist" || typeof e.ie_key === "string" && e.ie_key !== "Youtube" || !youtubeVideoId(watch)) return [];
       return [{ id, title: typeof e.title === "string" ? e.title : id, ...typeof e.duration === "number" ? { duration: e.duration } : {}, url: watch }];
     });
-    return { ...info.title ? { title: info.title } : {}, videos: videos.slice(0, limit) };
+    const unique = videos.filter((v, i) => videos.findIndex((w) => w.id === v.id) === i);
+    return { ...info.title ? { title: info.title } : {}, videos: unique.slice(0, limit) };
   } catch {
     return { error: "yt-dlp returned an unreadable listing" };
   }
@@ -4018,6 +4043,7 @@ function corpusMarkdown(c, root) {
   ].join("\n");
 }
 async function fetchVideoCorpus(url, root, opts = {}) {
+  if (isNoWrite()) return { ok: false, reason: "a corpus is kept on disk, and nothing may be written (NO_WRITE)" };
   const listed = await listVideos(url, { limit: opts.limit, deps: opts.deps, signal: opts.signal });
   if ("error" in listed) return { ok: false, reason: listed.error };
   if (!listed.videos.length) return { ok: false, reason: `no videos listed at ${url}` };
@@ -4029,10 +4055,15 @@ async function fetchVideoCorpus(url, root, opts = {}) {
     return r.ok ? { ...base2, ...r.meta.duration !== void 0 ? { duration: r.meta.duration } : {}, via: r.meta.via, dir: r.dir, reused: r.reused } : { ...base2, reason: r.reason };
   });
   const corpus = { source: url, ...listed.title ? { title: listed.title } : {}, createdAt: (/* @__PURE__ */ new Date()).toISOString(), videos };
-  ensureDir(root);
-  writeArtifact(join12(root, "corpus.json"), `${JSON.stringify(corpus, null, 2)}
+  let path;
+  try {
+    ensureDir(root);
+    writeArtifact(join12(root, "corpus.json"), `${JSON.stringify(corpus, null, 2)}
 `);
-  const path = writeArtifact(join12(root, "CORPUS.md"), corpusMarkdown(corpus, root));
+    path = writeArtifact(join12(root, "CORPUS.md"), corpusMarkdown(corpus, root));
+  } catch (e) {
+    return { ok: false, reason: `cannot write the corpus in ${root}: ${e.message}` };
+  }
   return { ok: true, dir: root, corpus: path, videos, ...listed.title ? { title: listed.title } : {} };
 }
 
@@ -5059,7 +5090,7 @@ function parseTag(tag) {
   const region = /^(?:[a-z]{2}|\d{3})$/i.test(parts[i] ?? "") ? parts[i].toLowerCase() : void 0;
   return { lang, script, region };
 }
-function baseLang2(lang) {
+function baseLang3(lang) {
   return parseTag(lang).lang;
 }
 function resolveRegion(lang, region) {
@@ -5072,7 +5103,7 @@ function resolveRegion(lang, region) {
 function ddgRegion(lang, region) {
   const r = resolveRegion(lang, region);
   if (r === NO_REGION) return "wt-wt";
-  const l = baseLang2(lang);
+  const l = baseLang3(lang);
   return DDG_KL[`${l}-${r}`] ?? DDG_KL[l] ?? `${REGION_ALIASES[r] ?? r}-${DDG_LANG_ALIASES[l] ?? l}`;
 }
 function searxngLanguage(lang, region) {
@@ -5083,7 +5114,7 @@ function searxngLanguage(lang, region) {
   return country && /^[a-z]{2}$/.test(country) && country !== NO_REGION ? `${t.lang}-${country.toUpperCase()}` : t.lang;
 }
 function acceptLanguageHeader(lang, region) {
-  const l = baseLang2(lang);
+  const l = baseLang3(lang);
   const r = resolveRegion(lang, region);
   if (r === NO_REGION) return l === "en" ? "en" : `${l},en;q=0.5`;
   const R = r.toUpperCase();
@@ -5251,7 +5282,7 @@ async function searchViaFirecrawl(query, limit, opts = {}) {
   const n = Number.isFinite(limit) ? Math.min(100, Math.max(1, Math.trunc(limit))) : 10;
   const locale = {};
   if (opts.lang || opts.region) {
-    if (opts.lang) locale.lang = baseLang2(opts.lang);
+    if (opts.lang) locale.lang = baseLang3(opts.lang);
     const country = resolveRegion(opts.lang, opts.region);
     if (/^[a-z]{2}$/.test(country) && country !== "wt") locale.country = country;
   }
@@ -8579,7 +8610,7 @@ async function searchViaKeyless(engine, query, opts = {}) {
   const localised = !!(opts.lang || opts.region);
   const kl = localised ? ddgRegion(opts.lang, opts.region) : "wt-wt";
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
-  const locale = localised ? { lang: baseLang2(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : void 0;
+  const locale = localised ? { lang: baseLang3(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : void 0;
   const seen = /* @__PURE__ */ new Set();
   const hits = [];
   const deadline = opts.budgetMs === void 0 ? Number.POSITIVE_INFINITY : Date.now() + opts.budgetMs;
@@ -9118,7 +9149,7 @@ function resolveUrl2(url, base2) {
 
 // src/repo.ts
 import { createHash as createHash3, randomBytes } from "crypto";
-import { existsSync as existsSync8, mkdirSync as mkdirSync5, readdirSync as readdirSync8, renameSync as renameSync2, rmSync as rmSync5, statSync as statSync5 } from "fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync5, readdirSync as readdirSync8, renameSync as renameSync3, rmSync as rmSync5, statSync as statSync5 } from "fs";
 import { tmpdir as tmpdir5 } from "os";
 import { basename as basename2, join as join18, resolve as resolve4 } from "path";
 
@@ -11400,14 +11431,16 @@ function toolLimit(raw, def, max = 50) {
   return Number.isFinite(n) ? Math.min(max, Math.max(1, n)) : def;
 }
 var WRITING_TOOLS = /* @__PURE__ */ new Set(["webindex_video_fetch", "webindex_video_frames", "webindex_video_list"]);
+var REPLACING_TOOLS = /* @__PURE__ */ new Set(["webindex_video_frames", "webindex_video_list"]);
 function withHints(tools) {
   return tools.map((t) => ({
     ...t,
     annotations: {
-      // The video tools write their run directory (a transcript, frames, a
-      // corpus file) — additively, and a repeat call reuses what is there.
+      // The video tools write their run directory. A transcript is only ever
+      // added; frames replace the video's earlier frames, and a corpus the
+      // directory's earlier CORPUS.md — so those two say they may destroy.
       readOnlyHint: !WRITING_TOOLS.has(t.name),
-      destructiveHint: false,
+      destructiveHint: REPLACING_TOOLS.has(t.name),
       idempotentHint: true,
       openWorldHint: !CLOSED_WORLD_TOOLS.has(t.name) || WRITING_TOOLS.has(t.name)
     }
@@ -12044,7 +12077,7 @@ extractor: ${r.extractor}` };
         const dir = videoDir(args.dir);
         const r = await fetchVideoRun(url, dir, { refresh: args.refresh === true, lang: args.lang ? String(args.lang) : void 0, signal });
         if (!r.ok) throw new ToolError(`No transcript for ${url}: ${r.reason}.`);
-        const text = isNoWrite() ? takeArtifacts().find((a) => a.path === r.transcript)?.content ?? "" : readFileSync17(r.transcript, "utf8");
+        const text = r.markdown ?? readFileSync17(r.transcript, "utf8");
         return { text: `${text}
 ---
 run: ${r.dir}
@@ -12708,7 +12741,7 @@ async function dispatch(argv) {
       const summary = { ...r, title: r.meta.title, via: r.meta.via, duration: r.meta.duration };
       if (asJson) process.stdout.write(jsonLine(summary));
       else if (isNoWrite()) {
-        process.stdout.write(takeArtifacts().find((a) => a.path === r.transcript)?.content ?? "");
+        process.stdout.write(r.markdown ?? readFileSync17(r.transcript, "utf8"));
       } else {
         const m = r.meta;
         const facts = [m.channel, m.duration !== void 0 ? formatStamp(m.duration) : void 0, m.via, `${r.segments} segment${r.segments === 1 ? "" : "s"}`].filter(Boolean).join(" \xB7 ");

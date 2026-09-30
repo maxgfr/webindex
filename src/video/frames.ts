@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { isNoWrite, writeArtifact } from "../no-write.js";
 import { alignFrames, framesMarkdown, type FrameKind, type VideoFrame } from "./align.js";
@@ -84,11 +84,12 @@ export async function extractFrames(
   runDir: string,
   opts: { effort?: FrameEffort; deps?: Partial<VideoDeps>; signal?: AbortSignal } = {},
 ): Promise<FramesResult> {
+  // JPEGs are binary files, and the no-write gate collects text: there is
+  // nothing honest to print instead of them. Said first, since under it no
+  // run was written for the check below to find either.
+  if (isNoWrite()) return { ok: false, reason: "frames are image files, and nothing may be written (NO_WRITE)" };
   const run = readVideoRun(runDir);
   if (!run) return { ok: false, reason: `no video run in ${runDir} — fetch the video first` };
-  // JPEGs are binary files, and the no-write gate collects text: there is
-  // nothing honest to print instead of them.
-  if (isNoWrite()) return { ok: false, reason: "frames are image files, and nothing may be written (NO_WRITE)" };
   const deps = videoDeps(opts.deps);
   if (!deps.have("ffmpeg")) return { ok: false, reason: "frames need ffmpeg" };
   const effort = opts.effort ?? "med";
@@ -158,21 +159,32 @@ export async function extractFrames(
       kept.push({ ...c, ...(hash !== undefined ? { hash } : {}) });
     }
 
-    // 4. Capped, renamed by time, written beside the transcript.
+    // 4. Capped, renamed by time, written beside the transcript. The new set is
+    // laid out in the temp directory and swapped in whole, so a failure — or a
+    // concurrent call on the same video — never leaves FRAMES.md pointing at
+    // a half-replaced set.
     const chosen = capFrames(kept, FRAME_EFFORT[effort]);
-    const framesDir = join(runDir, "frames");
-    rmSync(framesDir, { recursive: true, force: true });
-    mkdirSync(framesDir, { recursive: true });
+    const staged = join(tmp, "frames");
+    mkdirSync(staged);
     const placed = chosen.map((c, i) => {
       const file = `frames/${String(i + 1).padStart(4, "0")}_${fileStamp(c.time)}.jpg`;
-      copyFileSync(c.path, join(runDir, file));
+      copyFileSync(c.path, join(tmp, file));
       return { file, time: c.time, kind: c.kind };
     });
     const frames = alignFrames(placed, segments, meta.chapters ?? []);
     const dropped = candidates.length - kept.length;
     const note = `${plural(frames.length, "frame")} (effort ${effort}: at most ${FRAME_EFFORT[effort]}) from ${plural(candidates.length, "candidate")} — scene changes above ${SCENE_THRESHOLD}, one per chapter start, ${plural(dropped, "near-duplicate")} dropped`;
-    const markdown = writeArtifact(join(runDir, "FRAMES.md"), framesMarkdown(meta, frames, note));
-    writeArtifact(join(runDir, "frames.json"), `${JSON.stringify(frames, null, 2)}\n`);
-    return { ok: true, dir: framesDir, markdown, frames, candidates: candidates.length, duplicates: candidates.length - kept.length, effort };
+    const framesDir = join(runDir, "frames");
+    try {
+      const incoming = `${framesDir}.${process.pid}.${Date.now()}.new`;
+      cpSync(staged, incoming, { recursive: true });
+      rmSync(framesDir, { recursive: true, force: true });
+      renameSync(incoming, framesDir);
+      writeArtifact(join(runDir, "frames.json"), `${JSON.stringify(frames, null, 2)}\n`);
+      const markdown = writeArtifact(join(runDir, "FRAMES.md"), framesMarkdown(meta, frames, note));
+      return { ok: true, dir: framesDir, markdown, frames, candidates: candidates.length, duplicates: dropped, effort };
+    } catch (e) {
+      return { ok: false, reason: `cannot write the frames in ${runDir}: ${(e as Error).message}` };
+    }
   });
 }

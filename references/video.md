@@ -93,7 +93,10 @@ keeps its label with the reason, so the numbering never shifts under an answer.
 
 `webindex_video_fetch`, `webindex_video_search`, `webindex_video_frames` and
 `webindex_video_list` do the same. The three that keep a run on disk are the only
-tools not annotated read-only. Under `--public-only`, `--extract-root` or
+tools not annotated read-only, and frames and list — which replace a video's
+earlier frames and a directory's earlier corpus — are annotated destructive.
+Under `WEBINDEX_NO_WRITE`, fetch returns the transcript without writing it,
+and frames and list refuse: their output is files. Under `--public-only`, `--extract-root` or
 `--allow-remote`, their `dir` is a directory *name* inside the video root, never
 a path, and the video URL passes the public-address check before yt-dlp runs.
 

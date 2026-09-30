@@ -96,16 +96,29 @@ describe("fetchVideoRun", () => {
     expect(await fetchVideoRun("https://example.com/x", root)).toEqual({ ok: false, reason: "not a YouTube video URL: https://example.com/x" });
   });
 
-  it("collects the files instead of writing them under no-write", async () => {
+  it("writes nothing under no-write, and hands the transcript back instead", async () => {
     setNoWrite(true);
     const r = await fetchVideoRun(ZOO, root);
-    expect(r.ok).toBe(true);
-    expect(takeArtifacts().map((a) => a.path.slice(root.length + 1))).toEqual([
-      "jNQXAC9IVRw/segments.json",
-      "jNQXAC9IVRw/meta.json",
-      "jNQXAC9IVRw/TRANSCRIPT.md",
-    ]);
+    expect(r.ok && r.markdown).toContain("[00:01] All right, so here we are");
+    // Nothing collected either: a long-lived server would keep it forever.
+    expect(takeArtifacts()).toEqual([]);
     expect(() => readFileSync(join(root, "jNQXAC9IVRw", "meta.json"))).toThrow();
+  });
+
+  it("reads the video again when another language is asked than the run was read in", async () => {
+    const first = await fetchVideoRun(ZOO, root);
+    expect(first.ok && first.meta.track).toBe("en");
+    const before = calls.length;
+    expect(await fetchVideoRun(ZOO, root, { lang: "en-GB" })).toMatchObject({ ok: true, reused: true });
+    expect(calls.length).toBe(before);
+    await fetchVideoRun(ZOO, root, { lang: "fr" });
+    expect(calls.length).toBeGreaterThan(before);
+  });
+
+  it("never reuses a run cut short before its meta.json", async () => {
+    await fetchVideoRun(ZOO, root);
+    rmSync(join(root, "jNQXAC9IVRw", "meta.json"));
+    expect(await fetchVideoRun(ZOO, root)).toMatchObject({ ok: true, reused: false });
   });
 });
 

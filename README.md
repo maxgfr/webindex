@@ -202,10 +202,12 @@ claude mcp add --transport http webindex http://127.0.0.1:7340/mcp
 | `webindex_video_frames` | `url` (required), `effort`, `dir` | What is on screen: a frame at every scene change and chapter start, near-duplicates dropped, at most 20/50/100 by `effort`, each with its image path, stamp and the transcript from 5 s before to 10 s after — read the images to see slides or code. Needs ffmpeg. |
 | `webindex_video_list` | `url` (required), `limit`, `dir` | The first `limit` videos of a playlist or channel, each kept as a run, and `CORPUS.md` naming them `V1`…`Vn`; a video that cannot be read keeps its label with the reason. Reports progress per video. |
 
-Every tool is annotated `destructiveHint: false` and `idempotentHint`. All but the
-three video tools that keep a run on disk — `webindex_video_fetch`,
-`webindex_video_frames` and `webindex_video_list`, which write only under the
-video root and reuse what is there — are `readOnlyHint`; all but
+Every tool is annotated `idempotentHint`. All but the three video tools that keep a
+run on disk — `webindex_video_fetch`, `webindex_video_frames` and
+`webindex_video_list`, which write only under the video root and reuse what is
+there — are `readOnlyHint`, and only `webindex_video_frames` (which replaces the
+video's earlier frames) and `webindex_video_list` (the directory's earlier
+`CORPUS.md`) are `destructiveHint`; all but
 `webindex_extract`, `webindex_rank`, `webindex_embed` and `webindex_video_search`
 are `openWorldHint`. Under `--public-only`, `--extract-root` or `--allow-remote`,
 a video tool's `dir` is a directory *name* inside the video root, never a path.

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { ensureDir, writeArtifact } from "../no-write.js";
+import { ensureDir, isNoWrite, writeArtifact } from "../no-write.js";
 import { mapLimit } from "../pool.js";
 import { videoDeps, type VideoDeps, type VideoLadderOptions } from "./ladder.js";
 import { formatStamp } from "./markdown.js";
@@ -62,7 +62,9 @@ export async function listVideos(
       if (e._type === "playlist" || (typeof e.ie_key === "string" && e.ie_key !== "Youtube") || !youtubeVideoId(watch)) return [];
       return [{ id, title: typeof e.title === "string" ? e.title : id, ...(typeof e.duration === "number" ? { duration: e.duration } : {}), url: watch }];
     });
-    return { ...(info.title ? { title: info.title } : {}), videos: videos.slice(0, limit) };
+    // A playlist can hold one video twice: read once, labelled once.
+    const unique = videos.filter((v, i) => videos.findIndex((w) => w.id === v.id) === i);
+    return { ...(info.title ? { title: info.title } : {}), videos: unique.slice(0, limit) };
   } catch {
     return { error: "yt-dlp returned an unreadable listing" };
   }
@@ -128,6 +130,9 @@ export async function fetchVideoCorpus(
   root: string,
   opts: VideoLadderOptions & { limit?: number; refresh?: boolean; onVideo?: (done: number, total: number, title: string) => void } = {},
 ): Promise<CorpusResult> {
+  // A corpus is files other commands read back; with nothing written there is
+  // nothing to cite V1…Vn from.
+  if (isNoWrite()) return { ok: false, reason: "a corpus is kept on disk, and nothing may be written (NO_WRITE)" };
   const listed = await listVideos(url, { limit: opts.limit, deps: opts.deps, signal: opts.signal });
   if ("error" in listed) return { ok: false, reason: listed.error };
   if (!listed.videos.length) return { ok: false, reason: `no videos listed at ${url}` };
@@ -141,8 +146,13 @@ export async function fetchVideoCorpus(
       : { ...base, reason: r.reason };
   });
   const corpus: VideoCorpus = { source: url, ...(listed.title ? { title: listed.title } : {}), createdAt: new Date().toISOString(), videos };
-  ensureDir(root);
-  writeArtifact(join(root, "corpus.json"), `${JSON.stringify(corpus, null, 2)}\n`);
-  const path = writeArtifact(join(root, "CORPUS.md"), corpusMarkdown(corpus, root));
+  let path: string;
+  try {
+    ensureDir(root);
+    writeArtifact(join(root, "corpus.json"), `${JSON.stringify(corpus, null, 2)}\n`);
+    path = writeArtifact(join(root, "CORPUS.md"), corpusMarkdown(corpus, root));
+  } catch (e) {
+    return { ok: false, reason: `cannot write the corpus in ${root}: ${(e as Error).message}` };
+  }
   return { ok: true, dir: root, corpus: path, videos, ...(listed.title ? { title: listed.title } : {}) };
 }

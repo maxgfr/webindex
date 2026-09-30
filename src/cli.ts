@@ -90,7 +90,7 @@ import {
   positionalText,
   UsageError,
 } from "./cli-kit.js";
-import { ensureDir, isNoWrite, takeArtifacts, writeArtifact } from "./no-write.js";
+import { ensureDir, isNoWrite, writeArtifact } from "./no-write.js";
 import { mapLimit } from "./pool.js";
 import type { JsonSchemaProp } from "./mcp/protocol.js";
 import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
@@ -938,6 +938,8 @@ function toolLimit(raw: unknown, def: number, max = 50): number {
 
 // The tools that write: each video tool keeps its run on disk, under the video root.
 const WRITING_TOOLS = new Set(["webindex_video_fetch", "webindex_video_frames", "webindex_video_list"]);
+// ...and of those, the ones that replace what an earlier call wrote.
+const REPLACING_TOOLS = new Set(["webindex_video_frames", "webindex_video_list"]);
 
 /**
  * The hints a client reads before calling. Without them it must assume any
@@ -949,10 +951,11 @@ function withHints(tools: ToolDecl[]): ToolDecl[] {
   return tools.map((t) => ({
     ...t,
     annotations: {
-      // The video tools write their run directory (a transcript, frames, a
-      // corpus file) — additively, and a repeat call reuses what is there.
+      // The video tools write their run directory. A transcript is only ever
+      // added; frames replace the video's earlier frames, and a corpus the
+      // directory's earlier CORPUS.md — so those two say they may destroy.
       readOnlyHint: !WRITING_TOOLS.has(t.name),
-      destructiveHint: false,
+      destructiveHint: REPLACING_TOOLS.has(t.name),
       idempotentHint: true,
       openWorldHint: !CLOSED_WORLD_TOOLS.has(t.name) || WRITING_TOOLS.has(t.name),
     },
@@ -1717,7 +1720,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
         const dir = videoDir(args.dir);
         const r = await fetchVideoRun(url, dir, { refresh: args.refresh === true, lang: args.lang ? String(args.lang) : undefined, signal });
         if (!r.ok) throw new ToolError(`No transcript for ${url}: ${r.reason}.`);
-        const text = isNoWrite() ? (takeArtifacts().find((a) => a.path === r.transcript)?.content ?? "") : readFileSync(r.transcript, "utf8");
+        const text = r.markdown ?? readFileSync(r.transcript, "utf8");
         return { text: `${text}\n---\nrun: ${r.dir}\nvia: ${r.meta.via}${r.reused ? " (already on disk)" : ""}` };
       }
       if (name === "webindex_video_search") {
@@ -2470,8 +2473,9 @@ async function dispatch(argv: string[]): Promise<void> {
       const summary = { ...r, title: r.meta.title, via: r.meta.via, duration: r.meta.duration };
       if (asJson) process.stdout.write(jsonLine(summary));
       else if (isNoWrite()) {
-        // Nothing was written: the transcript itself is the answer.
-        process.stdout.write(takeArtifacts().find((a) => a.path === r.transcript)?.content ?? "");
+        // Nothing may be written: the transcript itself is the answer, from
+        // the run already on disk or from the fetch that just read it.
+        process.stdout.write(r.markdown ?? readFileSync(r.transcript, "utf8"));
       } else {
         const m = r.meta;
         const facts = [m.channel, m.duration !== undefined ? formatStamp(m.duration) : undefined, m.via, `${r.segments} segment${r.segments === 1 ? "" : "s"}`]
