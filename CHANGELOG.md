@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.26.1](https://github.com/maxgfr/webindex/compare/v1.26.0...v1.26.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* **text:** give one slug to spellings of a non-ASCII name that differ in case or spacing ([09c3d6e](https://github.com/maxgfr/webindex/commit/09c3d6e5481269ecc98228a944ac1b689c1ce72c))
+
 # [1.26.0](https://github.com/maxgfr/webindex/compare/v1.25.0...v1.26.0) (2026-09-30)
 
 
