@@ -71,10 +71,10 @@ describe("transcriptMarkdown", () => {
     );
   });
 
-  it("writes no heading without chapters, and skips a chapter with nothing in it", () => {
+  it("writes no heading without chapters, and keeps a chapter with nothing in it", () => {
     const md = transcriptMarkdown(transcript({ chapters: [] }));
     expect(md).not.toContain("##");
-    const skipped = transcriptMarkdown(
+    const kept = transcriptMarkdown(
       transcript({
         chapters: [
           { start: 0, end: 1, title: "Cold open" },
@@ -83,8 +83,16 @@ describe("transcriptMarkdown", () => {
         ],
       }),
     );
-    expect(skipped).not.toContain("Cold open");
-    expect(skipped).toContain("## Intro\n\n[00:01]");
+    expect(kept).toContain("## Cold open\n\n## Intro\n\n[00:01]");
+  });
+
+  it("names the track, and says when it is a translation", () => {
+    const own = transcriptMarkdown(transcript({ track: "en", meta: { ...transcript().meta!, language: "en" } }));
+    expect(own).toContain("- Transcript: manual subtitles (manual-subs, track en)\n");
+    const auto = transcriptMarkdown(transcript({ via: "auto-subs", track: "en-orig", meta: { ...transcript().meta!, language: "en-US" } }));
+    expect(auto).toContain("- Transcript: YouTube auto-captions (auto-subs, track en-orig)\n");
+    const translated = transcriptMarkdown(transcript({ track: "fr", meta: { ...transcript().meta!, language: "en" } }));
+    expect(translated).toContain("- Transcript: manual subtitles (manual-subs, track fr) — a translation: the video speaks en");
   });
 
   it("is empty when there is no transcript", () => {

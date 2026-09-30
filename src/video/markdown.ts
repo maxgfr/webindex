@@ -22,6 +22,20 @@ const VIA_LABEL: Record<string, string> = {
 };
 
 const paragraph = (s: VideoSegment) => `[${formatStamp(s.start)}] ${s.text}`;
+const baseLang = (tag: string) =>
+  tag
+    .toLowerCase()
+    .replace(/-orig$/, "")
+    .split(/[-_]/)[0];
+
+/** How the transcript was made, and — for a subtitle track in another language than the video's — that it is a translation. */
+function source(t: VideoTranscript): string | undefined {
+  if (!t.via) return undefined;
+  const how = `${VIA_LABEL[t.via] ?? t.via} (${t.via}${t.track ? `, track ${t.track}` : ""})`;
+  const spoken = t.meta?.language;
+  if (t.track && spoken && baseLang(t.track) !== baseLang(spoken)) return `${how} — a translation: the video speaks ${spoken}`;
+  return how;
+}
 
 /** The transcript as Markdown: header, chapters, stamped paragraphs. Empty when there is no transcript. */
 export function transcriptMarkdown(t: VideoTranscript): string {
@@ -34,7 +48,7 @@ export function transcriptMarkdown(t: VideoTranscript): string {
       meta.uploadDate && `- Published: ${meta.uploadDate}`,
       meta.duration !== undefined && `- Duration: ${formatStamp(meta.duration)}`,
       `- URL: ${meta.webpageUrl}`,
-      t.via && `- Transcript: ${VIA_LABEL[t.via] ?? t.via} (${t.via})`,
+      t.via && `- Transcript: ${source(t)}`,
     ].filter(Boolean) as string[];
     head.push(...facts, "");
   }
@@ -43,11 +57,10 @@ export function transcriptMarkdown(t: VideoTranscript): string {
   const chapters = [...t.chapters].sort((a, b) => a.start - b.start);
   let c = -1;
   for (const seg of t.segments) {
-    // Advance to the last chapter that has started by this segment.
-    let next = c;
-    while (next + 1 < chapters.length && chapters[next + 1]!.start <= seg.start + 0.5) next++;
-    if (next !== c) {
-      c = next;
+    // Every chapter that has started by this segment gets its heading, an
+    // empty one (a silent intro) included, so the outline stays whole.
+    while (c + 1 < chapters.length && chapters[c + 1]!.start <= seg.start + 0.5) {
+      c++;
       body.push(`## ${chapters[c]!.title}`, "");
     }
     body.push(paragraph(seg), "");

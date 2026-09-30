@@ -35,6 +35,36 @@ describe("parseVtt", () => {
     expect(text.match(/good morning/g)).toHaveLength(1);
   });
 
+  it("keeps a line a rolling track says twice on purpose", () => {
+    const vtt = [
+      "WEBVTT",
+      "",
+      "00:00:01.000 --> 00:00:02.000 align:start position:0%",
+      " ",
+      "no<00:00:01.500><c> no</c>",
+      "",
+      "00:00:02.000 --> 00:00:02.010 align:start position:0%",
+      "no no",
+      " ",
+      "",
+      "00:00:02.010 --> 00:00:03.000 align:start position:0%",
+      "no no",
+      "no<00:00:02.500><c> no</c>",
+      "",
+      "00:00:03.000 --> 00:00:04.000 align:start position:0%",
+      "no no",
+      "thank<00:00:03.500><c> you</c>",
+      "",
+    ].join("\n");
+    expect(parseVtt(vtt).map((c) => c.text)).toEqual(["no no", "no no", "thank you"]);
+  });
+
+  it("dedupes a rolling track it is told is one, even without timing tags", () => {
+    const vtt = "WEBVTT\n\n00:01.000 --> 00:02.000\nhello there\n\n00:02.000 --> 00:03.000\nhello there\ngeneral kenobi\n";
+    expect(parseVtt(vtt, { rolling: true }).map((c) => c.text)).toEqual(["hello there", "general kenobi"]);
+    expect(parseVtt(vtt).map((c) => c.text)).toEqual(["hello there", "hello there general kenobi"]);
+  });
+
   it("strips tags and decodes entities", () => {
     const vtt = "WEBVTT\n\nNOTE a comment\n\n00:01.000 --> 00:02.500 align:start position:0%\n<v Roger>Tom &amp; Jerry&#39;s <i>&lt;show&gt;</i>&nbsp;now\n";
     expect(parseVtt(vtt)).toEqual([{ start: 1, end: 2.5, text: "Tom & Jerry's <show> now" }]);

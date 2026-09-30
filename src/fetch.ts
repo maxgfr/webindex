@@ -1191,7 +1191,8 @@ export async function fetchAndExtract(
   // other would be, since yt-dlp is about to fetch it.
   if (youtubeVideoId(url)) {
     if (opts.authorizeUrl && !(await opts.authorizeUrl(url))) return { text: "", finalUrl: url, status: 0, note: `Refused ${url}: not a public address.` };
-    const t = await transcribeVideo(url, { lang: opts.acceptLanguage?.split(/[,;]/)[0]?.trim() || undefined });
+    const t = await transcribeVideo(url, { lang: opts.acceptLanguage?.split(/[,;]/)[0]?.trim() || undefined, signal: opts.signal });
+    if (opts.signal?.aborted) return cancelled();
     const text = transcriptMarkdown(t);
     return {
       text,

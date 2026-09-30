@@ -936,13 +936,13 @@ var ERROR_LINE_RE = /^\w*error\b/i;
 var PATH_RE = /(?<![\w:/.\\])(?:file:\/\/\/?(?:[A-Za-z]:)?|[A-Za-z]:(?=\\))?(?:[/\\][^\s/\\:'"()]+)+/g;
 function failureDetail(tool, r) {
   const lines = [];
-  let source = false;
+  let source2 = false;
   let props = false;
   for (const raw of (r.stderr ?? "").split(/\r?\n/)) {
     const l = raw.trim();
-    if (source) source = false;
+    if (source2) source2 = false;
     else if (props) props = l !== "}";
-    else if (THROW_SITE_RE.test(l)) source = true;
+    else if (THROW_SITE_RE.test(l)) source2 = true;
     else if (l.startsWith("at ") && l.endsWith("{")) props = true;
     else if (l && !NOISE_RE.test(l)) lines.push(l);
   }
@@ -2389,13 +2389,16 @@ function sh(cmd, args, opts = {}) {
 }
 function shAsync(cmd, args, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
+  if (opts.signal?.aborted) return Promise.resolve({ ok: false, status: 130, stdout: "", stderr: "aborted" });
   return new Promise((resolve8) => {
     let settled = false;
     let timer;
+    let onAbort;
     const done = (r) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (onAbort) opts.signal?.removeEventListener("abort", onAbort);
       resolve8(r);
     };
     let child;
@@ -2419,6 +2422,13 @@ function shAsync(cmd, args, opts = {}) {
       killTree(child);
       done({ ok: false, status: 124, stdout, stderr: stderr || `timed out after ${timeoutMs}ms` });
     }, timeoutMs);
+    if (opts.signal) {
+      onAbort = () => {
+        killTree(child);
+        done({ ok: false, status: 130, stdout, stderr: "aborted" });
+      };
+      opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
     child.on("error", (e) => done(toResult(null, stdout, stderr, e)));
     child.on("close", (code) => done(toResult(code, stdout, stderr)));
   });
@@ -2431,8 +2441,9 @@ var SUBTITLE_TIMEOUT_MS = 12e4;
 function ytdlpExtraArgs() {
   return (env("YTDLP_ARGS") ?? "").split(/\s+/).filter(Boolean);
 }
-function runYtdlp(args, run = defaultVideoRunner, timeoutMs = PROBE_TIMEOUT_MS) {
-  return run("yt-dlp", [...args, ...ytdlpExtraArgs()], { timeoutMs });
+function runYtdlp(args, opts = {}) {
+  const argv = [...args, ...ytdlpExtraArgs(), ...opts.url ? ["--", opts.url] : []];
+  return (opts.run ?? defaultVideoRunner)("yt-dlp", argv, { timeoutMs: opts.timeoutMs ?? PROBE_TIMEOUT_MS, signal: opts.signal });
 }
 var str = (v) => typeof v === "string" && v.trim() ? v.trim() : void 0;
 var num = (v) => typeof v === "number" && Number.isFinite(v) ? v : void 0;
@@ -2453,11 +2464,14 @@ function videoMetaFromInfo(info) {
     chapters,
     subtitles: tracks(info.subtitles),
     autoCaptions: tracks(info.automatic_captions),
-    webpageUrl: str(info.webpage_url) ?? `https://www.youtube.com/watch?v=${id}`
+    webpageUrl: str(info.webpage_url) ?? `https://www.youtube.com/watch?v=${id}`,
+    ...info.live_status === "is_live" || info.is_live === true ? { live: "live" } : {},
+    ...info.live_status === "is_upcoming" ? { live: "upcoming" } : {}
   };
 }
-async function probeVideo(url, run = defaultVideoRunner) {
-  const r = await runYtdlp(["-J", "--skip-download", "--no-playlist", "--no-warnings", url], run, PROBE_TIMEOUT_MS);
+async function probeVideo(url, run = defaultVideoRunner, signal) {
+  const r = await runYtdlp(["-J", "--skip-download", "--no-playlist", "--no-warnings"], { run, url, signal });
+  if (signal?.aborted) return { error: "cancelled" };
   if (r.missing) return { error: "install yt-dlp (https://github.com/yt-dlp/yt-dlp) to read videos", missing: true };
   if (!r.ok) return { error: classifyYtdlpError(r.stderr) };
   try {
@@ -2490,7 +2504,7 @@ async function withTempDir(label, fn) {
     rmSync2(dir, { recursive: true, force: true });
   }
 }
-async function downloadSubtitle(info, lang, auto, run = defaultVideoRunner) {
+async function downloadSubtitle(info, lang, auto, run = defaultVideoRunner, signal) {
   return withTempDir("subs", async (dir) => {
     const infoPath = join8(dir, "info.json");
     writeFileSync4(infoPath, info);
@@ -2508,11 +2522,11 @@ async function downloadSubtitle(info, lang, auto, run = defaultVideoRunner) {
         "-o",
         join8(dir, "sub.%(ext)s")
       ],
-      run,
-      SUBTITLE_TIMEOUT_MS
+      { run, timeoutMs: SUBTITLE_TIMEOUT_MS, signal }
     );
     const file = readdirSync2(dir).find((f) => f.endsWith(".vtt"));
     if (file) return { vtt: readFileSync8(join8(dir, file), "utf8") };
+    if (signal?.aborted) return { error: "cancelled" };
     return { error: r.ok ? `yt-dlp wrote no ${lang} track` : classifyYtdlpError(r.stderr) };
   });
 }
@@ -2544,38 +2558,39 @@ function decode(text) {
   });
 }
 var clean = (line) => decode(line.replace(/<[^>]*>/g, "")).replace(/\s+/g, " ").trim();
-function parseVtt(src) {
-  const text = src.replace(/^﻿/, "").replace(/\r\n?/g, "\n");
+function parseVtt(src, opts = {}) {
+  const text = src.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
   if (!/^WEBVTT/.test(text)) return [];
+  const rolling = opts.rolling ?? (/<\d{2}:\d{2}[:.]\d/.test(text) || /<c>/.test(text));
   const out = [];
-  const rolling = /<\d{2}:\d{2}[:.]\d/.test(text) || /<c>/.test(text);
-  const said = [];
+  let shown = [];
   for (const block of text.split(/\n{2,}/)) {
-    const lines = block.split("\n");
-    const at = lines.findIndex((l) => TIMING.test(l));
+    const raw = block.split("\n");
+    const at = raw.findIndex((l) => TIMING.test(l));
     if (at < 0) continue;
-    const m = TIMING.exec(lines[at]);
+    const m = TIMING.exec(raw[at]);
     const start = seconds(m[1]);
     const end = seconds(m[2]);
+    const lines = raw.slice(at + 1).map(clean).filter(Boolean);
+    const previous = shown;
+    shown = lines;
     if (end - start < MIN_CUE_S) continue;
-    const fresh = [];
-    for (const raw of lines.slice(at + 1)) {
-      let line = clean(raw);
-      if (!line) continue;
-      if (!rolling) {
-        fresh.push(line);
-        continue;
-      }
-      if (said.includes(line)) continue;
-      const last = said[said.length - 1];
-      if (last && line.startsWith(`${last} `)) line = line.slice(last.length + 1);
-      fresh.push(line);
-      said.push(clean(raw));
-      if (said.length > 2) said.shift();
+    let fresh = lines;
+    if (rolling) {
+      fresh = lines.slice(repeatedLead(lines, previous));
+      const last = previous[previous.length - 1];
+      if (last && fresh[0]?.startsWith(`${last} `)) fresh = [fresh[0].slice(last.length + 1), ...fresh.slice(1)];
     }
     if (fresh.length) out.push({ start, end, text: fresh.join(" ") });
   }
   return out;
+}
+function repeatedLead(lines, previous) {
+  for (let n = Math.min(lines.length, previous.length); n > 0; n--) {
+    const tail = previous.slice(previous.length - n);
+    if (tail.every((l, i) => l === lines[i])) return n;
+  }
+  return 0;
 }
 var SENTENCE_END = /[.!?…]+["'”’)\]]*(?=\s|$)/g;
 var MAX_SEGMENT_S = 30;
@@ -2629,31 +2644,51 @@ function whisperSegments(json) {
     return [];
   }
 }
-async function whisperTranscribe(info, language, run) {
+function whisperLanguage(tag) {
+  const base2 = tag?.toLowerCase().split(/[-_]/)[0];
+  return base2 && /^[a-z]{2,3}$/.test(base2) ? base2 : void 0;
+}
+async function whisperTranscribe(info, language, run, signal) {
   if (whisperBudgetLeft() <= 0) return { declined: "budget" };
   spent2++;
-  const timeoutMs = envInt("WHISPER_TIMEOUT_MS", DEFAULT_TIMEOUT_MS2, 1e3);
+  const refund = (r) => {
+    spent2 = Math.max(0, spent2 - 1);
+    return r;
+  };
+  const budgetMs = envInt("WHISPER_TIMEOUT_MS", DEFAULT_TIMEOUT_MS2, 1e3);
+  const deadline = Date.now() + budgetMs;
+  const left = () => Math.max(1e3, deadline - Date.now());
+  const timedOut = { failed: `whisper: timed out after ${Math.round(budgetMs / 6e4)} min (${envName("WHISPER_TIMEOUT_MS")})` };
   return withTempDir("whisper", async (dir) => {
     const infoPath = join9(dir, "info.json");
     writeFileSync5(infoPath, info);
-    const dl = await runYtdlp(["--load-info-json", infoPath, "-f", "bestaudio/best", "--no-warnings", "-o", join9(dir, "audio.%(ext)s")], run, timeoutMs);
+    const dl = await runYtdlp(["--load-info-json", infoPath, "-f", "bestaudio/best", "--no-warnings", "-o", join9(dir, "audio.%(ext)s")], {
+      run,
+      timeoutMs: left(),
+      signal
+    });
+    if (signal?.aborted) return refund({ failed: "whisper: cancelled" });
+    if (dl.status === 124) return timedOut;
     const audio = readdirSync3(dir).find((f) => f.startsWith("audio.") && !f.endsWith(".part"));
-    if (!audio) return { failed: `whisper: the audio download failed${dl.stderr ? ` (${dl.stderr.trim().split("\n").pop()})` : ""}` };
+    if (!audio) return refund({ failed: `whisper: the audio download failed${dl.stderr ? ` (${dl.stderr.trim().split("\n").pop()})` : ""}` });
     const wav = join9(dir, "speech.wav");
     const ff = await run("ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", join9(dir, audio), "-ar", "16000", "-ac", "1", wav], {
-      timeoutMs
+      timeoutMs: left(),
+      signal
     });
-    if (ff.missing) return { failed: "whisper needs ffmpeg", unavailable: true };
-    if (!ff.ok || !existsSync2(wav)) return { failed: "whisper: ffmpeg could not convert the audio" };
+    if (ff.missing) return refund({ failed: "whisper needs ffmpeg", unavailable: true });
+    if (signal?.aborted) return refund({ failed: "whisper: cancelled" });
+    if (ff.status === 124) return timedOut;
+    if (!ff.ok || !existsSync2(wav)) return refund({ failed: "whisper: ffmpeg could not convert the audio" });
     const args = ["--with", PYAV_PIN, "whisper-ctranslate2", wav, "--model", whisperModel(), "--output_format", "json", "--output_dir", dir];
-    if (language) args.push("--language", language);
-    const w = await run("uvx", args, { timeoutMs, cwd: dir });
-    if (w.missing) return { failed: "whisper needs uvx", unavailable: true };
+    const lang = whisperLanguage(language);
+    if (lang) args.push("--language", lang);
+    const w = await run("uvx", args, { timeoutMs: left(), cwd: dir, signal });
+    if (w.missing) return refund({ failed: "whisper needs uvx", unavailable: true });
+    if (signal?.aborted) return { failed: "whisper: cancelled" };
+    if (w.status === 124) return timedOut;
     const out = join9(dir, "speech.json");
-    if (!w.ok || !existsSync2(out)) {
-      const why = w.status === 124 ? `timed out after ${Math.round(timeoutMs / 6e4)} min` : w.stderr.trim().split("\n").pop() ?? "failed";
-      return { failed: `whisper: ${why}` };
-    }
+    if (!w.ok || !existsSync2(out)) return { failed: `whisper: ${w.stderr.trim().split("\n").pop() || "failed"}` };
     return { segments: whisperSegments(readFileSync9(out, "utf8")) };
   });
 }
@@ -2709,62 +2744,75 @@ function pickAutoTrack(meta) {
   return origs.length === 1 ? origs[0] : void 0;
 }
 var chapterStarts = (meta) => meta.chapters.map((c) => c.start);
-async function subtitleRung(auto, meta, info, lang, deps) {
-  const track = auto ? pickAutoTrack(meta) : pickManualTrack(meta, lang);
+async function subtitleRung(auto, meta, info, opts, deps) {
+  const track = auto ? pickAutoTrack(meta) : pickManualTrack(meta, opts.lang);
   if (!track) return { failure: auto ? "no auto-captions in the video's language" : "no manual subtitles", noTrack: true };
-  const got = await downloadSubtitle(info, track, auto, deps.run);
+  const got = await downloadSubtitle(info, track, auto, deps.run, opts.signal);
   if ("error" in got) return { failure: `${auto ? "auto-captions" : "subtitles"} (${track}): ${got.error}` };
-  return { segments: mergeSegments(parseVtt(got.vtt), chapterStarts(meta)) };
+  return { segments: mergeSegments(parseVtt(got.vtt, { rolling: auto }), chapterStarts(meta)), track };
 }
-async function whisperRung(meta, info, deps) {
+async function whisperRung(meta, info, opts, deps) {
   const missing = ["uvx", "ffmpeg"].filter((c) => !deps.have(c));
   if (missing.length) return { failure: "whisper needs uvx and ffmpeg", unavailable: true };
   if (whisperBudgetLeft() <= 0) return { failure: `this run's whisper budget is spent (raise ${envName("WHISPER_MAX")})` };
-  const r = await whisperTranscribe(info, meta.language, deps.run);
+  const r = await whisperTranscribe(info, meta.language, deps.run, opts.signal);
   if ("segments" in r) return { segments: mergeSegments(r.segments, chapterStarts(meta)) };
   if ("declined" in r) return { failure: `this run's whisper budget is spent (raise ${envName("WHISPER_MAX")})` };
   return { failure: r.failed, unavailable: r.unavailable };
 }
 var plain = (segments) => segments.map((s) => s.text).join("\n");
 async function transcribeVideo(url, opts = {}) {
+  const none = (reason2, meta2) => ({
+    text: "",
+    segments: [],
+    chapters: meta2?.chapters ?? [],
+    ...meta2 ? { meta: meta2 } : {},
+    reason: reason2
+  });
+  const id = youtubeVideoId(url);
+  if (!id) return none(`not a YouTube video URL: ${url}`);
   const deps = videoDeps(opts.deps);
   const rungs = enabledTranscribers(opts.engines);
-  if (!rungs.length) return { text: "", segments: [], chapters: [], reason: `every transcript rung is switched off (${envName("VIDEO_ENGINES")})` };
-  const probe = await probeVideo(url, deps.run);
-  if ("error" in probe) return { text: "", segments: [], chapters: [], reason: probe.error };
+  if (!rungs.length) return none(`every transcript rung is switched off (${envName("VIDEO_ENGINES")})`);
+  const probe = await probeVideo(`https://www.youtube.com/watch?v=${id}`, deps.run, opts.signal);
+  if ("error" in probe) return none(probe.error);
   const { meta, info } = probe;
+  if (meta.live) return none(`live stream ${meta.live === "live" ? "in progress" : "not started yet"} \u2014 read it once it has ended`, meta);
   const failures = [];
   let noTrack = 0;
   let subtitleRungs = 0;
   let whisperMissing = false;
   let gateReason;
-  for (const id of rungs) {
-    if (id !== "whisper") subtitleRungs++;
-    const known = dead3.get(id);
+  for (const rung of rungs) {
+    if (opts.signal?.aborted) return none("cancelled", meta);
+    if (rung !== "whisper") subtitleRungs++;
+    const known = dead3.get(rung);
     let got;
     if (known) got = { failure: known, unavailable: true };
     else {
       try {
-        got = id === "whisper" ? await whisperRung(meta, info, deps) : await subtitleRung(id === "auto-subs", meta, info, opts.lang, deps);
+        got = rung === "whisper" ? await whisperRung(meta, info, opts, deps) : await subtitleRung(rung === "auto-subs", meta, info, opts, deps);
       } catch (e) {
-        got = { failure: `${id}: ${e.message}` };
+        got = { failure: `${rung}: ${e.message}` };
       }
     }
+    if (opts.signal?.aborted) return none("cancelled", meta);
     if ("failure" in got) {
-      if (got.unavailable) dead3.set(id, got.failure);
-      if (id === "whisper" && got.unavailable) whisperMissing = true;
+      if (got.unavailable) dead3.set(rung, got.failure);
+      if (rung === "whisper" && got.unavailable) whisperMissing = true;
       if (got.noTrack) noTrack++;
       failures.push(got.failure);
       continue;
     }
     const verdict = assessTranscript(got.segments, meta.duration);
-    if (verdict.ok) return { text: plain(got.segments), segments: got.segments, chapters: meta.chapters, meta, via: id };
+    if (verdict.ok)
+      return { text: plain(got.segments), segments: got.segments, chapters: meta.chapters, meta, via: rung, ...got.track ? { track: got.track } : {} };
     gateReason = verdict.reason;
   }
   let reason;
   if (subtitleRungs && noTrack === subtitleRungs && whisperMissing && !gateReason) reason = "no subtitles, and whisper needs uvx and ffmpeg";
   else reason = [...new Set([gateReason, ...failures].filter(Boolean))].join("; ");
-  return { text: "", segments: [], chapters: meta.chapters, meta, reason: reason || "no transcript" };
+  return none(reason || "no transcript", meta);
 }
 
 // src/video/markdown.ts
@@ -2782,6 +2830,14 @@ var VIA_LABEL = {
   whisper: "local whisper transcription"
 };
 var paragraph = (s) => `[${formatStamp(s.start)}] ${s.text}`;
+var baseLang = (tag) => tag.toLowerCase().replace(/-orig$/, "").split(/[-_]/)[0];
+function source(t) {
+  if (!t.via) return void 0;
+  const how = `${VIA_LABEL[t.via] ?? t.via} (${t.via}${t.track ? `, track ${t.track}` : ""})`;
+  const spoken = t.meta?.language;
+  if (t.track && spoken && baseLang(t.track) !== baseLang(spoken)) return `${how} \u2014 a translation: the video speaks ${spoken}`;
+  return how;
+}
 function transcriptMarkdown(t) {
   if (!t.segments.length) return "";
   const meta = t.meta;
@@ -2792,7 +2848,7 @@ function transcriptMarkdown(t) {
       meta.uploadDate && `- Published: ${meta.uploadDate}`,
       meta.duration !== void 0 && `- Duration: ${formatStamp(meta.duration)}`,
       `- URL: ${meta.webpageUrl}`,
-      t.via && `- Transcript: ${VIA_LABEL[t.via] ?? t.via} (${t.via})`
+      t.via && `- Transcript: ${source(t)}`
     ].filter(Boolean);
     head.push(...facts, "");
   }
@@ -2800,10 +2856,8 @@ function transcriptMarkdown(t) {
   const chapters = [...t.chapters].sort((a, b) => a.start - b.start);
   let c = -1;
   for (const seg of t.segments) {
-    let next = c;
-    while (next + 1 < chapters.length && chapters[next + 1].start <= seg.start + 0.5) next++;
-    if (next !== c) {
-      c = next;
+    while (c + 1 < chapters.length && chapters[c + 1].start <= seg.start + 0.5) {
+      c++;
       body.push(`## ${chapters[c].title}`, "");
     }
     body.push(paragraph(seg), "");
@@ -4226,7 +4280,7 @@ function parseTag(tag) {
   const region = /^(?:[a-z]{2}|\d{3})$/i.test(parts[i] ?? "") ? parts[i].toLowerCase() : void 0;
   return { lang, script, region };
 }
-function baseLang(lang) {
+function baseLang2(lang) {
   return parseTag(lang).lang;
 }
 function resolveRegion(lang, region) {
@@ -4239,7 +4293,7 @@ function resolveRegion(lang, region) {
 function ddgRegion(lang, region) {
   const r = resolveRegion(lang, region);
   if (r === NO_REGION) return "wt-wt";
-  const l = baseLang(lang);
+  const l = baseLang2(lang);
   return DDG_KL[`${l}-${r}`] ?? DDG_KL[l] ?? `${REGION_ALIASES[r] ?? r}-${DDG_LANG_ALIASES[l] ?? l}`;
 }
 function searxngLanguage(lang, region) {
@@ -4250,7 +4304,7 @@ function searxngLanguage(lang, region) {
   return country && /^[a-z]{2}$/.test(country) && country !== NO_REGION ? `${t.lang}-${country.toUpperCase()}` : t.lang;
 }
 function acceptLanguageHeader(lang, region) {
-  const l = baseLang(lang);
+  const l = baseLang2(lang);
   const r = resolveRegion(lang, region);
   if (r === NO_REGION) return l === "en" ? "en" : `${l},en;q=0.5`;
   const R = r.toUpperCase();
@@ -4418,7 +4472,7 @@ async function searchViaFirecrawl(query, limit, opts = {}) {
   const n = Number.isFinite(limit) ? Math.min(100, Math.max(1, Math.trunc(limit))) : 10;
   const locale = {};
   if (opts.lang || opts.region) {
-    if (opts.lang) locale.lang = baseLang(opts.lang);
+    if (opts.lang) locale.lang = baseLang2(opts.lang);
     const country = resolveRegion(opts.lang, opts.region);
     if (/^[a-z]{2}$/.test(country) && country !== "wt") locale.country = country;
   }
@@ -5016,7 +5070,8 @@ async function fetchAndExtract(url, opts = {}) {
   if (opts.signal?.aborted) return cancelled();
   if (youtubeVideoId(url)) {
     if (opts.authorizeUrl && !await opts.authorizeUrl(url)) return { text: "", finalUrl: url, status: 0, note: `Refused ${url}: not a public address.` };
-    const t = await transcribeVideo(url, { lang: opts.acceptLanguage?.split(/[,;]/)[0]?.trim() || void 0 });
+    const t = await transcribeVideo(url, { lang: opts.acceptLanguage?.split(/[,;]/)[0]?.trim() || void 0, signal: opts.signal });
+    if (opts.signal?.aborted) return cancelled();
     const text = transcriptMarkdown(t);
     return {
       text,
@@ -8111,7 +8166,7 @@ async function searchViaKeyless(engine, query, opts = {}) {
   const localised = !!(opts.lang || opts.region);
   const kl = localised ? ddgRegion(opts.lang, opts.region) : "wt-wt";
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
-  const locale = localised ? { lang: baseLang(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : void 0;
+  const locale = localised ? { lang: baseLang2(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : void 0;
   const seen = /* @__PURE__ */ new Set();
   const hits = [];
   const deadline = opts.budgetMs === void 0 ? Number.POSITIVE_INFINITY : Date.now() + opts.budgetMs;
@@ -11014,7 +11069,7 @@ function webindexAdapter(policy = {}) {
       {
         name: "webindex_fetch",
         title: "Fetch a URL as clean text",
-        description: "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector \u2192 anydoc \u2192 Firecrawl \u2192 pdftotext \u2192 native \u2192 OCR) and office documents (anydoc \u2192 Firecrawl \u2192 a built-in OOXML/OpenDocument reader), and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text, then a trailer with the final URL after redirects, the page's canonical URL and title, any note, and which rung produced it \u2014 never raw bytes. Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
+        description: "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector \u2192 anydoc \u2192 Firecrawl \u2192 pdftotext \u2192 native \u2192 OCR) and office documents (anydoc \u2192 Firecrawl \u2192 a built-in OOXML/OpenDocument reader), YouTube videos (a timestamped, chaptered transcript: manual subtitles \u2192 the video's own auto-captions \u2192 a local whisper transcription, which can take minutes for a long video with no subtitles), and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text, then a trailer with the final URL after redirects, the page's canonical URL and title, any note, and which rung produced it \u2014 never raw bytes. Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
         inputSchema: {
           type: "object",
           properties: {

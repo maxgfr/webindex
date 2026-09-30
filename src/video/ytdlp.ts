@@ -11,12 +11,13 @@ import { shAsync, type ShResult } from "../exec.js";
 // increasingly need. So it is used for all of it — metadata, subtitles, audio,
 // playlist listings — and webindex's own HTTP client never touches a video.
 //
-// Every command goes through a runner that tests replace, and every call ends
-// with `<PREFIX>_YTDLP_ARGS`: the one escape hatch for cookies or a proxy
-// (`--cookies-from-browser firefox`), split on whitespace.
+// Every command goes through a runner that tests replace, and every call carries
+// `<PREFIX>_YTDLP_ARGS`: the one escape hatch for cookies or a proxy
+// (`--cookies-from-browser firefox`), split on whitespace. A URL always comes
+// after `--`, so no string handed to this module is ever read as an option.
 
 /** Runs a command. The default is shAsync; tests inject their own. */
-export type VideoRunner = (cmd: string, args: string[], opts?: { timeoutMs?: number; cwd?: string }) => Promise<ShResult>;
+export type VideoRunner = (cmd: string, args: string[], opts?: { timeoutMs?: number; cwd?: string; signal?: AbortSignal }) => Promise<ShResult>;
 
 export const defaultVideoRunner: VideoRunner = (cmd, args, opts) => shAsync(cmd, args, opts);
 
@@ -28,9 +29,10 @@ export function ytdlpExtraArgs(): string[] {
   return (env("YTDLP_ARGS") ?? "").split(/\s+/).filter(Boolean);
 }
 
-/** Run yt-dlp with the escape-hatch arguments appended. */
-export function runYtdlp(args: string[], run: VideoRunner = defaultVideoRunner, timeoutMs = PROBE_TIMEOUT_MS): Promise<ShResult> {
-  return run("yt-dlp", [...args, ...ytdlpExtraArgs()], { timeoutMs });
+/** Run yt-dlp: its options, the escape-hatch arguments, then `--` and the URL when there is one. */
+export function runYtdlp(args: string[], opts: { run?: VideoRunner; timeoutMs?: number; url?: string; signal?: AbortSignal } = {}): Promise<ShResult> {
+  const argv = [...args, ...ytdlpExtraArgs(), ...(opts.url ? ["--", opts.url] : [])];
+  return (opts.run ?? defaultVideoRunner)("yt-dlp", argv, { timeoutMs: opts.timeoutMs ?? PROBE_TIMEOUT_MS, signal: opts.signal });
 }
 
 export interface VideoChapter {
@@ -56,6 +58,8 @@ export interface VideoMeta {
   /** Languages with auto-captions — the original (`<lang>-orig`) and YouTube's machine translations. */
   autoCaptions: string[];
   webpageUrl: string;
+  /** A stream that is on air now, or scheduled: there is nothing whole to transcribe yet. */
+  live?: "live" | "upcoming";
 }
 
 /** The metadata, and the raw `-J` JSON later calls are fed with `--load-info-json`. */
@@ -87,12 +91,15 @@ export function videoMetaFromInfo(info: Record<string, unknown>): VideoMeta | un
     subtitles: tracks(info.subtitles),
     autoCaptions: tracks(info.automatic_captions),
     webpageUrl: str(info.webpage_url) ?? `https://www.youtube.com/watch?v=${id}`,
+    ...(info.live_status === "is_live" || info.is_live === true ? { live: "live" as const } : {}),
+    ...(info.live_status === "is_upcoming" ? { live: "upcoming" as const } : {}),
   };
 }
 
 /** Read one video's metadata. Never throws: a failure is a reason. */
-export async function probeVideo(url: string, run: VideoRunner = defaultVideoRunner): Promise<VideoProbe> {
-  const r = await runYtdlp(["-J", "--skip-download", "--no-playlist", "--no-warnings", url], run, PROBE_TIMEOUT_MS);
+export async function probeVideo(url: string, run: VideoRunner = defaultVideoRunner, signal?: AbortSignal): Promise<VideoProbe> {
+  const r = await runYtdlp(["-J", "--skip-download", "--no-playlist", "--no-warnings"], { run, url, signal });
+  if (signal?.aborted) return { error: "cancelled" };
   if (r.missing) return { error: "install yt-dlp (https://github.com/yt-dlp/yt-dlp) to read videos", missing: true };
   if (!r.ok) return { error: classifyYtdlpError(r.stderr) };
   try {
@@ -146,6 +153,7 @@ export async function downloadSubtitle(
   lang: string,
   auto: boolean,
   run: VideoRunner = defaultVideoRunner,
+  signal?: AbortSignal,
 ): Promise<{ vtt: string } | { error: string }> {
   return withTempDir("subs", async (dir) => {
     const infoPath = join(dir, "info.json");
@@ -164,11 +172,11 @@ export async function downloadSubtitle(
         "-o",
         join(dir, "sub.%(ext)s"),
       ],
-      run,
-      SUBTITLE_TIMEOUT_MS,
+      { run, timeoutMs: SUBTITLE_TIMEOUT_MS, signal },
     );
     const file = readdirSync(dir).find((f) => f.endsWith(".vtt"));
     if (file) return { vtt: readFileSync(join(dir, file), "utf8") };
+    if (signal?.aborted) return { error: "cancelled" };
     return { error: r.ok ? `yt-dlp wrote no ${lang} track` : classifyYtdlpError(r.stderr) };
   });
 }

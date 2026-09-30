@@ -1,6 +1,7 @@
 import { envName } from "../brand.js";
 import { have } from "../exec.js";
 import { enginesFromEnv } from "../pdf/ladder.js";
+import { youtubeVideoId } from "./url.js";
 import { mergeSegments, parseVtt, type VideoSegment } from "./vtt.js";
 import { resetWhisperBudget, whisperBudgetLeft, whisperTranscribe } from "./whisper.js";
 import { defaultVideoRunner, downloadSubtitle, probeVideo, type VideoChapter, type VideoMeta, type VideoRunner } from "./ytdlp.js";
@@ -30,6 +31,12 @@ export interface VideoTranscript {
   meta?: VideoMeta;
   /** Which rung produced the transcript. */
   via?: VideoTranscriberId;
+  /**
+   * The subtitle track it was read from (`en`, `fr`, `en-orig`). A manual
+   * track in another language than the video's is a translation, and a reader
+   * quoting it must know.
+   */
+  track?: string;
   /** Why there is no transcript, when there is none. */
   reason?: string;
 }
@@ -46,6 +53,8 @@ export interface VideoLadderOptions {
   /** Restrict or reorder the rungs. Defaults to `<PREFIX>_VIDEO_ENGINES`, else all three. */
   engines?: VideoTranscriberId[];
   deps?: Partial<VideoDeps>;
+  /** Stops the ladder, and kills whichever command it is running. */
+  signal?: AbortSignal;
 }
 
 // What the ladder runs through when a caller passes no deps of its own. A test
@@ -140,21 +149,22 @@ export function pickAutoTrack(meta: VideoMeta): string | undefined {
 
 const chapterStarts = (meta: VideoMeta) => meta.chapters.map((c) => c.start);
 
-type RungOutcome = { segments: VideoSegment[] } | { failure: string; noTrack?: boolean; unavailable?: boolean };
+type RungOutcome = { segments: VideoSegment[]; track?: string } | { failure: string; noTrack?: boolean; unavailable?: boolean };
 
-async function subtitleRung(auto: boolean, meta: VideoMeta, info: string, lang: string | undefined, deps: VideoDeps): Promise<RungOutcome> {
-  const track = auto ? pickAutoTrack(meta) : pickManualTrack(meta, lang);
+async function subtitleRung(auto: boolean, meta: VideoMeta, info: string, opts: VideoLadderOptions, deps: VideoDeps): Promise<RungOutcome> {
+  const track = auto ? pickAutoTrack(meta) : pickManualTrack(meta, opts.lang);
   if (!track) return { failure: auto ? "no auto-captions in the video's language" : "no manual subtitles", noTrack: true };
-  const got = await downloadSubtitle(info, track, auto, deps.run);
+  const got = await downloadSubtitle(info, track, auto, deps.run, opts.signal);
   if ("error" in got) return { failure: `${auto ? "auto-captions" : "subtitles"} (${track}): ${got.error}` };
-  return { segments: mergeSegments(parseVtt(got.vtt), chapterStarts(meta)) };
+  // Only an auto track rolls; a manual one that repeats a line means it.
+  return { segments: mergeSegments(parseVtt(got.vtt, { rolling: auto }), chapterStarts(meta)), track };
 }
 
-async function whisperRung(meta: VideoMeta, info: string, deps: VideoDeps): Promise<RungOutcome> {
+async function whisperRung(meta: VideoMeta, info: string, opts: VideoLadderOptions, deps: VideoDeps): Promise<RungOutcome> {
   const missing = ["uvx", "ffmpeg"].filter((c) => !deps.have(c));
   if (missing.length) return { failure: "whisper needs uvx and ffmpeg", unavailable: true };
   if (whisperBudgetLeft() <= 0) return { failure: `this run's whisper budget is spent (raise ${envName("WHISPER_MAX")})` };
-  const r = await whisperTranscribe(info, meta.language, deps.run);
+  const r = await whisperTranscribe(info, meta.language, deps.run, opts.signal);
   if ("segments" in r) return { segments: mergeSegments(r.segments, chapterStarts(meta)) };
   if ("declined" in r) return { failure: `this run's whisper budget is spent (raise ${envName("WHISPER_MAX")})` };
   return { failure: r.failed, unavailable: r.unavailable };
@@ -165,42 +175,61 @@ const plain = (segments: VideoSegment[]) => segments.map((s) => s.text).join("\n
 /**
  * A YouTube video's transcript, from the first rung whose output passes the
  * quality gate. Never throws: every failure is a `reason`.
+ *
+ * Only a URL `youtubeVideoId` recognises is read, and yt-dlp is handed the
+ * canonical watch URL rebuilt from its id — never the caller's string, which
+ * could otherwise reach yt-dlp as an option.
  */
 export async function transcribeVideo(url: string, opts: VideoLadderOptions = {}): Promise<VideoTranscript> {
+  const none = (reason: string, meta?: VideoMeta): VideoTranscript => ({
+    text: "",
+    segments: [],
+    chapters: meta?.chapters ?? [],
+    ...(meta ? { meta } : {}),
+    reason,
+  });
+  const id = youtubeVideoId(url);
+  if (!id) return none(`not a YouTube video URL: ${url}`);
   const deps = videoDeps(opts.deps);
   const rungs = enabledTranscribers(opts.engines);
-  if (!rungs.length) return { text: "", segments: [], chapters: [], reason: `every transcript rung is switched off (${envName("VIDEO_ENGINES")})` };
+  if (!rungs.length) return none(`every transcript rung is switched off (${envName("VIDEO_ENGINES")})`);
 
-  const probe = await probeVideo(url, deps.run);
-  if ("error" in probe) return { text: "", segments: [], chapters: [], reason: probe.error };
+  const probe = await probeVideo(`https://www.youtube.com/watch?v=${id}`, deps.run, opts.signal);
+  if ("error" in probe) return none(probe.error);
   const { meta, info } = probe;
+  // A stream on air has no end to transcribe, and whisper would record it
+  // until its timeout; one not started yet has nothing at all.
+  if (meta.live) return none(`live stream ${meta.live === "live" ? "in progress" : "not started yet"} — read it once it has ended`, meta);
 
   const failures: string[] = [];
   let noTrack = 0;
   let subtitleRungs = 0;
   let whisperMissing = false;
   let gateReason: string | undefined;
-  for (const id of rungs) {
-    if (id !== "whisper") subtitleRungs++;
-    const known = dead.get(id);
+  for (const rung of rungs) {
+    if (opts.signal?.aborted) return none("cancelled", meta);
+    if (rung !== "whisper") subtitleRungs++;
+    const known = dead.get(rung);
     let got: RungOutcome;
     if (known) got = { failure: known, unavailable: true };
     else {
       try {
-        got = id === "whisper" ? await whisperRung(meta, info, deps) : await subtitleRung(id === "auto-subs", meta, info, opts.lang, deps);
+        got = rung === "whisper" ? await whisperRung(meta, info, opts, deps) : await subtitleRung(rung === "auto-subs", meta, info, opts, deps);
       } catch (e) {
-        got = { failure: `${id}: ${(e as Error).message}` }; // a rung must never take the run down
+        got = { failure: `${rung}: ${(e as Error).message}` }; // a rung must never take the run down
       }
     }
+    if (opts.signal?.aborted) return none("cancelled", meta);
     if ("failure" in got) {
-      if (got.unavailable) dead.set(id, got.failure);
-      if (id === "whisper" && got.unavailable) whisperMissing = true;
+      if (got.unavailable) dead.set(rung, got.failure);
+      if (rung === "whisper" && got.unavailable) whisperMissing = true;
       if (got.noTrack) noTrack++;
       failures.push(got.failure);
       continue;
     }
     const verdict = assessTranscript(got.segments, meta.duration);
-    if (verdict.ok) return { text: plain(got.segments), segments: got.segments, chapters: meta.chapters, meta, via: id };
+    if (verdict.ok)
+      return { text: plain(got.segments), segments: got.segments, chapters: meta.chapters, meta, via: rung, ...(got.track ? { track: got.track } : {}) };
     gateReason = verdict.reason;
   }
 
@@ -208,5 +237,5 @@ export async function transcribeVideo(url: string, opts: VideoLadderOptions = {}
   let reason: string;
   if (subtitleRungs && noTrack === subtitleRungs && whisperMissing && !gateReason) reason = "no subtitles, and whisper needs uvx and ffmpeg";
   else reason = [...new Set([gateReason, ...failures].filter(Boolean))].join("; ");
-  return { text: "", segments: [], chapters: meta.chapters, meta, reason: reason || "no transcript" };
+  return none(reason || "no transcript", meta);
 }

@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ShResult } from "../src/exec.js";
 import {
   assessTranscript,
@@ -241,11 +241,108 @@ describe("transcribeVideo", () => {
     expect(bot.meta).toBeUndefined();
   });
 
-  it("appends WEBINDEX_YTDLP_ARGS to every yt-dlp call", async () => {
+  it("passes WEBINDEX_YTDLP_ARGS on every yt-dlp call, and the URL only after --", async () => {
     process.env.WEBINDEX_TEST_YTDLP_ARGS = " --cookies-from-browser   firefox ";
     const calls: string[][] = [];
-    await transcribeVideo(URL, { deps: { run: runner({ manual: { en: fixture("ted-manual.en.vtt") } }, calls), have: haveAll } });
-    for (const c of calls.filter((c) => c[0] === "yt-dlp")) expect(c.slice(-2)).toEqual(["--cookies-from-browser", "firefox"]);
+    await transcribeVideo("https://youtu.be/iG9CE55wbtY?si=x", {
+      deps: { run: runner({ manual: { en: fixture("ted-manual.en.vtt") } }, calls), have: haveAll },
+    });
+    const ytdlp = calls.filter((c) => c[0] === "yt-dlp");
+    expect(ytdlp).toHaveLength(2);
+    // The probe gets the canonical watch URL rebuilt from the id, never the caller's string.
+    expect(ytdlp[0]!.slice(-4)).toEqual(["--cookies-from-browser", "firefox", "--", URL]);
+    expect(ytdlp[1]!.slice(-2)).toEqual(["--cookies-from-browser", "firefox"]);
+  });
+
+  it("refuses anything that is not a YouTube video before running a command", async () => {
+    const calls: string[][] = [];
+    for (const bad of ["--config-locations=/tmp/x", "https://example.com/watch?v=iG9CE55wbtY", "https://www.youtube.com/@TED"]) {
+      const t = await transcribeVideo(bad, { deps: { run: runner({}, calls), have: haveAll } });
+      expect(t.reason).toBe(`not a YouTube video URL: ${bad}`);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("does not try to transcribe a live or upcoming stream", async () => {
+    for (const [status, words] of [
+      ["is_live", "live stream in progress"],
+      ["is_upcoming", "live stream not started yet"],
+    ]) {
+      const calls: string[][] = [];
+      const t = await transcribeVideo(URL, { deps: { run: runner({ info: { ...INFO, live_status: status, subtitles: {} } }, calls), have: haveAll } });
+      expect(t.reason).toBe(`${words} — read it once it has ended`);
+      expect(t.meta?.live).toBe(status === "is_live" ? "live" : "upcoming");
+      expect(calls).toHaveLength(1);
+    }
+  });
+
+  it("stops when its caller aborts, and kills the command it was running", async () => {
+    const ctl = new AbortController();
+    const seen: (AbortSignal | undefined)[] = [];
+    const run: VideoRunner = async (cmd, args, opts) => {
+      seen.push(opts?.signal);
+      if (args.includes("-J")) {
+        ctl.abort();
+        return fail("aborted", 130);
+      }
+      return fail(`unexpected ${cmd}`);
+    };
+    const t = await transcribeVideo(URL, { signal: ctl.signal, deps: { run, have: haveAll } });
+    expect(t.reason).toBe("cancelled");
+    expect(seen).toEqual([ctl.signal]);
+  });
+
+  it("records the track it read", async () => {
+    const t = await transcribeVideo(URL, { lang: "fr", deps: { run: runner({ manual: { fr: fixture("ted-manual.fr.vtt") } }), have: haveAll } });
+    expect(t).toMatchObject({ via: "manual-subs", track: "fr" });
+  });
+});
+
+describe("whisper", () => {
+  const info = { ...INFO, language: "en-US", subtitles: {}, automatic_captions: {} };
+
+  it("tells whisper the bare language code, and nothing it would refuse", async () => {
+    const calls: string[][] = [];
+    await transcribeVideo(URL, { deps: { run: runner({ info, whisper: talk(130) }, calls), have: haveAll } });
+    const uvx = calls.find((c) => c[0] === "uvx")!;
+    expect(uvx[uvx.indexOf("--language") + 1]).toBe("en");
+    resetVideoLadderCache();
+    const none: string[][] = [];
+    await transcribeVideo(URL, { deps: { run: runner({ info: { ...info, language: "x-klingon" }, whisper: talk(130) }, none), have: haveAll } });
+    expect(none.find((c) => c[0] === "uvx")).not.toContain("--language");
+  });
+
+  it("refunds the budget when no transcription was attempted", async () => {
+    process.env.WEBINDEX_TEST_WHISPER_MAX = "1";
+    const noAudio: VideoRunner = async (cmd, args, opts) =>
+      cmd === "yt-dlp" && args.includes("bestaudio/best") ? fail("ERROR: HTTP Error 403: Forbidden") : runner({ info, whisper: talk(130) })(cmd, args, opts);
+    const first = await transcribeVideo(URL, { deps: { run: noAudio, have: haveAll } });
+    expect(first.reason).toContain("the audio download failed");
+    const second = await transcribeVideo(URL, { deps: { run: runner({ info, whisper: talk(130) }), have: haveAll } });
+    expect(second.via).toBe("whisper");
+  });
+
+  it("gives the three steps one deadline between them", async () => {
+    process.env.WEBINDEX_TEST_WHISPER_TIMEOUT_MS = "60000";
+    // Each step "takes" 25 s of a fake clock.
+    let clock = 1_000_000;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const budgets: number[] = [];
+    const inner = runner({ info, whisper: talk(130) });
+    const run: VideoRunner = async (cmd, args, opts) => {
+      if (cmd !== "yt-dlp" || args.includes("bestaudio/best")) {
+        budgets.push(opts?.timeoutMs ?? 0);
+        clock += 25_000;
+      }
+      return inner(cmd, args, opts);
+    };
+    try {
+      await transcribeVideo(URL, { deps: { run, have: haveAll } });
+    } finally {
+      now.mockRestore();
+      delete process.env.WEBINDEX_TEST_WHISPER_TIMEOUT_MS;
+    }
+    expect(budgets).toEqual([60_000, 35_000, 10_000]);
   });
 });
 

@@ -48,46 +48,53 @@ const clean = (line: string) =>
     .trim();
 
 /**
- * The cues of a WebVTT file, tags stripped and entities decoded, with the
- * rolling repetition of auto-captions removed: a line already said is dropped,
- * and a line that continues the last one keeps only what it adds. Empty for
- * anything that is not WebVTT.
+ * The cues of a WebVTT file, tags stripped and entities decoded. On a rolling
+ * track (auto-captions) each cue opens by repeating what the previous one
+ * showed; those leading lines are dropped, and a line that continues the last
+ * one keeps only what it adds — while a line said twice on purpose ("no no",
+ * a chorus) is kept. `rolling` defaults to what the file looks like: word-timing
+ * tags give an auto track away. Empty for anything that is not WebVTT.
  */
-export function parseVtt(src: string): VideoSegment[] {
-  const text = src.replace(/^﻿/, "").replace(/\r\n?/g, "\n");
+export function parseVtt(src: string, opts: { rolling?: boolean } = {}): VideoSegment[] {
+  const text = src.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
   if (!/^WEBVTT/.test(text)) return [];
+  const rolling = opts.rolling ?? (/<\d{2}:\d{2}[:.]\d/.test(text) || /<c>/.test(text));
   const out: VideoSegment[] = [];
-  // Only a rolling track repeats itself on purpose; a manual one that says
-  // "No." twice means it twice. The word-timing tags give a rolling one away.
-  const rolling = /<\d{2}:\d{2}[:.]\d/.test(text) || /<c>/.test(text);
-  // What the viewer has already read: the last two lines emitted.
-  const said: string[] = [];
+  // The lines the previous cue put on screen.
+  let shown: string[] = [];
   for (const block of text.split(/\n{2,}/)) {
-    const lines = block.split("\n");
-    const at = lines.findIndex((l) => TIMING.test(l));
+    const raw = block.split("\n");
+    const at = raw.findIndex((l) => TIMING.test(l));
     if (at < 0) continue; // the header, NOTE, STYLE and REGION blocks
-    const m = TIMING.exec(lines[at]!)!;
+    const m = TIMING.exec(raw[at]!)!;
     const start = seconds(m[1]!);
     const end = seconds(m[2]!);
+    const lines = raw
+      .slice(at + 1)
+      .map(clean)
+      .filter(Boolean);
+    const previous = shown;
+    shown = lines;
+    // The 10 ms bridge cues of a rolling track only hold the last line up.
     if (end - start < MIN_CUE_S) continue;
-    const fresh: string[] = [];
-    for (const raw of lines.slice(at + 1)) {
-      let line = clean(raw);
-      if (!line) continue;
-      if (!rolling) {
-        fresh.push(line);
-        continue;
-      }
-      if (said.includes(line)) continue;
-      const last = said[said.length - 1];
-      if (last && line.startsWith(`${last} `)) line = line.slice(last.length + 1);
-      fresh.push(line);
-      said.push(clean(raw));
-      if (said.length > 2) said.shift();
+    let fresh = lines;
+    if (rolling) {
+      fresh = lines.slice(repeatedLead(lines, previous));
+      const last = previous[previous.length - 1];
+      if (last && fresh[0]?.startsWith(`${last} `)) fresh = [fresh[0].slice(last.length + 1), ...fresh.slice(1)];
     }
     if (fresh.length) out.push({ start, end, text: fresh.join(" ") });
   }
   return out;
+}
+
+/** How many of a cue's first lines repeat, in order, the end of what was already on screen. */
+function repeatedLead(lines: string[], previous: string[]): number {
+  for (let n = Math.min(lines.length, previous.length); n > 0; n--) {
+    const tail = previous.slice(previous.length - n);
+    if (tail.every((l, i) => l === lines[i])) return n;
+  }
+  return 0;
 }
 
 // A sentence ends on . ! ? or …, possibly inside a closing quote or bracket.

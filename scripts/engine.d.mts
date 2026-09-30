@@ -363,12 +363,14 @@ declare function shAsync(cmd: string, args: string[], opts?: {
     cwd?: string;
     timeoutMs?: number;
     env?: NodeJS.ProcessEnv;
+    signal?: AbortSignal;
 }): Promise<ShResult>;
 
 /** Runs a command. The default is shAsync; tests inject their own. */
 type VideoRunner = (cmd: string, args: string[], opts?: {
     timeoutMs?: number;
     cwd?: string;
+    signal?: AbortSignal;
 }) => Promise<ShResult>;
 interface VideoChapter {
     start: number;
@@ -392,6 +394,8 @@ interface VideoMeta {
     /** Languages with auto-captions — the original (`<lang>-orig`) and YouTube's machine translations. */
     autoCaptions: string[];
     webpageUrl: string;
+    /** A stream that is on air now, or scheduled: there is nothing whole to transcribe yet. */
+    live?: "live" | "upcoming";
 }
 /** The metadata, and the raw `-J` JSON later calls are fed with `--load-info-json`. */
 type VideoProbe = {
@@ -404,7 +408,7 @@ type VideoProbe = {
 /** Project yt-dlp's info JSON onto VideoMeta. Undefined when it is not a single video. */
 declare function videoMetaFromInfo(info: Record<string, unknown>): VideoMeta | undefined;
 /** Read one video's metadata. Never throws: a failure is a reason. */
-declare function probeVideo(url: string, run?: VideoRunner): Promise<VideoProbe>;
+declare function probeVideo(url: string, run?: VideoRunner, signal?: AbortSignal): Promise<VideoProbe>;
 /**
  * yt-dlp's failure, said the way a reader can act on it. The order matters:
  * YouTube's own wording names the most specific cause, and a 403 is the least
@@ -415,7 +419,7 @@ declare function classifyYtdlpError(stderr: string): string;
  * One subtitle track, as WebVTT text. Fed the probe's own JSON through
  * `--load-info-json`, so the page is not extracted a second time.
  */
-declare function downloadSubtitle(info: string, lang: string, auto: boolean, run?: VideoRunner): Promise<{
+declare function downloadSubtitle(info: string, lang: string, auto: boolean, run?: VideoRunner, signal?: AbortSignal): Promise<{
     vtt: string;
 } | {
     error: string;
@@ -433,12 +437,16 @@ interface VideoSegment {
     text: string;
 }
 /**
- * The cues of a WebVTT file, tags stripped and entities decoded, with the
- * rolling repetition of auto-captions removed: a line already said is dropped,
- * and a line that continues the last one keeps only what it adds. Empty for
- * anything that is not WebVTT.
+ * The cues of a WebVTT file, tags stripped and entities decoded. On a rolling
+ * track (auto-captions) each cue opens by repeating what the previous one
+ * showed; those leading lines are dropped, and a line that continues the last
+ * one keeps only what it adds — while a line said twice on purpose ("no no",
+ * a chorus) is kept. `rolling` defaults to what the file looks like: word-timing
+ * tags give an auto track away. Empty for anything that is not WebVTT.
  */
-declare function parseVtt(src: string): VideoSegment[];
+declare function parseVtt(src: string, opts?: {
+    rolling?: boolean;
+}): VideoSegment[];
 /**
  * Cues merged into segments of one to three sentences: a segment closes after
  * its third sentence, or on a sentence end once it holds a couple of lines'
@@ -464,6 +472,12 @@ interface VideoTranscript {
     meta?: VideoMeta;
     /** Which rung produced the transcript. */
     via?: VideoTranscriberId;
+    /**
+     * The subtitle track it was read from (`en`, `fr`, `en-orig`). A manual
+     * track in another language than the video's is a translation, and a reader
+     * quoting it must know.
+     */
+    track?: string;
     /** Why there is no transcript, when there is none. */
     reason?: string;
 }
@@ -478,6 +492,8 @@ interface VideoLadderOptions {
     /** Restrict or reorder the rungs. Defaults to `<PREFIX>_VIDEO_ENGINES`, else all three. */
     engines?: VideoTranscriberId[];
     deps?: Partial<VideoDeps>;
+    /** Stops the ladder, and kills whichever command it is running. */
+    signal?: AbortSignal;
 }
 /** Test seam: the runner and `have` every later call uses by default; no argument restores the real tools. */
 declare function setVideoDeps(deps?: Partial<VideoDeps>): void;
@@ -500,6 +516,10 @@ declare function assessTranscript(segments: VideoSegment[], duration?: number): 
 /**
  * A YouTube video's transcript, from the first rung whose output passes the
  * quality gate. Never throws: every failure is a `reason`.
+ *
+ * Only a URL `youtubeVideoId` recognises is read, and yt-dlp is handed the
+ * canonical watch URL rebuilt from its id — never the caller's string, which
+ * could otherwise reach yt-dlp as an option.
  */
 declare function transcribeVideo(url: string, opts?: VideoLadderOptions): Promise<VideoTranscript>;
 

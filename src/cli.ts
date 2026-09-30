@@ -1071,6 +1071,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
           title: "Fetch a URL as clean text",
           description:
             "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR) and office documents (anydoc → Firecrawl → a built-in OOXML/OpenDocument reader), " +
+            "YouTube videos (a timestamped, chaptered transcript: manual subtitles → the video's own auto-captions → a local whisper transcription, which can take minutes for a long video with no subtitles), " +
             "and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text, then a trailer with the final URL after redirects, the page's canonical URL and title, any note, and which rung produced it — never raw bytes. " +
             "Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
           inputSchema: {

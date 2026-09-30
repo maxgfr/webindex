@@ -101,15 +101,22 @@ export function sh(cmd: string, args: string[], opts: { cwd?: string; input?: st
  * long as all of them put together. SIGKILL on timeout — to the command and
  * everything it started — and never an orphan.
  */
-export function shAsync(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): Promise<ShResult> {
+export function shAsync(
+  cmd: string,
+  args: string[],
+  opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal } = {},
+): Promise<ShResult> {
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
+  if (opts.signal?.aborted) return Promise.resolve({ ok: false, status: 130, stdout: "", stderr: "aborted" });
   return new Promise((resolve) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
     const done = (r: ShResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (onAbort) opts.signal?.removeEventListener("abort", onAbort);
       resolve(r);
     };
     let child: ReturnType<typeof spawn>;
@@ -137,6 +144,15 @@ export function shAsync(cmd: string, args: string[], opts: { cwd?: string; timeo
       killTree(child);
       done({ ok: false, status: 124, stdout, stderr: stderr || `timed out after ${timeoutMs}ms` });
     }, timeoutMs);
+    // Cancelled by the caller (an MCP client that gave up): the command and
+    // everything it started go, exactly as on a timeout.
+    if (opts.signal) {
+      onAbort = () => {
+        killTree(child);
+        done({ ok: false, status: 130, stdout, stderr: "aborted" });
+      };
+      opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
     child.on("error", (e) => done(toResult(null, stdout, stderr, e as NodeJS.ErrnoException)));
     child.on("close", (code) => done(toResult(code, stdout, stderr)));
   });
