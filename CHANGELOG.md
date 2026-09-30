@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.24.0](https://github.com/maxgfr/webindex/compare/v1.23.0...v1.24.0) (2026-09-30)
+
+
+### Features
+
+* **video:** extract what is on screen, aligned with what was said ([5a0ed36](https://github.com/maxgfr/webindex/commit/5a0ed36b86ad9563215f7bedb82c2bd4ef9b8030))
+
 # [1.23.0](https://github.com/maxgfr/webindex/compare/v1.22.0...v1.23.0) (2026-09-30)
 
 
