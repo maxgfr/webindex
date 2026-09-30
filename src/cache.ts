@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fetchAndExtract, looksLikePdfUrl, type ExtractorId } from "./fetch.js";
 import { docFormatForUrl } from "./doc.js";
+import { youtubeVideoId } from "./video.js";
 import { firecrawlBase, firecrawlIsExplicit, probeFirecrawl } from "./firecrawl.js";
 import { canonicalizeUrl, domainOf, fnv1a64 } from "./url.js";
 import { isNoWrite, writeFileAtomic } from "./no-write.js";
@@ -131,10 +132,14 @@ const sameFormat = (variant: CacheVariant): readonly CacheVariant[] => (MARKDOWN
 // from what is installed, which no pre-fetch prediction can name.
 const PDF_CACHE_NS = "pdf" as const;
 const DOC_CACHE_NS = "doc" as const;
-type CacheNamespace = ExtractorId | typeof PDF_CACHE_NS | typeof DOC_CACHE_NS;
+// A video's transcript rung is only known after the ladder has run, exactly as
+// a PDF's is, so every transcript shares one namespace too.
+const VIDEO_CACHE_NS = "video" as const;
+type CacheNamespace = ExtractorId | typeof PDF_CACHE_NS | typeof DOC_CACHE_NS | typeof VIDEO_CACHE_NS;
 
 async function currentExtractor(opts: { firecrawl?: string; fullPage?: boolean }, url: string): Promise<CacheNamespace> {
   if (looksLikePdfUrl(url)) return PDF_CACHE_NS;
+  if (youtubeVideoId(url)) return VIDEO_CACHE_NS;
   if (docFormatForUrl(url)) return DOC_CACHE_NS;
   // A full-page read never goes to Firecrawl, so it must never be served Firecrawl's text.
   if (opts.fullPage) return "native";
@@ -145,11 +150,14 @@ async function currentExtractor(opts: { firecrawl?: string; fullPage?: boolean }
 // Older entries for extensionless documents were filed under the converter.
 // Keep reading those alongside the format namespaces so upgrading keeps both
 // online and offline caches usable.
-const DOCUMENT_NAMESPACES: CacheNamespace[] = [PDF_CACHE_NS, DOC_CACHE_NS, "pdf-inspector", "pdftotext", "anydoc", "ocr"];
+const DOCUMENT_NAMESPACES: CacheNamespace[] = [PDF_CACHE_NS, DOC_CACHE_NS, VIDEO_CACHE_NS, "pdf-inspector", "pdftotext", "anydoc", "ocr"];
 const WRITTEN_NAMESPACES: CacheNamespace[] = ["native", "firecrawl", ...DOCUMENT_NAMESPACES];
 
 function namespaceFor(result: Extract, predicted: CacheNamespace): CacheNamespace {
-  return result.documentType ?? (predicted === PDF_CACHE_NS || predicted === DOC_CACHE_NS ? predicted : (result.extractor ?? "native"));
+  return (
+    result.documentType ??
+    (predicted === PDF_CACHE_NS || predicted === DOC_CACHE_NS || predicted === VIDEO_CACHE_NS ? predicted : (result.extractor ?? "native"))
+  );
 }
 
 /**

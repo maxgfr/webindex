@@ -1,0 +1,114 @@
+{
+ "id": "iG9CE55wbtY",
+ "title": "Do schools kill creativity? | Sir Ken Robinson | TED",
+ "channel": "TED",
+ "uploader": "TED",
+ "upload_date": "20070107",
+ "duration": 1203,
+ "language": "en",
+ "webpage_url": "https://www.youtube.com/watch?v=iG9CE55wbtY",
+ "chapters": [
+  {
+   "start_time": 0,
+   "title": "Introduction",
+   "end_time": 42
+  },
+  {
+   "start_time": 42,
+   "title": "Three themes",
+   "end_time": 115
+  },
+  {
+   "start_time": 115,
+   "title": "Education",
+   "end_time": 224
+  },
+  {
+   "start_time": 224,
+   "title": "A great story",
+   "end_time": 345
+  },
+  {
+   "start_time": 345,
+   "title": "Being wrong",
+   "end_time": 471
+  },
+  {
+   "start_time": 471,
+   "title": "Moving to Los Angeles",
+   "end_time": 521
+  },
+  {
+   "start_time": 521,
+   "title": "Hierarchy of subjects",
+   "end_time": 676
+  },
+  {
+   "start_time": 676,
+   "title": "Academic ability",
+   "end_time": 772
+  },
+  {
+   "start_time": 772,
+   "title": "Intelligence",
+   "end_time": 908
+  },
+  {
+   "start_time": 908,
+   "title": "epiphany",
+   "end_time": 1203
+  }
+ ],
+ "subtitles": {
+  "en": [
+   {
+    "ext": "vtt",
+    "url": "https://example.invalid/en"
+   }
+  ],
+  "fr": [
+   {
+    "ext": "vtt",
+    "url": "https://example.invalid/fr"
+   }
+  ],
+  "de": [
+   {
+    "ext": "vtt",
+    "url": "https://example.invalid/de"
+   }
+  ]
+ },
+ "automatic_captions": {
+  "en-orig": [
+   {
+    "ext": "vtt",
+    "url": "https://example.invalid/a/en-orig"
+   }
+  ],
+  "en": [
+   {
+    "ext": "vtt",
+    "url": "https://example.invalid/a/en"
+   }
+  ],
+  "fr": [
+   {
+    "ext": "vtt",
+    "url": "https://example.invalid/a/fr"
+   }
+  ],
+  "de": [
+   {
+    "ext": "vtt",
+    "url": "https://example.invalid/a/de"
+   }
+  ],
+  "ja": [
+   {
+    "ext": "vtt",
+    "url": "https://example.invalid/a/ja"
+   }
+  ]
+ }
+}

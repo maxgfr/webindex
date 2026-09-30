@@ -318,6 +318,196 @@ declare function extractDocument(bytes: Buffer, fmt: DocFormat, opts?: DocLadder
  */
 declare function officeToText(bytes: Buffer): string | undefined;
 
+/**
+ * The video id a YouTube URL points at, or undefined when it names no single
+ * video. Reads `watch?v=`, `youtu.be/<id>`, and the `/shorts/`, `/embed/`,
+ * `/live/` and `/v/` paths, on youtube.com, its subdomains (www, m, music) and
+ * youtube-nocookie.com.
+ */
+declare function youtubeVideoId(url: string): string | undefined;
+/**
+ * Whether a YouTube URL names a list of videos: a `playlist` (any URL carrying
+ * `list=`) or a `channel` (`/@handle`, `/channel/`, `/c/`, `/user/`).
+ * Undefined for anything else, a single video included.
+ */
+declare function youtubeListKind(url: string): "playlist" | "channel" | undefined;
+
+interface ShResult {
+    ok: boolean;
+    status: number;
+    stdout: string;
+    stderr: string;
+    /** The executable itself was not found — not a failure OF the command. */
+    missing?: boolean;
+}
+declare function have(cmd: string): boolean;
+/** Test seam: forget which executables were found. */
+declare function resetHaveCache(): void;
+/** Run a command synchronously. Never throws — a missing binary is a result. */
+declare function sh(cmd: string, args: string[], opts?: {
+    cwd?: string;
+    input?: string;
+    timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
+}): ShResult;
+/**
+ * Run a command without blocking the event loop.
+ *
+ * Preferred wherever several commands could overlap — a synchronous `git clone`
+ * freezes everything else in the process for the whole transfer, which is the
+ * difference between three clones taking as long as the slowest and taking as
+ * long as all of them put together. SIGKILL on timeout — to the command and
+ * everything it started — and never an orphan.
+ */
+declare function shAsync(cmd: string, args: string[], opts?: {
+    cwd?: string;
+    timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
+}): Promise<ShResult>;
+
+/** Runs a command. The default is shAsync; tests inject their own. */
+type VideoRunner = (cmd: string, args: string[], opts?: {
+    timeoutMs?: number;
+    cwd?: string;
+}) => Promise<ShResult>;
+interface VideoChapter {
+    start: number;
+    end: number;
+    title: string;
+}
+/** What yt-dlp's `-J` says about one video, reduced to what a transcript needs. */
+interface VideoMeta {
+    id: string;
+    title: string;
+    channel?: string;
+    /** YYYY-MM-DD. */
+    uploadDate?: string;
+    /** Seconds. */
+    duration?: number;
+    /** The video's own language, when YouTube knows it (`en`, `fr`…). */
+    language?: string;
+    chapters: VideoChapter[];
+    /** Languages with manual subtitles. */
+    subtitles: string[];
+    /** Languages with auto-captions — the original (`<lang>-orig`) and YouTube's machine translations. */
+    autoCaptions: string[];
+    webpageUrl: string;
+}
+/** The metadata, and the raw `-J` JSON later calls are fed with `--load-info-json`. */
+type VideoProbe = {
+    meta: VideoMeta;
+    info: string;
+} | {
+    error: string;
+    missing?: boolean;
+};
+/** Project yt-dlp's info JSON onto VideoMeta. Undefined when it is not a single video. */
+declare function videoMetaFromInfo(info: Record<string, unknown>): VideoMeta | undefined;
+/** Read one video's metadata. Never throws: a failure is a reason. */
+declare function probeVideo(url: string, run?: VideoRunner): Promise<VideoProbe>;
+/**
+ * yt-dlp's failure, said the way a reader can act on it. The order matters:
+ * YouTube's own wording names the most specific cause, and a 403 is the least
+ * specific of them.
+ */
+declare function classifyYtdlpError(stderr: string): string;
+/**
+ * One subtitle track, as WebVTT text. Fed the probe's own JSON through
+ * `--load-info-json`, so the page is not extracted a second time.
+ */
+declare function downloadSubtitle(info: string, lang: string, auto: boolean, run?: VideoRunner): Promise<{
+    vtt: string;
+} | {
+    error: string;
+}>;
+/** yt-dlp's version, and how many days old that release is. Undefined when it is not installed. */
+declare function ytdlpVersionAge(run?: VideoRunner, now?: number): Promise<{
+    version: string;
+    ageDays?: number;
+} | undefined>;
+
+/** One timed piece of transcript, in seconds from the start of the video. */
+interface VideoSegment {
+    start: number;
+    end: number;
+    text: string;
+}
+/**
+ * The cues of a WebVTT file, tags stripped and entities decoded, with the
+ * rolling repetition of auto-captions removed: a line already said is dropped,
+ * and a line that continues the last one keeps only what it adds. Empty for
+ * anything that is not WebVTT.
+ */
+declare function parseVtt(src: string): VideoSegment[];
+/**
+ * Cues merged into segments of one to three sentences: a segment closes after
+ * its third sentence, or on a sentence end once it holds a couple of lines'
+ * worth of words. It never spans more than 30 s — which is what bounds an
+ * unpunctuated auto-caption stream — nor a pause of more than 5 s, nor any
+ * of `breaks` (chapter starts, in seconds).
+ */
+declare function mergeSegments(cues: VideoSegment[], breaks?: number[]): VideoSegment[];
+
+/** Videos this process may still transcribe. */
+declare function whisperBudgetLeft(): number;
+/** The whisper model to ask for: `<PREFIX>_WHISPER_MODEL`, else `small`. */
+declare function whisperModel(): string;
+
+type VideoTranscriberId = "manual-subs" | "auto-subs" | "whisper";
+declare const VIDEO_TRANSCRIBERS: VideoTranscriberId[];
+interface VideoTranscript {
+    /** The transcript as plain text, one segment per line. Empty when every rung failed. */
+    text: string;
+    segments: VideoSegment[];
+    chapters: VideoChapter[];
+    /** Absent only when yt-dlp could not read the video at all. */
+    meta?: VideoMeta;
+    /** Which rung produced the transcript. */
+    via?: VideoTranscriberId;
+    /** Why there is no transcript, when there is none. */
+    reason?: string;
+}
+/** What the ladder shells out through. Injected by tests; the defaults run the real tools. */
+interface VideoDeps {
+    run: VideoRunner;
+    have: (cmd: string) => boolean;
+}
+interface VideoLadderOptions {
+    /** The preferred subtitle language (`fr`, `en-US`). Defaults to the video's own. */
+    lang?: string;
+    /** Restrict or reorder the rungs. Defaults to `<PREFIX>_VIDEO_ENGINES`, else all three. */
+    engines?: VideoTranscriberId[];
+    deps?: Partial<VideoDeps>;
+}
+/** Test seam: the runner and `have` every later call uses by default; no argument restores the real tools. */
+declare function setVideoDeps(deps?: Partial<VideoDeps>): void;
+/** Test seam: forget which rungs were found missing, and refill the whisper budget. */
+declare function resetVideoLadderCache(): void;
+/** The rungs to try: an explicit list, else `<PREFIX>_VIDEO_ENGINES` (a comma list, or `none`), else all. */
+declare function enabledTranscribers(engines?: VideoTranscriberId[]): VideoTranscriberId[];
+/**
+ * Whether a transcript is worth citing: not empty, and for a video over a
+ * minute at least 5 words a minute. The bar judges emptiness, not eloquence —
+ * it is there so a music video's three captioned lines fall through to
+ * whisper instead of passing for its transcript.
+ */
+declare function assessTranscript(segments: VideoSegment[], duration?: number): {
+    ok: true;
+} | {
+    ok: false;
+    reason: string;
+};
+/**
+ * A YouTube video's transcript, from the first rung whose output passes the
+ * quality gate. Never throws: every failure is a `reason`.
+ */
+declare function transcribeVideo(url: string, opts?: VideoLadderOptions): Promise<VideoTranscript>;
+
+/** Seconds as `mm:ss`, or `h:mm:ss` past an hour. */
+declare function formatStamp(seconds: number): string;
+/** The transcript as Markdown: header, chapters, stamped paragraphs. Empty when there is no transcript. */
+declare function transcriptMarkdown(t: VideoTranscript): string;
+
 declare const PDF_INSPECTOR_SPEC = "@firecrawl/pdf-inspector@1";
 declare const ANYDOC_SPEC = "@firecrawl/anydoc@0.1";
 interface RunResult {
@@ -533,7 +723,7 @@ declare const PDF_URL_RE: RegExp;
  * preferred rung — whenever a Firecrawl container happens to be up.
  */
 declare function looksLikePdfUrl(url: string): boolean;
-type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext" | "anydoc" | "ocr" | "builtin";
+type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext" | "anydoc" | "ocr" | "builtin" | "manual-subs" | "auto-subs" | "whisper";
 interface ExtractResult {
     text: string;
     consentDropped?: number;
@@ -543,7 +733,7 @@ interface ExtractResult {
     status: number;
     extractor?: ExtractorId;
     /** Document type detected from the URL or response, independent of converter. */
-    documentType?: "pdf" | "doc";
+    documentType?: "pdf" | "doc" | "video";
     canonical?: string;
     /**
      * The page's own one-line summary (`<meta name=description>`, else
@@ -1258,39 +1448,6 @@ declare function resolveRegion(lang: string | undefined, region?: string): strin
 declare function ddgRegion(lang: string | undefined, region?: string): string;
 declare function searxngLanguage(lang: string | undefined, region?: string): string | undefined;
 declare function acceptLanguageHeader(lang: string | undefined, region?: string): string;
-
-interface ShResult {
-    ok: boolean;
-    status: number;
-    stdout: string;
-    stderr: string;
-    /** The executable itself was not found — not a failure OF the command. */
-    missing?: boolean;
-}
-declare function have(cmd: string): boolean;
-/** Test seam: forget which executables were found. */
-declare function resetHaveCache(): void;
-/** Run a command synchronously. Never throws — a missing binary is a result. */
-declare function sh(cmd: string, args: string[], opts?: {
-    cwd?: string;
-    input?: string;
-    timeoutMs?: number;
-    env?: NodeJS.ProcessEnv;
-}): ShResult;
-/**
- * Run a command without blocking the event loop.
- *
- * Preferred wherever several commands could overlap — a synchronous `git clone`
- * freezes everything else in the process for the whole transfer, which is the
- * difference between three clones taking as long as the slowest and taking as
- * long as all of them put together. SIGKILL on timeout — to the command and
- * everything it started — and never an orphan.
- */
-declare function shAsync(cmd: string, args: string[], opts?: {
-    cwd?: string;
-    timeoutMs?: number;
-    env?: NodeJS.ProcessEnv;
-}): Promise<ShResult>;
 
 type ForgeKind = "github" | "gitlab" | "gitea";
 interface ForgeItem {
@@ -2311,7 +2468,8 @@ type CacheRead = "" | "consent" | "full";
 type CacheVariant = CacheRead | "md" | `${Exclude<CacheRead, "">}-md`;
 declare const PDF_CACHE_NS: "pdf";
 declare const DOC_CACHE_NS: "doc";
-type CacheNamespace = ExtractorId | typeof PDF_CACHE_NS | typeof DOC_CACHE_NS;
+declare const VIDEO_CACHE_NS: "video";
+type CacheNamespace = ExtractorId | typeof PDF_CACHE_NS | typeof DOC_CACHE_NS | typeof VIDEO_CACHE_NS;
 /** How the cache behaves for this run. Both default to off. */
 interface CacheMode {
     /** Ignore any stored entry and re-fetch. The fresh result is still written. */
@@ -3726,4 +3884,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCHES_REMOVED_IN, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, CP1252_C1, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ChangeVerdict, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type Fingerprint, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type FirecrawlSearchOptions, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HandleOptions, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, InvalidParamsError, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type MarkdownOptions, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROGRESS_MESSAGE_SINCE, PROTOCOL_VERSIONS, type PackageFacts, type PackageLookup, type PackageResolution, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoFactsResult, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RungOutcome, type RungReport, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type SearchRung, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type Table, type ToolAnnotations, type ToolCallContext, type ToolDecl, ToolError, type ToolOutcome, UsageError, type VectorHit, type VectorPoint, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, awaitHostSlot, backOffHost, baseLang, batchRefusal, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, contentHash, cosine, crawlConcurrency, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, decodeLocal, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, embed, embedModel, embedOne, embedPrefixes, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, extractTables, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, fingerprint, firecrawlBase, firecrawlIsExplicit, fnv1a64, fnv1a64Words, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, forgeRef, hammingDistance, hasChanged, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToMarkdown, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, looksLikeChallenge, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, lookupPackageResult, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, maxCrawlDelayMs, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, officeToText, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, repoFactsResult, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOcrTools, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resolvePackage, resolvePackageResult, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, searxngLanguage, setCacheMode, setNoWrite, sh, shAsync, shq, simhash, skillName, sleep, slugify, sniffDocument, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, tableToMarkdown, takeArtifacts, throttleReason, toBatches, uncitedIds, unitTexts, unknownEngines, upsert, urlDeclaresIdentity, validateArgs, withRunLock, writeArtifact, writeFileAtomic, writeManifest };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCHES_REMOVED_IN, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, CP1252_C1, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ChangeVerdict, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, type Feed, type FeedItem, type Fingerprint, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type FirecrawlSearchOptions, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type HandleOptions, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, InvalidParamsError, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type MarkdownOptions, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROGRESS_MESSAGE_SINCE, PROTOCOL_VERSIONS, type PackageFacts, type PackageLookup, type PackageResolution, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoFactsResult, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RungOutcome, type RungReport, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type SearchRung, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type Table, type ToolAnnotations, type ToolCallContext, type ToolDecl, ToolError, type ToolOutcome, UsageError, VIDEO_TRANSCRIBERS, type VectorHit, type VectorPoint, type VideoChapter, type VideoDeps, type VideoLadderOptions, type VideoMeta, type VideoProbe, type VideoRunner, type VideoSegment, type VideoTranscriberId, type VideoTranscript, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, assessTranscript, awaitHostSlot, backOffHost, baseLang, batchRefusal, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, classifyYtdlpError, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, contentHash, cosine, crawlConcurrency, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, decodeLocal, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, downloadSubtitle, embed, embedModel, embedOne, embedPrefixes, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, enabledTranscribers, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, extractTables, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, fingerprint, firecrawlBase, firecrawlIsExplicit, fnv1a64, fnv1a64Words, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, forgeRef, formatStamp, hammingDistance, hasChanged, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToMarkdown, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, looksLikeChallenge, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, lookupPackageResult, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, maxCrawlDelayMs, mergeSegments, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, officeToText, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, parseVtt, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, probeVideo, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, recencyScore, renderAsset, repoCacheRoot, repoFacts, repoFactsResult, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOcrTools, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resetVideoLadderCache, resolvePackage, resolvePackageResult, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searxngBase, searxngIsExplicit, searxngLanguage, setCacheMode, setNoWrite, setVideoDeps, sh, shAsync, shq, simhash, skillName, sleep, slugify, sniffDocument, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, tableToMarkdown, takeArtifacts, throttleReason, toBatches, transcribeVideo, transcriptMarkdown, uncitedIds, unitTexts, unknownEngines, upsert, urlDeclaresIdentity, validateArgs, videoMetaFromInfo, whisperBudgetLeft, whisperModel, withRunLock, writeArtifact, writeFileAtomic, writeManifest, youtubeListKind, youtubeVideoId, ytdlpVersionAge };

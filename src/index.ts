@@ -32,6 +32,11 @@ export * from "./pdf.js";
 // the caller cite bytes nothing could read.
 export * from "./doc.js";
 
+// ── Retrieval: YouTube videos ───────────────────────────────────────────────
+// A video URL becomes a timestamped transcript: manual subtitles → auto-captions
+// → local whisper, through yt-dlp. fetchAndExtract takes this route by itself.
+export * from "./video.js";
+
 // Running an external converter on stdin. Exported because the ladders' rungs
 // are pinned npx specs that consumers surface in their `doctor` output.
 export { ANYDOC_SPEC, PDF_INSPECTOR_SPEC, runWithInput } from "./pdf/exec.js";
