@@ -22,7 +22,17 @@ import { decodeLocal } from "./charset.js";
 import { ENGINE_VERSION } from "./version.js";
 import { DOC_EXTRACTORS, docFormatForUrl, extractDocument, enabledDocExtractors, sniffDocument } from "./doc.js";
 import { enabledExtractors, extractPdf, ocrBudgetLeft, ocrTools, PDF_EXTRACTORS } from "./pdf.js";
-import { enabledTranscribers, VIDEO_TRANSCRIBERS, whisperBudgetLeft, whisperModel, ytdlpVersionAge } from "./video.js";
+import {
+  enabledTranscribers,
+  fetchVideoRun,
+  formatStamp,
+  searchVideoRuns,
+  VIDEO_TRANSCRIBERS,
+  videoRoot,
+  whisperBudgetLeft,
+  whisperModel,
+  ytdlpVersionAge,
+} from "./video.js";
 import { videoDeps } from "./video/ladder.js";
 import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./pdf/exec.js";
 import { enginesFromEnv } from "./pdf/ladder.js";
@@ -74,7 +84,7 @@ import {
   positionalText,
   UsageError,
 } from "./cli-kit.js";
-import { ensureDir, isNoWrite, writeArtifact } from "./no-write.js";
+import { ensureDir, isNoWrite, takeArtifacts, writeArtifact } from "./no-write.js";
 import { mapLimit } from "./pool.js";
 import type { JsonSchemaProp } from "./mcp/protocol.js";
 import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
@@ -130,6 +140,8 @@ USAGE
   webindex skill     finish [--root <dir>]
   webindex skill     recall [--ref <baseline>] [--root <dir>]
   webindex skill     init <name> [--root <dir>]
+  webindex video     fetch <url> [--out <dir>] [--lang <tag>] [--refresh] [--json]
+  webindex video     search <query> [--out <dir>] [--limit <n>] [--json]
   webindex doctor [--json]
   webindex version
 
@@ -280,6 +292,14 @@ COMMANDS
              that regenerated artifacts kept every identity of the --ref
              baseline (HEAD by default).
              Dev-time only — it reads a repo, it never runs inside one.
+  video      A YouTube video kept on disk, so a question about it never reads
+             it twice. 'fetch' writes <dir>/<id>/TRANSCRIPT.md (what fetch
+             prints for a video), segments.json and meta.json, and reuses them
+             on the next call — no yt-dlp at all — unless --refresh. 'search'
+             ranks ~45 s passages of every video under --out (or of one video's
+             own directory) against a question, each with its [mm:ss] stamp
+             and a link that opens the video there. The directory is --out,
+             else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which
@@ -310,6 +330,7 @@ ENVIRONMENT
                          whisper's model (default small), videos one process may
                          transcribe (3), one video's budget (1800000)
   WEBINDEX_YTDLP_ARGS    extra yt-dlp flags on every call: browser cookies, a proxy
+  WEBINDEX_VIDEO_DIR     where \`video\` keeps its runs (default <tmp>/webindex/video)
   WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
   WEBINDEX_QDRANT        vector store base URL, or "off"      (default http://localhost:6333)
   WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
@@ -393,6 +414,7 @@ export const VALUE_FLAGS = [
   "prefix",
   "extract-root",
   "format",
+  "out",
 ];
 export const BOOL_FLAGS = [
   "json",
@@ -435,6 +457,7 @@ export const COMMANDS = [
   "embed",
   "hybrid",
   "changed",
+  "video",
   ...STACK_SERVICES.filter((s) => s !== "all"),
   "stack",
 ];
@@ -443,6 +466,9 @@ const SPEC: CliSpec = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: 
 
 /** What `webindex skill` does. The last three are the repin workflow's steps (.github/workflows/skill-repin.yml). */
 const SKILL_ACTIONS = ["check", "bundle", "vendor", "copy", "doctor", "init", "repin", "finish", "recall"];
+
+/** What `webindex video` does. */
+const VIDEO_ACTIONS = ["fetch", "search"];
 
 /** A yt-dlp release older than this is flagged by doctor: YouTube breaks old ones. */
 const YTDLP_STALE_DAYS = 60;
@@ -1668,6 +1694,7 @@ function positionalLimit(args: CommandArgs): { max: number; hint?: string } {
   if (cmd === "rank" || cmd === "hybrid") return { max: 0, hint: 'the question goes in --query "<q>"' };
   if (cmd === "doctor" || cmd === "mcp") return { max: 0 };
   if (cmd === "skill") return { max: args.positional[0] === "init" ? 2 : 1 };
+  if (cmd === "video") return args.positional[0] === "search" ? { max: Number.POSITIVE_INFINITY } : { max: 2 };
   if (cmd === "issues" || cmd === "prs") return { max: 1, hint: 'search words go in --terms "<words>"' };
   if (cmd === "repo" || cmd === "releases" || cmd === "tags") return { max: 1, hint: "quote a path that contains spaces" };
   return { max: 1 };
@@ -2256,6 +2283,45 @@ async function dispatch(argv: string[]): Promise<void> {
     // Exit 1 on "could not tell", so a watcher script never reads an error as
     // "nothing to do". `changed` itself is not a failure.
     if (v.changed === undefined) process.exit(EXIT_FAILURE);
+    return;
+  }
+
+  // A video read once and kept on disk; see src/video/run.ts.
+  if (cmd === "video") {
+    const action = args.positional[0] ?? "";
+    if (!VIDEO_ACTIONS.includes(action)) usage(`usage: webindex video ${VIDEO_ACTIONS.join("|")}`);
+    const root = videoRoot(argValue(args, "out"));
+    const asJson = argBool(args, "json");
+
+    if (action === "fetch") {
+      const url = args.positional[1];
+      if (!url) usage("usage: webindex video fetch <url> [--out <dir>] [--lang <tag>] [--refresh] [--json]");
+      const r = await fetchVideoRun(url, root, { refresh: argBool(args, "refresh"), lang: argValue(args, "lang") });
+      if (!r.ok) {
+        if (asJson) process.stdout.write(jsonLine(r));
+        fail(`no transcript for ${url}: ${r.reason}`);
+      }
+      const summary = { ...r, title: r.meta.title, via: r.meta.via, duration: r.meta.duration };
+      if (asJson) process.stdout.write(jsonLine(summary));
+      else if (isNoWrite()) {
+        // Nothing was written: the transcript itself is the answer.
+        process.stdout.write(takeArtifacts().find((a) => a.path === r.transcript)?.content ?? "");
+      } else {
+        const m = r.meta;
+        const facts = [m.channel, m.duration !== undefined ? formatStamp(m.duration) : undefined, m.via, `${r.segments} segment${r.segments === 1 ? "" : "s"}`]
+          .filter(Boolean)
+          .join(" · ");
+        process.stdout.write(`${r.transcript}\n  ${m.title} — ${facts}${r.reused ? " (already on disk)" : ""}\n`);
+      }
+      return;
+    }
+
+    const query = args.positional.slice(1).join(" ").trim();
+    if (!query) usage("usage: webindex video search <query> [--out <dir>] [--limit <n>] [--json]");
+    const hits = searchVideoRuns(root, query, { limit: argInt(args, "limit", { min: 1 }) ?? 10 });
+    if (asJson) process.stdout.write(jsonLine({ dir: root, query, hits }));
+    else for (const h of hits) process.stdout.write(`[${h.label} ${h.stamp}] ${h.title}${h.chapter ? ` — ${h.chapter}` : ""}\n  ${h.url}\n  ${h.text}\n\n`);
+    if (!hits.length) fail(`nothing under ${root} matches "${query}" — \`webindex video fetch <url>\` reads a video first`);
     return;
   }
 
