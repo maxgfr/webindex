@@ -90,11 +90,15 @@ export interface VideoHit {
 
 const PASSAGE_S = 45;
 
-/** Consecutive segments grouped into passages of about 45 s — the unit a search returns. */
-export function videoPassages(segments: VideoSegment[]): VideoSegment[] {
+/** Consecutive segments grouped into passages of about 45 s — the unit a search returns — never across a chapter start. */
+export function videoPassages(segments: VideoSegment[], chapterStarts: number[] = []): VideoSegment[] {
   const out: VideoSegment[] = [];
   let cur: VideoSegment | undefined;
   for (const s of segments) {
+    if (cur && chapterStarts.some((b) => b > cur!.start + 0.5 && b <= s.start + 0.5)) {
+      out.push(cur);
+      cur = undefined;
+    }
     cur = cur ? { start: cur.start, end: s.end, text: `${cur.text} ${s.text}` } : { ...s };
     if (cur.end - cur.start >= PASSAGE_S) {
       out.push(cur);
@@ -138,18 +142,31 @@ export function listVideoRuns(dir: string): { dir: string; meta: VideoRunMeta; s
   });
 }
 
+/** A corpus directory's V# labels (from its corpus.json), keyed by video id; empty for any other directory. */
+export function corpusLabels(dir: string): Map<string, string> {
+  const c = readJson<{ videos?: { label?: unknown; id?: unknown }[] }>(join(dir, "corpus.json"));
+  const out = new Map<string, string>();
+  for (const v of c?.videos ?? []) if (typeof v.id === "string" && typeof v.label === "string") out.set(v.id, v.label);
+  return out;
+}
+
 const chapterAt = (chapters: VideoChapter[], t: number) => [...chapters].reverse().find((c) => c.start <= t + 0.5)?.title;
 
 /**
  * Search the transcripts under `dir` — one run, or every run in it — for a
  * question: ~45 s passages ranked by BM25F, chapter titles weighted as
- * headings. `labels` names each video (a corpus's `V1`…); a video id otherwise.
+ * headings. Each hit is labelled with its video's V# when `dir` is a corpus
+ * (see fetchVideoCorpus), or `labels` says so; with its id otherwise.
  */
 export function searchVideoRuns(dir: string, query: string, opts: { limit?: number; labels?: Map<string, string> } = {}): VideoHit[] {
+  const labels = opts.labels ?? corpusLabels(dir);
   const docs: (Bm25Doc & { hit: Omit<VideoHit, "score"> })[] = [];
   for (const run of listVideoRuns(dir)) {
     const { meta } = run;
-    for (const p of videoPassages(run.segments)) {
+    for (const p of videoPassages(
+      run.segments,
+      (meta.chapters ?? []).map((c) => c.start),
+    )) {
       const chapter = chapterAt(meta.chapters ?? [], p.start);
       docs.push({
         id: `${meta.id}@${p.start}`,
@@ -157,7 +174,7 @@ export function searchVideoRuns(dir: string, query: string, opts: { limit?: numb
         headings: chapter ?? "",
         body: p.text,
         hit: {
-          label: opts.labels?.get(meta.id) ?? meta.id,
+          label: labels.get(meta.id) ?? meta.id,
           videoId: meta.id,
           title: meta.title,
           ...(chapter ? { chapter } : {}),

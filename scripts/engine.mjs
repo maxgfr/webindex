@@ -1929,7 +1929,11 @@ function videoMetaFromInfo(info) {
   const date = str(info.upload_date);
   const tracks = (v) => v && typeof v === "object" ? Object.keys(v).filter((k) => k !== "live_chat") : [];
   const duration = num(info.duration);
-  const chapters = Array.isArray(info.chapters) ? info.chapters.map((c) => ({ start: num(c.start_time) ?? 0, end: num(c.end_time) ?? duration ?? 0, title: str(c.title) ?? "" })).filter((c) => c.title) : [];
+  const chapters = Array.isArray(info.chapters) ? info.chapters.map((c) => ({
+    start: num(c.start_time) ?? 0,
+    end: num(c.end_time) ?? duration ?? 0,
+    title: (str(c.title) ?? "").replace(/^<Untitled Chapter (\d+)>$/, "Chapter $1")
+  })).filter((c) => c.title) : [];
   return {
     id,
     title: str(info.title) ?? id,
@@ -3465,10 +3469,14 @@ async function fetchVideoRun(url, root, opts = {}) {
   return { ok: true, id, dir, transcript: transcriptPath, reused: false, meta, segments: t.segments.length };
 }
 var PASSAGE_S = 45;
-function videoPassages(segments) {
+function videoPassages(segments, chapterStarts2 = []) {
   const out = [];
   let cur;
   for (const s of segments) {
+    if (cur && chapterStarts2.some((b) => b > cur.start + 0.5 && b <= s.start + 0.5)) {
+      out.push(cur);
+      cur = void 0;
+    }
     cur = cur ? { start: cur.start, end: s.end, text: `${cur.text} ${s.text}` } : { ...s };
     if (cur.end - cur.start >= PASSAGE_S) {
       out.push(cur);
@@ -3507,12 +3515,22 @@ function listVideoRuns(dir) {
     return run ? [{ dir: child, ...run }] : [];
   });
 }
+function corpusLabels(dir) {
+  const c = readJson(join4(dir, "corpus.json"));
+  const out = /* @__PURE__ */ new Map();
+  for (const v of c?.videos ?? []) if (typeof v.id === "string" && typeof v.label === "string") out.set(v.id, v.label);
+  return out;
+}
 var chapterAt = (chapters, t) => [...chapters].reverse().find((c) => c.start <= t + 0.5)?.title;
 function searchVideoRuns(dir, query, opts = {}) {
+  const labels = opts.labels ?? corpusLabels(dir);
   const docs = [];
   for (const run of listVideoRuns(dir)) {
     const { meta } = run;
-    for (const p of videoPassages(run.segments)) {
+    for (const p of videoPassages(
+      run.segments,
+      (meta.chapters ?? []).map((c) => c.start)
+    )) {
       const chapter = chapterAt(meta.chapters ?? [], p.start);
       docs.push({
         id: `${meta.id}@${p.start}`,
@@ -3520,7 +3538,7 @@ function searchVideoRuns(dir, query, opts = {}) {
         headings: chapter ?? "",
         body: p.text,
         hit: {
-          label: opts.labels?.get(meta.id) ?? meta.id,
+          label: labels.get(meta.id) ?? meta.id,
           videoId: meta.id,
           title: meta.title,
           ...chapter ? { chapter } : {},
@@ -3711,6 +3729,116 @@ async function extractFrames(runDir, opts = {}) {
 `);
     return { ok: true, dir: framesDir, markdown, frames, candidates: candidates.length, duplicates: candidates.length - kept.length, effort };
   });
+}
+
+// src/video/list.ts
+import { join as join6 } from "path";
+
+// src/pool.ts
+async function mapLimit(items, limit, fn) {
+  const width = typeof limit !== "number" || Number.isNaN(limit) ? 1 : Math.max(1, Math.floor(limit));
+  if (items.length <= 1 || width === 1) {
+    const out = [];
+    for (let i = 0; i < items.length; i++) out.push(await fn(items[i], i));
+    return out;
+  }
+  const results = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(width, items.length) }, async () => {
+    for (; ; ) {
+      const i = next++;
+      if (i >= items.length) return;
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (e) {
+        next = items.length;
+        throw e;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+// src/video/list.ts
+var LIST_TIMEOUT_MS = 12e4;
+var DEFAULT_LIMIT = 10;
+var CORPUS_CONCURRENCY = 2;
+function listingUrl(url) {
+  const u = new URL(url);
+  if (youtubeListKind(url) === "channel" && /^\/(?:@[^/]+|(?:channel|c|user)\/[^/]+)\/?$/.test(u.pathname)) {
+    u.pathname = `${u.pathname.replace(/\/$/, "")}/videos`;
+  }
+  return u.toString();
+}
+async function listVideos(url, opts = {}) {
+  const kind = youtubeListKind(url);
+  if (!kind) return { error: `not a YouTube playlist or channel URL: ${url}` };
+  const limit = Math.max(1, Math.trunc(opts.limit ?? DEFAULT_LIMIT));
+  const r = await runYtdlp(["--flat-playlist", "-J", "--playlist-end", String(limit), "--no-warnings"], {
+    run: videoDeps(opts.deps).run,
+    url: listingUrl(url),
+    timeoutMs: LIST_TIMEOUT_MS,
+    signal: opts.signal
+  });
+  if (r.missing) return { error: "install yt-dlp (https://github.com/yt-dlp/yt-dlp) to read videos" };
+  if (!r.ok) return { error: classifyYtdlpError(r.stderr) };
+  try {
+    const info = JSON.parse(r.stdout);
+    const videos = (info.entries ?? []).flatMap((e) => {
+      const id = typeof e.id === "string" ? e.id : "";
+      const watch = `https://www.youtube.com/watch?v=${id}`;
+      if (e._type === "playlist" || typeof e.ie_key === "string" && e.ie_key !== "Youtube" || !youtubeVideoId(watch)) return [];
+      return [{ id, title: typeof e.title === "string" ? e.title : id, ...typeof e.duration === "number" ? { duration: e.duration } : {}, url: watch }];
+    });
+    return { ...info.title ? { title: info.title } : {}, videos: videos.slice(0, limit) };
+  } catch {
+    return { error: "yt-dlp returned an unreadable listing" };
+  }
+}
+function corpusMarkdown(c, root) {
+  const cell2 = (s) => s.replace(/\|/g, "\\|").replace(/\s+/g, " ");
+  const rows = c.videos.map(
+    (v) => [
+      v.label,
+      v.id,
+      cell2(v.title),
+      v.duration !== void 0 ? formatStamp(v.duration) : "",
+      v.via ?? "\u2014",
+      v.dir ? `${v.id}/TRANSCRIPT.md` : cell2(`not read: ${v.reason ?? "no transcript"}`)
+    ].join(" | ")
+  );
+  const read2 = c.videos.filter((v) => v.dir).length;
+  return [
+    `# ${c.title ?? "Video corpus"}`,
+    "",
+    `- Source: ${c.source}`,
+    `- Directory: ${root}`,
+    `- ${read2} of ${c.videos.length} videos read, ${c.createdAt}`,
+    "",
+    "| V# | id | title | duration | via | transcript |",
+    "|---|---|---|---|---|---|",
+    ...rows.map((r) => `| ${r} |`),
+    ""
+  ].join("\n");
+}
+async function fetchVideoCorpus(url, root, opts = {}) {
+  const listed = await listVideos(url, { limit: opts.limit, deps: opts.deps, signal: opts.signal });
+  if ("error" in listed) return { ok: false, reason: listed.error };
+  if (!listed.videos.length) return { ok: false, reason: `no videos listed at ${url}` };
+  let done = 0;
+  const videos = await mapLimit(listed.videos, CORPUS_CONCURRENCY, async (v, i) => {
+    const r = await fetchVideoRun(v.url, root, { ...opts });
+    opts.onVideo?.(++done, listed.videos.length, v.title);
+    const base2 = { label: `V${i + 1}`, id: v.id, title: r.ok ? r.meta.title : v.title, ...v.duration !== void 0 ? { duration: v.duration } : {} };
+    return r.ok ? { ...base2, ...r.meta.duration !== void 0 ? { duration: r.meta.duration } : {}, via: r.meta.via, dir: r.dir, reused: r.reused } : { ...base2, reason: r.reason };
+  });
+  const corpus = { source: url, ...listed.title ? { title: listed.title } : {}, createdAt: (/* @__PURE__ */ new Date()).toISOString(), videos };
+  ensureDir(root);
+  writeArtifact(join6(root, "corpus.json"), `${JSON.stringify(corpus, null, 2)}
+`);
+  const path = writeArtifact(join6(root, "CORPUS.md"), corpusMarkdown(corpus, root));
+  return { ok: true, dir: root, corpus: path, videos, ...listed.title ? { title: listed.title } : {} };
 }
 
 // src/mime.ts
@@ -6152,7 +6280,7 @@ function resolveEutils(raw, op) {
 import { createHash, randomBytes } from "crypto";
 import { existsSync as existsSync5, mkdirSync as mkdirSync3, readdirSync as readdirSync5, renameSync as renameSync2, rmSync as rmSync4, statSync as statSync2 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
-import { basename, join as join6, resolve as resolve2 } from "path";
+import { basename, join as join7, resolve as resolve2 } from "path";
 
 // src/forge-host.ts
 var KINDS = /* @__PURE__ */ new Set(["github", "gitlab", "gitea"]);
@@ -6184,7 +6312,7 @@ function hostForgeKind(host) {
 
 // src/repo.ts
 function repoCacheRoot() {
-  return env("REPO_DIR") ?? brand().repoDir ?? join6(tmpdir4(), brand().name, "repos");
+  return env("REPO_DIR") ?? brand().repoDir ?? join7(tmpdir4(), brand().name, "repos");
 }
 var cloneTimeoutMs = () => envInt("GIT_CLONE_TIMEOUT_MS", 3e5, 1e3);
 var fetchTimeoutMs = () => envInt("GIT_FETCH_TIMEOUT_MS", 12e4, 1e3);
@@ -6303,7 +6431,7 @@ async function ensureClone(ref, opts = {}) {
   if (!have("git")) throw new Error(`git is not installed or not on PATH \u2014 cannot clone ${ref.cloneUrl}`);
   const branch = opts.branch?.trim() || void 0;
   if (branch?.startsWith("-")) throw new Error(`"${branch}" is not a branch name`);
-  const dir = join6(repoCacheRoot(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
+  const dir = join7(repoCacheRoot(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
   const pending = inflight.get(dir);
   if (pending && !opts.refresh) {
     return pending.catch((e) => {
@@ -6324,17 +6452,17 @@ function branchSlug(branch) {
 }
 async function obtainClone(ref, dir, opts) {
   let target = dir;
-  if (!existsSync5(join6(dir, ".git")) && !opts.branch) {
+  if (!existsSync5(join7(dir, ".git")) && !opts.branch) {
     for (const old of legacySlugs(ref)) {
-      const legacy = join6(repoCacheRoot(), old);
-      const origin = existsSync5(join6(legacy, ".git")) ? originUrl(legacy) : void 0;
+      const legacy = join7(repoCacheRoot(), old);
+      const origin = existsSync5(join7(legacy, ".git")) ? originUrl(legacy) : void 0;
       if (origin && resolveRepo(origin).slug === ref.slug) {
         target = legacy;
         break;
       }
     }
   }
-  if (existsSync5(join6(target, ".git"))) return opts.refresh ? refreshClone(ref, target, opts.branch) : target;
+  if (existsSync5(join7(target, ".git"))) return opts.refresh ? refreshClone(ref, target, opts.branch) : target;
   return freshClone(ref, dir, opts.branch);
 }
 async function refreshClone(ref, dir, branch) {
@@ -6364,18 +6492,18 @@ function discard(path) {
 function sweepStaging(staging) {
   try {
     for (const name of readdirSync5(staging)) {
-      const at = join6(staging, name);
+      const at = join7(staging, name);
       if (Date.now() - statSync2(at).mtimeMs > STALE_STAGING_MS) rmSync4(at, { recursive: true, force: true });
     }
   } catch {
   }
 }
 async function freshClone(ref, dir, branch) {
-  const staging = join6(repoCacheRoot(), ".partial");
+  const staging = join7(repoCacheRoot(), ".partial");
   mkdirSync3(staging, { recursive: true });
   sweepStaging(staging);
   const attempt = async (filter) => {
-    const tmp = join6(staging, `${basename(dir)}-${process.pid}-${randomBytes(4).toString("hex")}`);
+    const tmp = join7(staging, `${basename(dir)}-${process.pid}-${randomBytes(4).toString("hex")}`);
     const args = ["clone", "--depth", "1", ...filter ? ["--filter=blob:none"] : [], ...branch ? ["--branch", branch] : [], "--", ref.cloneUrl, tmp];
     const r = await shAsync("git", args, { timeoutMs: cloneTimeoutMs() });
     if (!r.ok) discard(tmp);
@@ -6396,12 +6524,12 @@ async function freshClone(ref, dir, branch) {
     }
   }
   if (!existsSync5(done.tmp) || readdirSync5(done.tmp).length === 0) throw new Error(`clone produced an empty tree for ${ref.cloneUrl}`);
-  if (existsSync5(dir) && !existsSync5(join6(dir, ".git"))) rmSync4(dir, { recursive: true, force: true });
+  if (existsSync5(dir) && !existsSync5(join7(dir, ".git"))) rmSync4(dir, { recursive: true, force: true });
   try {
     renameSync2(done.tmp, dir);
   } catch (e) {
     discard(done.tmp);
-    if (!existsSync5(join6(dir, ".git"))) throw new Error(`could not move the clone of ${ref.cloneUrl} into ${dir}: ${e.message}`);
+    if (!existsSync5(join7(dir, ".git"))) throw new Error(`could not move the clone of ${ref.cloneUrl} into ${dir}: ${e.message}`);
   }
   return dir;
 }
@@ -8428,15 +8556,15 @@ function closingNote(rungs, cancelled) {
 // src/stack.ts
 import { spawnSync as spawnSync3 } from "child_process";
 import { existsSync as existsSync7, lstatSync as lstatSync2, mkdirSync as mkdirSync5, readFileSync as readFileSync8, statSync as statSync4, writeFileSync as writeFileSync5 } from "fs";
-import { dirname as dirname2, join as join8, resolve as resolve4 } from "path";
+import { dirname as dirname2, join as join9, resolve as resolve4 } from "path";
 
 // src/cache.ts
 import { chmodSync, existsSync as existsSync6, lstatSync, mkdirSync as mkdirSync4, readFileSync as readFileSync7, readdirSync as readdirSync6, rmSync as rmSync5, statSync as statSync3 } from "fs";
-import { dirname, join as join7 } from "path";
+import { dirname, join as join8 } from "path";
 import { tmpdir as tmpdir5 } from "os";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
-  return namedCacheDir() ?? join7(tmpdir5(), userScoped(brand().name), "cache");
+  return namedCacheDir() ?? join8(tmpdir5(), userScoped(brand().name), "cache");
 }
 var namedCacheDir = () => env("CACHE_DIR") ?? brand().cacheDir;
 function userScoped(name) {
@@ -8447,7 +8575,7 @@ function cachePath(url, acceptLanguage = "", extractor = "native", variant = "")
   const canon = canonicalizeUrl(url);
   const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
   const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
-  return join7(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
+  return join8(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
 }
 var TEXT_VARIANTS = ["", "consent", "full"];
 var MARKDOWN_VARIANTS = ["md", "consent-md", "full-md"];
@@ -8701,7 +8829,7 @@ function cacheStats(now = Date.now()) {
   for (const name of readdirSync6(dir)) {
     const own = ownFile(name);
     if (!own) continue;
-    const abs = join7(dir, name);
+    const abs = join8(dir, name);
     if (own.kind !== "json") {
       out.bytes += sizeOf(abs);
       continue;
@@ -8728,7 +8856,7 @@ function cacheClean(all = false, now = Date.now()) {
   const present = new Set(names);
   const remove = (name) => {
     try {
-      rmSync5(join7(dir, name), { force: true });
+      rmSync5(join8(dir, name), { force: true });
       return true;
     } catch {
       return false;
@@ -8736,7 +8864,7 @@ function cacheClean(all = false, now = Date.now()) {
   };
   const abandoned = (name) => {
     try {
-      return all || now - statSync3(join7(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
+      return all || now - statSync3(join8(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
     } catch {
       return false;
     }
@@ -8746,7 +8874,7 @@ function cacheClean(all = false, now = Date.now()) {
     const own = ownFile(name);
     if (!own) continue;
     if (own.kind === "json") {
-      const entry = readEntryMeta(join7(dir, name));
+      const entry = readEntryMeta(join8(dir, name));
       if (!entry || !all && isCacheFresh(entry, now) || !remove(name)) continue;
       remove(`${own.stem}.body`);
       removed++;
@@ -9018,11 +9146,11 @@ function renderAsset(template) {
   return template.replaceAll("{{CLI}}", brand().cli);
 }
 function composeAssets() {
-  const base2 = join8(cacheDir(), "compose");
+  const base2 = join9(cacheDir(), "compose");
   return [
-    { path: join8(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
-    { path: join8(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
-    { path: join8(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
+    { path: join9(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
+    { path: join9(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
+    { path: join9(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
   ];
 }
 function ensureComposeMaterialized() {
@@ -9201,32 +9329,6 @@ ${up.stderr}` : ""}`, code: 1 };
   return { message: [`${tag}: ${spec.summary}`, ...spec.postUp?.(file, run) ?? []].join("\n"), code: 0 };
 }
 
-// src/pool.ts
-async function mapLimit(items, limit, fn) {
-  const width = typeof limit !== "number" || Number.isNaN(limit) ? 1 : Math.max(1, Math.floor(limit));
-  if (items.length <= 1 || width === 1) {
-    const out = [];
-    for (let i = 0; i < items.length; i++) out.push(await fn(items[i], i));
-    return out;
-  }
-  const results = new Array(items.length);
-  let next = 0;
-  const workers = Array.from({ length: Math.min(width, items.length) }, async () => {
-    for (; ; ) {
-      const i = next++;
-      if (i >= items.length) return;
-      try {
-        results[i] = await fn(items[i], i);
-      } catch (e) {
-        next = items.length;
-        throw e;
-      }
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
-
 // src/run-lock.ts
 var chains = /* @__PURE__ */ new Map();
 function withRunLock(slug, fn) {
@@ -9246,7 +9348,7 @@ function resetRunLocks() {
 }
 
 // src/run.ts
-import { join as join9 } from "path";
+import { join as join10 } from "path";
 import { readFileSync as readFileSync9 } from "fs";
 function pad(n) {
   return String(n).padStart(2, "0");
@@ -9265,10 +9367,10 @@ function readJsonSafe(path) {
   }
 }
 function readManifest(dir, file = "manifest.json") {
-  return readJsonSafe(join9(dir, file));
+  return readJsonSafe(join10(dir, file));
 }
 function writeManifest(dir, value, file = "manifest.json") {
-  return writeArtifact(join9(dir, file), `${JSON.stringify(value, null, 2)}
+  return writeArtifact(join10(dir, file), `${JSON.stringify(value, null, 2)}
 `);
 }
 
@@ -10210,10 +10312,10 @@ function extractNumerals(text, max = 8) {
 
 // src/orchestrate.ts
 import { existsSync as existsSync8 } from "fs";
-import { join as join11, resolve as resolve5 } from "path";
+import { join as join12, resolve as resolve5 } from "path";
 
 // src/orchestrate/templates.ts
-import { join as join10 } from "path";
+import { join as join11 } from "path";
 var WORKFLOW_FORBIDDEN = ["Date.now(", "Math.random(", "new Date("];
 function oneWriterFooter(runAbs, opts = {}) {
   const forbidden = opts.writingCommands?.length ? ` Do not run any engine command that writes (${opts.writingCommands.map((c) => `\`${c}\``).join(", ")}).` : "";
@@ -10224,7 +10326,7 @@ Return ONLY the structured output specified above. Do NOT write, edit, or delete
 
 One sanctioned exception: ${opts.sanctioned}` : ""}
 
-Exception for oversized prose: if a note is too large to return, write ONLY to \`${join10(runAbs, "orchestration", "out")}/<role>-<batch>.md\` \u2014 a file namespaced to you alone \u2014 and return its path.
+Exception for oversized prose: if a note is too large to return, write ONLY to \`${join11(runAbs, "orchestration", "out")}/<role>-<batch>.md\` \u2014 a file namespaced to you alone \u2014 and return its path.
 `;
 }
 var SMALL_WORKLIST = 3;
@@ -10249,7 +10351,7 @@ function assertWorkflowSafe(script, phaseName) {
 }
 function emitWorkflowScript(phase, emission, runAbs, engineAbs, smallWorklist, constants = {}) {
   const cli = brand().cli;
-  const scriptPath = join10(runAbs, "orchestration", `${phase.name}.workflow.mjs`);
+  const scriptPath = join11(runAbs, "orchestration", `${phase.name}.workflow.mjs`);
   const meta = { name: `${cli}-${phase.name}`, description: emission.description(phase.items), phases: [{ title: emission.title }] };
   const batches = phaseBatches(phase, emission, smallWorklist);
   const hint = emission.applyHint(runAbs, engineAbs, phase);
@@ -10329,7 +10431,7 @@ function runbookMd(phases, defs, runAbs, engineAbs, cli, preamble = [], smallWor
       const batches = phaseBatches(ph, emission, smallWorklist);
       const widest = batches.reduce((w, b) => Math.max(w, b.length), 0);
       lines.push(
-        `Fan out: \`Workflow({ scriptPath: "${join10(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
+        `Fan out: \`Workflow({ scriptPath: "${join11(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
         `(${batches.length} agent(s) of at most ${widest} item(s), contract \`agents/${emission.role}.md\`).`,
         ``,
         `Sequentially instead: play \`agents/${emission.role}.md\` yourself over ${shq(ph.ids.join(","))}.`,
@@ -10350,7 +10452,7 @@ var BATCH_SIZE = 8;
 function listPhases(runDir, engineAbs, defs) {
   const run = resolve5(runDir);
   return defs.map((def) => {
-    const worklist = join11(run, def.worklist);
+    const worklist = join12(run, def.worklist);
     const parsed = readJsonSafe(worklist);
     const ids = def.ids(parsed, run, engineAbs);
     const ready = ids !== void 0;
@@ -10396,14 +10498,14 @@ function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
     }
     selected = [ph];
   }
-  const orchDir = join11(run, "orchestration");
-  const agentsDir = join11(orchDir, "agents");
-  ensureDir(join11(orchDir, "out"));
+  const orchDir = join12(run, "orchestration");
+  const agentsDir = join12(orchDir, "agents");
+  ensureDir(join12(orchDir, "out"));
   ensureDir(agentsDir);
   const written = [];
   const notices = [];
   for (const [name, content] of Object.entries(contracts(run, engineAbs, phases))) {
-    written.push(writeArtifact(join11(agentsDir, `${name}.md`), content));
+    written.push(writeArtifact(join12(agentsDir, `${name}.md`), content));
   }
   if (!opts.eco) {
     for (const ph of selected) {
@@ -10417,10 +10519,10 @@ function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
       if (ph.items <= floor) {
         notices.push(`phase "${ph.name}": only ${ph.items} item(s) \u2014 the sequential --eco path is equivalent and cheaper.`);
       }
-      written.push(writeArtifact(join11(orchDir, `${ph.name}.workflow.mjs`), emitWorkflowScript(ph, def, run, engineAbs, small, opts.constants)));
+      written.push(writeArtifact(join12(orchDir, `${ph.name}.workflow.mjs`), emitWorkflowScript(ph, def, run, engineAbs, small, opts.constants)));
     }
   }
-  written.push(writeArtifact(join11(orchDir, "RUNBOOK.md"), runbookMd(phases, defs, run, engineAbs, brand().cli, opts.runbookPreamble, small)));
+  written.push(writeArtifact(join12(orchDir, "RUNBOOK.md"), runbookMd(phases, defs, run, engineAbs, brand().cli, opts.runbookPreamble, small)));
   return { exitCode: 0, written, notices, errors: [], phases };
 }
 
@@ -10648,7 +10750,7 @@ function isOriginAllowed(origin, allowed = []) {
 
 // src/mcp/resources.ts
 import { existsSync as existsSync9, readdirSync as readdirSync7, readFileSync as readFileSync10, realpathSync, statSync as statSync5 } from "fs";
-import { basename as basename3, dirname as dirname3, join as join12, relative, resolve as resolve6, sep } from "path";
+import { basename as basename3, dirname as dirname3, join as join13, relative, resolve as resolve6, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
@@ -10656,17 +10758,17 @@ function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname3(fileURLToPath(import.meta.url));
   const name = brand().name;
   const candidates = [resolve6(here, ".."), resolve6(here, "..", "skills", name), resolve6(here, "..", "..", "skills", name)];
-  return candidates.find((dir) => existsSync9(join12(dir, "SKILL.md")));
+  return candidates.find((dir) => existsSync9(join13(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
-  const refDir = join12(root, "references");
+  const refDir = join13(root, "references");
   if (!existsSync9(refDir)) return out;
   for (const file of readdirSync7(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join12("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
+    out.push(describe(root, join13("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
   }
   return out;
 }
@@ -10705,7 +10807,7 @@ function describe(root, rel, fallbackTitle) {
     title: fallbackTitle,
     mimeType: "text/markdown"
   };
-  const summary = firstProse(join12(root, rel));
+  const summary = firstProse(join13(root, rel));
   if (summary) decl.description = summary;
   return decl;
 }
@@ -11363,6 +11465,8 @@ export {
   contactUa,
   contentCoverage,
   contentHash,
+  corpusLabels,
+  corpusMarkdown,
   cosine,
   crawlConcurrency,
   crawlSite,
@@ -11424,6 +11528,7 @@ export {
   fetchFeed,
   fetchRobots,
   fetchSitemap,
+  fetchVideoCorpus,
   fetchVideoRun,
   fingerprint,
   firecrawlBase,
@@ -11468,6 +11573,7 @@ export {
   listResources,
   listTags,
   listVideoRuns,
+  listVideos,
   looksLikeChallenge,
   looksLikeFirecrawl,
   looksLikeJunkExtraction,

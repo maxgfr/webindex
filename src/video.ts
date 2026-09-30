@@ -38,6 +38,7 @@ export {
 export { formatStamp, transcriptMarkdown } from "./video/markdown.js";
 export {
   fetchVideoRun,
+  corpusLabels,
   listVideoRuns,
   readVideoRun,
   searchVideoRuns,
@@ -48,3 +49,4 @@ export {
 } from "./video/run.js";
 export { extractFrames, FRAME_EFFORT, type FrameEffort, type FramesResult } from "./video/frames.js";
 export type { FrameKind, VideoFrame } from "./video/align.js";
+export { corpusMarkdown, fetchVideoCorpus, listVideos, type CorpusResult, type CorpusVideo, type ListedVideo, type VideoCorpus } from "./video/list.js";

@@ -145,6 +145,11 @@ describe("passages", () => {
     ]);
   });
 
+  it("starts a new passage at a chapter start", () => {
+    const segs = Array.from({ length: 4 }, (_, i) => ({ start: i * 10, end: i * 10 + 10, text: `s${i}` }));
+    expect(videoPassages(segs, [0, 20]).map((p) => p.text)).toEqual(["s0 s1", "s2 s3"]);
+  });
+
   it("sets t= on the watch URL", () => {
     expect(videoUrlAt("https://www.youtube.com/watch?v=abc", 61.9)).toBe("https://www.youtube.com/watch?v=abc&t=61s");
     expect(videoUrlAt("not a url", 3)).toBe("not a url");

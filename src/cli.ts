@@ -13,7 +13,7 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // What it offers is what the engine actually does today: discover candidate
 // URLs through the local keyless stack, turn a URL or a local file into clean
 // text, drive the containers, and serve all of that to an agent over MCP.
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isIP } from "node:net";
 import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -36,6 +36,8 @@ import {
   whisperModel,
   ytdlpVersionAge,
   youtubeVideoId,
+  youtubeListKind,
+  fetchVideoCorpus,
 } from "./video.js";
 import { videoDeps } from "./video/ladder.js";
 import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./pdf/exec.js";
@@ -147,6 +149,7 @@ USAGE
   webindex video     fetch <url> [--out <dir>] [--lang <tag>] [--refresh] [--json]
   webindex video     search <query> [--out <dir>] [--limit <n>] [--json]
   webindex video     frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]
+  webindex video     list <playlist|channel> [--limit <n>] [--out <dir>] [--refresh] [--json]
   webindex doctor [--json]
   webindex version
 
@@ -308,8 +311,11 @@ COMMANDS
              near-duplicates dropped, at most 20, 50 or 100 by --effort (med
              by default) — into <id>/frames/, and FRAMES.md pairs each with
              what was said from 5 s before it to 10 s after; it needs ffmpeg,
-             and fetches the video first when given a URL. The directory is
-             --out, else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
+             and fetches the video first when given a URL. 'list' reads the
+             first --limit videos (default 10) of a playlist or channel, two at
+             a time, and writes CORPUS.md naming them V1…Vn; 'search' on that
+             directory then labels its hits V1…Vn. The directory is --out,
+             else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which
@@ -479,7 +485,7 @@ const SPEC: CliSpec = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: 
 const SKILL_ACTIONS = ["check", "bundle", "vendor", "copy", "doctor", "init", "repin", "finish", "recall"];
 
 /** What `webindex video` does. */
-const VIDEO_ACTIONS = ["fetch", "search", "frames"];
+const VIDEO_ACTIONS = ["fetch", "search", "frames", "list"];
 
 /** A yt-dlp release older than this is flagged by doctor: YouTube breaks old ones. */
 const YTDLP_STALE_DAYS = 60;
@@ -922,7 +928,16 @@ function parseRankDocs(value: unknown, where: string): RankInput[] {
 // The tools that stay on this machine: a file on disk, a pool the caller sent,
 // the local embedding server. Every other one reaches the open web or a public
 // API, whose answers no one here controls.
-const CLOSED_WORLD_TOOLS = new Set(["webindex_extract", "webindex_rank", "webindex_embed"]);
+const CLOSED_WORLD_TOOLS = new Set(["webindex_extract", "webindex_rank", "webindex_embed", "webindex_video_search"]);
+
+/** A tool's count argument: a whole number from 1 to `max`, else the default. */
+function toolLimit(raw: unknown, def: number, max = 50): number {
+  const n = typeof raw === "number" ? Math.trunc(raw) : Number.NaN;
+  return Number.isFinite(n) ? Math.min(max, Math.max(1, n)) : def;
+}
+
+// The tools that write: each video tool keeps its run on disk, under the video root.
+const WRITING_TOOLS = new Set(["webindex_video_fetch", "webindex_video_frames", "webindex_video_list"]);
 
 /**
  * The hints a client reads before calling. Without them it must assume any
@@ -933,7 +948,14 @@ const CLOSED_WORLD_TOOLS = new Set(["webindex_extract", "webindex_rank", "webind
 function withHints(tools: ToolDecl[]): ToolDecl[] {
   return tools.map((t) => ({
     ...t,
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: !CLOSED_WORLD_TOOLS.has(t.name) },
+    annotations: {
+      // The video tools write their run directory (a transcript, frames, a
+      // corpus file) — additively, and a repeat call reuses what is there.
+      readOnlyHint: !WRITING_TOOLS.has(t.name),
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: !CLOSED_WORLD_TOOLS.has(t.name) || WRITING_TOOLS.has(t.name),
+    },
   }));
 }
 
@@ -1072,6 +1094,32 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
     if (!configuredForgeHosts().has(normalizeForgeHost(ref.host))) return guard;
     const own = new URL(apiBase(ref, kind ? { kind } : {})).origin;
     return async (url) => new URL(url).origin === own || (await guard(url));
+  };
+  // Where a video tool keeps its runs. With no policy, any directory the
+  // caller names; under one, only a directory NAME inside the video root —
+  // a path would let a caller write, or list, anywhere on the machine.
+  const guarded = guard !== undefined || root !== undefined || policy.noLocalFiles === true;
+  const videoDir = (raw: unknown): string => {
+    const base = videoRoot();
+    if (raw === undefined || raw === null || raw === "") return base;
+    const named = String(raw);
+    if (!guarded) return resolve(named);
+    if (!/^[A-Za-z0-9._-]+$/.test(named) || named === "." || named === "..") {
+      throw new ToolError(`\`dir\` must be the name of a directory inside ${base} on this server, not a path.`);
+    }
+    mkdirSync(base, { recursive: true });
+    const target = join(base, named);
+    if (existsSync(target) && relative(realpathSync(base), realpathSync(target)).startsWith("..")) {
+      throw new ToolError(`${named} leads outside ${base}, the only directory this server writes videos to.`);
+    }
+    return target;
+  };
+  const videoUrl = async (raw: unknown, what: "video" | "list"): Promise<string> => {
+    const url = String(raw ?? "");
+    const ok = what === "video" ? youtubeVideoId(url) : youtubeListKind(url);
+    if (!ok) throw new ToolError(what === "video" ? "`url` must be a YouTube video URL." : "`url` must be a YouTube playlist or channel URL.");
+    await refuseUrl(url);
+    return url;
   };
   return {
     version: ENGINE_VERSION,
@@ -1345,6 +1393,74 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
             required: ["url", "max"],
           },
         },
+        {
+          name: "webindex_video_fetch",
+          title: "Read a YouTube video, and keep it",
+          description:
+            "Read a YouTube video into a run directory and return its transcript as Markdown: a header (title, channel, date, duration, which track), a heading per chapter, and a [mm:ss] stamp on every paragraph — cite by stamp. " +
+            "Manual subtitles first, then the video's own auto-captions, then a local whisper transcription (minutes for a long video). The run is kept: a second call, and webindex_video_search, read it without touching YouTube.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "A YouTube video URL (watch, youtu.be, shorts, embed, live)." },
+              lang: {
+                type: "string",
+                description: "Preferred subtitle language, e.g. fr. Defaults to the video's own; another language's track is marked as a translation.",
+              },
+              refresh: { type: "boolean", description: "Read the video again even when its run is on disk." },
+              dir: { type: "string", description: "The directory runs are kept in (default: the server's video root)." },
+            },
+            required: ["url"],
+          },
+        },
+        {
+          name: "webindex_video_search",
+          title: "Search the videos already read",
+          description:
+            "Rank ~45 s passages of the videos kept in a directory (every one, or a corpus from webindex_video_list, labelled V1…Vn) against a question, with BM25F. " +
+            "Each hit has its video, [mm:ss] stamp, chapter, a link that opens the video there, and the passage — for answering a follow-up question without reading the video again.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "The question, or its key words." },
+              limit: { type: "number", description: "How many passages (default 10)." },
+              dir: { type: "string", description: "The directory to search (default: the server's video root)." },
+            },
+            required: ["query"],
+          },
+        },
+        {
+          name: "webindex_video_frames",
+          title: "What is on screen in a video",
+          description:
+            "Take a frame at every scene change and chapter start of a YouTube video, drop near-duplicates, keep at most 20/50/100 by `effort`, and pair each frame with what was said from 5 s before to 10 s after. " +
+            "Returns FRAMES.md's path and each frame's image path, stamp and aligned transcript; read the images to see slides, code or diagrams. Downloads the video (720p at most) and needs ffmpeg — expect tens of seconds.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "A YouTube video URL; read first when it is not kept yet." },
+              effort: { type: "string", enum: ["low", "med", "high"], description: "At most 20, 50 or 100 frames (default med)." },
+              dir: { type: "string", description: "The directory runs are kept in (default: the server's video root)." },
+            },
+            required: ["url"],
+          },
+        },
+        {
+          name: "webindex_video_list",
+          title: "Read a playlist or a channel",
+          description:
+            "Read the first `limit` videos of a YouTube playlist or channel, two at a time, each kept as its own run, and write CORPUS.md naming them V1…Vn in listing order — the labels to cite across videos. " +
+            "A video that cannot be read keeps its label, with the reason. Returns the corpus rows; webindex_video_search on the same `dir` then searches them all.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "A YouTube playlist or channel URL (list=, /@handle, /channel/, /c/, /user/)." },
+              limit: { type: "number", description: "How many videos (default 10)." },
+              dir: { type: "string", description: "The directory the corpus is kept in (default: the server's video root)." },
+            },
+            required: ["url"],
+          },
+        },
       ]),
     capAdvice: {
       webindex_search: "lower `limit`",
@@ -1363,6 +1479,10 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
       webindex_tables: "this page's tables are enormous; fetch it and read the file instead of inlining them",
       webindex_embed: "send fewer `texts` — a vector per input is large, and they are rarely worth reading inline",
       webindex_crawl: "lower `max`, or `depth` — a crawl's whole output is the sum of its pages",
+      webindex_video_fetch: "the transcript is very long; read TRANSCRIPT.md from the run directory, or ask webindex_video_search",
+      webindex_video_search: "lower `limit`",
+      webindex_video_frames: "lower `effort`",
+      webindex_video_list: "lower `limit`",
     },
     async callTool(name, args, ctx) {
       // What the server hands every call: the client's cancel, and a way to
@@ -1591,6 +1711,41 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
             2,
           ),
         };
+      }
+      if (name === "webindex_video_fetch") {
+        const url = await videoUrl(args.url, "video");
+        const dir = videoDir(args.dir);
+        const r = await fetchVideoRun(url, dir, { refresh: args.refresh === true, lang: args.lang ? String(args.lang) : undefined, signal });
+        if (!r.ok) throw new ToolError(`No transcript for ${url}: ${r.reason}.`);
+        const text = isNoWrite() ? (takeArtifacts().find((a) => a.path === r.transcript)?.content ?? "") : readFileSync(r.transcript, "utf8");
+        return { text: `${text}\n---\nrun: ${r.dir}\nvia: ${r.meta.via}${r.reused ? " (already on disk)" : ""}` };
+      }
+      if (name === "webindex_video_search") {
+        const query = String(args.query ?? "").trim();
+        if (!query) throw new ToolError("`query` is required.");
+        const dir = videoDir(args.dir);
+        const hits = searchVideoRuns(dir, query, { limit: toolLimit(args.limit, 10) });
+        if (!hits.length) throw new ToolError(`Nothing kept under ${dir} matches "${query}" — read a video first with webindex_video_fetch.`);
+        return { text: JSON.stringify({ dir, hits }, null, 2) };
+      }
+      if (name === "webindex_video_frames") {
+        const url = await videoUrl(args.url, "video");
+        const effort = args.effort === undefined ? "med" : String(args.effort);
+        if (!(effort in FRAME_EFFORT)) throw new ToolError("`effort` must be low, med or high.");
+        const run = await fetchVideoRun(url, videoDir(args.dir), { signal });
+        if (!run.ok) throw new ToolError(`No transcript for ${url}: ${run.reason}.`);
+        const r = await extractFrames(run.dir, { effort: effort as FrameEffort, signal });
+        if (!r.ok) throw new ToolError(r.reason);
+        const frames = r.frames.map((f) => ({ image: join(run.dir, f.file), stamp: f.stamp, chapter: f.chapter, kind: f.kind, said: f.text }));
+        return { text: JSON.stringify({ markdown: r.markdown, candidates: r.candidates, duplicates: r.duplicates, frames }, null, 2) };
+      }
+      if (name === "webindex_video_list") {
+        const url = await videoUrl(args.url, "list");
+        const dir = videoDir(args.dir);
+        const limit = toolLimit(args.limit, 10);
+        const r = await fetchVideoCorpus(url, dir, { limit, signal, onVideo: (done, total, title) => ctx?.progress(done, total, title) });
+        if (!r.ok) throw new ToolError(r.reason);
+        return { text: JSON.stringify({ corpus: r.corpus, title: r.title, videos: r.videos }, null, 2) };
       }
       throw new ToolError(`unknown tool: ${name}`);
     },
@@ -2324,6 +2479,25 @@ async function dispatch(argv: string[]): Promise<void> {
           .join(" · ");
         process.stdout.write(`${r.transcript}\n  ${m.title} — ${facts}${r.reused ? " (already on disk)" : ""}\n`);
       }
+      return;
+    }
+
+    if (action === "list") {
+      const url = args.positional[1];
+      if (!url) usage("usage: webindex video list <playlist|channel> [--limit <n>] [--out <dir>] [--refresh] [--json]");
+      const r = await fetchVideoCorpus(url, root, {
+        limit: argInt(args, "limit", { min: 1 }) ?? 10,
+        refresh: argBool(args, "refresh"),
+        lang: argValue(args, "lang"),
+        onVideo: (done, total, title) => process.stderr.write(`  [${done}/${total}] ${title}\n`),
+      });
+      if (!r.ok) fail(r.reason);
+      if (asJson) process.stdout.write(jsonLine(r));
+      else {
+        const rows = r.videos.map((v) => `  ${v.label.padEnd(4)}${v.dir ? `${v.via?.padEnd(12)}${v.title}` : `not read — ${v.reason}`}`);
+        process.stdout.write(`${r.corpus}\n${rows.join("\n")}\n`);
+      }
+      if (!r.videos.some((v) => v.dir)) fail("none of the listed videos had a transcript");
       return;
     }
 

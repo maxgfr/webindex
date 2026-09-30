@@ -77,7 +77,13 @@ export function videoMetaFromInfo(info: Record<string, unknown>): VideoMeta | un
   const duration = num(info.duration);
   const chapters = Array.isArray(info.chapters)
     ? (info.chapters as Record<string, unknown>[])
-        .map((c) => ({ start: num(c.start_time) ?? 0, end: num(c.end_time) ?? duration ?? 0, title: str(c.title) ?? "" }))
+        // yt-dlp names an untitled chapter "<Untitled Chapter 1>", which a
+        // Markdown heading would carry as a stray HTML tag.
+        .map((c) => ({
+          start: num(c.start_time) ?? 0,
+          end: num(c.end_time) ?? duration ?? 0,
+          title: (str(c.title) ?? "").replace(/^<Untitled Chapter (\d+)>$/, "Chapter $1"),
+        }))
         .filter((c) => c.title)
     : [];
   return {

@@ -13,7 +13,7 @@ brew install maxgfr/tap/webindex
 
 ## Everything it does
 
-Three surfaces over one engine: **355 library exports**, **28 CLI commands**, **16 MCP
+Three surfaces over one engine: **359 library exports**, **28 CLI commands**, **20 MCP
 tools**. Nothing below needs an API key, and every optional helper degrades to a note
 rather than an error.
 
@@ -63,7 +63,7 @@ rather than an error.
 | `webindex hybrid --query <q>` | Rank documents with BM25F **and** a dense lane, fused by RRF. Each hit reports its rank in each lane. The dense lane sends the model its task prefixes — nomic's `search_query:` / `search_document:`, mxbai's, e5's; `WEBINDEX_EMBED_QUERY_PREFIX` / `WEBINDEX_EMBED_DOC_PREFIX` override them — and at most `WEBINDEX_EMBED_MAX_CHARS` (8000) of each document. Degrades to the lexical half, with a note on stderr, when no embedding server answers. |
 | `webindex changed <url>` | Fingerprint a URL, or — given `--etag` / `--last-modified` / `--hash` — say whether it changed and how it was decided. A baseline prints `etag`, `last-modified`, `hash` (SHA-256 of the raw bytes, what `sha256sum` of the download gives) and `status`, and exits non-zero instead of printing one it could not read. `--timeout <ms>` bounds the request. Exits non-zero on "could not tell", so a watcher never reads an error as "nothing to do". |
 | `webindex skill <action>` | Packaging gates for a repo built on this engine, driven by its `skill.json`: `vendor` (pin by tag + sha256, `--check` for the offline drift/staleness gate), `check` (no module may re-declare an engine export), `bundle` (`skills add` would install a working skill), `copy`, `doctor`, `init`, and the repin workflow's three steps — `repin`, `finish`, `recall` (see below). |
-| `webindex video fetch\|search\|frames` | A YouTube video kept on disk, so a question about it never reads it twice. `fetch <url>` writes `<dir>/<videoId>/TRANSCRIPT.md` (the Markdown `fetch` prints for a video), `segments.json` (every timed segment) and `meta.json` (title, channel, date, duration, chapters, tracks, the rung that read it and when), then reuses them on the next call without running yt-dlp at all — `--refresh` reads the video again, `--lang` picks the subtitle language. `search <query>` ranks ~45 s passages of every video under the directory (or of one video's own directory) with BM25F, chapter titles weighted as headings, and prints each with its `[mm:ss]` stamp and a link that opens the video there (`--limit`, default 10; `--json` for the hits). The directory is `--out <dir>`, else `WEBINDEX_VIDEO_DIR`, else `<tmp>/webindex/video`; under `WEBINDEX_NO_WRITE` nothing is written and `fetch` prints the transcript. `frames <url|id|dir>` takes what is on screen: the video at 720p at most into a temp directory (removed afterwards), a frame at every scene change (ffmpeg's scene score above 0.3) and just after every chapter start — evenly spaced ones when a video has neither — near-duplicates dropped by dHash (64 bits, Hamming distance ≤ 6), and at most 20, 50 or 100 kept by `--effort low\|med\|high` (`med` by default), the most widely spaced first. They land in `<id>/frames/NNNN_mm-ss.jpg`, with `FRAMES.md` pairing each frame with what was said from 5 s before it to 10 s after, and `frames.json` the same as data. It needs ffmpeg, and fetches the video first when given a URL. |
+| `webindex video fetch\|search\|frames\|list` | A YouTube video kept on disk, so a question about it never reads it twice. `fetch <url>` writes `<dir>/<videoId>/TRANSCRIPT.md` (the Markdown `fetch` prints for a video), `segments.json` (every timed segment) and `meta.json` (title, channel, date, duration, chapters, tracks, the rung that read it and when), then reuses them on the next call without running yt-dlp at all — `--refresh` reads the video again, `--lang` picks the subtitle language. `search <query>` ranks ~45 s passages of every video under the directory (or of one video's own directory) with BM25F, chapter titles weighted as headings, and prints each with its `[mm:ss]` stamp and a link that opens the video there (`--limit`, default 10; `--json` for the hits). The directory is `--out <dir>`, else `WEBINDEX_VIDEO_DIR`, else `<tmp>/webindex/video`; under `WEBINDEX_NO_WRITE` nothing is written and `fetch` prints the transcript. `frames <url|id|dir>` takes what is on screen: the video at 720p at most into a temp directory (removed afterwards), a frame at every scene change (ffmpeg's scene score above 0.3) and just after every chapter start — evenly spaced ones when a video has neither — near-duplicates dropped by dHash (64 bits, Hamming distance ≤ 6), and at most 20, 50 or 100 kept by `--effort low\|med\|high` (`med` by default), the most widely spaced first. They land in `<id>/frames/NNNN_mm-ss.jpg`, with `FRAMES.md` pairing each frame with what was said from 5 s before it to 10 s after, and `frames.json` the same as data. It needs ffmpeg, and fetches the video first when given a URL. `list <playlist\|channel>` reads the first `--limit` videos (default 10) two at a time — a channel's `/videos` tab when the URL names none — each kept as its own run (an existing one reused), and writes `CORPUS.md` and `corpus.json` naming them `V1`…`Vn` in listing order; a video that cannot be read keeps its label with the reason, so the numbering never shifts. `search` on a corpus directory labels its hits `V1`…`Vn`. |
 | `webindex doctor` | Which optional helpers answer — SearXNG, Firecrawl, Ollama, Qdrant — and what each extraction rung will do on this machine: installed, downloads on first use, not installed, built-in, or switched off and by which variable. The npx rungs are checked against npm's cache, never installed. The video rungs show yt-dlp's version and age (flagged past 60 days — YouTube breaks old releases) and whether whisper has `uvx` and `ffmpeg`. `--json` returns each service's state and each rung as data (`rungs.pdf`, `rungs.doc`, `rungs.video`, and `ytdlp`). |
 | `webindex version` | The engine version. |
 
@@ -172,7 +172,7 @@ call a ChatGPT or Claude search API itself. See the
 
 ## The MCP server
 
-`webindex mcp` exposes sixteen tools — primitives only. Point any MCP client at it:
+`webindex mcp` exposes twenty tools — primitives only. Point any MCP client at it:
 
 ```bash
 claude mcp add webindex -- webindex mcp                    # stdio
@@ -197,9 +197,18 @@ claude mcp add --transport http webindex http://127.0.0.1:7340/mcp
 | `webindex_tables` | `url` (required), `markdown` | Every `<table>` as headers and rows with `colspan`/`rowspan` resolved, or as markdown. |
 | `webindex_embed` | `texts` (required) | One vector per text from the local Ollama, in input order. Fails with a note naming the command that starts it when no embedding server answers. |
 | `webindex_crawl` | `url` (required), `max` (required), `depth`, `prefix`, `sitemap` | A bounded breadth-first walk honouring robots.txt at every hop and staying on the origin the seed lands on: each page's URL, title and text, what robots.txt refused, and what was left pending. Every page comes back inline, and an answer over 1 MB is withheld — ask for tens of pages, not hundreds. |
+| `webindex_video_fetch` | `url` (required), `lang`, `refresh`, `dir` | A YouTube video's transcript as Markdown — header, a heading per chapter, a `[mm:ss]` stamp per paragraph — read from manual subtitles, else the video's own auto-captions, else a local whisper transcription, and kept as a run so a second call (and `webindex_video_search`) never reads the video again. The trailer names the run directory and the rung. |
+| `webindex_video_search` | `query` (required), `limit`, `dir` | ~45 s passages of the videos kept in `dir` ranked against the question, each with its video (`V1`… in a corpus), stamp, chapter, a link that opens the video there, and the passage. Stays on this machine. |
+| `webindex_video_frames` | `url` (required), `effort`, `dir` | What is on screen: a frame at every scene change and chapter start, near-duplicates dropped, at most 20/50/100 by `effort`, each with its image path, stamp and the transcript from 5 s before to 10 s after — read the images to see slides or code. Needs ffmpeg. |
+| `webindex_video_list` | `url` (required), `limit`, `dir` | The first `limit` videos of a playlist or channel, each kept as a run, and `CORPUS.md` naming them `V1`…`Vn`; a video that cannot be read keeps its label with the reason. Reports progress per video. |
 
-Every tool is annotated `readOnlyHint` (none changes anything it reaches) and,
-except `webindex_extract`, `webindex_rank` and `webindex_embed`, `openWorldHint`.
+Every tool is annotated `destructiveHint: false` and `idempotentHint`. All but the
+three video tools that keep a run on disk — `webindex_video_fetch`,
+`webindex_video_frames` and `webindex_video_list`, which write only under the
+video root and reuse what is there — are `readOnlyHint`; all but
+`webindex_extract`, `webindex_rank`, `webindex_embed` and `webindex_video_search`
+are `openWorldHint`. Under `--public-only`, `--extract-root` or `--allow-remote`,
+a video tool's `dir` is a directory *name* inside the video root, never a path.
 
 The server implements `initialize`, `ping`, `tools/list`, `tools/call`,
 `resources/list`, `resources/templates/list`, `resources/read`, `prompts/list`,

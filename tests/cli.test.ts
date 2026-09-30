@@ -1025,6 +1025,10 @@ describe("the MCP tools", () => {
       "webindex_tables",
       "webindex_embed",
       "webindex_crawl",
+      "webindex_video_fetch",
+      "webindex_video_search",
+      "webindex_video_frames",
+      "webindex_video_list",
     ]);
     for (const t of tools) {
       expect(t.inputSchema.required.length, t.name).toBeGreaterThan(0);
@@ -1034,13 +1038,15 @@ describe("the MCP tools", () => {
     }
   });
 
-  it("annotates every tool as read-only, and the ones that reach the web as open-world", () => {
+  it("annotates every tool as read-only but the video runs, and the ones that reach the web as open-world", () => {
     // Without hints a client has to treat each tool as possibly destructive
-    // and ask before every call; none of these changes anything anywhere.
-    const closed = ["webindex_extract", "webindex_rank", "webindex_embed"];
+    // and ask before every call. Only the video tools write — their own run
+    // directory, additively — and none of them destroys anything.
+    const closed = ["webindex_extract", "webindex_rank", "webindex_embed", "webindex_video_search"];
+    const writing = ["webindex_video_fetch", "webindex_video_frames", "webindex_video_list"];
     for (const t of adapter.listTools(LATEST_PROTOCOL)) {
       expect(t.annotations, t.name).toEqual({
-        readOnlyHint: true,
+        readOnlyHint: !writing.includes(t.name),
         destructiveHint: false,
         idempotentHint: true,
         openWorldHint: !closed.includes(t.name),
