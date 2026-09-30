@@ -46,3 +46,5 @@ export {
   type VideoRunMeta,
   type VideoRunResult,
 } from "./video/run.js";
+export { extractFrames, FRAME_EFFORT, type FrameEffort, type FramesResult } from "./video/frames.js";
+export type { FrameKind, VideoFrame } from "./video/align.js";

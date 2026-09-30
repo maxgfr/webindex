@@ -442,9 +442,9 @@ async function repinSkill(root, config) {
 }
 
 // src/cli.ts
-import { existsSync as existsSync9, readFileSync as readFileSync16, realpathSync as realpathSync3, statSync as statSync7 } from "fs";
+import { existsSync as existsSync10, readFileSync as readFileSync17, realpathSync as realpathSync3, statSync as statSync7 } from "fs";
 import { isIP as isIP2 } from "net";
-import { basename as basename4, extname, isAbsolute as isAbsolute3, join as join18, relative as relative4, resolve as resolve8 } from "path";
+import { basename as basename4, extname, isAbsolute as isAbsolute3, join as join19, relative as relative4, resolve as resolve8 } from "path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL } from "url";
 
 // src/mime.ts
@@ -2542,6 +2542,19 @@ async function ytdlpVersionAge(run = defaultVideoRunner, now = Date.now()) {
   const released = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
   return { version, ageDays: Math.max(0, Math.floor((now - released) / 864e5)) };
 }
+async function downloadMedia(args, dir, stem, opts) {
+  let stderr = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const timeoutMs = typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
+    const r = await runYtdlp([...args, "--no-warnings", "-o", join8(dir, `${stem}.%(ext)s`)], { run: opts.run, url: opts.url, timeoutMs, signal: opts.signal });
+    const file = readdirSync2(dir).find((f) => f.startsWith(`${stem}.`) && !f.endsWith(".part") && !f.endsWith(".ytdl"));
+    if (file) return { file };
+    if (opts.signal?.aborted) return { error: "cancelled" };
+    if (r.status === 124) return { error: "timed out", timedOut: true };
+    stderr = r.stderr;
+  }
+  return { error: classifyYtdlpError(stderr) };
+}
 
 // src/video/vtt.ts
 var TIMING = /^((?:\d+:)?\d{1,2}:\d{2}\.\d{3})\s+-->\s+((?:\d+:)?\d{1,2}:\d{2}\.\d{3})/;
@@ -2622,7 +2635,7 @@ function mergeSegments(cues, breaks = []) {
 }
 
 // src/video/whisper.ts
-import { existsSync as existsSync2, readdirSync as readdirSync3, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "fs";
+import { existsSync as existsSync2, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "fs";
 import { join as join9 } from "path";
 var DEFAULT_MAX = 3;
 var DEFAULT_TIMEOUT_MS2 = 30 * 6e4;
@@ -2665,15 +2678,11 @@ async function whisperTranscribe(info, language, run, signal) {
   return withTempDir("whisper", async (dir) => {
     const infoPath = join9(dir, "info.json");
     writeFileSync5(infoPath, info);
-    const dl = await runYtdlp(["--load-info-json", infoPath, "-f", "bestaudio/best", "--no-warnings", "-o", join9(dir, "audio.%(ext)s")], {
-      run,
-      timeoutMs: left(),
-      signal
-    });
+    const dl = await downloadMedia(["--load-info-json", infoPath, "-f", "bestaudio/best"], dir, "audio", { run, timeoutMs: left, signal });
     if (signal?.aborted) return refund({ failed: "whisper: cancelled" });
-    if (dl.status === 124) return timedOut;
-    const audio = readdirSync3(dir).find((f) => f.startsWith("audio.") && !f.endsWith(".part"));
-    if (!audio) return refund({ failed: `whisper: the audio download failed${dl.stderr ? ` (${dl.stderr.trim().split("\n").pop()})` : ""}` });
+    if ("timedOut" in dl) return timedOut;
+    if ("error" in dl) return refund({ failed: `whisper: the audio download failed (${dl.error})` });
+    const audio = dl.file;
     const wav = join9(dir, "speech.wav");
     const ff = await run("ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", join9(dir, audio), "-ar", "16000", "-ac", "1", wav], {
       timeoutMs: left(),
@@ -2869,7 +2878,7 @@ function transcriptMarkdown(t) {
 }
 
 // src/video/run.ts
-import { existsSync as existsSync3, readdirSync as readdirSync4, readFileSync as readFileSync10, statSync } from "fs";
+import { existsSync as existsSync3, readdirSync as readdirSync3, readFileSync as readFileSync10, statSync } from "fs";
 import { tmpdir as tmpdir3 } from "os";
 import { join as join10, resolve } from "path";
 
@@ -3671,7 +3680,7 @@ function listVideoRuns(dir) {
   if (self) return [{ dir, ...self }];
   let names = [];
   try {
-    names = readdirSync4(dir).sort();
+    names = readdirSync3(dir).sort();
   } catch {
     return [];
   }
@@ -3713,6 +3722,183 @@ function searchVideoRuns(dir, query, opts = {}) {
   }
   const index = buildBm25Index(query, docs);
   return docs.map((d) => ({ ...d.hit, score: Math.round(bm25Score(index, d) * 1e3) / 1e3 })).filter((h) => h.score > 0).sort((a, b) => b.score - a.score || a.videoId.localeCompare(b.videoId) || a.start - b.start).slice(0, opts.limit ?? 10);
+}
+
+// src/video/frames.ts
+import { copyFileSync, existsSync as existsSync4, mkdirSync as mkdirSync2, readdirSync as readdirSync4, readFileSync as readFileSync11, rmSync as rmSync3 } from "fs";
+import { join as join11 } from "path";
+
+// src/video/align.ts
+var BEFORE_S = 5;
+var AFTER_S = 10;
+function transcriptAround(segments, t) {
+  return segments.filter((s) => s.end >= t - BEFORE_S && s.start <= t + AFTER_S).map((s) => `[${formatStamp(s.start)}] ${s.text}`).join("\n");
+}
+var chapterAt2 = (chapters, t) => [...chapters].sort((a, b) => b.start - a.start).find((c) => c.start <= t + 0.5)?.title;
+function alignFrames(frames, segments, chapters) {
+  return frames.map((f) => {
+    const chapter = chapterAt2(chapters, f.time);
+    return { file: f.file, time: f.time, stamp: formatStamp(f.time), kind: f.kind, ...chapter ? { chapter } : {}, text: transcriptAround(segments, f.time) };
+  });
+}
+function framesMarkdown(meta, frames, note) {
+  const out = [`# ${meta.title} \u2014 frames`, "", `- URL: ${meta.webpageUrl}`, `- ${note}`, ""];
+  const quoted = /* @__PURE__ */ new Set();
+  for (const f of frames) {
+    out.push(`## [${f.stamp}]${f.chapter ? ` ${f.chapter}` : ""}`, "", `![${f.stamp}](${f.file})`, "");
+    const lines = f.text ? f.text.split("\n") : [];
+    const fresh = lines.filter((l) => !quoted.has(l));
+    for (const l of fresh) quoted.add(l);
+    if (fresh.length) out.push(...fresh.map((l) => `> ${l}`), "");
+    else if (lines.length) out.push(`_(said over the passage quoted above, from ${lines[0].slice(0, lines[0].indexOf("]") + 1)})_`, "");
+    else out.push("_(nothing said around this frame)_", "");
+  }
+  return out.join("\n").trimEnd() + "\n";
+}
+
+// src/video/dhash.ts
+var DHASH_FRAME_BYTES = 72;
+var DHASH_SAME = 6;
+function dhash(gray) {
+  if (gray.length < DHASH_FRAME_BYTES) throw new Error(`dhash needs ${DHASH_FRAME_BYTES} bytes, got ${gray.length}`);
+  let h = 0n;
+  for (let y = 0; y < 8; y++) {
+    for (let x = 0; x < 8; x++) {
+      h = h << 1n | (gray[y * 9 + x] > gray[y * 9 + x + 1] ? 1n : 0n);
+    }
+  }
+  return h;
+}
+function hamming(a, b) {
+  let x = a ^ b;
+  let n = 0;
+  while (x) {
+    x &= x - 1n;
+    n++;
+  }
+  return n;
+}
+function dhashStream(raw) {
+  const out = [];
+  for (let at = 0; at + DHASH_FRAME_BYTES <= raw.length; at += DHASH_FRAME_BYTES) out.push(dhash(raw.subarray(at, at + DHASH_FRAME_BYTES)));
+  return out;
+}
+
+// src/video/frames.ts
+var FRAME_EFFORT = { low: 20, med: 50, high: 100 };
+var SCENE_THRESHOLD = 0.3;
+var FRAMES_TIMEOUT_MS = 30 * 6e4;
+var MIN_FRAMES = 3;
+var INTERVAL_FRAMES = 10;
+var JPEG_FILTER = "scale='min(1280,iw)':-2:out_range=full,format=yuvj420p";
+function parseShowinfo(stderr) {
+  const out = [];
+  for (const m of stderr.matchAll(/\bn:\s*(\d+)\s+pts:\s*-?\d+\s+pts_time:(-?[\d.]+)/g)) out[Number(m[1])] = Number(m[2]);
+  return out.filter((t) => Number.isFinite(t));
+}
+function capFrames(frames, max) {
+  const kept = [...frames].sort((a, b) => a.time - b.time);
+  const limit = Math.max(1, max);
+  while (kept.length > limit) {
+    const spareChapters = kept.some((f) => f.kind !== "chapter");
+    let worst = kept.length - 1;
+    let gap = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < kept.length; i++) {
+      if (spareChapters && kept[i].kind === "chapter") continue;
+      const g = i ? kept[i].time - kept[i - 1].time : kept[1].time - kept[0].time;
+      if (g < gap) {
+        gap = g;
+        worst = i;
+      }
+    }
+    kept.splice(worst, 1);
+  }
+  return kept;
+}
+var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+var fileStamp = (t) => formatStamp(t).replace(/:/g, "-");
+async function extractFrames(runDir, opts = {}) {
+  const run = readVideoRun(runDir);
+  if (!run) return { ok: false, reason: `no video run in ${runDir} \u2014 fetch the video first` };
+  if (isNoWrite()) return { ok: false, reason: "frames are image files, and nothing may be written (NO_WRITE)" };
+  const deps = videoDeps(opts.deps);
+  if (!deps.have("ffmpeg")) return { ok: false, reason: "frames need ffmpeg" };
+  const effort = opts.effort ?? "med";
+  const { meta, segments } = run;
+  const duration = meta.duration ?? 0;
+  return withTempDir("frames", async (tmp) => {
+    const dl = await downloadMedia(["-f", "bv*[height<=720]/b[height<=720]/bv*/b", "--no-playlist"], tmp, "video", {
+      run: deps.run,
+      url: `https://www.youtube.com/watch?v=${meta.id}`,
+      timeoutMs: FRAMES_TIMEOUT_MS,
+      signal: opts.signal
+    });
+    if (opts.signal?.aborted) return { ok: false, reason: "cancelled" };
+    if ("error" in dl) return { ok: false, reason: `the video download failed: ${dl.error}` };
+    const video = dl.file;
+    const input = join11(tmp, video);
+    const ffmpeg = (args) => deps.run("ffmpeg", ["-nostdin", "-hide_banner", ...args], { timeoutMs: FRAMES_TIMEOUT_MS, signal: opts.signal });
+    const sceneDir = join11(tmp, "scene");
+    mkdirSync2(sceneDir);
+    const scenes = await ffmpeg([
+      "-i",
+      input,
+      "-vf",
+      `select='gt(scene,${SCENE_THRESHOLD})',showinfo,${JPEG_FILTER}`,
+      "-fps_mode",
+      "vfr",
+      "-q:v",
+      "3",
+      join11(sceneDir, "%04d.jpg")
+    ]);
+    if (opts.signal?.aborted) return { ok: false, reason: "cancelled" };
+    const times = parseShowinfo(scenes.stderr);
+    const sceneFiles = readdirSync4(sceneDir).sort();
+    const candidates = sceneFiles.slice(0, times.length).map((f, i) => ({ path: join11(sceneDir, f), time: times[i], kind: "scene" }));
+    const single = async (time, kind) => {
+      const path = join11(tmp, `${kind}-${candidates.length}.jpg`);
+      await ffmpeg(["-loglevel", "error", "-ss", time.toFixed(2), "-i", input, "-frames:v", "1", "-vf", JPEG_FILTER, "-q:v", "3", "-y", path]);
+      if (existsSync4(path)) candidates.push({ path, time, kind });
+    };
+    const last = duration > 1 ? duration - 0.5 : Number.POSITIVE_INFINITY;
+    for (const c of meta.chapters ?? []) await single(Math.min(c.start + 1, last), "chapter");
+    if (candidates.length < MIN_FRAMES && duration > 0) {
+      const n = Math.min(FRAME_EFFORT[effort], INTERVAL_FRAMES);
+      for (let i = 0; i < n; i++) await single(duration * (i + 0.5) / n, "interval");
+    }
+    if (opts.signal?.aborted) return { ok: false, reason: "cancelled" };
+    if (!candidates.length)
+      return { ok: false, reason: `ffmpeg took no frame from the video${scenes.ok ? "" : ` (${scenes.stderr.trim().split("\n").pop()})`}` };
+    candidates.sort((a, b) => a.time - b.time);
+    const candDir = join11(tmp, "cand");
+    mkdirSync2(candDir);
+    candidates.forEach((c, i) => copyFileSync(c.path, join11(candDir, `${String(i + 1).padStart(4, "0")}.jpg`)));
+    const raw = join11(tmp, "hash.raw");
+    await ffmpeg(["-loglevel", "error", "-i", join11(candDir, "%04d.jpg"), "-vf", "scale=9:8,format=gray", "-f", "rawvideo", "-y", raw]);
+    const hashes = existsSync4(raw) ? dhashStream(readFileSync11(raw)) : [];
+    const kept = [];
+    for (const [i, c] of candidates.entries()) {
+      const hash = hashes.length === candidates.length ? hashes[i] : void 0;
+      if (hash !== void 0 && kept.some((k) => k.hash !== void 0 && hamming(k.hash, hash) <= DHASH_SAME)) continue;
+      kept.push({ ...c, ...hash !== void 0 ? { hash } : {} });
+    }
+    const chosen = capFrames(kept, FRAME_EFFORT[effort]);
+    const framesDir = join11(runDir, "frames");
+    rmSync3(framesDir, { recursive: true, force: true });
+    mkdirSync2(framesDir, { recursive: true });
+    const placed = chosen.map((c, i) => {
+      const file = `frames/${String(i + 1).padStart(4, "0")}_${fileStamp(c.time)}.jpg`;
+      copyFileSync(c.path, join11(runDir, file));
+      return { file, time: c.time, kind: c.kind };
+    });
+    const frames = alignFrames(placed, segments, meta.chapters ?? []);
+    const dropped = candidates.length - kept.length;
+    const note = `${plural(frames.length, "frame")} (effort ${effort}: at most ${FRAME_EFFORT[effort]}) from ${plural(candidates.length, "candidate")} \u2014 scene changes above ${SCENE_THRESHOLD}, one per chapter start, ${plural(dropped, "near-duplicate")} dropped`;
+    const markdown = writeArtifact(join11(runDir, "FRAMES.md"), framesMarkdown(meta, frames, note));
+    writeArtifact(join11(runDir, "frames.json"), `${JSON.stringify(frames, null, 2)}
+`);
+    return { ok: true, dir: framesDir, markdown, frames, candidates: candidates.length, duplicates: candidates.length - kept.length, effort };
+  });
 }
 
 // src/entities.ts
@@ -5770,16 +5956,16 @@ function metaDescriptionOf(html) {
 
 // src/stack.ts
 import { spawnSync as spawnSync3 } from "child_process";
-import { existsSync as existsSync5, lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync12, statSync as statSync3, writeFileSync as writeFileSync6 } from "fs";
-import { dirname as dirname2, join as join12, resolve as resolve2 } from "path";
+import { existsSync as existsSync6, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync13, statSync as statSync3, writeFileSync as writeFileSync6 } from "fs";
+import { dirname as dirname2, join as join13, resolve as resolve2 } from "path";
 
 // src/cache.ts
-import { chmodSync, existsSync as existsSync4, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync11, readdirSync as readdirSync5, rmSync as rmSync3, statSync as statSync2 } from "fs";
-import { dirname, join as join11 } from "path";
+import { chmodSync, existsSync as existsSync5, lstatSync, mkdirSync as mkdirSync3, readFileSync as readFileSync12, readdirSync as readdirSync5, rmSync as rmSync4, statSync as statSync2 } from "fs";
+import { dirname, join as join12 } from "path";
 import { tmpdir as tmpdir4 } from "os";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
-  return namedCacheDir() ?? join11(tmpdir4(), userScoped(brand().name), "cache");
+  return namedCacheDir() ?? join12(tmpdir4(), userScoped(brand().name), "cache");
 }
 var namedCacheDir = () => env("CACHE_DIR") ?? brand().cacheDir;
 function userScoped(name) {
@@ -5790,7 +5976,7 @@ function cachePath(url, acceptLanguage = "", extractor = "native", variant = "")
   const canon = canonicalizeUrl(url);
   const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
   const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
-  return join11(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
+  return join12(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
 }
 var TEXT_VARIANTS = ["", "consent", "full"];
 var MARKDOWN_VARIANTS = ["md", "consent-md", "full-md"];
@@ -5859,11 +6045,11 @@ function entryPaths(url, acceptLanguage, extractor, variant) {
 function readCache(url, acceptLanguage = "", extractor = "native", variant = "") {
   if (!entryDir(false)) return void 0;
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
-  if (!existsSync4(meta)) return void 0;
+  if (!existsSync5(meta)) return void 0;
   try {
-    const entry = JSON.parse(readFileSync11(meta, "utf8"));
+    const entry = JSON.parse(readFileSync12(meta, "utf8"));
     if (typeof entry.cachedAt !== "number") return void 0;
-    const text = existsSync4(body) ? readFileSync11(body, "utf8") : entry.text;
+    const text = existsSync5(body) ? readFileSync12(body, "utf8") : entry.text;
     if (!text?.trim()) return void 0;
     return { ...entry, text };
   } catch {
@@ -5892,7 +6078,7 @@ function writeCache(url, res, now, acceptLanguage = "", extractor = "native", va
 var ensured = /* @__PURE__ */ new Set();
 function ensureDir2(dir) {
   if (ensured.has(dir)) return;
-  mkdirSync2(dir, { recursive: true });
+  mkdirSync3(dir, { recursive: true });
   ensured.add(dir);
 }
 function openCacheDir(create) {
@@ -5902,7 +6088,7 @@ function openCacheDir(create) {
     if (create) ensureDir2(dir);
     return { dir };
   }
-  if (create) mkdirSync2(dirname(dirname(dir)), { recursive: true });
+  if (create) mkdirSync3(dirname(dirname(dir)), { recursive: true });
   for (const p of [dirname(dir), dir]) {
     if (create) mkdirPrivate(p);
     let st;
@@ -5927,7 +6113,7 @@ function openCacheDir(create) {
 }
 function mkdirPrivate(p) {
   try {
-    mkdirSync2(p, { mode: 448 });
+    mkdirSync3(p, { mode: 448 });
   } catch (e) {
     if (e.code !== "EEXIST") throw e;
   }
@@ -6013,7 +6199,7 @@ function ownFile(name) {
 }
 function readEntryMeta(abs) {
   try {
-    const entry = JSON.parse(readFileSync11(abs, "utf8"));
+    const entry = JSON.parse(readFileSync12(abs, "utf8"));
     return entry && typeof entry.cachedAt === "number" && typeof entry.finalUrl === "string" ? entry : void 0;
   } catch {
     return void 0;
@@ -6032,13 +6218,13 @@ function cacheStats(now = Date.now()) {
   const out = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
   const { refused } = openCacheDir(false);
   if (refused) return { ...out, refused };
-  if (!existsSync4(dir)) return out;
+  if (!existsSync5(dir)) return out;
   let oldest = Number.POSITIVE_INFINITY;
   let newest = 0;
   for (const name of readdirSync5(dir)) {
     const own = ownFile(name);
     if (!own) continue;
-    const abs = join11(dir, name);
+    const abs = join12(dir, name);
     if (own.kind !== "json") {
       out.bytes += sizeOf(abs);
       continue;
@@ -6060,12 +6246,12 @@ function cacheStats(now = Date.now()) {
 }
 function cacheClean(all = false, now = Date.now()) {
   const dir = cacheDir();
-  if (isNoWrite() || !openCacheDir(false).dir || !existsSync4(dir)) return 0;
+  if (isNoWrite() || !openCacheDir(false).dir || !existsSync5(dir)) return 0;
   const names = readdirSync5(dir);
   const present = new Set(names);
   const remove = (name) => {
     try {
-      rmSync3(join11(dir, name), { force: true });
+      rmSync4(join12(dir, name), { force: true });
       return true;
     } catch {
       return false;
@@ -6073,7 +6259,7 @@ function cacheClean(all = false, now = Date.now()) {
   };
   const abandoned = (name) => {
     try {
-      return all || now - statSync2(join11(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
+      return all || now - statSync2(join12(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
     } catch {
       return false;
     }
@@ -6083,7 +6269,7 @@ function cacheClean(all = false, now = Date.now()) {
     const own = ownFile(name);
     if (!own) continue;
     if (own.kind === "json") {
-      const entry = readEntryMeta(join11(dir, name));
+      const entry = readEntryMeta(join12(dir, name));
       if (!entry || !all && isCacheFresh(entry, now) || !remove(name)) continue;
       remove(`${own.stem}.body`);
       removed++;
@@ -6355,11 +6541,11 @@ function renderAsset(template) {
   return template.replaceAll("{{CLI}}", brand().cli);
 }
 function composeAssets() {
-  const base2 = join12(cacheDir(), "compose");
+  const base2 = join13(cacheDir(), "compose");
   return [
-    { path: join12(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
-    { path: join12(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
-    { path: join12(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
+    { path: join13(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
+    { path: join13(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
+    { path: join13(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
   ];
 }
 function ensureComposeMaterialized() {
@@ -6372,7 +6558,7 @@ function untrustedStack() {
   for (const a of assets) {
     let body;
     try {
-      body = readFileSync12(a.path, "utf8");
+      body = readFileSync13(a.path, "utf8");
     } catch {
     }
     if (body !== a.content) return `${a.path} does not hold the stack this binary ships, and could not be rewritten`;
@@ -6400,8 +6586,8 @@ function untrustedStack() {
 }
 function writeIfChanged(path, content) {
   try {
-    if (existsSync5(path) && readFileSync12(path, "utf8") === content) return;
-    mkdirSync3(dirname2(path), { recursive: true, mode: 448 });
+    if (existsSync6(path) && readFileSync13(path, "utf8") === content) return;
+    mkdirSync4(dirname2(path), { recursive: true, mode: 448 });
     writeFileSync6(path, content);
   } catch {
   }
@@ -7694,8 +7880,8 @@ async function hasChanged(url, previous, opts = {}) {
 }
 
 // src/skillkit/usage.ts
-import { readdirSync as readdirSync6, readFileSync as readFileSync13, statSync as statSync4 } from "fs";
-import { dirname as dirname3, join as join13, relative, resolve as resolve3 } from "path";
+import { readdirSync as readdirSync6, readFileSync as readFileSync14, statSync as statSync4 } from "fs";
+import { dirname as dirname3, join as join14, relative, resolve as resolve3 } from "path";
 var DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|enum)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm;
 var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']((?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs))["']/g;
 function engineExports(dts) {
@@ -7715,7 +7901,7 @@ function walkSources(dir, skip = "vendor", out = []) {
     return out;
   }
   for (const e of entries) {
-    const p = join13(dir, e);
+    const p = join14(dir, e);
     if (statSync4(p).isDirectory()) {
       if (e !== skip) walkSources(p, skip, out);
     } else if (e.endsWith(".ts")) out.push(p);
@@ -7724,13 +7910,13 @@ function walkSources(dir, skip = "vendor", out = []) {
 }
 function auditEngineUsage(root, config, dts, engineName) {
   const surface = engineExports(dts);
-  const files = walkSources(join13(root, "src"));
+  const files = walkSources(join14(root, "src"));
   const forks = new Map(Object.entries(config.forks));
   const collisions = [];
   const tolerated = [];
   const imported = /* @__PURE__ */ new Set();
   for (const file of files) {
-    const src = readFileSync13(file, "utf8");
+    const src = readFileSync14(file, "utf8");
     const rel = relative(root, file);
     for (const m of src.matchAll(DECL)) {
       const name = m[1] ?? m[2];
@@ -7747,7 +7933,7 @@ function auditEngineUsage(root, config, dts, engineName) {
         } else {
           let shim = "";
           try {
-            shim = readFileSync13(resolve3(dirname3(file), spec.replace(/\.js$/, ".ts")), "utf8");
+            shim = readFileSync14(resolve3(dirname3(file), spec.replace(/\.js$/, ".ts")), "utf8");
           } catch {
             continue;
           }
@@ -7766,8 +7952,8 @@ function auditEngineUsage(root, config, dts, engineName) {
 }
 
 // src/skillkit/bundle.ts
-import { existsSync as existsSync6, readdirSync as readdirSync7, readFileSync as readFileSync14 } from "fs";
-import { join as join14 } from "path";
+import { existsSync as existsSync7, readdirSync as readdirSync7, readFileSync as readFileSync15 } from "fs";
+import { join as join15 } from "path";
 
 // src/cli-kit.ts
 import { basename } from "path";
@@ -7883,17 +8069,17 @@ function auditSkillBundle(root, config, cli) {
   const out = [];
   const check = (ok, message) => out.push({ ok, message });
   const name = config.name;
-  const skillDir = join14(root, "skills", name);
+  const skillDir = join15(root, "skills", name);
   check(
-    !existsSync6(join14(root, "SKILL.md")),
-    existsSync6(join14(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name}/SKILL.md` : "no root SKILL.md"
+    !existsSync7(join15(root, "SKILL.md")),
+    existsSync7(join15(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name}/SKILL.md` : "no root SKILL.md"
   );
-  const skillMd = join14(skillDir, "SKILL.md");
-  if (!existsSync6(skillMd)) {
+  const skillMd = join15(skillDir, "SKILL.md");
+  if (!existsSync7(skillMd)) {
     check(false, `missing skills/${name}/SKILL.md \u2014 the skill package has no SKILL.md`);
     return out;
   }
-  const raw = readFileSync14(skillMd, "utf8");
+  const raw = readFileSync15(skillMd, "utf8");
   const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
   if (!fm) {
     check(false, `skills/${name}/SKILL.md has no frontmatter block`);
@@ -7916,13 +8102,13 @@ function auditSkillBundle(root, config, cli) {
       len <= DESC_MAX ? `description ${len} chars (<= ${DESC_MAX})` : `description ${len} chars exceeds the ${DESC_MAX}-char headroom cap`
     );
   }
-  const refsDir = join14(skillDir, "references");
-  if (existsSync6(refsDir)) {
+  const refsDir = join15(skillDir, "references");
+  if (existsSync7(refsDir)) {
     const files = readdirSync7(refsDir).filter((f) => f.endsWith(".md"));
     for (const m of new Set(raw.match(/references\/[\w.-]+\.md/g) ?? [])) {
       check(
-        existsSync6(join14(skillDir, m)),
-        existsSync6(join14(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
+        existsSync7(join15(skillDir, m)),
+        existsSync7(join15(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
       );
     }
     for (const f of files) {
@@ -7933,12 +8119,12 @@ function auditSkillBundle(root, config, cli) {
     }
   }
   const bundleRel = `scripts/${name}.mjs`;
-  const rootBundle = join14(root, bundleRel);
-  const pkgBundle = join14(skillDir, bundleRel);
-  if (!existsSync6(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
-  else if (!existsSync6(pkgBundle)) check(false, `missing skills/${name}/${bundleRel} \u2014 run \`skill copy\``);
+  const rootBundle = join15(root, bundleRel);
+  const pkgBundle = join15(skillDir, bundleRel);
+  if (!existsSync7(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
+  else if (!existsSync7(pkgBundle)) check(false, `missing skills/${name}/${bundleRel} \u2014 run \`skill copy\``);
   else {
-    const same = readFileSync14(rootBundle).equals(readFileSync14(pkgBundle));
+    const same = readFileSync15(rootBundle).equals(readFileSync15(pkgBundle));
     check(
       same,
       same ? `embedded engine is byte-identical to ${bundleRel}` : `skills/${name}/${bundleRel} differs from ${bundleRel} \u2014 run \`skill copy\` and commit`
@@ -7947,8 +8133,8 @@ function auditSkillBundle(root, config, cli) {
   if (!cli) return out;
   const universe = /* @__PURE__ */ new Set([...cli.valueFlags, ...cli.boolFlags, "help", "version", ...config.allowedForeignFlags]);
   const docs = [["SKILL.md", raw]];
-  if (existsSync6(refsDir)) {
-    for (const f of readdirSync7(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync14(join14(refsDir, f), "utf8")]);
+  if (existsSync7(refsDir)) {
+    for (const f of readdirSync7(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync15(join15(refsDir, f), "utf8")]);
   }
   let unknown = 0;
   for (const [file, text] of docs) {
@@ -7969,7 +8155,7 @@ function auditSkillBundle(root, config, cli) {
 }
 
 // src/skillkit/scaffold.ts
-import { join as join15 } from "path";
+import { join as join16 } from "path";
 var enginesJson = (engine, repo, minRef) => JSON.stringify(
   {
     _comment: "The packaging contract for this skill, read by `skill vendor|check|bundle`. `forks` is a ratchet: entries may leave, never arrive \u2014 so the next declaration shadowing an engine export is an argued decision rather than a quiet copy. `usageFloor` goes up when a layer lands and never down to make a red run pass.",
@@ -8068,8 +8254,8 @@ function scaffoldSkill(root, name, opts = {}) {
     // scaffolding; any older floor lets the staleness gate pass a pin that old.
     [SKILL_CONFIG]: `${enginesJson(name, opts.engineRepo ?? "maxgfr/webindex", opts.minRef ?? `v${ENGINE_VERSION}`)}
 `,
-    [join15("src", "engine.ts")]: engineShim(name, prefix),
-    [join15("skills", name, "SKILL.md")]: `---
+    [join16("src", "engine.ts")]: engineShim(name, prefix),
+    [join16("skills", name, "SKILL.md")]: `---
 name: ${name}
 description: TODO \u2014 one sentence saying WHEN to use this skill, under 1000 characters.
 ---
@@ -8078,18 +8264,18 @@ description: TODO \u2014 one sentence saying WHEN to use this skill, under 1000 
 
 TODO
 `,
-    [join15(".github", "workflows", "ci.yml")]: ci(),
+    [join16(".github", "workflows", "ci.yml")]: ci(),
     ".gitignore": gitignore
   };
   const written = [];
   const exists = opts.exists;
   for (const [rel, content] of Object.entries(files)) {
-    const path = join15(root, rel);
+    const path = join16(root, rel);
     if (exists?.(path)) {
       errors.push(`${rel} already exists \u2014 left alone.`);
       continue;
     }
-    ensureDir(join15(path, ".."));
+    ensureDir(join16(path, ".."));
     written.push(writeArtifact(path, content));
   }
   return { written, errors };
@@ -8823,9 +9009,9 @@ function resolveUrl2(url, base2) {
 
 // src/repo.ts
 import { createHash as createHash3, randomBytes } from "crypto";
-import { existsSync as existsSync7, mkdirSync as mkdirSync4, readdirSync as readdirSync8, renameSync as renameSync2, rmSync as rmSync4, statSync as statSync5 } from "fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync5, readdirSync as readdirSync8, renameSync as renameSync2, rmSync as rmSync5, statSync as statSync5 } from "fs";
 import { tmpdir as tmpdir5 } from "os";
-import { basename as basename2, join as join16, resolve as resolve4 } from "path";
+import { basename as basename2, join as join17, resolve as resolve4 } from "path";
 
 // src/forge-host.ts
 var KINDS = /* @__PURE__ */ new Set(["github", "gitlab", "gitea"]);
@@ -8860,7 +9046,7 @@ function resolveRepo(raw, opts = {}) {
   const trimmed = raw.trim();
   if (trimmed && opts.local !== false) {
     const asPath = resolve4(trimmed);
-    if (existsSync7(asPath) && statSync5(asPath).isDirectory()) {
+    if (existsSync8(asPath) && statSync5(asPath).isDirectory()) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename2(asPath)}-${asPath}`)}` };
     }
   }
@@ -9733,8 +9919,8 @@ function isOriginAllowed(origin, allowed = []) {
 }
 
 // src/mcp/resources.ts
-import { existsSync as existsSync8, readdirSync as readdirSync9, readFileSync as readFileSync15, realpathSync, statSync as statSync6 } from "fs";
-import { basename as basename3, dirname as dirname4, join as join17, relative as relative2, resolve as resolve6, sep } from "path";
+import { existsSync as existsSync9, readdirSync as readdirSync9, readFileSync as readFileSync16, realpathSync, statSync as statSync6 } from "fs";
+import { basename as basename3, dirname as dirname4, join as join18, relative as relative2, resolve as resolve6, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
@@ -9742,17 +9928,17 @@ function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname4(fileURLToPath(import.meta.url));
   const name = brand().name;
   const candidates = [resolve6(here, ".."), resolve6(here, "..", "skills", name), resolve6(here, "..", "..", "skills", name)];
-  return candidates.find((dir) => existsSync8(join17(dir, "SKILL.md")));
+  return candidates.find((dir) => existsSync9(join18(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
-  const refDir = join17(root, "references");
-  if (!existsSync8(refDir)) return out;
+  const refDir = join18(root, "references");
+  if (!existsSync9(refDir)) return out;
   for (const file of readdirSync9(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join17("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
+    out.push(describe(root, join18("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
   }
   return out;
 }
@@ -9780,7 +9966,7 @@ function readResource(uri, moduleDir) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
   if (!statSync6(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
-  return { uri, mimeType: "text/markdown", text: readFileSync15(targetReal, "utf8") };
+  return { uri, mimeType: "text/markdown", text: readFileSync16(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
 };
@@ -9791,14 +9977,14 @@ function describe(root, rel, fallbackTitle) {
     title: fallbackTitle,
     mimeType: "text/markdown"
   };
-  const summary = firstProse(join17(root, rel));
+  const summary = firstProse(join18(root, rel));
   if (summary) decl.description = summary;
   return decl;
 }
 function firstProse(file) {
   let text;
   try {
-    text = readFileSync15(file, "utf8");
+    text = readFileSync16(file, "utf8");
   } catch {
     return void 0;
   }
@@ -10520,6 +10706,7 @@ USAGE
   webindex skill     init <name> [--root <dir>]
   webindex video     fetch <url> [--out <dir>] [--lang <tag>] [--refresh] [--json]
   webindex video     search <query> [--out <dir>] [--limit <n>] [--json]
+  webindex video     frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]
   webindex doctor [--json]
   webindex version
 
@@ -10676,8 +10863,13 @@ COMMANDS
              on the next call \u2014 no yt-dlp at all \u2014 unless --refresh. 'search'
              ranks ~45 s passages of every video under --out (or of one video's
              own directory) against a question, each with its [mm:ss] stamp
-             and a link that opens the video there. The directory is --out,
-             else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
+             and a link that opens the video there. 'frames' takes what is
+             on screen \u2014 a frame at every scene change and chapter start,
+             near-duplicates dropped, at most 20, 50 or 100 by --effort (med
+             by default) \u2014 into <id>/frames/, and FRAMES.md pairs each with
+             what was said from 5 s before it to 10 s after; it needs ffmpeg,
+             and fetches the video first when given a URL. The directory is
+             --out, else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which
@@ -10781,7 +10973,8 @@ var VALUE_FLAGS = [
   "prefix",
   "extract-root",
   "format",
-  "out"
+  "out",
+  "effort"
 ];
 var BOOL_FLAGS = [
   "json",
@@ -10830,7 +11023,7 @@ var COMMANDS = [
 ];
 var SPEC = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS };
 var SKILL_ACTIONS = ["check", "bundle", "vendor", "copy", "doctor", "init", "repin", "finish", "recall"];
-var VIDEO_ACTIONS = ["fetch", "search"];
+var VIDEO_ACTIONS = ["fetch", "search", "frames"];
 var YTDLP_STALE_DAYS = 60;
 function fail(msg) {
   process.stderr.write(`webindex: ${msg}
@@ -10905,7 +11098,7 @@ function forgeTarget(raw, kind) {
 async function extractLocal(path, fullPage = false, given, format = "text") {
   let bytes;
   try {
-    bytes = given ?? readFileSync16(path);
+    bytes = given ?? readFileSync17(path);
   } catch (e) {
     throw new ToolError(`cannot read ${path}: ${e.message}`);
   }
@@ -11039,7 +11232,7 @@ function readDocsInput(args, usageLine) {
   if (src === void 0 && process.stdin.isTTY) usage(usageLine);
   const label = `--docs ${src === void 0 || src === "-" ? "(stdin)" : src}`;
   try {
-    return { text: readFileSync16(src === void 0 || src === "-" ? 0 : src, "utf8"), label };
+    return { text: readFileSync17(src === void 0 || src === "-" ? 0 : src, "utf8"), label };
   } catch (e) {
     fail(`cannot read ${src === void 0 || src === "-" ? "stdin" : src}: ${e.message}`);
   }
@@ -11047,7 +11240,7 @@ function readDocsInput(args, usageLine) {
 function readStdin(usageLine) {
   if (process.stdin.isTTY) usage(usageLine);
   try {
-    return readFileSync16(0);
+    return readFileSync17(0);
   } catch (e) {
     fail(`cannot read stdin: ${e.message}`);
   }
@@ -11062,7 +11255,7 @@ async function readPage(target, accept, usageLine) {
   if (target === "-") bytes = readStdin(usageLine);
   else {
     try {
-      bytes = readFileSync16(target.startsWith("file:") ? fileURLToPath2(target) : target);
+      bytes = readFileSync17(target.startsWith("file:") ? fileURLToPath2(target) : target);
     } catch (e) {
       fail(`${target} is neither an http(s) URL nor a readable file (${e.code ?? e.message})`);
     }
@@ -11774,7 +11967,7 @@ async function dispatch(argv) {
     const bad = urls.find((u) => !/^https?:\/\//i.test(u));
     if (bad !== void 0) {
       fail(
-        `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync9(bad) ? ` \u2014 for a file on disk, \`webindex extract ${bad}\`` : ""}`
+        `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync10(bad) ? ` \u2014 for a file on disk, \`webindex extract ${bad}\`` : ""}`
       );
     }
     const fullPage = argBool(args, "full-page");
@@ -12275,6 +12468,34 @@ async function dispatch(argv) {
       }
       return;
     }
+    if (action === "frames") {
+      const target = args.positional[1];
+      const frameUsage = "usage: webindex video frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]";
+      if (!target) usage(frameUsage);
+      const effort = argValue(args, "effort") ?? "med";
+      if (!(effort in FRAME_EFFORT)) usage(`--effort must be low, med or high, not "${effort}"`);
+      let runDir;
+      if (youtubeVideoId(target)) {
+        const r2 = await fetchVideoRun(target, root, { lang: argValue(args, "lang") });
+        if (!r2.ok) fail(`no transcript for ${target}: ${r2.reason}`);
+        runDir = r2.dir;
+      } else runDir = existsSync10(join19(root, target, "meta.json")) ? join19(root, target) : resolve8(target);
+      const r = await extractFrames(runDir, { effort });
+      if (!r.ok) {
+        if (asJson) process.stdout.write(jsonLine(r));
+        fail(r.reason);
+      }
+      if (asJson) process.stdout.write(jsonLine(r));
+      else {
+        const n = (k, w) => `${k} ${w}${k === 1 ? "" : "s"}`;
+        process.stdout.write(
+          `${r.markdown}
+  ${n(r.frames.length, "frame")} in ${r.dir} (${n(r.candidates, "candidate")}, ${n(r.duplicates, "near-duplicate")} dropped, effort ${r.effort})
+`
+        );
+      }
+      return;
+    }
     const query = args.positional.slice(1).join(" ").trim();
     if (!query) usage("usage: webindex video search <query> [--out <dir>] [--limit <n>] [--json]");
     const hits = searchVideoRuns(root, query, { limit: argInt(args, "limit", { min: 1 }) ?? 10 });
@@ -12297,7 +12518,7 @@ async function dispatch(argv) {
       if (!name) usage("usage: webindex skill init <name> [--root <dir>]");
       const badName = skillNameProblem(name);
       if (badName) usage(badName);
-      const r = scaffoldSkill(root, name, { exists: existsSync9 });
+      const r = scaffoldSkill(root, name, { exists: existsSync10 });
       for (const e of r.errors) process.stderr.write(`  ${e}
 `);
       if (asJson) process.stdout.write(jsonLine(r));
@@ -12384,7 +12605,7 @@ async function dispatch(argv) {
         const dtsFile = pin?.files?.find((f) => f.local.endsWith(".d.mts"))?.local;
         let dts = "";
         try {
-          dts = readFileSync16(join18(root, config.vendorDir, dtsFile ?? ""), "utf8");
+          dts = readFileSync17(join19(root, config.vendorDir, dtsFile ?? ""), "utf8");
         } catch {
           fail(`cannot read the vendored declarations for "${engineName}" \u2014 run \`webindex skill vendor --ref <tag>\` first`);
         }
@@ -12418,11 +12639,11 @@ async function dispatch(argv) {
       return;
     }
     if (action === "bundle") {
-      const built = join18(root, "scripts", `${config.name}.mjs`);
+      const built = join19(root, "scripts", `${config.name}.mjs`);
       let surface;
       let surfaceProblem;
       const flagList = (v) => v == null || typeof v === "string" || typeof v[Symbol.iterator] !== "function" ? void 0 : [...v];
-      if (existsSync9(built)) {
+      if (existsSync10(built)) {
         try {
           const mod = await import(pathToFileURL(built).href);
           const valueFlags = flagList(mod.VALUE_FLAGS);
@@ -12455,11 +12676,11 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
       return;
     }
     if (action === "copy") {
-      const from = join18(root, "scripts", `${config.name}.mjs`);
-      if (!existsSync9(from)) fail(`missing ${relative4(root, from)} \u2014 run the build first`);
-      const to = join18(root, "skills", config.name, "scripts", `${config.name}.mjs`);
-      ensureDir(join18(to, ".."));
-      writeArtifact(to, readFileSync16(from, "utf8"));
+      const from = join19(root, "scripts", `${config.name}.mjs`);
+      if (!existsSync10(from)) fail(`missing ${relative4(root, from)} \u2014 run the build first`);
+      const to = join19(root, "skills", config.name, "scripts", `${config.name}.mjs`);
+      ensureDir(join19(to, ".."));
+      writeArtifact(to, readFileSync17(from, "utf8"));
       process.stdout.write(`  copied ${relative4(root, from)} -> ${relative4(root, to)}
 `);
       return;
