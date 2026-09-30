@@ -1025,6 +1025,10 @@ describe("the MCP tools", () => {
       "webindex_tables",
       "webindex_embed",
       "webindex_crawl",
+      "webindex_video_fetch",
+      "webindex_video_search",
+      "webindex_video_frames",
+      "webindex_video_list",
     ]);
     for (const t of tools) {
       expect(t.inputSchema.required.length, t.name).toBeGreaterThan(0);
@@ -1034,14 +1038,18 @@ describe("the MCP tools", () => {
     }
   });
 
-  it("annotates every tool as read-only, and the ones that reach the web as open-world", () => {
+  it("annotates every tool as read-only but the video runs, and the ones that reach the web as open-world", () => {
     // Without hints a client has to treat each tool as possibly destructive
-    // and ask before every call; none of these changes anything anywhere.
-    const closed = ["webindex_extract", "webindex_rank", "webindex_embed"];
+    // and ask before every call. Only the video tools write — their own run
+    // directory, additively — and none of them destroys anything.
+    const closed = ["webindex_extract", "webindex_rank", "webindex_embed", "webindex_video_search"];
+    const writing = ["webindex_video_fetch", "webindex_video_frames", "webindex_video_list"];
+    // Frames replace a video's earlier frames, a corpus the directory's CORPUS.md.
+    const replacing = ["webindex_video_frames", "webindex_video_list"];
     for (const t of adapter.listTools(LATEST_PROTOCOL)) {
       expect(t.annotations, t.name).toEqual({
-        readOnlyHint: true,
-        destructiveHint: false,
+        readOnlyHint: !writing.includes(t.name),
+        destructiveHint: replacing.includes(t.name),
         idempotentHint: true,
         openWorldHint: !closed.includes(t.name),
       });
@@ -2323,6 +2331,16 @@ describe("webindex video", () => {
     expect(await run(["video", "fetch", "https://youtu.be/jNQXAC9IVRw", "--out", dir])).toBe(0);
     expect(stdout()).toMatch(/^# Me at the zoo\n/);
     expect(readdirSync(dir)).toEqual([]);
+    expect(await run(["video", "list", "https://www.youtube.com/playlist?list=PLx", "--out", dir])).toBe(1);
+    expect(stderr()).toContain("nothing may be written");
+  });
+
+  it("prints a run already on disk under no-write", async () => {
+    expect(await run(["video", "fetch", "https://youtu.be/jNQXAC9IVRw", "--out", dir])).toBe(0);
+    process.env[envName("NO_WRITE")] = "1";
+    out.length = 0;
+    expect(await run(["video", "fetch", "https://youtu.be/jNQXAC9IVRw", "--out", dir])).toBe(0);
+    expect(stdout()).toMatch(/^# Me at the zoo\n/);
   });
 
   it("frames: validates --effort, and says what it lacks", async () => {

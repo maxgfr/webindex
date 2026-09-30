@@ -94,6 +94,11 @@ describe("videoMetaFromInfo", () => {
     expect(meta.chapters[0]).toEqual({ start: 0, end: 42, title: "Introduction" });
   });
 
+  it("names an untitled chapter plainly", () => {
+    const meta = videoMetaFromInfo({ id: "abc", chapters: [{ start_time: 0, end_time: 5, title: "<Untitled Chapter 1>" }] })!;
+    expect(meta.chapters[0]!.title).toBe("Chapter 1");
+  });
+
   it("drops the live-chat pseudo track and refuses an entry with no id", () => {
     expect(videoMetaFromInfo({ id: "abc", subtitles: { live_chat: [], en: [] } })!.subtitles).toEqual(["en"]);
     expect(videoMetaFromInfo({ title: "x" })).toBeUndefined();

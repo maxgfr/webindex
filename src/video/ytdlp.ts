@@ -77,7 +77,13 @@ export function videoMetaFromInfo(info: Record<string, unknown>): VideoMeta | un
   const duration = num(info.duration);
   const chapters = Array.isArray(info.chapters)
     ? (info.chapters as Record<string, unknown>[])
-        .map((c) => ({ start: num(c.start_time) ?? 0, end: num(c.end_time) ?? duration ?? 0, title: str(c.title) ?? "" }))
+        // yt-dlp names an untitled chapter "<Untitled Chapter 1>", which a
+        // Markdown heading would carry as a stray HTML tag.
+        .map((c) => ({
+          start: num(c.start_time) ?? 0,
+          end: num(c.end_time) ?? duration ?? 0,
+          title: (str(c.title) ?? "").replace(/^<Untitled Chapter (\d+)>$/, "Chapter $1"),
+        }))
         .filter((c) => c.title)
     : [];
   return {
@@ -208,11 +214,14 @@ export async function downloadMedia(
   for (let attempt = 0; attempt < 2; attempt++) {
     const timeoutMs = typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
     const r = await runYtdlp([...args, "--no-warnings", "-o", join(dir, `${stem}.%(ext)s`)], { run: opts.run, url: opts.url, timeoutMs, signal: opts.signal });
-    const file = readdirSync(dir).find((f) => f.startsWith(`${stem}.`) && !f.endsWith(".part") && !f.endsWith(".ytdl"));
-    if (file) return { file };
+    // Judged on the exit status first: a download killed half-way leaves
+    // fragments behind (`.part`, `.part-Frag7`, `.ytdl`, `.f136.mp4`) that are
+    // not the file, and reading one would transcribe half a video.
     if (opts.signal?.aborted) return { error: "cancelled" };
     if (r.status === 124) return { error: "timed out", timedOut: true };
-    stderr = r.stderr;
+    const file = r.ok ? readdirSync(dir).find((f) => f.startsWith(`${stem}.`) && !/\.part(?:-Frag\d+)?$|\.ytdl$|\.f\d+\.\w+$/.test(f)) : undefined;
+    if (file) return { file };
+    stderr = r.ok ? "yt-dlp wrote no file" : r.stderr;
   }
   return { error: classifyYtdlpError(stderr) };
 }

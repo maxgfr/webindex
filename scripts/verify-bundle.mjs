@@ -124,6 +124,9 @@ const ALLOWED_FOREIGN = new Set([
   "run-root",
   "master",
   "stdout",
+  // yt-dlp's own option, quoted in references/video.md as the value of
+  // WEBINDEX_YTDLP_ARGS — the one way past YouTube's sign-in wall.
+  "cookies-from-browser",
 ]);
 // `--help` and `--version` are answered by the parser rather than declared as
 // flags, so they are legitimately documented and legitimately absent from the

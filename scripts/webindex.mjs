@@ -212,9 +212,6 @@ function writeFileAtomic(path, content) {
     throw e;
   }
 }
-function takeArtifacts() {
-  return collected.splice(0, collected.length);
-}
 
 // src/run.ts
 function readJsonSafe(path) {
@@ -442,9 +439,9 @@ async function repinSkill(root, config) {
 }
 
 // src/cli.ts
-import { existsSync as existsSync10, readFileSync as readFileSync17, realpathSync as realpathSync3, statSync as statSync7 } from "fs";
+import { existsSync as existsSync10, mkdirSync as mkdirSync6, readFileSync as readFileSync17, realpathSync as realpathSync3, statSync as statSync7 } from "fs";
 import { isIP as isIP2 } from "net";
-import { basename as basename4, extname, isAbsolute as isAbsolute3, join as join19, relative as relative4, resolve as resolve8 } from "path";
+import { basename as basename4, extname, isAbsolute as isAbsolute3, join as join20, relative as relative4, resolve as resolve8 } from "path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL } from "url";
 
 // src/mime.ts
@@ -2344,6 +2341,13 @@ function youtubeVideoId(url) {
   }
   return id && VIDEO_ID.test(id) ? id : void 0;
 }
+function youtubeListKind(url) {
+  const u = parse(url);
+  if (!u || !isYoutubeHost(u.hostname)) return void 0;
+  if (u.searchParams.get("list")) return "playlist";
+  if (/^\/(?:@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)/.test(u.pathname)) return "channel";
+  return void 0;
+}
 
 // src/video/ytdlp.ts
 import { mkdtempSync as mkdtempSync2, readdirSync as readdirSync2, readFileSync as readFileSync8, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "fs";
@@ -2456,7 +2460,11 @@ function videoMetaFromInfo(info) {
   const date = str(info.upload_date);
   const tracks = (v) => v && typeof v === "object" ? Object.keys(v).filter((k) => k !== "live_chat") : [];
   const duration = num(info.duration);
-  const chapters = Array.isArray(info.chapters) ? info.chapters.map((c) => ({ start: num(c.start_time) ?? 0, end: num(c.end_time) ?? duration ?? 0, title: str(c.title) ?? "" })).filter((c) => c.title) : [];
+  const chapters = Array.isArray(info.chapters) ? info.chapters.map((c) => ({
+    start: num(c.start_time) ?? 0,
+    end: num(c.end_time) ?? duration ?? 0,
+    title: (str(c.title) ?? "").replace(/^<Untitled Chapter (\d+)>$/, "Chapter $1")
+  })).filter((c) => c.title) : [];
   return {
     id,
     title: str(info.title) ?? id,
@@ -2547,11 +2555,11 @@ async function downloadMedia(args, dir, stem, opts) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const timeoutMs = typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
     const r = await runYtdlp([...args, "--no-warnings", "-o", join8(dir, `${stem}.%(ext)s`)], { run: opts.run, url: opts.url, timeoutMs, signal: opts.signal });
-    const file = readdirSync2(dir).find((f) => f.startsWith(`${stem}.`) && !f.endsWith(".part") && !f.endsWith(".ytdl"));
-    if (file) return { file };
     if (opts.signal?.aborted) return { error: "cancelled" };
     if (r.status === 124) return { error: "timed out", timedOut: true };
-    stderr = r.stderr;
+    const file = r.ok ? readdirSync2(dir).find((f) => f.startsWith(`${stem}.`) && !/\.part(?:-Frag\d+)?$|\.ytdl$|\.f\d+\.\w+$/.test(f)) : void 0;
+    if (file) return { file };
+    stderr = r.ok ? "yt-dlp wrote no file" : r.stderr;
   }
   return { error: classifyYtdlpError(stderr) };
 }
@@ -3618,6 +3626,12 @@ function jaccardSorted(a, b) {
 function videoRoot(out) {
   return resolve(out ?? env("VIDEO_DIR") ?? join10(tmpdir3(), brand().name, "video"));
 }
+var baseLang2 = (tag) => tag.toLowerCase().replace(/-orig$/, "").split(/[-_]/)[0];
+function servesLang(meta, lang) {
+  if (!lang) return true;
+  const read2 = meta.track ?? meta.lang ?? meta.language;
+  return read2 !== void 0 && baseLang2(read2) === baseLang2(lang);
+}
 var readJson = (path) => {
   try {
     return JSON.parse(readFileSync10(path, "utf8"));
@@ -3638,25 +3652,42 @@ async function fetchVideoRun(url, root, opts = {}) {
   const transcriptPath = join10(dir, "TRANSCRIPT.md");
   if (!opts.refresh) {
     const kept = readVideoRun(dir);
-    if (kept && existsSync3(transcriptPath))
+    if (kept && existsSync3(transcriptPath) && servesLang(kept.meta, opts.lang))
       return { ok: true, id, dir, transcript: transcriptPath, reused: true, meta: kept.meta, segments: kept.segments.length };
   }
   const t = await transcribeVideo(url, opts);
   if (!t.via || !t.meta) return { ok: false, id, reason: t.reason ?? "no transcript" };
-  const meta = { ...t.meta, via: t.via, fetchedAt: (/* @__PURE__ */ new Date()).toISOString() };
-  ensureDir(dir);
-  writeArtifact(join10(dir, "segments.json"), `${JSON.stringify(t.segments, null, 1)}
+  const meta = {
+    ...t.meta,
+    via: t.via,
+    ...t.track ? { track: t.track } : {},
+    ...opts.lang ? { lang: opts.lang } : {},
+    fetchedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  const markdown = transcriptMarkdown(t);
+  const done = { ok: true, id, dir, transcript: transcriptPath, reused: false, meta, segments: t.segments.length };
+  if (isNoWrite()) return { ...done, markdown };
+  try {
+    ensureDir(dir);
+    writeArtifact(join10(dir, "segments.json"), `${JSON.stringify(t.segments, null, 1)}
 `);
-  writeArtifact(join10(dir, "meta.json"), `${JSON.stringify(meta, null, 2)}
+    writeArtifact(transcriptPath, markdown);
+    writeArtifact(join10(dir, "meta.json"), `${JSON.stringify(meta, null, 2)}
 `);
-  writeArtifact(transcriptPath, transcriptMarkdown(t));
-  return { ok: true, id, dir, transcript: transcriptPath, reused: false, meta, segments: t.segments.length };
+  } catch (e) {
+    return { ok: false, id, reason: `cannot write the run in ${dir}: ${e.message}` };
+  }
+  return done;
 }
 var PASSAGE_S = 45;
-function videoPassages(segments) {
+function videoPassages(segments, chapterStarts2 = []) {
   const out = [];
   let cur;
   for (const s of segments) {
+    if (cur && chapterStarts2.some((b) => b > cur.start + 0.5 && b <= s.start + 0.5)) {
+      out.push(cur);
+      cur = void 0;
+    }
     cur = cur ? { start: cur.start, end: s.end, text: `${cur.text} ${s.text}` } : { ...s };
     if (cur.end - cur.start >= PASSAGE_S) {
       out.push(cur);
@@ -3695,12 +3726,22 @@ function listVideoRuns(dir) {
     return run ? [{ dir: child, ...run }] : [];
   });
 }
+function corpusLabels(dir) {
+  const c = readJson(join10(dir, "corpus.json"));
+  const out = /* @__PURE__ */ new Map();
+  for (const v of c?.videos ?? []) if (typeof v.id === "string" && typeof v.label === "string") out.set(v.id, v.label);
+  return out;
+}
 var chapterAt = (chapters, t) => [...chapters].reverse().find((c) => c.start <= t + 0.5)?.title;
 function searchVideoRuns(dir, query, opts = {}) {
+  const labels = opts.labels ?? corpusLabels(dir);
   const docs = [];
   for (const run of listVideoRuns(dir)) {
     const { meta } = run;
-    for (const p of videoPassages(run.segments)) {
+    for (const p of videoPassages(
+      run.segments,
+      (meta.chapters ?? []).map((c) => c.start)
+    )) {
       const chapter = chapterAt(meta.chapters ?? [], p.start);
       docs.push({
         id: `${meta.id}@${p.start}`,
@@ -3708,7 +3749,7 @@ function searchVideoRuns(dir, query, opts = {}) {
         headings: chapter ?? "",
         body: p.text,
         hit: {
-          label: opts.labels?.get(meta.id) ?? meta.id,
+          label: labels.get(meta.id) ?? meta.id,
           videoId: meta.id,
           title: meta.title,
           ...chapter ? { chapter } : {},
@@ -3725,7 +3766,7 @@ function searchVideoRuns(dir, query, opts = {}) {
 }
 
 // src/video/frames.ts
-import { copyFileSync, existsSync as existsSync4, mkdirSync as mkdirSync2, readdirSync as readdirSync4, readFileSync as readFileSync11, rmSync as rmSync3 } from "fs";
+import { copyFileSync, cpSync, existsSync as existsSync4, mkdirSync as mkdirSync2, readdirSync as readdirSync4, readFileSync as readFileSync11, renameSync as renameSync2, rmSync as rmSync3 } from "fs";
 import { join as join11 } from "path";
 
 // src/video/align.ts
@@ -3818,9 +3859,9 @@ function capFrames(frames, max) {
 var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 var fileStamp = (t) => formatStamp(t).replace(/:/g, "-");
 async function extractFrames(runDir, opts = {}) {
+  if (isNoWrite()) return { ok: false, reason: "frames are image files, and nothing may be written (NO_WRITE)" };
   const run = readVideoRun(runDir);
   if (!run) return { ok: false, reason: `no video run in ${runDir} \u2014 fetch the video first` };
-  if (isNoWrite()) return { ok: false, reason: "frames are image files, and nothing may be written (NO_WRITE)" };
   const deps = videoDeps(opts.deps);
   if (!deps.have("ffmpeg")) return { ok: false, reason: "frames need ffmpeg" };
   const effort = opts.effort ?? "med";
@@ -3883,22 +3924,147 @@ async function extractFrames(runDir, opts = {}) {
       kept.push({ ...c, ...hash !== void 0 ? { hash } : {} });
     }
     const chosen = capFrames(kept, FRAME_EFFORT[effort]);
-    const framesDir = join11(runDir, "frames");
-    rmSync3(framesDir, { recursive: true, force: true });
-    mkdirSync2(framesDir, { recursive: true });
+    const staged = join11(tmp, "frames");
+    mkdirSync2(staged);
     const placed = chosen.map((c, i) => {
       const file = `frames/${String(i + 1).padStart(4, "0")}_${fileStamp(c.time)}.jpg`;
-      copyFileSync(c.path, join11(runDir, file));
+      copyFileSync(c.path, join11(tmp, file));
       return { file, time: c.time, kind: c.kind };
     });
     const frames = alignFrames(placed, segments, meta.chapters ?? []);
     const dropped = candidates.length - kept.length;
     const note = `${plural(frames.length, "frame")} (effort ${effort}: at most ${FRAME_EFFORT[effort]}) from ${plural(candidates.length, "candidate")} \u2014 scene changes above ${SCENE_THRESHOLD}, one per chapter start, ${plural(dropped, "near-duplicate")} dropped`;
-    const markdown = writeArtifact(join11(runDir, "FRAMES.md"), framesMarkdown(meta, frames, note));
-    writeArtifact(join11(runDir, "frames.json"), `${JSON.stringify(frames, null, 2)}
+    const framesDir = join11(runDir, "frames");
+    try {
+      const incoming = `${framesDir}.${process.pid}.${Date.now()}.new`;
+      cpSync(staged, incoming, { recursive: true });
+      rmSync3(framesDir, { recursive: true, force: true });
+      renameSync2(incoming, framesDir);
+      writeArtifact(join11(runDir, "frames.json"), `${JSON.stringify(frames, null, 2)}
 `);
-    return { ok: true, dir: framesDir, markdown, frames, candidates: candidates.length, duplicates: candidates.length - kept.length, effort };
+      const markdown = writeArtifact(join11(runDir, "FRAMES.md"), framesMarkdown(meta, frames, note));
+      return { ok: true, dir: framesDir, markdown, frames, candidates: candidates.length, duplicates: dropped, effort };
+    } catch (e) {
+      return { ok: false, reason: `cannot write the frames in ${runDir}: ${e.message}` };
+    }
   });
+}
+
+// src/video/list.ts
+import { join as join12 } from "path";
+
+// src/pool.ts
+async function mapLimit(items, limit, fn) {
+  const width = typeof limit !== "number" || Number.isNaN(limit) ? 1 : Math.max(1, Math.floor(limit));
+  if (items.length <= 1 || width === 1) {
+    const out = [];
+    for (let i = 0; i < items.length; i++) out.push(await fn(items[i], i));
+    return out;
+  }
+  const results = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(width, items.length) }, async () => {
+    for (; ; ) {
+      const i = next++;
+      if (i >= items.length) return;
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (e) {
+        next = items.length;
+        throw e;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+// src/video/list.ts
+var LIST_TIMEOUT_MS = 12e4;
+var DEFAULT_LIMIT = 10;
+var CORPUS_CONCURRENCY = 2;
+function listingUrl(url) {
+  const u = new URL(url);
+  if (youtubeListKind(url) === "channel" && /^\/(?:@[^/]+|(?:channel|c|user)\/[^/]+)\/?$/.test(u.pathname)) {
+    u.pathname = `${u.pathname.replace(/\/$/, "")}/videos`;
+  }
+  return u.toString();
+}
+async function listVideos(url, opts = {}) {
+  const kind = youtubeListKind(url);
+  if (!kind) return { error: `not a YouTube playlist or channel URL: ${url}` };
+  const limit = Math.max(1, Math.trunc(opts.limit ?? DEFAULT_LIMIT));
+  const r = await runYtdlp(["--flat-playlist", "-J", "--playlist-end", String(limit), "--no-warnings"], {
+    run: videoDeps(opts.deps).run,
+    url: listingUrl(url),
+    timeoutMs: LIST_TIMEOUT_MS,
+    signal: opts.signal
+  });
+  if (r.missing) return { error: "install yt-dlp (https://github.com/yt-dlp/yt-dlp) to read videos" };
+  if (!r.ok) return { error: classifyYtdlpError(r.stderr) };
+  try {
+    const info = JSON.parse(r.stdout);
+    const videos = (info.entries ?? []).flatMap((e) => {
+      const id = typeof e.id === "string" ? e.id : "";
+      const watch = `https://www.youtube.com/watch?v=${id}`;
+      if (e._type === "playlist" || typeof e.ie_key === "string" && e.ie_key !== "Youtube" || !youtubeVideoId(watch)) return [];
+      return [{ id, title: typeof e.title === "string" ? e.title : id, ...typeof e.duration === "number" ? { duration: e.duration } : {}, url: watch }];
+    });
+    const unique = videos.filter((v, i) => videos.findIndex((w) => w.id === v.id) === i);
+    return { ...info.title ? { title: info.title } : {}, videos: unique.slice(0, limit) };
+  } catch {
+    return { error: "yt-dlp returned an unreadable listing" };
+  }
+}
+function corpusMarkdown(c, root) {
+  const cell2 = (s) => s.replace(/\|/g, "\\|").replace(/\s+/g, " ");
+  const rows = c.videos.map(
+    (v) => [
+      v.label,
+      v.id,
+      cell2(v.title),
+      v.duration !== void 0 ? formatStamp(v.duration) : "",
+      v.via ?? "\u2014",
+      v.dir ? `${v.id}/TRANSCRIPT.md` : cell2(`not read: ${v.reason ?? "no transcript"}`)
+    ].join(" | ")
+  );
+  const read2 = c.videos.filter((v) => v.dir).length;
+  return [
+    `# ${c.title ?? "Video corpus"}`,
+    "",
+    `- Source: ${c.source}`,
+    `- Directory: ${root}`,
+    `- ${read2} of ${c.videos.length} videos read, ${c.createdAt}`,
+    "",
+    "| V# | id | title | duration | via | transcript |",
+    "|---|---|---|---|---|---|",
+    ...rows.map((r) => `| ${r} |`),
+    ""
+  ].join("\n");
+}
+async function fetchVideoCorpus(url, root, opts = {}) {
+  if (isNoWrite()) return { ok: false, reason: "a corpus is kept on disk, and nothing may be written (NO_WRITE)" };
+  const listed = await listVideos(url, { limit: opts.limit, deps: opts.deps, signal: opts.signal });
+  if ("error" in listed) return { ok: false, reason: listed.error };
+  if (!listed.videos.length) return { ok: false, reason: `no videos listed at ${url}` };
+  let done = 0;
+  const videos = await mapLimit(listed.videos, CORPUS_CONCURRENCY, async (v, i) => {
+    const r = await fetchVideoRun(v.url, root, { ...opts });
+    opts.onVideo?.(++done, listed.videos.length, v.title);
+    const base2 = { label: `V${i + 1}`, id: v.id, title: r.ok ? r.meta.title : v.title, ...v.duration !== void 0 ? { duration: v.duration } : {} };
+    return r.ok ? { ...base2, ...r.meta.duration !== void 0 ? { duration: r.meta.duration } : {}, via: r.meta.via, dir: r.dir, reused: r.reused } : { ...base2, reason: r.reason };
+  });
+  const corpus = { source: url, ...listed.title ? { title: listed.title } : {}, createdAt: (/* @__PURE__ */ new Date()).toISOString(), videos };
+  let path;
+  try {
+    ensureDir(root);
+    writeArtifact(join12(root, "corpus.json"), `${JSON.stringify(corpus, null, 2)}
+`);
+    path = writeArtifact(join12(root, "CORPUS.md"), corpusMarkdown(corpus, root));
+  } catch (e) {
+    return { ok: false, reason: `cannot write the corpus in ${root}: ${e.message}` };
+  }
+  return { ok: true, dir: root, corpus: path, videos, ...listed.title ? { title: listed.title } : {} };
 }
 
 // src/entities.ts
@@ -4924,7 +5090,7 @@ function parseTag(tag) {
   const region = /^(?:[a-z]{2}|\d{3})$/i.test(parts[i] ?? "") ? parts[i].toLowerCase() : void 0;
   return { lang, script, region };
 }
-function baseLang2(lang) {
+function baseLang3(lang) {
   return parseTag(lang).lang;
 }
 function resolveRegion(lang, region) {
@@ -4937,7 +5103,7 @@ function resolveRegion(lang, region) {
 function ddgRegion(lang, region) {
   const r = resolveRegion(lang, region);
   if (r === NO_REGION) return "wt-wt";
-  const l = baseLang2(lang);
+  const l = baseLang3(lang);
   return DDG_KL[`${l}-${r}`] ?? DDG_KL[l] ?? `${REGION_ALIASES[r] ?? r}-${DDG_LANG_ALIASES[l] ?? l}`;
 }
 function searxngLanguage(lang, region) {
@@ -4948,7 +5114,7 @@ function searxngLanguage(lang, region) {
   return country && /^[a-z]{2}$/.test(country) && country !== NO_REGION ? `${t.lang}-${country.toUpperCase()}` : t.lang;
 }
 function acceptLanguageHeader(lang, region) {
-  const l = baseLang2(lang);
+  const l = baseLang3(lang);
   const r = resolveRegion(lang, region);
   if (r === NO_REGION) return l === "en" ? "en" : `${l},en;q=0.5`;
   const R = r.toUpperCase();
@@ -5116,7 +5282,7 @@ async function searchViaFirecrawl(query, limit, opts = {}) {
   const n = Number.isFinite(limit) ? Math.min(100, Math.max(1, Math.trunc(limit))) : 10;
   const locale = {};
   if (opts.lang || opts.region) {
-    if (opts.lang) locale.lang = baseLang2(opts.lang);
+    if (opts.lang) locale.lang = baseLang3(opts.lang);
     const country = resolveRegion(opts.lang, opts.region);
     if (/^[a-z]{2}$/.test(country) && country !== "wt") locale.country = country;
   }
@@ -5957,15 +6123,15 @@ function metaDescriptionOf(html) {
 // src/stack.ts
 import { spawnSync as spawnSync3 } from "child_process";
 import { existsSync as existsSync6, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync13, statSync as statSync3, writeFileSync as writeFileSync6 } from "fs";
-import { dirname as dirname2, join as join13, resolve as resolve2 } from "path";
+import { dirname as dirname2, join as join14, resolve as resolve2 } from "path";
 
 // src/cache.ts
 import { chmodSync, existsSync as existsSync5, lstatSync, mkdirSync as mkdirSync3, readFileSync as readFileSync12, readdirSync as readdirSync5, rmSync as rmSync4, statSync as statSync2 } from "fs";
-import { dirname, join as join12 } from "path";
+import { dirname, join as join13 } from "path";
 import { tmpdir as tmpdir4 } from "os";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
-  return namedCacheDir() ?? join12(tmpdir4(), userScoped(brand().name), "cache");
+  return namedCacheDir() ?? join13(tmpdir4(), userScoped(brand().name), "cache");
 }
 var namedCacheDir = () => env("CACHE_DIR") ?? brand().cacheDir;
 function userScoped(name) {
@@ -5976,7 +6142,7 @@ function cachePath(url, acceptLanguage = "", extractor = "native", variant = "")
   const canon = canonicalizeUrl(url);
   const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
   const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
-  return join12(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
+  return join13(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
 }
 var TEXT_VARIANTS = ["", "consent", "full"];
 var MARKDOWN_VARIANTS = ["md", "consent-md", "full-md"];
@@ -6224,7 +6390,7 @@ function cacheStats(now = Date.now()) {
   for (const name of readdirSync5(dir)) {
     const own = ownFile(name);
     if (!own) continue;
-    const abs = join12(dir, name);
+    const abs = join13(dir, name);
     if (own.kind !== "json") {
       out.bytes += sizeOf(abs);
       continue;
@@ -6251,7 +6417,7 @@ function cacheClean(all = false, now = Date.now()) {
   const present = new Set(names);
   const remove = (name) => {
     try {
-      rmSync4(join12(dir, name), { force: true });
+      rmSync4(join13(dir, name), { force: true });
       return true;
     } catch {
       return false;
@@ -6259,7 +6425,7 @@ function cacheClean(all = false, now = Date.now()) {
   };
   const abandoned = (name) => {
     try {
-      return all || now - statSync2(join12(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
+      return all || now - statSync2(join13(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
     } catch {
       return false;
     }
@@ -6269,7 +6435,7 @@ function cacheClean(all = false, now = Date.now()) {
     const own = ownFile(name);
     if (!own) continue;
     if (own.kind === "json") {
-      const entry = readEntryMeta(join12(dir, name));
+      const entry = readEntryMeta(join13(dir, name));
       if (!entry || !all && isCacheFresh(entry, now) || !remove(name)) continue;
       remove(`${own.stem}.body`);
       removed++;
@@ -6541,11 +6707,11 @@ function renderAsset(template) {
   return template.replaceAll("{{CLI}}", brand().cli);
 }
 function composeAssets() {
-  const base2 = join13(cacheDir(), "compose");
+  const base2 = join14(cacheDir(), "compose");
   return [
-    { path: join13(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
-    { path: join13(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
-    { path: join13(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
+    { path: join14(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
+    { path: join14(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
+    { path: join14(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
   ];
 }
 function ensureComposeMaterialized() {
@@ -6722,32 +6888,6 @@ ${pulled.stderr}` : ""}`, code: 1 };
 ${up.stderr}` : ""}`, code: 1 };
   }
   return { message: [`${tag}: ${spec.summary}`, ...spec.postUp?.(file, run) ?? []].join("\n"), code: 0 };
-}
-
-// src/pool.ts
-async function mapLimit(items, limit, fn) {
-  const width = typeof limit !== "number" || Number.isNaN(limit) ? 1 : Math.max(1, Math.floor(limit));
-  if (items.length <= 1 || width === 1) {
-    const out = [];
-    for (let i = 0; i < items.length; i++) out.push(await fn(items[i], i));
-    return out;
-  }
-  const results = new Array(items.length);
-  let next = 0;
-  const workers = Array.from({ length: Math.min(width, items.length) }, async () => {
-    for (; ; ) {
-      const i = next++;
-      if (i >= items.length) return;
-      try {
-        results[i] = await fn(items[i], i);
-      } catch (e) {
-        next = items.length;
-        throw e;
-      }
-    }
-  });
-  await Promise.all(workers);
-  return results;
 }
 
 // src/probe.ts
@@ -7881,7 +8021,7 @@ async function hasChanged(url, previous, opts = {}) {
 
 // src/skillkit/usage.ts
 import { readdirSync as readdirSync6, readFileSync as readFileSync14, statSync as statSync4 } from "fs";
-import { dirname as dirname3, join as join14, relative, resolve as resolve3 } from "path";
+import { dirname as dirname3, join as join15, relative, resolve as resolve3 } from "path";
 var DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|enum)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm;
 var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']((?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs))["']/g;
 function engineExports(dts) {
@@ -7901,7 +8041,7 @@ function walkSources(dir, skip = "vendor", out = []) {
     return out;
   }
   for (const e of entries) {
-    const p = join14(dir, e);
+    const p = join15(dir, e);
     if (statSync4(p).isDirectory()) {
       if (e !== skip) walkSources(p, skip, out);
     } else if (e.endsWith(".ts")) out.push(p);
@@ -7910,7 +8050,7 @@ function walkSources(dir, skip = "vendor", out = []) {
 }
 function auditEngineUsage(root, config, dts, engineName) {
   const surface = engineExports(dts);
-  const files = walkSources(join14(root, "src"));
+  const files = walkSources(join15(root, "src"));
   const forks = new Map(Object.entries(config.forks));
   const collisions = [];
   const tolerated = [];
@@ -7953,7 +8093,7 @@ function auditEngineUsage(root, config, dts, engineName) {
 
 // src/skillkit/bundle.ts
 import { existsSync as existsSync7, readdirSync as readdirSync7, readFileSync as readFileSync15 } from "fs";
-import { join as join15 } from "path";
+import { join as join16 } from "path";
 
 // src/cli-kit.ts
 import { basename } from "path";
@@ -8069,12 +8209,12 @@ function auditSkillBundle(root, config, cli) {
   const out = [];
   const check = (ok, message) => out.push({ ok, message });
   const name = config.name;
-  const skillDir = join15(root, "skills", name);
+  const skillDir = join16(root, "skills", name);
   check(
-    !existsSync7(join15(root, "SKILL.md")),
-    existsSync7(join15(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name}/SKILL.md` : "no root SKILL.md"
+    !existsSync7(join16(root, "SKILL.md")),
+    existsSync7(join16(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name}/SKILL.md` : "no root SKILL.md"
   );
-  const skillMd = join15(skillDir, "SKILL.md");
+  const skillMd = join16(skillDir, "SKILL.md");
   if (!existsSync7(skillMd)) {
     check(false, `missing skills/${name}/SKILL.md \u2014 the skill package has no SKILL.md`);
     return out;
@@ -8102,13 +8242,13 @@ function auditSkillBundle(root, config, cli) {
       len <= DESC_MAX ? `description ${len} chars (<= ${DESC_MAX})` : `description ${len} chars exceeds the ${DESC_MAX}-char headroom cap`
     );
   }
-  const refsDir = join15(skillDir, "references");
+  const refsDir = join16(skillDir, "references");
   if (existsSync7(refsDir)) {
     const files = readdirSync7(refsDir).filter((f) => f.endsWith(".md"));
     for (const m of new Set(raw.match(/references\/[\w.-]+\.md/g) ?? [])) {
       check(
-        existsSync7(join15(skillDir, m)),
-        existsSync7(join15(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
+        existsSync7(join16(skillDir, m)),
+        existsSync7(join16(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
       );
     }
     for (const f of files) {
@@ -8119,8 +8259,8 @@ function auditSkillBundle(root, config, cli) {
     }
   }
   const bundleRel = `scripts/${name}.mjs`;
-  const rootBundle = join15(root, bundleRel);
-  const pkgBundle = join15(skillDir, bundleRel);
+  const rootBundle = join16(root, bundleRel);
+  const pkgBundle = join16(skillDir, bundleRel);
   if (!existsSync7(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
   else if (!existsSync7(pkgBundle)) check(false, `missing skills/${name}/${bundleRel} \u2014 run \`skill copy\``);
   else {
@@ -8134,7 +8274,7 @@ function auditSkillBundle(root, config, cli) {
   const universe = /* @__PURE__ */ new Set([...cli.valueFlags, ...cli.boolFlags, "help", "version", ...config.allowedForeignFlags]);
   const docs = [["SKILL.md", raw]];
   if (existsSync7(refsDir)) {
-    for (const f of readdirSync7(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync15(join15(refsDir, f), "utf8")]);
+    for (const f of readdirSync7(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync15(join16(refsDir, f), "utf8")]);
   }
   let unknown = 0;
   for (const [file, text] of docs) {
@@ -8155,7 +8295,7 @@ function auditSkillBundle(root, config, cli) {
 }
 
 // src/skillkit/scaffold.ts
-import { join as join16 } from "path";
+import { join as join17 } from "path";
 var enginesJson = (engine, repo, minRef) => JSON.stringify(
   {
     _comment: "The packaging contract for this skill, read by `skill vendor|check|bundle`. `forks` is a ratchet: entries may leave, never arrive \u2014 so the next declaration shadowing an engine export is an argued decision rather than a quiet copy. `usageFloor` goes up when a layer lands and never down to make a red run pass.",
@@ -8254,8 +8394,8 @@ function scaffoldSkill(root, name, opts = {}) {
     // scaffolding; any older floor lets the staleness gate pass a pin that old.
     [SKILL_CONFIG]: `${enginesJson(name, opts.engineRepo ?? "maxgfr/webindex", opts.minRef ?? `v${ENGINE_VERSION}`)}
 `,
-    [join16("src", "engine.ts")]: engineShim(name, prefix),
-    [join16("skills", name, "SKILL.md")]: `---
+    [join17("src", "engine.ts")]: engineShim(name, prefix),
+    [join17("skills", name, "SKILL.md")]: `---
 name: ${name}
 description: TODO \u2014 one sentence saying WHEN to use this skill, under 1000 characters.
 ---
@@ -8264,18 +8404,18 @@ description: TODO \u2014 one sentence saying WHEN to use this skill, under 1000 
 
 TODO
 `,
-    [join16(".github", "workflows", "ci.yml")]: ci(),
+    [join17(".github", "workflows", "ci.yml")]: ci(),
     ".gitignore": gitignore
   };
   const written = [];
   const exists = opts.exists;
   for (const [rel, content] of Object.entries(files)) {
-    const path = join16(root, rel);
+    const path = join17(root, rel);
     if (exists?.(path)) {
       errors.push(`${rel} already exists \u2014 left alone.`);
       continue;
     }
-    ensureDir(join16(path, ".."));
+    ensureDir(join17(path, ".."));
     written.push(writeArtifact(path, content));
   }
   return { written, errors };
@@ -8470,7 +8610,7 @@ async function searchViaKeyless(engine, query, opts = {}) {
   const localised = !!(opts.lang || opts.region);
   const kl = localised ? ddgRegion(opts.lang, opts.region) : "wt-wt";
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
-  const locale = localised ? { lang: baseLang2(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : void 0;
+  const locale = localised ? { lang: baseLang3(opts.lang), region: resolveRegion(opts.lang, opts.region).toUpperCase() } : void 0;
   const seen = /* @__PURE__ */ new Set();
   const hits = [];
   const deadline = opts.budgetMs === void 0 ? Number.POSITIVE_INFINITY : Date.now() + opts.budgetMs;
@@ -9009,9 +9149,9 @@ function resolveUrl2(url, base2) {
 
 // src/repo.ts
 import { createHash as createHash3, randomBytes } from "crypto";
-import { existsSync as existsSync8, mkdirSync as mkdirSync5, readdirSync as readdirSync8, renameSync as renameSync2, rmSync as rmSync5, statSync as statSync5 } from "fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync5, readdirSync as readdirSync8, renameSync as renameSync3, rmSync as rmSync5, statSync as statSync5 } from "fs";
 import { tmpdir as tmpdir5 } from "os";
-import { basename as basename2, join as join17, resolve as resolve4 } from "path";
+import { basename as basename2, join as join18, resolve as resolve4 } from "path";
 
 // src/forge-host.ts
 var KINDS = /* @__PURE__ */ new Set(["github", "gitlab", "gitea"]);
@@ -9920,7 +10060,7 @@ function isOriginAllowed(origin, allowed = []) {
 
 // src/mcp/resources.ts
 import { existsSync as existsSync9, readdirSync as readdirSync9, readFileSync as readFileSync16, realpathSync, statSync as statSync6 } from "fs";
-import { basename as basename3, dirname as dirname4, join as join18, relative as relative2, resolve as resolve6, sep } from "path";
+import { basename as basename3, dirname as dirname4, join as join19, relative as relative2, resolve as resolve6, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
@@ -9928,17 +10068,17 @@ function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname4(fileURLToPath(import.meta.url));
   const name = brand().name;
   const candidates = [resolve6(here, ".."), resolve6(here, "..", "skills", name), resolve6(here, "..", "..", "skills", name)];
-  return candidates.find((dir) => existsSync9(join18(dir, "SKILL.md")));
+  return candidates.find((dir) => existsSync9(join19(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
-  const refDir = join18(root, "references");
+  const refDir = join19(root, "references");
   if (!existsSync9(refDir)) return out;
   for (const file of readdirSync9(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join18("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
+    out.push(describe(root, join19("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
   }
   return out;
 }
@@ -9977,7 +10117,7 @@ function describe(root, rel, fallbackTitle) {
     title: fallbackTitle,
     mimeType: "text/markdown"
   };
-  const summary = firstProse(join18(root, rel));
+  const summary = firstProse(join19(root, rel));
   if (summary) decl.description = summary;
   return decl;
 }
@@ -10707,6 +10847,7 @@ USAGE
   webindex video     fetch <url> [--out <dir>] [--lang <tag>] [--refresh] [--json]
   webindex video     search <query> [--out <dir>] [--limit <n>] [--json]
   webindex video     frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]
+  webindex video     list <playlist|channel> [--limit <n>] [--out <dir>] [--refresh] [--json]
   webindex doctor [--json]
   webindex version
 
@@ -10868,8 +11009,11 @@ COMMANDS
              near-duplicates dropped, at most 20, 50 or 100 by --effort (med
              by default) \u2014 into <id>/frames/, and FRAMES.md pairs each with
              what was said from 5 s before it to 10 s after; it needs ffmpeg,
-             and fetches the video first when given a URL. The directory is
-             --out, else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
+             and fetches the video first when given a URL. 'list' reads the
+             first --limit videos (default 10) of a playlist or channel, two at
+             a time, and writes CORPUS.md naming them V1\u2026Vn; 'search' on that
+             directory then labels its hits V1\u2026Vn. The directory is --out,
+             else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which
@@ -11023,7 +11167,7 @@ var COMMANDS = [
 ];
 var SPEC = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS };
 var SKILL_ACTIONS = ["check", "bundle", "vendor", "copy", "doctor", "init", "repin", "finish", "recall"];
-var VIDEO_ACTIONS = ["fetch", "search", "frames"];
+var VIDEO_ACTIONS = ["fetch", "search", "frames", "list"];
 var YTDLP_STALE_DAYS = 60;
 function fail(msg) {
   process.stderr.write(`webindex: ${msg}
@@ -11281,11 +11425,25 @@ function parseRankDocs(value, where) {
     return d;
   });
 }
-var CLOSED_WORLD_TOOLS = /* @__PURE__ */ new Set(["webindex_extract", "webindex_rank", "webindex_embed"]);
+var CLOSED_WORLD_TOOLS = /* @__PURE__ */ new Set(["webindex_extract", "webindex_rank", "webindex_embed", "webindex_video_search"]);
+function toolLimit(raw, def, max = 50) {
+  const n = typeof raw === "number" ? Math.trunc(raw) : Number.NaN;
+  return Number.isFinite(n) ? Math.min(max, Math.max(1, n)) : def;
+}
+var WRITING_TOOLS = /* @__PURE__ */ new Set(["webindex_video_fetch", "webindex_video_frames", "webindex_video_list"]);
+var REPLACING_TOOLS = /* @__PURE__ */ new Set(["webindex_video_frames", "webindex_video_list"]);
 function withHints(tools) {
   return tools.map((t) => ({
     ...t,
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: !CLOSED_WORLD_TOOLS.has(t.name) }
+    annotations: {
+      // The video tools write their run directory. A transcript is only ever
+      // added; frames replace the video's earlier frames, and a corpus the
+      // directory's earlier CORPUS.md — so those two say they may destroy.
+      readOnlyHint: !WRITING_TOOLS.has(t.name),
+      destructiveHint: REPLACING_TOOLS.has(t.name),
+      idempotentHint: true,
+      openWorldHint: !CLOSED_WORLD_TOOLS.has(t.name) || WRITING_TOOLS.has(t.name)
+    }
   }));
 }
 function withPolicy(policy, tools) {
@@ -11366,6 +11524,29 @@ function webindexAdapter(policy = {}) {
     if (!configuredForgeHosts().has(normalizeForgeHost(ref.host))) return guard;
     const own = new URL(apiBase(ref, kind ? { kind } : {})).origin;
     return async (url) => new URL(url).origin === own || await guard(url);
+  };
+  const guarded = guard !== void 0 || root !== void 0 || policy.noLocalFiles === true;
+  const videoDir = (raw) => {
+    const base2 = videoRoot();
+    if (raw === void 0 || raw === null || raw === "") return base2;
+    const named = String(raw);
+    if (!guarded) return resolve8(named);
+    if (!/^[A-Za-z0-9._-]+$/.test(named) || named === "." || named === "..") {
+      throw new ToolError(`\`dir\` must be the name of a directory inside ${base2} on this server, not a path.`);
+    }
+    mkdirSync6(base2, { recursive: true });
+    const target = join20(base2, named);
+    if (existsSync10(target) && relative4(realpathSync3(base2), realpathSync3(target)).startsWith("..")) {
+      throw new ToolError(`${named} leads outside ${base2}, the only directory this server writes videos to.`);
+    }
+    return target;
+  };
+  const videoUrl = async (raw, what) => {
+    const url = String(raw ?? "");
+    const ok = what === "video" ? youtubeVideoId(url) : youtubeListKind(url);
+    if (!ok) throw new ToolError(what === "video" ? "`url` must be a YouTube video URL." : "`url` must be a YouTube playlist or channel URL.");
+    await refuseUrl(url);
+    return url;
   };
   return {
     version: ENGINE_VERSION,
@@ -11595,6 +11776,66 @@ function webindexAdapter(policy = {}) {
           },
           required: ["url", "max"]
         }
+      },
+      {
+        name: "webindex_video_fetch",
+        title: "Read a YouTube video, and keep it",
+        description: "Read a YouTube video into a run directory and return its transcript as Markdown: a header (title, channel, date, duration, which track), a heading per chapter, and a [mm:ss] stamp on every paragraph \u2014 cite by stamp. Manual subtitles first, then the video's own auto-captions, then a local whisper transcription (minutes for a long video). The run is kept: a second call, and webindex_video_search, read it without touching YouTube.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string", description: "A YouTube video URL (watch, youtu.be, shorts, embed, live)." },
+            lang: {
+              type: "string",
+              description: "Preferred subtitle language, e.g. fr. Defaults to the video's own; another language's track is marked as a translation."
+            },
+            refresh: { type: "boolean", description: "Read the video again even when its run is on disk." },
+            dir: { type: "string", description: "The directory runs are kept in (default: the server's video root)." }
+          },
+          required: ["url"]
+        }
+      },
+      {
+        name: "webindex_video_search",
+        title: "Search the videos already read",
+        description: "Rank ~45 s passages of the videos kept in a directory (every one, or a corpus from webindex_video_list, labelled V1\u2026Vn) against a question, with BM25F. Each hit has its video, [mm:ss] stamp, chapter, a link that opens the video there, and the passage \u2014 for answering a follow-up question without reading the video again.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "The question, or its key words." },
+            limit: { type: "number", description: "How many passages (default 10)." },
+            dir: { type: "string", description: "The directory to search (default: the server's video root)." }
+          },
+          required: ["query"]
+        }
+      },
+      {
+        name: "webindex_video_frames",
+        title: "What is on screen in a video",
+        description: "Take a frame at every scene change and chapter start of a YouTube video, drop near-duplicates, keep at most 20/50/100 by `effort`, and pair each frame with what was said from 5 s before to 10 s after. Returns FRAMES.md's path and each frame's image path, stamp and aligned transcript; read the images to see slides, code or diagrams. Downloads the video (720p at most) and needs ffmpeg \u2014 expect tens of seconds.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string", description: "A YouTube video URL; read first when it is not kept yet." },
+            effort: { type: "string", enum: ["low", "med", "high"], description: "At most 20, 50 or 100 frames (default med)." },
+            dir: { type: "string", description: "The directory runs are kept in (default: the server's video root)." }
+          },
+          required: ["url"]
+        }
+      },
+      {
+        name: "webindex_video_list",
+        title: "Read a playlist or a channel",
+        description: "Read the first `limit` videos of a YouTube playlist or channel, two at a time, each kept as its own run, and write CORPUS.md naming them V1\u2026Vn in listing order \u2014 the labels to cite across videos. A video that cannot be read keeps its label, with the reason. Returns the corpus rows; webindex_video_search on the same `dir` then searches them all.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string", description: "A YouTube playlist or channel URL (list=, /@handle, /channel/, /c/, /user/)." },
+            limit: { type: "number", description: "How many videos (default 10)." },
+            dir: { type: "string", description: "The directory the corpus is kept in (default: the server's video root)." }
+          },
+          required: ["url"]
+        }
       }
     ]),
     capAdvice: {
@@ -11613,7 +11854,11 @@ function webindexAdapter(policy = {}) {
       webindex_rank: "lower `limit`, or send shorter `text` per document \u2014 the ranking only needs enough to score",
       webindex_tables: "this page's tables are enormous; fetch it and read the file instead of inlining them",
       webindex_embed: "send fewer `texts` \u2014 a vector per input is large, and they are rarely worth reading inline",
-      webindex_crawl: "lower `max`, or `depth` \u2014 a crawl's whole output is the sum of its pages"
+      webindex_crawl: "lower `max`, or `depth` \u2014 a crawl's whole output is the sum of its pages",
+      webindex_video_fetch: "the transcript is very long; read TRANSCRIPT.md from the run directory, or ask webindex_video_search",
+      webindex_video_search: "lower `limit`",
+      webindex_video_frames: "lower `effort`",
+      webindex_video_list: "lower `limit`"
     },
     async callTool(name, args, ctx) {
       const signal = ctx?.signal;
@@ -11826,6 +12071,44 @@ extractor: ${r.extractor}` };
             2
           )
         };
+      }
+      if (name === "webindex_video_fetch") {
+        const url = await videoUrl(args.url, "video");
+        const dir = videoDir(args.dir);
+        const r = await fetchVideoRun(url, dir, { refresh: args.refresh === true, lang: args.lang ? String(args.lang) : void 0, signal });
+        if (!r.ok) throw new ToolError(`No transcript for ${url}: ${r.reason}.`);
+        const text = r.markdown ?? readFileSync17(r.transcript, "utf8");
+        return { text: `${text}
+---
+run: ${r.dir}
+via: ${r.meta.via}${r.reused ? " (already on disk)" : ""}` };
+      }
+      if (name === "webindex_video_search") {
+        const query = String(args.query ?? "").trim();
+        if (!query) throw new ToolError("`query` is required.");
+        const dir = videoDir(args.dir);
+        const hits = searchVideoRuns(dir, query, { limit: toolLimit(args.limit, 10) });
+        if (!hits.length) throw new ToolError(`Nothing kept under ${dir} matches "${query}" \u2014 read a video first with webindex_video_fetch.`);
+        return { text: JSON.stringify({ dir, hits }, null, 2) };
+      }
+      if (name === "webindex_video_frames") {
+        const url = await videoUrl(args.url, "video");
+        const effort = args.effort === void 0 ? "med" : String(args.effort);
+        if (!(effort in FRAME_EFFORT)) throw new ToolError("`effort` must be low, med or high.");
+        const run = await fetchVideoRun(url, videoDir(args.dir), { signal });
+        if (!run.ok) throw new ToolError(`No transcript for ${url}: ${run.reason}.`);
+        const r = await extractFrames(run.dir, { effort, signal });
+        if (!r.ok) throw new ToolError(r.reason);
+        const frames = r.frames.map((f) => ({ image: join20(run.dir, f.file), stamp: f.stamp, chapter: f.chapter, kind: f.kind, said: f.text }));
+        return { text: JSON.stringify({ markdown: r.markdown, candidates: r.candidates, duplicates: r.duplicates, frames }, null, 2) };
+      }
+      if (name === "webindex_video_list") {
+        const url = await videoUrl(args.url, "list");
+        const dir = videoDir(args.dir);
+        const limit = toolLimit(args.limit, 10);
+        const r = await fetchVideoCorpus(url, dir, { limit, signal, onVideo: (done, total, title) => ctx?.progress(done, total, title) });
+        if (!r.ok) throw new ToolError(r.reason);
+        return { text: JSON.stringify({ corpus: r.corpus, title: r.title, videos: r.videos }, null, 2) };
       }
       throw new ToolError(`unknown tool: ${name}`);
     }
@@ -12458,7 +12741,7 @@ async function dispatch(argv) {
       const summary = { ...r, title: r.meta.title, via: r.meta.via, duration: r.meta.duration };
       if (asJson) process.stdout.write(jsonLine(summary));
       else if (isNoWrite()) {
-        process.stdout.write(takeArtifacts().find((a) => a.path === r.transcript)?.content ?? "");
+        process.stdout.write(r.markdown ?? readFileSync17(r.transcript, "utf8"));
       } else {
         const m = r.meta;
         const facts = [m.channel, m.duration !== void 0 ? formatStamp(m.duration) : void 0, m.via, `${r.segments} segment${r.segments === 1 ? "" : "s"}`].filter(Boolean).join(" \xB7 ");
@@ -12466,6 +12749,27 @@ async function dispatch(argv) {
   ${m.title} \u2014 ${facts}${r.reused ? " (already on disk)" : ""}
 `);
       }
+      return;
+    }
+    if (action === "list") {
+      const url = args.positional[1];
+      if (!url) usage("usage: webindex video list <playlist|channel> [--limit <n>] [--out <dir>] [--refresh] [--json]");
+      const r = await fetchVideoCorpus(url, root, {
+        limit: argInt(args, "limit", { min: 1 }) ?? 10,
+        refresh: argBool(args, "refresh"),
+        lang: argValue(args, "lang"),
+        onVideo: (done, total, title) => process.stderr.write(`  [${done}/${total}] ${title}
+`)
+      });
+      if (!r.ok) fail(r.reason);
+      if (asJson) process.stdout.write(jsonLine(r));
+      else {
+        const rows = r.videos.map((v) => `  ${v.label.padEnd(4)}${v.dir ? `${v.via?.padEnd(12)}${v.title}` : `not read \u2014 ${v.reason}`}`);
+        process.stdout.write(`${r.corpus}
+${rows.join("\n")}
+`);
+      }
+      if (!r.videos.some((v) => v.dir)) fail("none of the listed videos had a transcript");
       return;
     }
     if (action === "frames") {
@@ -12479,7 +12783,7 @@ async function dispatch(argv) {
         const r2 = await fetchVideoRun(target, root, { lang: argValue(args, "lang") });
         if (!r2.ok) fail(`no transcript for ${target}: ${r2.reason}`);
         runDir = r2.dir;
-      } else runDir = existsSync10(join19(root, target, "meta.json")) ? join19(root, target) : resolve8(target);
+      } else runDir = existsSync10(join20(root, target, "meta.json")) ? join20(root, target) : resolve8(target);
       const r = await extractFrames(runDir, { effort });
       if (!r.ok) {
         if (asJson) process.stdout.write(jsonLine(r));
@@ -12605,7 +12909,7 @@ async function dispatch(argv) {
         const dtsFile = pin?.files?.find((f) => f.local.endsWith(".d.mts"))?.local;
         let dts = "";
         try {
-          dts = readFileSync17(join19(root, config.vendorDir, dtsFile ?? ""), "utf8");
+          dts = readFileSync17(join20(root, config.vendorDir, dtsFile ?? ""), "utf8");
         } catch {
           fail(`cannot read the vendored declarations for "${engineName}" \u2014 run \`webindex skill vendor --ref <tag>\` first`);
         }
@@ -12639,7 +12943,7 @@ async function dispatch(argv) {
       return;
     }
     if (action === "bundle") {
-      const built = join19(root, "scripts", `${config.name}.mjs`);
+      const built = join20(root, "scripts", `${config.name}.mjs`);
       let surface;
       let surfaceProblem;
       const flagList = (v) => v == null || typeof v === "string" || typeof v[Symbol.iterator] !== "function" ? void 0 : [...v];
@@ -12676,10 +12980,10 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
       return;
     }
     if (action === "copy") {
-      const from = join19(root, "scripts", `${config.name}.mjs`);
+      const from = join20(root, "scripts", `${config.name}.mjs`);
       if (!existsSync10(from)) fail(`missing ${relative4(root, from)} \u2014 run the build first`);
-      const to = join19(root, "skills", config.name, "scripts", `${config.name}.mjs`);
-      ensureDir(join19(to, ".."));
+      const to = join20(root, "skills", config.name, "scripts", `${config.name}.mjs`);
+      ensureDir(join20(to, ".."));
       writeArtifact(to, readFileSync17(from, "utf8"));
       process.stdout.write(`  copied ${relative4(root, from)} -> ${relative4(root, to)}
 `);
