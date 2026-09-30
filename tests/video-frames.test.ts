@@ -6,7 +6,7 @@ import { resetNoWrite, setNoWrite } from "../src/no-write.js";
 import { extractFrames, fetchVideoRun, resetVideoLadderCache, setVideoDeps, type VideoRunner } from "../src/video.js";
 import { alignFrames, framesMarkdown, transcriptAround } from "../src/video/align.js";
 import { DHASH_FRAME_BYTES, dhash, dhashStream, hamming } from "../src/video/dhash.js";
-import { capFrames, parseShowinfo } from "../src/video/frames.js";
+import { capFrames, parseShowinfo, VIDEO_FORMAT } from "../src/video/frames.js";
 
 // Logged by ffmpeg 9 over a real video (select + showinfo), trimmed to three frames.
 const SHOWINFO = `Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'video.mp4':
@@ -188,7 +188,7 @@ describe("extractFrames", () => {
     expect(md).toContain("> [00:12] here we are in front of the elephants");
     expect(JSON.parse(readFileSync(join(run.dir, "frames.json"), "utf8"))).toEqual(r.frames);
     // The video was downloaded after --, at 720p at most, and is gone with its temp dir.
-    const dl = calls.find((c) => c[0] === "yt-dlp" && c.includes("bv*[height<=720]/b[height<=720]/bv*/b"))!;
+    const dl = calls.find((c) => c[0] === "yt-dlp" && c.includes(VIDEO_FORMAT))!;
     expect(dl.slice(-2)).toEqual(["--", "https://www.youtube.com/watch?v=jNQXAC9IVRw"]);
     expect(existsSync(dirname(dl[dl.indexOf("-o") + 1]!))).toBe(false);
   });
@@ -218,7 +218,7 @@ describe("extractFrames", () => {
     const flaky = runner();
     setVideoDeps({
       run: async (cmd, args, opts) => {
-        if (cmd === "yt-dlp" && args.includes("bv*[height<=720]/b[height<=720]/bv*/b") && downloads++ === 0) {
+        if (cmd === "yt-dlp" && args.includes(VIDEO_FORMAT) && downloads++ === 0) {
           return { ok: false, status: 1, stdout: "", stderr: "ERROR: unable to download video data: HTTP Error 403: Forbidden" };
         }
         return flaky(cmd, args, opts);
@@ -236,7 +236,7 @@ describe("extractFrames", () => {
     const fragments =
       (status: number): VideoRunner =>
       async (cmd, args, opts) => {
-        if (cmd === "yt-dlp" && args.includes("bv*[height<=720]/b[height<=720]/bv*/b")) {
+        if (cmd === "yt-dlp" && args.includes(VIDEO_FORMAT)) {
           const dir = dirname(args[args.indexOf("-o") + 1]!);
           writeFileSync(join(dir, "video.f136.mp4.part-Frag7"), "half");
           writeFileSync(join(dir, "video.f136.mp4"), "video only, never merged");
@@ -248,6 +248,20 @@ describe("extractFrames", () => {
     expect(await extractFrames(run.dir)).toEqual({ ok: false, reason: "the video download failed: timed out" });
     setVideoDeps({ run: fragments(0), have: () => true });
     expect(await extractFrames(run.dir)).toMatchObject({ ok: false, reason: expect.stringContaining("yt-dlp wrote no file") });
+  });
+
+  it("downloads from the caller's URL, and never with the catch-all extractor under a policy", async () => {
+    const run = await fetchVideoRun("https://youtu.be/jNQXAC9IVRw", root);
+    if (!run.ok) throw new Error(run.reason);
+    // A meta.json on disk naming some other page is not what gets downloaded.
+    writeFileSync(join(run.dir, "meta.json"), JSON.stringify({ ...run.meta, webpageUrl: "https://attacker.example/x" }));
+    calls.length = 0;
+    await extractFrames(run.dir, { url: "https://youtu.be/jNQXAC9IVRw", knownHostsOnly: true });
+    const dl = calls.find((c) => c[0] === "yt-dlp" && c.includes(VIDEO_FORMAT))!;
+    expect(dl.slice(-2)).toEqual(["--", "https://www.youtube.com/watch?v=jNQXAC9IVRw"]);
+    expect(dl.slice(1, 3)).toEqual(["--use-extractors", "default,-generic"]);
+    // With no URL and a policy, an unknown page named on disk is refused outright.
+    expect(await extractFrames(run.dir, { knownHostsOnly: true })).toMatchObject({ ok: false, reason: expect.stringContaining("names no page") });
   });
 
   it("caps the frames by effort", async () => {

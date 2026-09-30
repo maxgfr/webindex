@@ -37,6 +37,7 @@ const LISTING = {
     { _type: "url", ie_key: "Youtube", id: "bbbbbbbbbbb", title: "Giraffes explained", duration: 60 },
     { _type: "url", ie_key: "Youtube", id: "ccccccccccc", title: "A private one", duration: 60 },
     { _type: "playlist", id: "UCnotavideo", title: "a tab" },
+    { _type: "url", ie_key: "YoutubeTab", id: "PLsomething", title: "Playlists", url: "https://www.youtube.com/playlist?list=PLsomething" },
     { _type: "url", ie_key: "Youtube", id: "aaaaaaaaaaa", title: "Elephants at the zoo, again", duration: 60 },
   ],
 };
@@ -80,9 +81,9 @@ describe("listVideos", () => {
     expect(r).toEqual({
       title: "Animals",
       videos: [
-        { id: "aaaaaaaaaaa", title: "Elephants at the zoo", duration: 60, url: "https://www.youtube.com/watch?v=aaaaaaaaaaa" },
-        { id: "bbbbbbbbbbb", title: "Giraffes explained", duration: 60, url: "https://www.youtube.com/watch?v=bbbbbbbbbbb" },
-        { id: "ccccccccccc", title: "A private one", duration: 60, url: "https://www.youtube.com/watch?v=ccccccccccc" },
+        { id: "aaaaaaaaaaa", key: "aaaaaaaaaaa", title: "Elephants at the zoo", duration: 60, url: "https://www.youtube.com/watch?v=aaaaaaaaaaa" },
+        { id: "bbbbbbbbbbb", key: "bbbbbbbbbbb", title: "Giraffes explained", duration: 60, url: "https://www.youtube.com/watch?v=bbbbbbbbbbb" },
+        { id: "ccccccccccc", key: "ccccccccccc", title: "A private one", duration: 60, url: "https://www.youtube.com/watch?v=ccccccccccc" },
       ],
     });
     const call = calls[0]!;
@@ -108,7 +109,10 @@ describe("listVideos", () => {
     expect(calls[0]!.at(-1)).toBe("https://www.youtube.com/@Fireship/videos");
     await listVideos("https://www.youtube.com/@Fireship/shorts");
     expect(calls[1]!.at(-1)).toBe("https://www.youtube.com/@Fireship/shorts");
-    expect(await listVideos("https://youtu.be/aaaaaaaaaaa")).toEqual({ error: "not a YouTube playlist or channel URL: https://youtu.be/aaaaaaaaaaa" });
+    expect(await listVideos("https://youtu.be/aaaaaaaaaaa")).toEqual({ error: "not a playlist or channel URL: https://youtu.be/aaaaaaaaaaa" });
+    expect(await listVideos("https://example.com/x", { knownHostsOnly: true })).toEqual({
+      error: "not a playlist or channel URL on YouTube: https://example.com/x",
+    });
   });
 });
 
@@ -170,9 +174,28 @@ describe("the MCP video tools", () => {
   });
 
   it("refuses a URL that is not what the tool reads", async () => {
-    await expect(webindexAdapter().callTool("webindex_video_fetch", { url: "https://example.com/x" })).rejects.toThrow("`url` must be a YouTube video URL.");
+    await expect(webindexAdapter().callTool("webindex_video_fetch", { url: "file:///etc/passwd" })).rejects.toThrow("`url` must be an http(s) URL of a video.");
     await expect(webindexAdapter().callTool("webindex_video_list", { url: "https://youtu.be/aaaaaaaaaaa" })).rejects.toThrow("playlist or channel");
     expect(calls).toEqual([]);
+  });
+
+  it("under a policy, reads only the known video hosts — yt-dlp's own redirects escape the address check", async () => {
+    const guarded = webindexAdapter({ noLocalFiles: true });
+    await expect(guarded.callTool("webindex_video_fetch", { url: "https://example.com/talk" })).rejects.toThrow("a video on a host this server reads");
+    await expect(guarded.callTool("webindex_video_list", { url: "https://vimeo.com/showcase/123" })).rejects.toThrow("YouTube playlist or channel");
+    expect(calls).toEqual([]);
+  });
+
+  it("without a policy, takes a YouTube list that also names a video", async () => {
+    const r = JSON.parse(
+      (await webindexAdapter().callTool("webindex_video_list", { url: "https://www.youtube.com/watch?v=aaaaaaaaaaa&list=PLx", limit: 1 })).text ?? "",
+    );
+    expect(r.videos[0].label).toBe("V1");
+  });
+
+  it("keeps a relative dir under the video root, never the server's working directory", async () => {
+    const r = await webindexAdapter().callTool("webindex_video_fetch", { url: "https://youtu.be/aaaaaaaaaaa", dir: "animals" });
+    expect(r.text).toContain(`run: ${join(root, "animals", "aaaaaaaaaaa")}`);
   });
 
   it("confines `dir` to a name inside the video root under a policy", async () => {

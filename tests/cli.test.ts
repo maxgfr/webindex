@@ -2357,8 +2357,8 @@ describe("webindex video", () => {
   });
 
   it("fails with the reason, and rejects a bad invocation", async () => {
-    expect(await run(["video", "fetch", "https://example.com/x", "--out", dir])).toBe(1);
-    expect(stderr()).toContain("not a YouTube video URL");
+    expect(await run(["video", "fetch", "ftp://example.com/x", "--out", dir])).toBe(1);
+    expect(stderr()).toContain("not a video URL");
     expect(await run(["video", "watch"])).toBe(2);
     expect(await run(["video", "fetch"])).toBe(2);
     expect(await run(["video", "search"])).toBe(2);

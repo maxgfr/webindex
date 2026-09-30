@@ -35,7 +35,8 @@ import {
   whisperBudgetLeft,
   whisperModel,
   ytdlpVersionAge,
-  youtubeVideoId,
+  knownVideo,
+  videoSource,
   youtubeListKind,
   fetchVideoCorpus,
 } from "./video.js";
@@ -183,11 +184,13 @@ COMMANDS
              (WEBINDEX_FETCH_CONCURRENCY), each printed under a "==> <url> <=="
              header in the order given, or as one --json array; a URL with
              nothing readable is named on stderr, and the run fails only when
-             every one of them did. A YouTube video URL returns its transcript
-             as Markdown, one [mm:ss] stamp per paragraph and a heading per
-             chapter: manual subtitles, else the video's own auto-captions
-             (never a machine translation), else a local whisper transcription
-             — through yt-dlp, which has to be installed.
+             every one of them did. A video URL — YouTube, Vimeo, Dailymotion,
+             Twitch, TED, Loom, TikTok and the other common hosts — returns
+             its transcript as Markdown, one [mm:ss] stamp per paragraph and
+             a heading per chapter: manual subtitles, else the video's own
+             auto-captions (never a machine translation), else a local
+             whisper transcription — through yt-dlp, which has to be
+             installed. A post on such a host with no video is read as a page.
   extract    Same extraction, on a file already on disk (- reads stdin),
              recognised by its bytes when its name says otherwise. --full-page
              keeps the whole HTML page, navigation and consent banners included;
@@ -300,8 +303,10 @@ COMMANDS
              that regenerated artifacts kept every identity of the --ref
              baseline (HEAD by default).
              Dev-time only — it reads a repo, it never runs inside one.
-  video      A YouTube video kept on disk, so a question about it never reads
-             it twice. 'fetch' writes <dir>/<id>/TRANSCRIPT.md (what fetch
+  video      A video kept on disk, so a question about it never reads it
+             twice — any page yt-dlp reads: YouTube, Vimeo, Dailymotion and
+             hundreds more. 'fetch' writes <dir>/<key>/TRANSCRIPT.md (the key
+             is the YouTube id, else site-id: vimeo-76979871; what fetch
              prints for a video), segments.json and meta.json, and reuses them
              on the next call — no yt-dlp at all — unless --refresh. 'search'
              ranks ~45 s passages of every video under --out (or of one video's
@@ -312,9 +317,9 @@ COMMANDS
              by default) — into <id>/frames/, and FRAMES.md pairs each with
              what was said from 5 s before it to 10 s after; it needs ffmpeg,
              and fetches the video first when given a URL. 'list' reads the
-             first --limit videos (default 10) of a playlist or channel, two at
-             a time, and writes CORPUS.md naming them V1…Vn; 'search' on that
-             directory then labels its hits V1…Vn. The directory is --out,
+             first --limit videos (default 10) of a playlist or channel on any
+             site, two at a time, and writes CORPUS.md naming them V1…Vn;
+             'search' on that directory then labels its hits V1…Vn. The directory is --out,
              else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
@@ -1106,7 +1111,9 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
     const base = videoRoot();
     if (raw === undefined || raw === null || raw === "") return base;
     const named = String(raw);
-    if (!guarded) return resolve(named);
+    // A relative name belongs under the video root, never under wherever the
+    // server happened to start: "animals" once landed in the caller's cwd.
+    if (!guarded) return isAbsolute(named) ? named : resolve(base, named);
     if (!/^[A-Za-z0-9._-]+$/.test(named) || named === "." || named === "..") {
       throw new ToolError(`\`dir\` must be the name of a directory inside ${base} on this server, not a path.`);
     }
@@ -1117,10 +1124,29 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
     }
     return target;
   };
+  // Which pages a video tool may hand yt-dlp. With no policy, any http(s)
+  // URL: yt-dlp reads hundreds of sites. Under one, only the hosts knownVideo
+  // recognises (and YouTube's lists): yt-dlp follows its own redirects, out of
+  // the public-address check's sight, so an arbitrary page is not handed to it.
   const videoUrl = async (raw: unknown, what: "video" | "list"): Promise<string> => {
     const url = String(raw ?? "");
-    const ok = what === "video" ? youtubeVideoId(url) : youtubeListKind(url);
-    if (!ok) throw new ToolError(what === "video" ? "`url` must be a YouTube video URL." : "`url` must be a YouTube playlist or channel URL.");
+    const ok =
+      what === "video"
+        ? videoSource(url, { anySite: !guarded })
+        : guarded
+          ? youtubeListKind(url)
+          : youtubeListKind(url) || (/^https?:\/\//i.test(url) && !knownVideo(url));
+    if (!ok) {
+      throw new ToolError(
+        what === "video"
+          ? guarded
+            ? "`url` must be a video on a host this server reads (YouTube, Vimeo, Dailymotion, Twitch, TED, Loom, TikTok…)."
+            : "`url` must be an http(s) URL of a video."
+          : guarded
+            ? "`url` must be a YouTube playlist or channel URL."
+            : "`url` must be the http(s) URL of a playlist or channel.",
+      );
+    }
     await refuseUrl(url);
     return url;
   };
@@ -1159,7 +1185,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
           title: "Fetch a URL as clean text",
           description:
             "Fetch a URL and return its readable text. Handles HTML, PDFs (pdf-inspector → anydoc → Firecrawl → pdftotext → native → OCR) and office documents (anydoc → Firecrawl → a built-in OOXML/OpenDocument reader), " +
-            "YouTube videos (a timestamped, chaptered transcript: manual subtitles → the video's own auto-captions → a local whisper transcription, which can take minutes for a long video with no subtitles), " +
+            "videos on YouTube, Vimeo, Dailymotion, Twitch, TED, Loom, TikTok and the other common hosts (a timestamped, chaptered transcript: manual subtitles → the video's own auto-captions → a local whisper transcription, which can take minutes for a long video with no subtitles), " +
             "and uses Firecrawl when available, with built-in extraction as fallback. Returns the extracted text, then a trailer with the final URL after redirects, the page's canonical URL and title, any note, and which rung produced it — never raw bytes. " +
             "Accepts URLs from the host's native search (including ChatGPT or Claude) or supplied directly; webindex_search is optional.",
           inputSchema: {
@@ -1398,14 +1424,17 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
         },
         {
           name: "webindex_video_fetch",
-          title: "Read a YouTube video, and keep it",
+          title: "Read a video, and keep it",
           description:
-            "Read a YouTube video into a run directory and return its transcript as Markdown: a header (title, channel, date, duration, which track), a heading per chapter, and a [mm:ss] stamp on every paragraph — cite by stamp. " +
-            "Manual subtitles first, then the video's own auto-captions, then a local whisper transcription (minutes for a long video). The run is kept: a second call, and webindex_video_search, read it without touching YouTube.",
+            "Read a video — YouTube, Vimeo, Dailymotion or any page yt-dlp reads (only the known video hosts under this server's public-only policy) — into a run directory and return its transcript as Markdown: a header (title, channel, date, duration, which track), a heading per chapter, and a [mm:ss] stamp on every paragraph — cite by stamp. " +
+            "Manual subtitles first, then the video's own auto-captions, then a local whisper transcription (minutes for a long video). The run is kept: a second call, and webindex_video_search, read it without touching the site.",
           inputSchema: {
             type: "object",
             properties: {
-              url: { type: "string", description: "A YouTube video URL (watch, youtu.be, shorts, embed, live)." },
+              url: {
+                type: "string",
+                description: "The video's URL: YouTube (watch, youtu.be, shorts, embed, live), Vimeo, Dailymotion, or any page yt-dlp reads.",
+              },
               lang: {
                 type: "string",
                 description: "Preferred subtitle language, e.g. fr. Defaults to the video's own; another language's track is marked as a translation.",
@@ -1436,12 +1465,12 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
           name: "webindex_video_frames",
           title: "What is on screen in a video",
           description:
-            "Take a frame at every scene change and chapter start of a YouTube video, drop near-duplicates, keep at most 20/50/100 by `effort`, and pair each frame with what was said from 5 s before to 10 s after. " +
+            "Take a frame at every scene change and chapter start of a video, drop near-duplicates, keep at most 20/50/100 by `effort`, and pair each frame with what was said from 5 s before to 10 s after. " +
             "Returns FRAMES.md's path and each frame's image path, stamp and aligned transcript; read the images to see slides, code or diagrams. Downloads the video (720p at most) and needs ffmpeg — expect tens of seconds.",
           inputSchema: {
             type: "object",
             properties: {
-              url: { type: "string", description: "A YouTube video URL; read first when it is not kept yet." },
+              url: { type: "string", description: "The video's URL; read first when it is not kept yet." },
               effort: { type: "string", enum: ["low", "med", "high"], description: "At most 20, 50 or 100 frames (default med)." },
               dir: { type: "string", description: "The directory runs are kept in (default: the server's video root)." },
             },
@@ -1452,12 +1481,15 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
           name: "webindex_video_list",
           title: "Read a playlist or a channel",
           description:
-            "Read the first `limit` videos of a YouTube playlist or channel, two at a time, each kept as its own run, and write CORPUS.md naming them V1…Vn in listing order — the labels to cite across videos. " +
+            "Read the first `limit` videos of a playlist or channel — YouTube, or any site yt-dlp lists (YouTube only under a public-only policy) — two at a time, each kept as its own run, and write CORPUS.md naming them V1…Vn in listing order — the labels to cite across videos. " +
             "A video that cannot be read keeps its label, with the reason. Returns the corpus rows; webindex_video_search on the same `dir` then searches them all.",
           inputSchema: {
             type: "object",
             properties: {
-              url: { type: "string", description: "A YouTube playlist or channel URL (list=, /@handle, /channel/, /c/, /user/)." },
+              url: {
+                type: "string",
+                description: "A playlist or channel URL: YouTube (list=, /@handle, /channel/, /c/, /user/), a Vimeo showcase, a Dailymotion playlist…",
+              },
               limit: { type: "number", description: "How many videos (default 10)." },
               dir: { type: "string", description: "The directory the corpus is kept in (default: the server's video root)." },
             },
@@ -1718,7 +1750,12 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
       if (name === "webindex_video_fetch") {
         const url = await videoUrl(args.url, "video");
         const dir = videoDir(args.dir);
-        const r = await fetchVideoRun(url, dir, { refresh: args.refresh === true, lang: args.lang ? String(args.lang) : undefined, signal });
+        const r = await fetchVideoRun(url, dir, {
+          refresh: args.refresh === true,
+          lang: args.lang ? String(args.lang) : undefined,
+          signal,
+          knownHostsOnly: guarded,
+        });
         if (!r.ok) throw new ToolError(`No transcript for ${url}: ${r.reason}.`);
         const text = r.markdown ?? readFileSync(r.transcript, "utf8");
         return { text: `${text}\n---\nrun: ${r.dir}\nvia: ${r.meta.via}${r.reused ? " (already on disk)" : ""}` };
@@ -1735,9 +1772,9 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
         const url = await videoUrl(args.url, "video");
         const effort = args.effort === undefined ? "med" : String(args.effort);
         if (!(effort in FRAME_EFFORT)) throw new ToolError("`effort` must be low, med or high.");
-        const run = await fetchVideoRun(url, videoDir(args.dir), { signal });
+        const run = await fetchVideoRun(url, videoDir(args.dir), { signal, knownHostsOnly: guarded });
         if (!run.ok) throw new ToolError(`No transcript for ${url}: ${run.reason}.`);
-        const r = await extractFrames(run.dir, { effort: effort as FrameEffort, signal });
+        const r = await extractFrames(run.dir, { effort: effort as FrameEffort, signal, url, knownHostsOnly: guarded });
         if (!r.ok) throw new ToolError(r.reason);
         const frames = r.frames.map((f) => ({ image: join(run.dir, f.file), stamp: f.stamp, chapter: f.chapter, kind: f.kind, said: f.text }));
         return { text: JSON.stringify({ markdown: r.markdown, candidates: r.candidates, duplicates: r.duplicates, frames }, null, 2) };
@@ -1746,7 +1783,12 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
         const url = await videoUrl(args.url, "list");
         const dir = videoDir(args.dir);
         const limit = toolLimit(args.limit, 10);
-        const r = await fetchVideoCorpus(url, dir, { limit, signal, onVideo: (done, total, title) => ctx?.progress(done, total, title) });
+        const r = await fetchVideoCorpus(url, dir, {
+          limit,
+          signal,
+          knownHostsOnly: guarded,
+          onVideo: (done, total, title) => ctx?.progress(done, total, title),
+        });
         if (!r.ok) throw new ToolError(r.reason);
         return { text: JSON.stringify({ corpus: r.corpus, title: r.title, videos: r.videos }, null, 2) };
       }
@@ -2514,7 +2556,7 @@ async function dispatch(argv: string[]): Promise<void> {
       // A URL is fetched first (or found already on disk); an id names a run
       // under the directory; anything else is a run directory itself.
       let runDir: string;
-      if (youtubeVideoId(target)) {
+      if (/^https?:\/\//i.test(target)) {
         const r = await fetchVideoRun(target, root, { lang: argValue(args, "lang") });
         if (!r.ok) fail(`no transcript for ${target}: ${r.reason}`);
         runDir = r.dir;

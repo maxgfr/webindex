@@ -4,11 +4,11 @@ import { join, resolve } from "node:path";
 import { brand, env } from "../brand.js";
 import { ensureDir, isNoWrite, writeArtifact } from "../no-write.js";
 import { bm25Score, buildBm25Index, type Bm25Doc } from "../rank.js";
-import { transcribeVideo, type VideoLadderOptions, type VideoTranscriberId, type VideoTranscript } from "./ladder.js";
+import { transcribeVideo, videoDeps, type VideoLadderOptions, type VideoTranscriberId, type VideoTranscript } from "./ladder.js";
 import { formatStamp, transcriptMarkdown } from "./markdown.js";
-import { youtubeVideoId } from "./url.js";
+import { videoSource, videoUrlAt } from "./url.js";
 import type { VideoSegment } from "./vtt.js";
-import type { VideoChapter, VideoMeta } from "./ytdlp.js";
+import { probeVideo, type VideoChapter, type VideoMeta } from "./ytdlp.js";
 
 // A video read once and kept: `<root>/<videoId>/` holds the transcript as
 // Markdown (TRANSCRIPT.md, what a reader opens), its segments (segments.json,
@@ -77,7 +77,8 @@ export function readVideoRun(dir: string): { meta: VideoRunMeta; segments: Video
 }
 
 /**
- * Read a video into `<root>/<videoId>/`, or reuse the run already there —
+ * Read a video into `<root>/<key>/` — the YouTube id, else `<site>-<id>` —
+ * or reuse the run already there —
  * unless `refresh`, or the run was read in another language than `lang` asks.
  * Never throws: a video with no transcript, or a run that cannot be written,
  * comes back as a reason.
@@ -88,17 +89,34 @@ export function readVideoRun(dir: string): { meta: VideoRunMeta; segments: Video
  * otherwise keep every transcript it ever read in memory.
  */
 export async function fetchVideoRun(url: string, root: string, opts: VideoLadderOptions & { refresh?: boolean } = {}): Promise<VideoRunResult> {
-  const id = youtubeVideoId(url);
-  if (!id) return { ok: false, reason: `not a YouTube video URL: ${url}` };
+  const source = videoSource(url, { anySite: !opts.knownHostsOnly });
+  if (!source) return { ok: false, reason: `not a video URL${opts.knownHostsOnly ? " on a known video host" : ""}: ${url}` };
+  const kept = (key: string): VideoRunResult | undefined => {
+    const dir = join(root, key);
+    const run = opts.refresh ? undefined : readVideoRun(dir);
+    if (!run || !existsSync(join(dir, "TRANSCRIPT.md")) || !servesLang(run.meta, opts.lang)) return undefined;
+    return { ok: true, id: key, dir, transcript: join(dir, "TRANSCRIPT.md"), reused: true, meta: run.meta, segments: run.segments.length };
+  };
+  // A known host's URL names its run: no yt-dlp at all for a video already read.
+  if (source.key) {
+    const reused = kept(source.key);
+    if (reused) return reused;
+  }
+  // Any other page is probed first — once, the ladder reuses the probe — to learn its key.
+  let probed: VideoLadderOptions["probed"];
+  if (!source.key) {
+    const probe = await probeVideo(source.url, videoDeps(opts.deps).run, opts.signal, opts.knownHostsOnly);
+    if ("error" in probe) return { ok: false, reason: probe.error };
+    const reused = kept(probe.meta.key ?? probe.meta.id);
+    if (reused) return reused;
+    probed = probe;
+  }
+  const t: VideoTranscript = await transcribeVideo(url, { ...opts, ...(probed ? { probed } : {}) });
+  // Written where the next lookup will look: the URL's own key when it has one.
+  const id = source.key ?? t.meta?.key ?? t.meta?.id;
+  if (!t.via || !t.meta || !id) return { ok: false, ...(id ? { id } : {}), reason: t.reason ?? "no transcript" };
   const dir = join(root, id);
   const transcriptPath = join(dir, "TRANSCRIPT.md");
-  if (!opts.refresh) {
-    const kept = readVideoRun(dir);
-    if (kept && existsSync(transcriptPath) && servesLang(kept.meta, opts.lang))
-      return { ok: true, id, dir, transcript: transcriptPath, reused: true, meta: kept.meta, segments: kept.segments.length };
-  }
-  const t: VideoTranscript = await transcribeVideo(url, opts);
-  if (!t.via || !t.meta) return { ok: false, id, reason: t.reason ?? "no transcript" };
   const meta: VideoRunMeta = {
     ...t.meta,
     via: t.via,
@@ -122,14 +140,17 @@ export async function fetchVideoRun(url: string, root: string, opts: VideoLadder
 
 /** One passage a search found: where it is, a link that opens the video there, and its text. */
 export interface VideoHit {
-  /** `V1`… when the directory is a corpus, else the video id. */
+  /** `V1`… when the directory is a corpus, else the run key. */
   label: string;
+  /** The run key: the YouTube id, else `<site>-<id>`. */
   videoId: string;
   title: string;
   chapter?: string;
+  /** Where the words that answer begin: the passage's best-matching segment, not the passage's own start. */
   start: number;
   stamp: string;
   url: string;
+  /** The whole passage, for context. */
   text: string;
   score: number;
 }
@@ -138,33 +159,29 @@ const PASSAGE_S = 45;
 
 /** Consecutive segments grouped into passages of about 45 s — the unit a search returns — never across a chapter start. */
 export function videoPassages(segments: VideoSegment[], chapterStarts: number[] = []): VideoSegment[] {
-  const out: VideoSegment[] = [];
-  let cur: VideoSegment | undefined;
+  return passageGroups(segments, chapterStarts).map((g) => ({ start: g[0]!.start, end: g[g.length - 1]!.end, text: g.map((s) => s.text).join(" ") }));
+}
+
+/** The segments of each passage, kept apart so a hit can point at the one that answers. */
+function passageGroups(segments: VideoSegment[], chapterStarts: number[]): VideoSegment[][] {
+  const out: VideoSegment[][] = [];
+  let cur: VideoSegment[] = [];
   for (const s of segments) {
-    if (cur && chapterStarts.some((b) => b > cur!.start + 0.5 && b <= s.start + 0.5)) {
+    if (cur.length && chapterStarts.some((b) => b > cur[0]!.start + 0.5 && b <= s.start + 0.5)) {
       out.push(cur);
-      cur = undefined;
+      cur = [];
     }
-    cur = cur ? { start: cur.start, end: s.end, text: `${cur.text} ${s.text}` } : { ...s };
-    if (cur.end - cur.start >= PASSAGE_S) {
+    cur.push(s);
+    if (s.end - cur[0]!.start >= PASSAGE_S) {
       out.push(cur);
-      cur = undefined;
+      cur = [];
     }
   }
-  if (cur) out.push(cur);
+  if (cur.length) out.push(cur);
   return out;
 }
 
-/** The watch URL opened at `seconds`. */
-export function videoUrlAt(webpageUrl: string, seconds: number): string {
-  try {
-    const u = new URL(webpageUrl);
-    u.searchParams.set("t", `${Math.floor(seconds)}s`);
-    return u.toString();
-  } catch {
-    return webpageUrl;
-  }
-}
+export { videoUrlAt };
 
 /** The runs under a directory, in a stable order: the directory itself when it is one run, else its children that are. */
 export function listVideoRuns(dir: string): { dir: string; meta: VideoRunMeta; segments: VideoSegment[] }[] {
@@ -206,36 +223,46 @@ const chapterAt = (chapters: VideoChapter[], t: number) => [...chapters].reverse
  */
 export function searchVideoRuns(dir: string, query: string, opts: { limit?: number; labels?: Map<string, string> } = {}): VideoHit[] {
   const labels = opts.labels ?? corpusLabels(dir);
-  const docs: (Bm25Doc & { hit: Omit<VideoHit, "score"> })[] = [];
+  const docs: (Bm25Doc & { parts: VideoSegment[]; meta: VideoRunMeta; key: string; chapter?: string })[] = [];
   for (const run of listVideoRuns(dir)) {
     const { meta } = run;
-    for (const p of videoPassages(
+    const key = meta.key ?? meta.id;
+    for (const parts of passageGroups(
       run.segments,
       (meta.chapters ?? []).map((c) => c.start),
     )) {
-      const chapter = chapterAt(meta.chapters ?? [], p.start);
-      docs.push({
-        id: `${meta.id}@${p.start}`,
-        title: "",
-        headings: chapter ?? "",
-        body: p.text,
-        hit: {
-          label: labels.get(meta.id) ?? meta.id,
-          videoId: meta.id,
-          title: meta.title,
-          ...(chapter ? { chapter } : {}),
-          start: p.start,
-          stamp: formatStamp(p.start),
-          url: videoUrlAt(meta.webpageUrl, p.start),
-          text: p.text,
-        },
-      });
+      const chapter = chapterAt(meta.chapters ?? [], parts[0]!.start);
+      docs.push({ id: `${key}@${parts[0]!.start}`, title: "", headings: chapter ?? "", body: parts.map((s) => s.text).join(" "), parts, meta, key, chapter });
     }
   }
   const index = buildBm25Index(query, docs);
-  return docs
-    .map((d) => ({ ...d.hit, score: Math.round(bm25Score(index, d) * 1000) / 1000 }))
-    .filter((h) => h.score > 0)
-    .sort((a, b) => b.score - a.score || a.videoId.localeCompare(b.videoId) || a.start - b.start)
+  const scored = docs
+    .map((d) => ({ d, score: Math.round(bm25Score(index, d) * 1000) / 1000 }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score || a.d.key.localeCompare(b.d.key) || a.d.parts[0]!.start - b.d.parts[0]!.start)
     .slice(0, opts.limit ?? 10);
+  return scored.map(({ d, score }) => {
+    // The stamp a reader cites: the segment inside the passage that matches
+    // best, not a passage start up to 45 s before the words that answer.
+    let best = d.parts[0]!;
+    let top = 0;
+    for (const s of d.parts) {
+      const sc = bm25Score(index, { id: `${d.id}#${s.start}`, title: "", headings: "", body: s.text });
+      if (sc > top) {
+        top = sc;
+        best = s;
+      }
+    }
+    return {
+      label: labels.get(d.key) ?? d.key,
+      videoId: d.key,
+      title: d.meta.title,
+      ...(d.chapter ? { chapter: d.chapter } : {}),
+      start: best.start,
+      stamp: formatStamp(best.start),
+      url: videoUrlAt(d.meta.webpageUrl, best.start),
+      text: d.body,
+      score,
+    };
+  });
 }

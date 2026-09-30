@@ -331,6 +331,45 @@ declare function youtubeVideoId(url: string): string | undefined;
  * Undefined for anything else, a single video included.
  */
 declare function youtubeListKind(url: string): "playlist" | "channel" | undefined;
+/** A video URL resolved to what yt-dlp is handed, and — when the URL alone says — the run it is kept under. */
+interface VideoSource {
+    /** `youtube`, `vimeo`, `dailymotion`… — the host's short name; `web` for a site this module does not know. */
+    site: string;
+    /** The URL yt-dlp reads: a canonical form rebuilt from the id where there is one, else the URL as given. */
+    url: string;
+    /** The run directory's name (`dQw4w9WgXcQ`, `vimeo-76979871`), when the URL alone determines it. */
+    key?: string;
+}
+/**
+ * A single video on a host this module knows — YouTube or one of the common
+ * video sites — resolved to the URL yt-dlp reads and, where the URL gives the
+ * id, its run key. Undefined for anything else, a playlist or a channel
+ * included.
+ */
+declare function knownVideo(url: string): VideoSource | undefined;
+/**
+ * The URL an explicit video command may hand yt-dlp: a known video host's,
+ * canonicalised; with `anySite`, any other http(s) URL too, as given (yt-dlp
+ * then says whether there is a video there). Undefined for anything that is
+ * not http(s) — no string starting with `-` can get through.
+ */
+declare function videoSource(url: string, opts?: {
+    anySite?: boolean;
+}): VideoSource | undefined;
+/**
+ * The run key of a video yt-dlp has read: its YouTube id as is, else
+ * `<site>-<id>`. yt-dlp's catch-all extractor names a page by its last path
+ * segment — `a.com/talks/intro` and `b.org/course/intro` are both `intro` — so
+ * a `web` key, and any id that had to be made filesystem-safe, also carries a
+ * hash of the page it came from: two pages never share a run.
+ */
+declare function videoRunKey(site: string, id: string, pageUrl?: string): string;
+/**
+ * The watch URL opened at `seconds`, in the form each site understands:
+ * YouTube `?t=`, Vimeo `#t=`, Dailymotion `?start=`, Twitch `?t=0h1m2s`. A site
+ * with no known form gets its URL unchanged.
+ */
+declare function videoUrlAt(webpageUrl: string, seconds: number): string;
 
 interface ShResult {
     ok: boolean;
@@ -379,7 +418,12 @@ interface VideoChapter {
 }
 /** What yt-dlp's `-J` says about one video, reduced to what a transcript needs. */
 interface VideoMeta {
+    /** The site's own id for the video. */
     id: string;
+    /** `youtube`, `vimeo`, `dailymotion`… — from yt-dlp's extractor. Absent in runs written before other sites were read: YouTube. */
+    site?: string;
+    /** The run directory's name: the YouTube id itself, else `<site>-<id>`. */
+    key?: string;
     title: string;
     channel?: string;
     /** YYYY-MM-DD. */
@@ -405,10 +449,17 @@ type VideoProbe = {
     error: string;
     missing?: boolean;
 };
+/**
+ * The short site name of a yt-dlp extractor — the prefix knownVideo uses, so a
+ * run's key is the same whether it came from the URL or from the probe:
+ * "YoutubeTab" → youtube, "TwitchVod" → twitch, "Twitter" → x, "TedTalk" →
+ * ted, "Generic" → web.
+ */
+declare function siteOf(extractor: string): string;
 /** Project yt-dlp's info JSON onto VideoMeta. Undefined when it is not a single video. */
-declare function videoMetaFromInfo(info: Record<string, unknown>): VideoMeta | undefined;
+declare function videoMetaFromInfo(info: Record<string, unknown>, sourceUrl?: string): VideoMeta | undefined;
 /** Read one video's metadata. Never throws: a failure is a reason. */
-declare function probeVideo(url: string, run?: VideoRunner, signal?: AbortSignal): Promise<VideoProbe>;
+declare function probeVideo(url: string, run?: VideoRunner, signal?: AbortSignal, knownOnly?: boolean): Promise<VideoProbe>;
 /**
  * yt-dlp's failure, said the way a reader can act on it. The order matters:
  * YouTube's own wording names the most specific cause, and a 403 is the least
@@ -419,7 +470,7 @@ declare function classifyYtdlpError(stderr: string): string;
  * One subtitle track, as WebVTT text. Fed the probe's own JSON through
  * `--load-info-json`, so the page is not extracted a second time.
  */
-declare function downloadSubtitle(info: string, lang: string, auto: boolean, run?: VideoRunner, signal?: AbortSignal): Promise<{
+declare function downloadSubtitle(info: string, lang: string, auto: boolean, run?: VideoRunner, signal?: AbortSignal, knownOnly?: boolean): Promise<{
     vtt: string;
 } | {
     error: string;
@@ -437,12 +488,12 @@ interface VideoSegment {
     text: string;
 }
 /**
- * The cues of a WebVTT file, tags stripped and entities decoded. On a rolling
+ * The cues of a WebVTT (or SRT) file, tags stripped and entities decoded. On a rolling
  * track (auto-captions) each cue opens by repeating what the previous one
  * showed; those leading lines are dropped, and a line that continues the last
  * one keeps only what it adds — while a line said twice on purpose ("no no",
  * a chorus) is kept. `rolling` defaults to what the file looks like: word-timing
- * tags give an auto track away. Empty for anything that is not WebVTT.
+ * tags give an auto track away. Empty for anything that is neither WebVTT nor SRT.
  */
 declare function parseVtt(src: string, opts?: {
     rolling?: boolean;
@@ -494,6 +545,17 @@ interface VideoLadderOptions {
     deps?: Partial<VideoDeps>;
     /** Stops the ladder, and kills whichever command it is running. */
     signal?: AbortSignal;
+    /**
+     * Read only the video hosts `knownVideo` recognises (YouTube, Vimeo,
+     * Dailymotion…), not any http(s) URL. Off by default: an explicit request
+     * for a video's transcript may name any page yt-dlp can read.
+     */
+    knownHostsOnly?: boolean;
+    /** The probe of this very URL, already made (see probeVideo): the page is not extracted a second time. */
+    probed?: {
+        meta: VideoMeta;
+        info: string;
+    };
 }
 /** Test seam: the runner and `have` every later call uses by default; no argument restores the real tools. */
 declare function setVideoDeps(deps?: Partial<VideoDeps>): void;
@@ -514,12 +576,13 @@ declare function assessTranscript(segments: VideoSegment[], duration?: number): 
     reason: string;
 };
 /**
- * A YouTube video's transcript, from the first rung whose output passes the
- * quality gate. Never throws: every failure is a `reason`.
+ * A video's transcript — YouTube, or any site yt-dlp reads — from the first
+ * rung whose output passes the quality gate. Never throws: every failure is a
+ * `reason`.
  *
- * Only a URL `youtubeVideoId` recognises is read, and yt-dlp is handed the
- * canonical watch URL rebuilt from its id — never the caller's string, which
- * could otherwise reach yt-dlp as an option.
+ * Only an http(s) URL is read, and it always reaches yt-dlp after `--`, so no
+ * caller's string can be taken for an option. A known host's URL is rebuilt
+ * from its id first (a YouTube watch URL, Vimeo's player).
  */
 declare function transcribeVideo(url: string, opts?: VideoLadderOptions): Promise<VideoTranscript>;
 
@@ -560,7 +623,8 @@ declare function readVideoRun(dir: string): {
     segments: VideoSegment[];
 } | undefined;
 /**
- * Read a video into `<root>/<videoId>/`, or reuse the run already there —
+ * Read a video into `<root>/<key>/` — the YouTube id, else `<site>-<id>` —
+ * or reuse the run already there —
  * unless `refresh`, or the run was read in another language than `lang` asks.
  * Never throws: a video with no transcript, or a run that cannot be written,
  * comes back as a reason.
@@ -575,14 +639,17 @@ declare function fetchVideoRun(url: string, root: string, opts?: VideoLadderOpti
 }): Promise<VideoRunResult>;
 /** One passage a search found: where it is, a link that opens the video there, and its text. */
 interface VideoHit {
-    /** `V1`… when the directory is a corpus, else the video id. */
+    /** `V1`… when the directory is a corpus, else the run key. */
     label: string;
+    /** The run key: the YouTube id, else `<site>-<id>`. */
     videoId: string;
     title: string;
     chapter?: string;
+    /** Where the words that answer begin: the passage's best-matching segment, not the passage's own start. */
     start: number;
     stamp: string;
     url: string;
+    /** The whole passage, for context. */
     text: string;
     score: number;
 }
@@ -646,11 +713,18 @@ declare function extractFrames(runDir: string, opts?: {
     effort?: FrameEffort;
     deps?: Partial<VideoDeps>;
     signal?: AbortSignal;
+    /** The video's URL, as the caller approved it; else the page the run was read from. */
+    url?: string;
+    /** Only the known video hosts, and never yt-dlp's catch-all extractor (an MCP policy). */
+    knownHostsOnly?: boolean;
 }): Promise<FramesResult>;
 
 /** One video a listing names. */
 interface ListedVideo {
+    /** The site's id for it. */
     id: string;
+    /** Its run key, when its URL gives one (every YouTube video does). */
+    key?: string;
     title: string;
     duration?: number;
     url: string;
@@ -663,6 +737,7 @@ declare function listVideos(url: string, opts?: {
     limit?: number;
     deps?: Partial<VideoDeps>;
     signal?: AbortSignal;
+    knownHostsOnly?: boolean;
 }): Promise<{
     title?: string;
     videos: ListedVideo[];
@@ -992,6 +1067,11 @@ declare function fetchAndExtract(url: string, opts?: {
     stripConsent?: boolean;
     /** Keep all page text through the built-in reader, bypassing isolation and consent filtering. */
     fullPage?: boolean;
+    /**
+     * `false` reads a video host's URL (YouTube, Vimeo…) as a page instead of
+     * sending it to the transcript ladder.
+     */
+    video?: boolean;
     /**
      * The shape of an HTML page's text. "text" (the default) is htmlToText's:
      * headings kept as `#` lines, everything else flattened. "markdown" is
@@ -4086,4 +4166,4 @@ declare function readResource(uri: string, moduleDir?: string): ResourceContents
 declare class ResourceError extends Error {
 }
 
-export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCHES_REMOVED_IN, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, CP1252_C1, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ChangeVerdict, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CorpusResult, type CorpusVideo, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, FRAME_EFFORT, type Feed, type FeedItem, type Fingerprint, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type FirecrawlSearchOptions, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type FrameEffort, type FrameKind, type FramesResult, type HandleOptions, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, InvalidParamsError, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type ListedVideo, type MarkdownOptions, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROGRESS_MESSAGE_SINCE, PROTOCOL_VERSIONS, type PackageFacts, type PackageLookup, type PackageResolution, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoFactsResult, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RungOutcome, type RungReport, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type SearchRung, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type Table, type ToolAnnotations, type ToolCallContext, type ToolDecl, ToolError, type ToolOutcome, UsageError, VIDEO_TRANSCRIBERS, type VectorHit, type VectorPoint, type VideoChapter, type VideoCorpus, type VideoDeps, type VideoFrame, type VideoHit, type VideoLadderOptions, type VideoMeta, type VideoProbe, type VideoRunMeta, type VideoRunResult, type VideoRunner, type VideoSegment, type VideoTranscriberId, type VideoTranscript, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, assessTranscript, awaitHostSlot, backOffHost, baseLang, batchRefusal, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, classifyYtdlpError, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, contentHash, corpusLabels, corpusMarkdown, cosine, crawlConcurrency, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, decodeLocal, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, downloadSubtitle, embed, embedModel, embedOne, embedPrefixes, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, enabledTranscribers, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractFrames, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, extractTables, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, fetchVideoCorpus, fetchVideoRun, fingerprint, firecrawlBase, firecrawlIsExplicit, fnv1a64, fnv1a64Words, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, forgeRef, formatStamp, hammingDistance, hasChanged, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToMarkdown, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, linksFrom, listPhases, listReleases, listResources, listTags, listVideoRuns, listVideos, looksLikeChallenge, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, lookupPackageResult, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, maxCrawlDelayMs, mergeSegments, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, officeToText, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, parseVtt, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, probeVideo, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, readVideoRun, recencyScore, renderAsset, repoCacheRoot, repoFacts, repoFactsResult, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOcrTools, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resetVideoLadderCache, resolvePackage, resolvePackageResult, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searchVideoRuns, searxngBase, searxngIsExplicit, searxngLanguage, setCacheMode, setNoWrite, setVideoDeps, sh, shAsync, shq, simhash, skillName, sleep, slugify, sniffDocument, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, tableToMarkdown, takeArtifacts, throttleReason, toBatches, transcribeVideo, transcriptMarkdown, uncitedIds, unitTexts, unknownEngines, upsert, urlDeclaresIdentity, validateArgs, videoMetaFromInfo, videoRoot, whisperBudgetLeft, whisperModel, withRunLock, writeArtifact, writeFileAtomic, writeManifest, youtubeListKind, youtubeVideoId, ytdlpVersionAge };
+export { ANNOTATIONS_SINCE, ANYDOC_SPEC, ASSUMED_HTTP_PROTOCOL, type Artifact, BATCHES_REMOVED_IN, BATCH_SIZE, type Bm25Doc, type Bm25Index, type Brand, COMPOSE_YAML, CP1252_C1, type CacheEntry, type CacheMode, type CacheStats, type CapAdvice, type ChangeVerdict, type ClaimUnit, type ClaimUnitOptions, type CliSpec, type CommandArgs, type CorpusResult, type CorpusVideo, type CrawlOptions, type CrawlResult, type CrawledPage, DEAD_LINK_STATUS, DEFAULT_MAX_RESPONSE_BYTES, DOC_EXTENSIONS, DOC_EXTRACTORS, type DocExtraction, type DocExtractorId, type DocFormat, type DocLadderOptions, ENGINE_VERSION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, EVIDENCE_TOKEN, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type EmbedResult, type EngineHit, type EngineResult, type ExcerptWindow, type ExpandedKeyword, type ExtractResult, type ExtractorId, FILE_LINE_TOKEN, FIRECRAWL_DEFAULT_BASE, FIRECRAWL_ENV, FRAME_EFFORT, type Feed, type FeedItem, type Fingerprint, type FirecrawlHit, type FirecrawlOptions, type FirecrawlScrape, type FirecrawlSearchOptions, type ForgeItem, type ForgeKind, type ForgeOptions, type ForgeResult, type FrameEffort, type FrameKind, type FramesResult, type HandleOptions, type HttpOptions, type HttpResult, type HybridDoc, type HybridHit, InvalidParamsError, type JsonRpcMessage, type JsonSchema, type JsonSchemaProp, KEYLESS_ENGINES, type KeylessEngine, type KeywordMatcher, type KeywordVariant, LATEST_PROTOCOL, LOCAL_FILE_DOMAIN, type ListedVideo, type MarkdownOptions, type McpAdapter, type McpServer, type OrchestrateOptions, type OrchestrateResult, PDF_EXTRACTORS, PDF_INSPECTOR_SPEC, PDF_URL_RE, PROGRESS_MESSAGE_SINCE, PROTOCOL_VERSIONS, type PackageFacts, type PackageLookup, type PackageResolution, type PageMetadata, type ParsedArgs, type PdfExtraction, type PdfExtractorId, type PdfLadderOptions, type PdfVerdict, type PhaseDefinition, type PhaseEmission, type PhaseInfo, type PromptDecl, PromptError, type PromptResult, type ProtocolVersion, RICH_TOOLS_SINCE, type Ranked, type RegistryKind, type RepoFacts, type RepoFactsResult, type RepoRef, type ResolvedProvider, type ResourceContents, type ResourceDecl, ResourceError, type Robots, type RobotsRule, type RungOutcome, type RungReport, type RunningHttpServer, SEARXNG_DEFAULT_BASE, SEARXNG_SETTINGS_YAML, SERVICE_PROFILES, SMALL_WORKLIST, SOURCE_TOKEN, STACK_SERVICES, type ScrapeAttempt, type SearchHit, type SearchOptions, type SearchResult, type SearchRung, type ServerOptions, type ShResult, type Sitemap, type StackAction, type StackDeps, type StackResult, type StackRun, type StdioOptions, TOKEN_RE, type Table, type ToolAnnotations, type ToolCallContext, type ToolDecl, ToolError, type ToolOutcome, UsageError, VIDEO_TRANSCRIBERS, type VectorHit, type VectorPoint, type VideoChapter, type VideoCorpus, type VideoDeps, type VideoFrame, type VideoHit, type VideoLadderOptions, type VideoMeta, type VideoProbe, type VideoRunMeta, type VideoRunResult, type VideoRunner, type VideoSegment, type VideoSource, type VideoTranscriberId, type VideoTranscript, WORKFLOW_FORBIDDEN, accentPattern, acceptLanguageHeader, addressedIdCount, apiBase, apiPrefix, appendixMask, applyRelevanceFloor, argBool, argInt, argList, argOneOf, argValue, arxivIdFromUrl, assessExtractedText, assessPdfText, assessTranscript, awaitHostSlot, backOffHost, baseLang, batchRefusal, bestExcerpt, bm25MatchedTerms, bm25Score, bm25Tokenize, bracketedTokensIn, brand, browserUa, buildBm25Index, buildMatcher, cacheClean, cacheDir, cacheMode, cachePath, cacheStats, cachedFetchAndExtract, canonicalRepo, canonicalRepoRef, canonicalizeUrl, capExtract, capResponse, charsetFromContentType, charsetFromHtml, citationTokensIn, classifyYtdlpError, cleanInline, codeMask, collectCitations, configure, contactUa, contentCoverage, contentHash, corpusLabels, corpusMarkdown, cosine, crawlConcurrency, crawlSite, createServer, danglingTokens, ddgRedirectTarget, ddgRegion, deaccent, decodeBody, decodeEntities, decodeLocal, dedupeByUrl, dedupeNearDuplicates, defaultUa, deleteCollection, deriveCitableUrl, detectRateLimited, discoverFeeds, diversify, docFlagRegex, docFormatForContentType, docFormatForUrl, documentedFlags, doiFromUrl, domainOf, downloadSubtitle, embed, embedModel, embedOne, embedPrefixes, embeddingsDisabled, emitWorkflowScript, enabledDocExtractors, enabledExtractors, enabledTranscribers, ensureClone, ensureCollection, ensureComposeMaterialized, ensureDir, ensureHistoryDepth, env, envFlag, envInt, envName, escapeRegExp, excerptWindows, expandTokens, externalHosts, extractClaimUnits, extractDocument, extractFrames, extractJsonLd, extractMainHtml, extractMetaTags, extractNumerals, extractPdf, extractTables, fetchAndExtract, fetchFeed, fetchRobots, fetchSitemap, fetchVideoCorpus, fetchVideoRun, fingerprint, firecrawlBase, firecrawlIsExplicit, fnv1a64, fnv1a64Words, focusedSnippet, foldTerm, forgeAuthHeaders, forgeKind, forgeRef, formatStamp, hammingDistance, hasChanged, have, headCommit, helpCoversFlag, hostDelayMs, htmlCanonicalUrl, htmlTitle, htmlToMarkdown, htmlToText, httpGet, httpJson, hybridSearch, isAllowed, isApiEndpoint, isCacheFresh, isCitableUrl, isInvokedDirectly, isKeylessEngine, isNoWrite, isOriginAllowed, isProtocolVersion, isStopword, jsonLine, keylessEngines, keywords, knownVideo, linksFrom, listPhases, listReleases, listResources, listTags, listVideoRuns, listVideos, looksLikeChallenge, looksLikeFirecrawl, looksLikeJunkExtraction, looksLikePdfUrl, lookupPackage, lookupPackageResult, mapGithubIssues, mapLimit, mapScrapeResponse, mapSearchResponse, markFirecrawlDown, markedQuoteMask, matcherFromTokens, maxCrawlDelayMs, mergeSegments, metaDescriptionOf, missingFromHelp, nearestHeading, negotiateProtocol, normalize, normalizeDoi, normalizeNumeralText, normalizeRepoUrl, ocrBudgetLeft, ocrPdf, ocrTools, officeToText, ollamaBase, oneWriterFooter, orMasks, orchestrateRun, originUrl, pageDelayMs, pageMetadata, parseArgs, parseDdgHtml, parseDdgLite, parseFeed, parseFileLine, parseMojeek, parseRetryAfter, parseRobots, parseSitemap, parseVtt, pdfToText, pipedEnum, politeDelayMs, positionalText, probeFirecrawl, probeOllama, probeQdrant, probeSearxng, probeVideo, pubmedAbstractUrl, qdrantBase, rankedKeywords, readCapped, readCappedBytes, readJsonSafe, readManifest, readResource, readVideoRun, recencyScore, renderAsset, repoCacheRoot, repoFacts, repoFactsResult, rescueViaWayback, resetBrand, resetCacheMode, resetCanonicalRepoCache, resetDocLadderCache, resetFirecrawlProbeCache, resetHaveCache, resetHistoryDepthCache, resetHostSchedule, resetNoWrite, resetOcrBudget, resetOcrTools, resetOllamaProbe, resetPdfLadderCache, resetQdrantProbe, resetRobotsCache, resetRunLocks, resetSearxngProbeCache, resetVideoLadderCache, resolvePackage, resolvePackageResult, resolveProvider, resolveRegion, resolveRepo, resolveSkillRoot, revalidationHeaders, rrf, runId, runStdioServer, runWithInput, runbookMd, sameCommit, scrapeViaFirecrawl, search, searchIssues, searchVectors, searchViaFirecrawl, searchViaKeyless, searchViaSearxng, searchVideoRuns, searxngBase, searxngIsExplicit, searxngLanguage, setCacheMode, setNoWrite, setVideoDeps, sh, shAsync, shq, simhash, siteOf, skillName, sleep, slugify, sniffDocument, stackControl, startHttpServer, stripConsentBoilerplate, stripHtmlComments, stripInlineCode, stripTags, structuredContentFor, subtokens, tableToMarkdown, takeArtifacts, throttleReason, toBatches, transcribeVideo, transcriptMarkdown, uncitedIds, unitTexts, unknownEngines, upsert, urlDeclaresIdentity, validateArgs, videoMetaFromInfo, videoRoot, videoRunKey, videoSource, videoUrlAt, whisperBudgetLeft, whisperModel, withRunLock, writeArtifact, writeFileAtomic, writeManifest, youtubeListKind, youtubeVideoId, ytdlpVersionAge };

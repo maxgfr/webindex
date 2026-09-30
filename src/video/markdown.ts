@@ -31,7 +31,9 @@ const baseLang = (tag: string) =>
 /** How the transcript was made, and — for a subtitle track in another language than the video's — that it is a translation. */
 function source(t: VideoTranscript): string | undefined {
   if (!t.via) return undefined;
-  const how = `${VIA_LABEL[t.via] ?? t.via} (${t.via}${t.track ? `, track ${t.track}` : ""})`;
+  const site = t.meta?.site ?? "youtube";
+  const label = t.via === "auto-subs" && site !== "youtube" ? `the site's auto-captions` : (VIA_LABEL[t.via] ?? t.via);
+  const how = `${label} (${t.via}${t.track ? `, track ${t.track}` : ""})`;
   const spoken = t.meta?.language;
   if (t.track && spoken && baseLang(t.track) !== baseLang(spoken)) return `${how} — a translation: the video speaks ${spoken}`;
   return how;

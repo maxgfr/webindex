@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -93,7 +93,7 @@ describe("fetchVideoRun", () => {
     setVideoDeps({ run: async () => ({ ok: false, status: 1, stdout: "", stderr: "ERROR: [youtube] x: Private video" }), have: () => true });
     expect(await fetchVideoRun(ZOO, root)).toEqual({ ok: false, id: "jNQXAC9IVRw", reason: "private video" });
     expect(() => readFileSync(join(root, "jNQXAC9IVRw", "meta.json"))).toThrow();
-    expect(await fetchVideoRun("https://example.com/x", root)).toEqual({ ok: false, reason: "not a YouTube video URL: https://example.com/x" });
+    expect(await fetchVideoRun("ftp://example.com/x", root)).toEqual({ ok: false, reason: "not a video URL: ftp://example.com/x" });
   });
 
   it("writes nothing under no-write, and hands the transcript back instead", async () => {
@@ -146,6 +146,97 @@ describe("searchVideoRuns", () => {
 
   it("finds nothing in a directory with no runs", () => {
     expect(searchVideoRuns(join(root, "missing"), "anything")).toEqual([]);
+  });
+});
+
+describe("other sites", () => {
+  const VIMEO = {
+    id: "76979871",
+    extractor_key: "Vimeo",
+    title: "The New Vimeo Player",
+    duration: 62,
+    webpage_url: "https://player.vimeo.com/video/76979871",
+    subtitles: { en: [] },
+    automatic_captions: {},
+  };
+  const WEB = { ...VIMEO, id: "talk", extractor_key: "Generic", title: "A talk", webpage_url: "https://example.com/talk" };
+  const other =
+    (info: Record<string, unknown>, calls: string[][]): VideoRunner =>
+    async (_cmd, args) => {
+      calls.push(args);
+      if (args.includes("-J")) return { ok: true, status: 0, stdout: JSON.stringify(info), stderr: "" };
+      const o = args[args.indexOf("-o") + 1]!;
+      writeFileSync(join(o.slice(0, o.lastIndexOf("/")), "sub.en.srt"), "1\n00:00:05,000 --> 00:00:09,000\nThe best player in the galaxy.\n");
+      return { ok: true, status: 0, stdout: "", stderr: "" };
+    };
+
+  it("writes a run under the URL's own key, even when yt-dlp names the video differently", async () => {
+    const calls: string[][] = [];
+    // yt-dlp calls a Twitch VOD "v123"; the URL's key is twitch-123.
+    setVideoDeps({
+      run: other({ ...VIMEO, id: "v123", extractor_key: "TwitchVod", webpage_url: "https://www.twitch.tv/videos/123" }, calls),
+      have: () => true,
+    });
+    expect(await fetchVideoRun("https://www.twitch.tv/videos/123", root)).toMatchObject({ ok: true, id: "twitch-123" });
+    const n = calls.length;
+    expect(await fetchVideoRun("https://www.twitch.tv/videos/123", root)).toMatchObject({ ok: true, reused: true });
+    expect(calls.length).toBe(n);
+  });
+
+  it("keeps a Vimeo video under vimeo-<id>, reads its SRT track, and reuses it with no yt-dlp", async () => {
+    const calls: string[][] = [];
+    setVideoDeps({ run: other(VIMEO, calls), have: () => true });
+    const r = await fetchVideoRun("https://vimeo.com/76979871", root);
+    expect(r).toMatchObject({ ok: true, id: "vimeo-76979871", dir: join(root, "vimeo-76979871"), reused: false });
+    expect(readFileSync(join(root, "vimeo-76979871", "TRANSCRIPT.md"), "utf8")).toContain("[00:05] The best player in the galaxy.");
+    const n = calls.length;
+    expect(await fetchVideoRun("https://player.vimeo.com/video/76979871", root)).toMatchObject({ ok: true, reused: true });
+    expect(calls.length).toBe(n);
+    expect(searchVideoRuns(root, "galaxy player")[0]).toMatchObject({ videoId: "vimeo-76979871", url: "https://player.vimeo.com/video/76979871#t=5s" });
+  });
+
+  it("probes an unknown page once, then reuses its run by the key yt-dlp gave", async () => {
+    const calls: string[][] = [];
+    setVideoDeps({ run: other(WEB, calls), have: () => true });
+    const r = await fetchVideoRun("https://example.com/talk", root);
+    expect(r.ok && r.id).toMatch(/^web-talk-[0-9a-f]{8}$/);
+    expect(r).toMatchObject({ ok: true, reused: false });
+    expect(calls.filter((c) => c.includes("-J"))).toHaveLength(1);
+    const again = await fetchVideoRun("https://example.com/talk", root);
+    expect(again).toMatchObject({ ok: true, reused: true });
+    // One probe to learn the key, nothing else.
+    expect(calls.filter((c) => c.includes("-J"))).toHaveLength(2);
+    expect(calls.filter((c) => !c.includes("-J"))).toHaveLength(1);
+  });
+});
+
+describe("search stamps", () => {
+  it("points at the segment that answers, not at the start of its passage", async () => {
+    const dir = join(root, "focus");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "meta.json"),
+      JSON.stringify({
+        id: "focus",
+        title: "t",
+        chapters: [],
+        subtitles: [],
+        autoCaptions: [],
+        webpageUrl: "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+        via: "manual-subs",
+      }),
+    );
+    writeFileSync(
+      join(dir, "segments.json"),
+      JSON.stringify([
+        { start: 0, end: 15, text: "An introduction about nothing in particular." },
+        { start: 15, end: 30, text: "More of the introduction, still nothing." },
+        { start: 30, end: 44, text: "The SE3 is the best value for money." },
+      ]),
+    );
+    const [hit] = searchVideoRuns(dir, "best value money");
+    expect(hit).toMatchObject({ start: 30, stamp: "00:30", url: "https://www.youtube.com/watch?v=aaaaaaaaaaa&t=30s" });
+    expect(hit!.text).toContain("An introduction");
   });
 });
 

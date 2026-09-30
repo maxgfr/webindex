@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fetchAndExtract, looksLikePdfUrl, type ExtractorId } from "./fetch.js";
 import { docFormatForUrl } from "./doc.js";
-import { youtubeVideoId } from "./video.js";
+import { knownVideo } from "./video.js";
 import { firecrawlBase, firecrawlIsExplicit, probeFirecrawl } from "./firecrawl.js";
 import { canonicalizeUrl, domainOf, fnv1a64 } from "./url.js";
 import { isNoWrite, writeFileAtomic } from "./no-write.js";
@@ -139,7 +139,7 @@ type CacheNamespace = ExtractorId | typeof PDF_CACHE_NS | typeof DOC_CACHE_NS | 
 
 async function currentExtractor(opts: { firecrawl?: string; fullPage?: boolean }, url: string): Promise<CacheNamespace> {
   if (looksLikePdfUrl(url)) return PDF_CACHE_NS;
-  if (youtubeVideoId(url)) return VIDEO_CACHE_NS;
+  if (knownVideo(url)) return VIDEO_CACHE_NS;
   if (docFormatForUrl(url)) return DOC_CACHE_NS;
   // A full-page read never goes to Firecrawl, so it must never be served Firecrawl's text.
   if (opts.fullPage) return "native";
@@ -154,6 +154,9 @@ const DOCUMENT_NAMESPACES: CacheNamespace[] = [PDF_CACHE_NS, DOC_CACHE_NS, VIDEO
 const WRITTEN_NAMESPACES: CacheNamespace[] = ["native", "firecrawl", ...DOCUMENT_NAMESPACES];
 
 function namespaceFor(result: Extract, predicted: CacheNamespace): CacheNamespace {
+  // A video host's page read as a page (no video on it) is a page: filed where
+  // pages are, with its format and read mode, not under the video namespace.
+  if (predicted === VIDEO_CACHE_NS && result.documentType !== "video") return result.extractor ?? "native";
   return (
     result.documentType ??
     (predicted === PDF_CACHE_NS || predicted === DOC_CACHE_NS || predicted === VIDEO_CACHE_NS ? predicted : (result.extractor ?? "native"))
@@ -552,6 +555,8 @@ export async function cachedFetchAndExtract(
 // failed on, which is still the best this page has.
 function lookup(url: string, acceptLanguage: string, ns: CacheNamespace, variant: CacheVariant): CacheEntry | undefined {
   const best = readAnyNamespace(url, acceptLanguage, [...new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
+  // ...and found there again, in its own variant.
+  if (ns === VIDEO_CACHE_NS && !best) return readCache(url, acceptLanguage, "native", variant);
   if (ns !== "firecrawl") return best;
   const fallback = readCache(url, acceptLanguage, "native", variant);
   return fallback?.fallbackFrom === "firecrawl" && (!best || fallback.cachedAt > best.cachedAt) ? fallback : best;
