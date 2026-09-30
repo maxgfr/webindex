@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.25.0](https://github.com/maxgfr/webindex/compare/v1.24.0...v1.25.0) (2026-09-30)
+
+
+### Bug Fixes
+
+* **video:** no-write, language and partial runs, downloads and replacements ([d33a873](https://github.com/maxgfr/webindex/commit/d33a873adf13a7976754c53378005436f755d2bf))
+
+
+### Features
+
+* **video:** read playlists and channels as a corpus, and serve video over MCP ([a12e2cd](https://github.com/maxgfr/webindex/commit/a12e2cd44d5017d3667ab8a978b92d06961c017c))
+
 # [1.24.0](https://github.com/maxgfr/webindex/compare/v1.23.0...v1.24.0) (2026-09-30)
 
 
