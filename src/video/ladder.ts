@@ -1,7 +1,7 @@
 import { envName } from "../brand.js";
 import { have } from "../exec.js";
 import { enginesFromEnv } from "../pdf/ladder.js";
-import { youtubeVideoId } from "./url.js";
+import { videoSource } from "./url.js";
 import { mergeSegments, parseVtt, type VideoSegment } from "./vtt.js";
 import { resetWhisperBudget, whisperBudgetLeft, whisperTranscribe } from "./whisper.js";
 import { defaultVideoRunner, downloadSubtitle, probeVideo, type VideoChapter, type VideoMeta, type VideoRunner } from "./ytdlp.js";
@@ -55,6 +55,14 @@ export interface VideoLadderOptions {
   deps?: Partial<VideoDeps>;
   /** Stops the ladder, and kills whichever command it is running. */
   signal?: AbortSignal;
+  /**
+   * Read only the video hosts `knownVideo` recognises (YouTube, Vimeo,
+   * Dailymotion…), not any http(s) URL. Off by default: an explicit request
+   * for a video's transcript may name any page yt-dlp can read.
+   */
+  knownHostsOnly?: boolean;
+  /** The probe of this very URL, already made (see probeVideo): the page is not extracted a second time. */
+  probed?: { meta: VideoMeta; info: string };
 }
 
 // What the ladder runs through when a caller passes no deps of its own. A test
@@ -173,12 +181,13 @@ async function whisperRung(meta: VideoMeta, info: string, opts: VideoLadderOptio
 const plain = (segments: VideoSegment[]) => segments.map((s) => s.text).join("\n");
 
 /**
- * A YouTube video's transcript, from the first rung whose output passes the
- * quality gate. Never throws: every failure is a `reason`.
+ * A video's transcript — YouTube, or any site yt-dlp reads — from the first
+ * rung whose output passes the quality gate. Never throws: every failure is a
+ * `reason`.
  *
- * Only a URL `youtubeVideoId` recognises is read, and yt-dlp is handed the
- * canonical watch URL rebuilt from its id — never the caller's string, which
- * could otherwise reach yt-dlp as an option.
+ * Only an http(s) URL is read, and it always reaches yt-dlp after `--`, so no
+ * caller's string can be taken for an option. A known host's URL is rebuilt
+ * from its id first (a YouTube watch URL, Vimeo's player).
  */
 export async function transcribeVideo(url: string, opts: VideoLadderOptions = {}): Promise<VideoTranscript> {
   const none = (reason: string, meta?: VideoMeta): VideoTranscript => ({
@@ -188,13 +197,13 @@ export async function transcribeVideo(url: string, opts: VideoLadderOptions = {}
     ...(meta ? { meta } : {}),
     reason,
   });
-  const id = youtubeVideoId(url);
-  if (!id) return none(`not a YouTube video URL: ${url}`);
+  const source = videoSource(url, { anySite: !opts.knownHostsOnly });
+  if (!source) return none(`not a video URL${opts.knownHostsOnly ? " on a known video host" : ""}: ${url}`);
   const deps = videoDeps(opts.deps);
   const rungs = enabledTranscribers(opts.engines);
   if (!rungs.length) return none(`every transcript rung is switched off (${envName("VIDEO_ENGINES")})`);
 
-  const probe = await probeVideo(`https://www.youtube.com/watch?v=${id}`, deps.run, opts.signal);
+  const probe = opts.probed ?? (await probeVideo(source.url, deps.run, opts.signal));
   if ("error" in probe) return none(probe.error);
   const { meta, info } = probe;
   // A stream on air has no end to transcribe, and whisper would record it

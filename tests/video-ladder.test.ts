@@ -14,6 +14,7 @@ import {
   type VideoRunner,
 } from "../src/video.js";
 import { pickAutoTrack, pickManualTrack } from "../src/video/ladder.js";
+import { AUDIO_FORMAT } from "../src/video/whisper.js";
 
 const fixture = (name: string) => readFileSync(join(import.meta.dirname, "fixtures", "video", name), "utf8");
 const INFO = JSON.parse(fixture("ted-info.json")) as Record<string, unknown>;
@@ -48,7 +49,7 @@ function runner(script: Script, calls: string[][] = []): VideoRunner {
       if (vtt) writeFileSync(join(outDir(args), `sub.${lang}.vtt`), vtt);
       return ok();
     }
-    if (cmd === "yt-dlp" && args.includes("bestaudio/best")) {
+    if (cmd === "yt-dlp" && args.includes(AUDIO_FORMAT)) {
       writeFileSync(join(outDir(args), "audio.webm"), "audio");
       return ok();
     }
@@ -97,6 +98,18 @@ describe("videoMetaFromInfo", () => {
   it("names an untitled chapter plainly", () => {
     const meta = videoMetaFromInfo({ id: "abc", chapters: [{ start_time: 0, end_time: 5, title: "<Untitled Chapter 1>" }] })!;
     expect(meta.chapters[0]!.title).toBe("Chapter 1");
+  });
+
+  it("names the site and the run key from yt-dlp's extractor", () => {
+    expect(videoMetaFromInfo(INFO)).toMatchObject({ site: "youtube", key: "iG9CE55wbtY" });
+    const vimeo = videoMetaFromInfo({ id: "76979871", extractor_key: "Vimeo", webpage_url: "https://player.vimeo.com/video/76979871" })!;
+    expect(vimeo).toMatchObject({ site: "vimeo", key: "vimeo-76979871", webpageUrl: "https://player.vimeo.com/video/76979871" });
+    expect(videoMetaFromInfo({ id: "x", extractor_key: "Generic", webpage_url: "javascript:alert(1)", original_url: "https://example.com/v" })).toMatchObject({
+      site: "web",
+      key: "web-x",
+      webpageUrl: "https://example.com/v",
+    });
+    expect(videoMetaFromInfo({ id: "1", extractor: "twitch:vod" })!.site).toBe("twitch");
   });
 
   it("drops the live-chat pseudo track and refuses an entry with no id", () => {
@@ -259,13 +272,30 @@ describe("transcribeVideo", () => {
     expect(ytdlp[1]!.slice(-2)).toEqual(["--cookies-from-browser", "firefox"]);
   });
 
-  it("refuses anything that is not a YouTube video before running a command", async () => {
+  it("refuses anything that is not an http(s) URL before running a command", async () => {
     const calls: string[][] = [];
-    for (const bad of ["--config-locations=/tmp/x", "https://example.com/watch?v=iG9CE55wbtY", "https://www.youtube.com/@TED"]) {
+    for (const bad of ["--config-locations=/tmp/x", "file:///etc/passwd", "ftp://example.com/v.mp4", ""]) {
       const t = await transcribeVideo(bad, { deps: { run: runner({}, calls), have: haveAll } });
-      expect(t.reason).toBe(`not a YouTube video URL: ${bad}`);
+      expect(t.reason).toBe(`not a video URL: ${bad}`);
     }
     expect(calls).toEqual([]);
+  });
+
+  it("reads only known video hosts when asked to, and any page otherwise — always after --", async () => {
+    const calls: string[][] = [];
+    const known = await transcribeVideo("https://example.com/talk", { knownHostsOnly: true, deps: { run: runner({}, calls), have: haveAll } });
+    expect(known.reason).toBe("not a video URL on a known video host: https://example.com/talk");
+    expect(calls).toEqual([]);
+    await transcribeVideo("https://example.com/talk", {
+      deps: { run: runner({ probe: fail("ERROR: Unsupported URL: https://example.com/talk") }, calls), have: haveAll },
+    });
+    expect(calls[0]!.slice(-2)).toEqual(["--", "https://example.com/talk"]);
+  });
+
+  it("hands yt-dlp Vimeo's player, not the page that asks for a login", async () => {
+    const calls: string[][] = [];
+    await transcribeVideo("https://vimeo.com/76979871", { deps: { run: runner({ probe: fail("x") }, calls), have: haveAll } });
+    expect(calls[0]!.at(-1)).toBe("https://player.vimeo.com/video/76979871");
   });
 
   it("does not try to transcribe a live or upcoming stream", async () => {
@@ -320,7 +350,7 @@ describe("whisper", () => {
   it("refunds the budget when no transcription was attempted", async () => {
     process.env.WEBINDEX_TEST_WHISPER_MAX = "1";
     const noAudio: VideoRunner = async (cmd, args, opts) =>
-      cmd === "yt-dlp" && args.includes("bestaudio/best") ? fail("ERROR: HTTP Error 403: Forbidden") : runner({ info, whisper: talk(130) })(cmd, args, opts);
+      cmd === "yt-dlp" && args.includes(AUDIO_FORMAT) ? fail("ERROR: HTTP Error 403: Forbidden") : runner({ info, whisper: talk(130) })(cmd, args, opts);
     const first = await transcribeVideo(URL, { deps: { run: noAudio, have: haveAll } });
     expect(first.reason).toContain("the audio download failed");
     const second = await transcribeVideo(URL, { deps: { run: runner({ info, whisper: talk(130) }), have: haveAll } });
@@ -335,7 +365,7 @@ describe("whisper", () => {
     const budgets: number[] = [];
     const inner = runner({ info, whisper: talk(130) });
     const run: VideoRunner = async (cmd, args, opts) => {
-      if (cmd !== "yt-dlp" || args.includes("bestaudio/best")) {
+      if (cmd !== "yt-dlp" || args.includes(AUDIO_FORMAT)) {
         budgets.push(opts?.timeoutMs ?? 0);
         clock += 25_000;
       }
@@ -360,6 +390,13 @@ describe("classifyYtdlpError", () => {
     ["WARNING: [youtube] x: PO Token required", "YouTube refused yt-dlp"],
     ["ERROR: [youtube] x: This video has been removed by the uploader", "video removed"],
     ["ERROR: [youtube] x: Video unavailable", "video unavailable"],
+    [
+      "ERROR: [vimeo] 1: The web client only works when logged-in. Use --cookies, --cookies-from-browser, --username and --password",
+      "the site asks yt-dlp to log in",
+    ],
+    ["ERROR: This format is DRM protected; Try selecting another format", "under DRM"],
+    ["ERROR: Unsupported URL: https://example.com/", "no video at this URL"],
+    ["ERROR: [twitter] 1: No video could be found in this tweet", "no video at this URL"],
     ["ERROR: something new", "yt-dlp failed: something new"],
   ])("reads %s", (stderr, expected) => {
     expect(classifyYtdlpError(stderr)).toContain(expected);
@@ -371,5 +408,13 @@ describe("ytdlpVersionAge", () => {
     const run: VideoRunner = async () => ok("2026.08.19\n");
     expect(await ytdlpVersionAge(run, Date.UTC(2026, 8, 30))).toEqual({ version: "2026.08.19", ageDays: 42 });
     expect(await ytdlpVersionAge(async () => missing)).toBeUndefined();
+  });
+});
+
+describe("probing a page that is a list", () => {
+  it("says it is a list, not a video", async () => {
+    const run: VideoRunner = async () => ok(JSON.stringify({ _type: "playlist", id: "p", entries: [] }));
+    const t = await transcribeVideo("https://example.com/videos", { deps: { run, have: haveAll } });
+    expect(t.reason).toBe("a list of videos, not one — read it with `video list`");
   });
 });

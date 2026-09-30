@@ -1,7 +1,7 @@
-// YouTube video transcripts — public surface.
+// Video transcripts — YouTube, and any site yt-dlp reads — public surface.
 //
 // The implementation lives in ./video/: `url.ts` (which URLs are videos,
-// playlists or channels), `ytdlp.ts` (metadata, subtitle tracks and yt-dlp's
+// playlists or channels, on YouTube and the other hosts it knows), `ytdlp.ts` (metadata, subtitle tracks and yt-dlp's
 // errors), `vtt.ts` (WebVTT → segments, rolling auto-captions undone),
 // `whisper.ts` (local transcription, budgeted), `ladder.ts` (manual subtitles →
 // auto-captions → whisper, behind a quality gate) and `markdown.ts` (a
@@ -9,7 +9,7 @@
 //
 // Callers want `transcribeVideo`, then `transcriptMarkdown`.
 
-export { youtubeListKind, youtubeVideoId } from "./video/url.js";
+export { isVideoList, knownVideo, videoRunKey, videoSource, videoUrlAt, youtubeListKind, youtubeVideoId, type VideoSource } from "./video/url.js";
 export {
   classifyYtdlpError,
   downloadSubtitle,

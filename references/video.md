@@ -1,19 +1,46 @@
 # Video
 
-A YouTube URL becomes citable text: a transcript with a `[mm:ss]` stamp on every
+A video URL becomes citable text: a transcript with a `[mm:ss]` stamp on every
 paragraph, the frames that show what was on screen, and a corpus when there are
 several videos. Everything runs on this machine through
 [yt-dlp](https://github.com/yt-dlp/yt-dlp): no API, no key.
 
+## Which sites
+
+Anything yt-dlp reads — YouTube, and [its hundreds of other
+sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md).
+
+- **`fetch`** (and `webindex_fetch`) sends the common video hosts to the
+  transcript ladder by their URL alone: YouTube, Vimeo, Dailymotion, Twitch
+  (videos, clips), TED talks, Loom, TikTok, Instagram reels, Facebook videos, X
+  posts, Bilibili, Rumble and a few PeerTube instances. Every other URL is read
+  as a page, as before. A post on one of those hosts that turns out to hold no
+  video (a text-only tweet) is read as the page it is, with a note.
+- **`video fetch|frames|list`** take any http(s) URL and let yt-dlp decide.
+  Under an MCP policy (`--public-only`, `--extract-root`, `--allow-remote`) the
+  video tools read only the known hosts, and lists only YouTube's: yt-dlp
+  follows its own redirects, where the public-address check cannot see them.
+- **Vimeo** is read through its player (`player.vimeo.com/video/<id>`, with the
+  `?h=` of an unlisted link): `vimeo.com`'s own page now asks yt-dlp to log in.
+  Some Vimeo videos are served under DRM: their subtitles read, their picture
+  and sound (frames, whisper) cannot — the note says so.
+- **Subtitles** in WebVTT or SRT (Dailymotion serves only SRT). Auto-captions
+  are YouTube's; elsewhere a video without subtitles goes to whisper.
+- **Run keys**: a YouTube run is kept under its id, any other under
+  `<site>-<id>` (`vimeo-76979871`, `dailymotion-x7tgad0`). A known host's run is
+  reused with no yt-dlp call; any other page costs one probe to learn its key.
+- **Links** open at the second in each site's own form: YouTube `?t=`, Vimeo
+  `#t=`, Dailymotion `?start=`, Twitch `?t=1h2m3s`.
+
 ## The transcript ladder
 
-`webindex fetch <youtube-url>` (and `webindex_fetch`, and every tool that vendors
+`webindex fetch <video-url>` (and `webindex_fetch`, and every tool that vendors
 the engine) reads a video by trying three rungs in order, stopping at the first
 whose output passes the quality gate:
 
 | Rung | What it reads | Cost |
 |---|---|---|
-| `manual-subs` | subtitles a person typed: the requested language (`--lang`), else the video's own, else English, else the first listed | seconds |
+| `manual-subs` | subtitles the site carries (WebVTT or SRT): the requested language (`--lang`), else the video's own, else English, else the first listed | seconds |
 | `auto-subs` | YouTube's speech recognition **in the video's own language** (`<lang>-orig`), never one of its machine translations | seconds |
 | `whisper` | a local transcription: yt-dlp fetches the audio, ffmpeg makes it 16 kHz mono, `uvx whisper-ctranslate2` transcribes it | minutes, plus the model the first time (`small` is ~500 MB) |
 
@@ -41,6 +68,10 @@ Nothing throws. Each failure comes back as a note saying which:
 |---|---|
 | `install yt-dlp` | install it (`brew install yt-dlp`, `pipx install yt-dlp`) |
 | `YouTube refused yt-dlp` (403, "Sign in to confirm you're not a bot", PO token) | update yt-dlp (`yt-dlp -U`; `doctor` flags a release older than 60 days), or `WEBINDEX_YTDLP_ARGS="--cookies-from-browser firefox"` |
+| `the site asks yt-dlp to log in` | a signed-in session: `WEBINDEX_YTDLP_ARGS="--cookies-from-browser firefox"` |
+| `the site serves this video under DRM` | subtitles still read; frames and whisper cannot |
+| `no video at this URL (yt-dlp found none)` | the page holds no video yt-dlp can read |
+| `a list of videos, not one` | read it with `video list` |
 | `private video`, `members-only video`, `video removed`, `video unavailable` | nothing — the video is not readable |
 | `age-restricted video` | a signed-in session: `WEBINDEX_YTDLP_ARGS="--cookies-from-browser firefox"` |
 | `no subtitles, and whisper needs uvx and ffmpeg` | install [uv](https://docs.astral.sh/uv/) and ffmpeg |

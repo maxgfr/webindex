@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { brand, env, envName } from "../brand.js";
 import { shAsync, type ShResult } from "../exec.js";
+import { videoRunKey } from "./url.js";
 
 // Everything that talks to yt-dlp.
 //
@@ -43,7 +44,12 @@ export interface VideoChapter {
 
 /** What yt-dlp's `-J` says about one video, reduced to what a transcript needs. */
 export interface VideoMeta {
+  /** The site's own id for the video. */
   id: string;
+  /** `youtube`, `vimeo`, `dailymotion`… — from yt-dlp's extractor. Absent in runs written before other sites were read: YouTube. */
+  site?: string;
+  /** The run directory's name: the YouTube id itself, else `<site>-<id>`. */
+  key?: string;
   title: string;
   channel?: string;
   /** YYYY-MM-DD. */
@@ -66,12 +72,18 @@ export interface VideoMeta {
 export type VideoProbe = { meta: VideoMeta; info: string } | { error: string; missing?: boolean };
 
 const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+// Only an http(s) URL is ever handed back to yt-dlp (frames, whisper): a site's
+// own metadata must not be able to smuggle in anything else.
+const httpUrl = (v: string | undefined) => (v && /^https?:\/\//i.test(v) ? v : undefined);
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 
 /** Project yt-dlp's info JSON onto VideoMeta. Undefined when it is not a single video. */
 export function videoMetaFromInfo(info: Record<string, unknown>): VideoMeta | undefined {
   const id = str(info.id);
   if (!id) return undefined;
+  // "Youtube", "Vimeo", "twitch:vod", "Generic" → youtube, vimeo, twitch, web.
+  const extractor = (str(info.extractor_key) ?? str(info.extractor) ?? "youtube").toLowerCase().split(":")[0]!;
+  const site = extractor === "generic" ? "web" : extractor.replace(/[^a-z0-9]/g, "") || "web";
   const date = str(info.upload_date);
   const tracks = (v: unknown) => (v && typeof v === "object" ? Object.keys(v as object).filter((k) => k !== "live_chat") : []);
   const duration = num(info.duration);
@@ -88,6 +100,8 @@ export function videoMetaFromInfo(info: Record<string, unknown>): VideoMeta | un
     : [];
   return {
     id,
+    site,
+    key: videoRunKey(site, id),
     title: str(info.title) ?? id,
     channel: str(info.channel) ?? str(info.uploader),
     uploadDate: date && /^\d{8}$/.test(date) ? `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}` : undefined,
@@ -96,7 +110,7 @@ export function videoMetaFromInfo(info: Record<string, unknown>): VideoMeta | un
     chapters,
     subtitles: tracks(info.subtitles),
     autoCaptions: tracks(info.automatic_captions),
-    webpageUrl: str(info.webpage_url) ?? `https://www.youtube.com/watch?v=${id}`,
+    webpageUrl: httpUrl(str(info.webpage_url)) ?? httpUrl(str(info.original_url)) ?? `https://www.youtube.com/watch?v=${id}`,
     ...(info.live_status === "is_live" || info.is_live === true ? { live: "live" as const } : {}),
     ...(info.live_status === "is_upcoming" ? { live: "upcoming" as const } : {}),
   };
@@ -109,8 +123,11 @@ export async function probeVideo(url: string, run: VideoRunner = defaultVideoRun
   if (r.missing) return { error: "install yt-dlp (https://github.com/yt-dlp/yt-dlp) to read videos", missing: true };
   if (!r.ok) return { error: classifyYtdlpError(r.stderr) };
   try {
-    const meta = videoMetaFromInfo(JSON.parse(r.stdout) as Record<string, unknown>);
-    return meta ? { meta, info: r.stdout } : { error: "yt-dlp returned no video for this URL" };
+    const parsed = JSON.parse(r.stdout) as Record<string, unknown> | null;
+    // A page holding several videos (a playlist, an archive item) is a list, not a video.
+    if (parsed?._type === "playlist") return { error: "a list of videos, not one — read it with `video list`" };
+    const meta = parsed ? videoMetaFromInfo(parsed) : undefined;
+    return meta ? { meta, info: r.stdout } : { error: "no video at this URL (yt-dlp found none)" };
   } catch {
     return { error: "yt-dlp returned unreadable metadata" };
   }
@@ -125,6 +142,9 @@ export function classifyYtdlpError(stderr: string): string {
   const s = stderr || "";
   const unblock = `update yt-dlp (\`${brand().cli} doctor\` shows how old it is) or set ${envName("YTDLP_ARGS")}="--cookies-from-browser firefox"`;
   if (/private video/i.test(s)) return "private video";
+  if (/logged-in|log(?:ged)? ?in (?:is )?required|login required|requires? (?:a )?login|--username and --password|account credentials/i.test(s)) {
+    return `the site asks yt-dlp to log in — ${envName("YTDLP_ARGS")}="--cookies-from-browser firefox" passes your browser's session`;
+  }
   if (/members[- ]only|join this channel/i.test(s)) return "members-only video";
   if (/confirm your age|age[- ]restricted|inappropriate for some users/i.test(s)) {
     return `age-restricted video — it needs a signed-in session: ${envName("YTDLP_ARGS")}="--cookies-from-browser firefox"`;
@@ -133,6 +153,8 @@ export function classifyYtdlpError(stderr: string): string {
   if (/has been removed|account .*terminated|no longer available|copyright claim/i.test(s)) return "video removed";
   if (/unavailable|not available/i.test(s)) return "video unavailable";
   if (/timed out after/i.test(s)) return "yt-dlp timed out";
+  if (/DRM protected/i.test(s)) return "the site serves this video under DRM: its picture and sound cannot be downloaded (subtitles still can)";
+  if (/unsupported url|no video (?:formats|could be found)|no media found|there's no video/i.test(s)) return "no video at this URL (yt-dlp found none)";
   const line = s
     .split("\n")
     .map((l) => l.trim())
@@ -174,13 +196,14 @@ export async function downloadSubtitle(
         "--sub-langs",
         lang,
         "--sub-format",
-        "vtt",
+        "vtt/srt",
         "-o",
         join(dir, "sub.%(ext)s"),
       ],
       { run, timeoutMs: SUBTITLE_TIMEOUT_MS, signal },
     );
-    const file = readdirSync(dir).find((f) => f.endsWith(".vtt"));
+    // WebVTT where the site has it, SRT otherwise (Dailymotion serves only SRT).
+    const file = readdirSync(dir).find((f) => f.endsWith(".vtt")) ?? readdirSync(dir).find((f) => f.endsWith(".srt"));
     if (file) return { vtt: readFileSync(join(dir, file), "utf8") };
     if (signal?.aborted) return { error: "cancelled" };
     return { error: r.ok ? `yt-dlp wrote no ${lang} track` : classifyYtdlpError(r.stderr) };

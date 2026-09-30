@@ -80,6 +80,14 @@ describe("parseVtt", () => {
     expect(parseVtt(vtt).map((c) => c.text)).toEqual(["Never gonna give you up", "Never gonna give you up"]);
   });
 
+  it("reads an SRT track as well (Dailymotion serves nothing else)", () => {
+    const srt = "1\n00:00:00,000 --> 00:00:04,960\nLorem ipsum dolor sit amet,\n\n2\n00:00:05,520 --> 00:00:09,860\nconsectetur adipiscing elit\n";
+    expect(parseVtt(srt)).toEqual([
+      { start: 0, end: 4.96, text: "Lorem ipsum dolor sit amet," },
+      { start: 5.52, end: 9.86, text: "consectetur adipiscing elit" },
+    ]);
+  });
+
   it("returns nothing for something that is not WebVTT", () => {
     expect(parseVtt("")).toEqual([]);
     expect(parseVtt("<html>blocked</html>")).toEqual([]);

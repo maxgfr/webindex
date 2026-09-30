@@ -4,7 +4,7 @@ import { mapLimit } from "../pool.js";
 import { videoDeps, type VideoDeps, type VideoLadderOptions } from "./ladder.js";
 import { formatStamp } from "./markdown.js";
 import { fetchVideoRun } from "./run.js";
-import { youtubeListKind, youtubeVideoId } from "./url.js";
+import { knownVideo, youtubeListKind, youtubeVideoId } from "./url.js";
 import { classifyYtdlpError, runYtdlp } from "./ytdlp.js";
 
 // Several videos at once: a playlist or a channel listed without reading any
@@ -19,7 +19,10 @@ const CORPUS_CONCURRENCY = 2;
 
 /** One video a listing names. */
 export interface ListedVideo {
+  /** The site's id for it. */
   id: string;
+  /** Its run key, when its URL gives one (every YouTube video does). */
+  key?: string;
   title: string;
   duration?: number;
   url: string;
@@ -40,10 +43,13 @@ function listingUrl(url: string): string {
  */
 export async function listVideos(
   url: string,
-  opts: { limit?: number; deps?: Partial<VideoDeps>; signal?: AbortSignal } = {},
+  opts: { limit?: number; deps?: Partial<VideoDeps>; signal?: AbortSignal; knownHostsOnly?: boolean } = {},
 ): Promise<{ title?: string; videos: ListedVideo[] } | { error: string }> {
-  const kind = youtubeListKind(url);
-  if (!kind) return { error: `not a YouTube playlist or channel URL: ${url}` };
+  // YouTube's lists are recognised by their URL; on any other site the URL
+  // is handed to yt-dlp as is, and its answer says whether it was a list.
+  const u = /^https?:\/\//i.test(url) ? url : undefined;
+  if (!u || (!youtubeListKind(url) && (opts.knownHostsOnly || knownVideo(url))))
+    return { error: `not a playlist or channel URL${opts.knownHostsOnly ? " on YouTube" : ""}: ${url}` };
   const limit = Math.max(1, Math.trunc(opts.limit ?? DEFAULT_LIMIT));
   const r = await runYtdlp(["--flat-playlist", "-J", "--playlist-end", String(limit), "--no-warnings"], {
     run: videoDeps(opts.deps).run,
@@ -57,13 +63,21 @@ export async function listVideos(
     const info = JSON.parse(r.stdout) as { title?: string; entries?: Record<string, unknown>[] };
     const videos = (info.entries ?? []).flatMap((e): ListedVideo[] => {
       const id = typeof e.id === "string" ? e.id : "";
-      const watch = `https://www.youtube.com/watch?v=${id}`;
       // A channel tab or a nested playlist is not a video, whatever its id looks like.
-      if (e._type === "playlist" || (typeof e.ie_key === "string" && e.ie_key !== "Youtube") || !youtubeVideoId(watch)) return [];
-      return [{ id, title: typeof e.title === "string" ? e.title : id, ...(typeof e.duration === "number" ? { duration: e.duration } : {}), url: watch }];
+      if (!id || e._type === "playlist") return [];
+      const title = typeof e.title === "string" ? e.title : id;
+      const duration = typeof e.duration === "number" ? { duration: e.duration } : {};
+      if (e.ie_key === "Youtube" || (e.ie_key === undefined && youtubeListKind(url))) {
+        const watch = `https://www.youtube.com/watch?v=${id}`;
+        return youtubeVideoId(watch) ? [{ id, key: id, title, ...duration, url: watch }] : [];
+      }
+      const entryUrl = [e.url, e.webpage_url].find((v): v is string => typeof v === "string" && /^https?:\/\//i.test(v));
+      if (!entryUrl) return [];
+      const known = knownVideo(entryUrl);
+      return [{ id, ...(known?.key ? { key: known.key } : {}), title, ...duration, url: entryUrl }];
     });
     // A playlist can hold one video twice: read once, labelled once.
-    const unique = videos.filter((v, i) => videos.findIndex((w) => w.id === v.id) === i);
+    const unique = videos.filter((v, i) => videos.findIndex((w) => w.url === v.url) === i);
     return { ...(info.title ? { title: info.title } : {}), videos: unique.slice(0, limit) };
   } catch {
     return { error: "yt-dlp returned an unreadable listing" };
@@ -133,14 +147,21 @@ export async function fetchVideoCorpus(
   // A corpus is files other commands read back; with nothing written there is
   // nothing to cite V1…Vn from.
   if (isNoWrite()) return { ok: false, reason: "a corpus is kept on disk, and nothing may be written (NO_WRITE)" };
-  const listed = await listVideos(url, { limit: opts.limit, deps: opts.deps, signal: opts.signal });
+  const listed = await listVideos(url, { limit: opts.limit, deps: opts.deps, signal: opts.signal, knownHostsOnly: opts.knownHostsOnly });
   if ("error" in listed) return { ok: false, reason: listed.error };
   if (!listed.videos.length) return { ok: false, reason: `no videos listed at ${url}` };
   let done = 0;
   const videos = await mapLimit(listed.videos, CORPUS_CONCURRENCY, async (v, i): Promise<CorpusVideo> => {
     const r = await fetchVideoRun(v.url, root, { ...opts });
-    opts.onVideo?.(++done, listed.videos.length, v.title);
-    const base = { label: `V${i + 1}`, id: v.id, title: r.ok ? r.meta.title : v.title, ...(v.duration !== undefined ? { duration: v.duration } : {}) };
+    // The video's own title: a flat listing may carry a machine-translated one.
+    opts.onVideo?.(++done, listed.videos.length, r.ok ? r.meta.title : v.title);
+    // `id` is the run's key — the directory CORPUS.md points at, and check resolves V# through.
+    const base = {
+      label: `V${i + 1}`,
+      id: r.ok ? r.id : (v.key ?? v.id),
+      title: r.ok ? r.meta.title : v.title,
+      ...(v.duration !== undefined ? { duration: v.duration } : {}),
+    };
     return r.ok
       ? { ...base, ...(r.meta.duration !== undefined ? { duration: r.meta.duration } : {}), via: r.meta.via, dir: r.dir, reused: r.reused }
       : { ...base, reason: r.reason };

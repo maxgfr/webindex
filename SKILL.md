@@ -39,7 +39,7 @@ Route by what you actually want:
 |---|---|
 | a cited recap of what the web says | `ultrasearch` |
 | a precise answer about a named open-source project | `ultradoc` |
-| a cited summary of, or answer about, YouTube videos | `ultrawatch` |
+| a cited summary of, or answer about, videos (YouTube, Vimeo…) | `ultrawatch` |
 | an idea turned into a buildable spec | `construct` |
 | one URL turned into clean text, or a pool ranked | this, directly |
 
@@ -66,7 +66,7 @@ webindex fetch <url> [--full-page]    # HTML main content, consent banners dropp
 webindex fetch <url> --format markdown # CommonMark: absolute links, fenced code, lists, tables — Firecrawl's shape, whichever extractor ran
 webindex fetch <url> --cache          # reuse a fresh copy for the TTL, revalidate a stale one (a 304 when unchanged); --refresh, --offline
 webindex fetch <url> <url> …         # several at once, each under a ==> <url> <== header (--json: an array); fails only if all did
-webindex fetch <youtube-url>         # a timestamped, chaptered transcript: manual subs → own auto-captions → local whisper
+webindex fetch <video-url>           # YouTube, Vimeo, Dailymotion…: a timestamped, chaptered transcript: manual subs → own auto-captions → local whisper
 webindex video fetch|search|frames|list …  # keep a video on disk, search it, its frames aligned with speech, a playlist as V1…Vn
 webindex extract <file|-> [--full-page] # the same on disk (- reads stdin); --full-page keeps navigation and consent banners too; --format markdown
 webindex rank --query <q> --docs <f> # BM25F + near-dup collapse + MMR; --dense adds the embedding lane
@@ -99,7 +99,8 @@ missing or out-of-range value, a stray argument.
 
 **In scope.** Discovery (SearXNG, the keyless engines, Firecrawl), retrieval
 (streaming byte caps, conditional GET, HTML→text or Markdown, main-content extraction, the
-PDF and office ladders, YouTube transcripts and frames, Wayback rescue, a
+PDF and office ladders, video transcripts and frames (YouTube and any site
+yt-dlp reads), Wayback rescue, a
 revalidating cache), text (keyword
 matching, URL identity), ranking (RRF, BM25F, SimHash, MMR), forges and package
 registries, and the whole MCP protocol.

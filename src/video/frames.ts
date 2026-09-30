@@ -6,6 +6,7 @@ import { DHASH_SAME, dhashStream, hamming } from "./dhash.js";
 import { videoDeps, type VideoDeps } from "./ladder.js";
 import { formatStamp } from "./markdown.js";
 import { readVideoRun } from "./run.js";
+import { videoSource } from "./url.js";
 import { downloadMedia, withTempDir } from "./ytdlp.js";
 
 // What is on screen: frames at every scene change and every chapter start,
@@ -20,6 +21,9 @@ export const FRAME_EFFORT = { low: 20, med: 50, high: 100 } as const;
 export type FrameEffort = keyof typeof FRAME_EFFORT;
 
 const SCENE_THRESHOLD = 0.3;
+// 720p at most, and never a DRM-protected format: some sites (Vimeo) list one
+// first, and ffmpeg can read nothing from it.
+export const VIDEO_FORMAT = "bv*[height<=720][has_drm!=?true]/b[height<=720][has_drm!=?true]/bv*[has_drm!=?true]/b[has_drm!=?true]";
 const FRAMES_TIMEOUT_MS = 30 * 60_000;
 // A video with (almost) no scene change and no chapters — a talking head, a
 // slide deck with fades — still gets this many frames, evenly spaced.
@@ -94,12 +98,15 @@ export async function extractFrames(
   if (!deps.have("ffmpeg")) return { ok: false, reason: "frames need ffmpeg" };
   const effort = opts.effort ?? "med";
   const { meta, segments } = run;
+  // The page the transcript was read from, as the ladder would hand it to yt-dlp.
+  const source = videoSource(meta.webpageUrl, { anySite: true });
+  if (!source) return { ok: false, reason: `the run in ${runDir} names no page to download the video from` };
   const duration = meta.duration ?? 0;
 
   return withTempDir("frames", async (tmp) => {
-    const dl = await downloadMedia(["-f", "bv*[height<=720]/b[height<=720]/bv*/b", "--no-playlist"], tmp, "video", {
+    const dl = await downloadMedia(["-f", VIDEO_FORMAT, "--no-playlist"], tmp, "video", {
       run: deps.run,
-      url: `https://www.youtube.com/watch?v=${meta.id}`,
+      url: source.url,
       timeoutMs: FRAMES_TIMEOUT_MS,
       signal: opts.signal,
     });

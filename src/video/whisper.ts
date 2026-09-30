@@ -21,6 +21,8 @@ const DEFAULT_MAX = 3;
 const DEFAULT_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_MODEL = "small";
 const PYAV_PIN = "av<18";
+// The best audio, never a DRM-protected format ffmpeg could not decode.
+export const AUDIO_FORMAT = "bestaudio[has_drm!=?true]/best[has_drm!=?true]";
 
 let spent = 0;
 
@@ -88,7 +90,7 @@ export async function whisperTranscribe(info: string, language: string | undefin
   return withTempDir("whisper", async (dir) => {
     const infoPath = join(dir, "info.json");
     writeFileSync(infoPath, info);
-    const dl = await downloadMedia(["--load-info-json", infoPath, "-f", "bestaudio/best"], dir, "audio", { run, timeoutMs: left, signal });
+    const dl = await downloadMedia(["--load-info-json", infoPath, "-f", AUDIO_FORMAT], dir, "audio", { run, timeoutMs: left, signal });
     if (signal?.aborted) return refund({ failed: "whisper: cancelled" });
     if ("timedOut" in dl) return timedOut;
     if ("error" in dl) return refund({ failed: `whisper: the audio download failed (${dl.error})` });

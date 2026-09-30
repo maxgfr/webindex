@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fetchAndExtract, looksLikePdfUrl, type ExtractorId } from "./fetch.js";
 import { docFormatForUrl } from "./doc.js";
-import { youtubeVideoId } from "./video.js";
+import { knownVideo } from "./video.js";
 import { firecrawlBase, firecrawlIsExplicit, probeFirecrawl } from "./firecrawl.js";
 import { canonicalizeUrl, domainOf, fnv1a64 } from "./url.js";
 import { isNoWrite, writeFileAtomic } from "./no-write.js";
@@ -139,7 +139,7 @@ type CacheNamespace = ExtractorId | typeof PDF_CACHE_NS | typeof DOC_CACHE_NS | 
 
 async function currentExtractor(opts: { firecrawl?: string; fullPage?: boolean }, url: string): Promise<CacheNamespace> {
   if (looksLikePdfUrl(url)) return PDF_CACHE_NS;
-  if (youtubeVideoId(url)) return VIDEO_CACHE_NS;
+  if (knownVideo(url)) return VIDEO_CACHE_NS;
   if (docFormatForUrl(url)) return DOC_CACHE_NS;
   // A full-page read never goes to Firecrawl, so it must never be served Firecrawl's text.
   if (opts.fullPage) return "native";

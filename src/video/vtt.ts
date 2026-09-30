@@ -20,12 +20,13 @@ export interface VideoSegment {
   text: string;
 }
 
-const TIMING = /^((?:\d+:)?\d{1,2}:\d{2}\.\d{3})\s+-->\s+((?:\d+:)?\d{1,2}:\d{2}\.\d{3})/;
+// WebVTT writes `00:01.234`, SRT `00:00:01,234`: both are read.
+const TIMING = /^((?:\d+:)?\d{1,2}:\d{2}[.,]\d{3})\s+-->\s+((?:\d+:)?\d{1,2}:\d{2}[.,]\d{3})/;
 // The bridge cues of a rolling track last 10 ms; nothing a person can read does.
 const MIN_CUE_S = 0.05;
 
 function seconds(stamp: string): number {
-  const parts = stamp.split(":").map(Number);
+  const parts = stamp.replace(",", ".").split(":").map(Number);
   return parts.reduce((acc, p) => acc * 60 + p, 0);
 }
 
@@ -48,16 +49,18 @@ const clean = (line: string) =>
     .trim();
 
 /**
- * The cues of a WebVTT file, tags stripped and entities decoded. On a rolling
+ * The cues of a WebVTT (or SRT) file, tags stripped and entities decoded. On a rolling
  * track (auto-captions) each cue opens by repeating what the previous one
  * showed; those leading lines are dropped, and a line that continues the last
  * one keeps only what it adds — while a line said twice on purpose ("no no",
  * a chorus) is kept. `rolling` defaults to what the file looks like: word-timing
- * tags give an auto track away. Empty for anything that is not WebVTT.
+ * tags give an auto track away. Empty for anything that is neither WebVTT nor SRT.
  */
 export function parseVtt(src: string, opts: { rolling?: boolean } = {}): VideoSegment[] {
   const text = src.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
-  if (!/^WEBVTT/.test(text)) return [];
+  // SRT has no header: it is recognised by a cue timing on one of its first lines.
+  const srt = !/^WEBVTT/.test(text) && /^\s*\d+\n\d{2}:\d{2}:\d{2},\d{3}\s+-->/.test(text);
+  if (!/^WEBVTT/.test(text) && !srt) return [];
   const rolling = opts.rolling ?? (/<\d{2}:\d{2}[:.]\d/.test(text) || /<c>/.test(text));
   const out: VideoSegment[] = [];
   // The lines the previous cue put on screen.

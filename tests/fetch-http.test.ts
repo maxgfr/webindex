@@ -1217,6 +1217,43 @@ describe("fetchAndExtract on a YouTube video", () => {
     expect(r.note).toBe("No transcript for https://www.youtube.com/watch?v=jNQXAC9IVRw: private video.");
   });
 
+  it("reads a Vimeo link as a video, through its player", async () => {
+    const calls: string[][] = [];
+    setVideoDeps({
+      run: async (_cmd, args) => {
+        calls.push(args);
+        if (args.includes("-J"))
+          return {
+            ok: true,
+            status: 0,
+            stdout: JSON.stringify({ ...info, id: "76979871", extractor_key: "Vimeo", webpage_url: "https://player.vimeo.com/video/76979871" }),
+            stderr: "",
+          };
+        return run(_cmd, args);
+      },
+      have: () => true,
+    });
+    const r = await fetchAndExtract("https://vimeo.com/76979871");
+    expect(r).toMatchObject({ documentType: "video", extractor: "manual-subs", finalUrl: "https://player.vimeo.com/video/76979871" });
+    expect(calls[0]!.at(-1)).toBe("https://player.vimeo.com/video/76979871");
+  });
+
+  it("reads a post on a video host as a page when it holds no video", async () => {
+    setVideoDeps({
+      run: async () => ({ ok: false, status: 1, stdout: "", stderr: "ERROR: [twitter] 1: No video could be found in this tweet" }),
+      have: () => true,
+    });
+    installFetchMock(
+      routes([
+        ["x.com/someone/status/1", { body: "<html><body><article><p>Just words in this post, a long enough sentence to keep.</p></article></body></html>" }],
+      ]),
+    );
+    const r = await fetchAndExtract("https://x.com/someone/status/1");
+    expect(r.documentType).toBeUndefined();
+    expect(r.text).toContain("Just words in this post");
+    expect(r.note).toContain("holds no video yt-dlp can read; read as a page.");
+  });
+
   it("asks authorizeUrl before yt-dlp runs", async () => {
     const calls: string[] = [];
     setVideoDeps({

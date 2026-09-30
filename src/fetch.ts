@@ -30,7 +30,7 @@ import { extractDocument, docFormatForUrl, docFormatForContentType, sniffDocumen
 // is where the extraction seam lives. Safe because neither module calls into the
 // other at module-evaluation time — only from inside function bodies.
 import { scrapeViaFirecrawl } from "./firecrawl.js";
-import { transcribeVideo, transcriptMarkdown, youtubeVideoId } from "./video.js";
+import { knownVideo, transcribeVideo, transcriptMarkdown } from "./video.js";
 
 // ── Tunables ────────────────────────────────────────────────────────────────
 //
@@ -1160,6 +1160,11 @@ export async function fetchAndExtract(
     /** Keep all page text through the built-in reader, bypassing isolation and consent filtering. */
     fullPage?: boolean;
     /**
+     * `false` reads a video host's URL (YouTube, Vimeo…) as a page instead of
+     * sending it to the transcript ladder.
+     */
+    video?: boolean;
+    /**
      * The shape of an HTML page's text. "text" (the default) is htmlToText's:
      * headings kept as `#` lines, everything else flattened. "markdown" is
      * htmlToMarkdown's CommonMark, links and images absolute — the shape
@@ -1186,14 +1191,26 @@ export async function fetchAndExtract(
 ): Promise<ExtractResult> {
   const cancelled = (): ExtractResult => ({ text: "", finalUrl: url, status: 0, note: `Fetching ${url} was cancelled.` });
   if (opts.signal?.aborted) return cancelled();
-  // A YouTube video is read by the transcript ladder, not as a page: the watch
-  // page's HTML holds no transcript at all. The URL is approved first, as any
-  // other would be, since yt-dlp is about to fetch it.
-  if (youtubeVideoId(url)) {
+  // A video — YouTube, Vimeo, Dailymotion and the other hosts knownVideo
+  // recognises — is read by the transcript ladder, not as a page: a watch
+  // page's HTML holds no transcript, and is often a bot wall. The URL is
+  // approved first, as any other would be, since yt-dlp is about to fetch it.
+  const video = opts.video === false ? undefined : knownVideo(url);
+  if (video) {
     if (opts.authorizeUrl && !(await opts.authorizeUrl(url))) return { text: "", finalUrl: url, status: 0, note: `Refused ${url}: not a public address.` };
-    const t = await transcribeVideo(url, { lang: opts.acceptLanguage?.split(/[,;]/)[0]?.trim() || undefined, signal: opts.signal });
+    const t = await transcribeVideo(url, {
+      lang: opts.acceptLanguage?.split(/[,;]/)[0]?.trim() || undefined,
+      signal: opts.signal,
+      knownHostsOnly: true,
+    });
     if (opts.signal?.aborted) return cancelled();
     const text = transcriptMarkdown(t);
+    // A post or a page on a video host that turns out to hold no video (a
+    // tweet with only text) is read as the page it is, and says so.
+    if (!text && video.site !== "youtube" && /no video at this URL|a list of videos/.test(t.reason ?? "")) {
+      const page = await fetchAndExtract(url, { ...opts, video: false });
+      return { ...page, note: [`${url} holds no video yt-dlp can read; read as a page.`, page.note].filter(Boolean).join(" ") };
+    }
     return {
       text,
       title: t.meta?.title,
