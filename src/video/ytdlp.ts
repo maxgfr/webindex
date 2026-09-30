@@ -191,3 +191,28 @@ export async function ytdlpVersionAge(run: VideoRunner = defaultVideoRunner, now
   const released = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
   return { version, ageDays: Math.max(0, Math.floor((now - released) / 86_400_000)) };
 }
+
+/**
+ * Download one media file with yt-dlp into `dir` as `<stem>.<ext>`: the file's
+ * name, or why there is none. Tried twice — YouTube answers a media request
+ * with a stray 403 often enough that one retry turns most failures into a
+ * download — but never after a timeout or a cancellation.
+ */
+export async function downloadMedia(
+  args: string[],
+  dir: string,
+  stem: string,
+  opts: { run?: VideoRunner; url?: string; timeoutMs: number | (() => number); signal?: AbortSignal },
+): Promise<{ file: string } | { error: string; timedOut?: boolean }> {
+  let stderr = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const timeoutMs = typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
+    const r = await runYtdlp([...args, "--no-warnings", "-o", join(dir, `${stem}.%(ext)s`)], { run: opts.run, url: opts.url, timeoutMs, signal: opts.signal });
+    const file = readdirSync(dir).find((f) => f.startsWith(`${stem}.`) && !f.endsWith(".part") && !f.endsWith(".ytdl"));
+    if (file) return { file };
+    if (opts.signal?.aborted) return { error: "cancelled" };
+    if (r.status === 124) return { error: "timed out", timedOut: true };
+    stderr = r.stderr;
+  }
+  return { error: classifyYtdlpError(stderr) };
+}

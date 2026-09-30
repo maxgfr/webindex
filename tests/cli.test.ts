@@ -2325,6 +2325,19 @@ describe("webindex video", () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 
+  it("frames: validates --effort, and says what it lacks", async () => {
+    expect(await run(["video", "frames", "https://youtu.be/jNQXAC9IVRw", "--effort", "max", "--out", dir])).toBe(2);
+    expect(stderr()).toContain("--effort must be low, med or high");
+    expect(await run(["video", "fetch", "https://youtu.be/jNQXAC9IVRw", "--out", dir])).toBe(0);
+    setVideoDeps({ run: async () => ({ ok: false, status: 1, stdout: "", stderr: "" }), have: () => false });
+    // By id, under --out: the run is found, and ffmpeg is what is missing.
+    expect(await run(["video", "frames", "jNQXAC9IVRw", "--out", dir])).toBe(1);
+    expect(stderr()).toContain("frames need ffmpeg");
+    expect(await run(["video", "frames", join(dir, "nope")])).toBe(1);
+    expect(stderr()).toContain("no video run in");
+    expect(await run(["video", "frames"])).toBe(2);
+  });
+
   it("fails with the reason, and rejects a bad invocation", async () => {
     expect(await run(["video", "fetch", "https://example.com/x", "--out", dir])).toBe(1);
     expect(stderr()).toContain("not a YouTube video URL");

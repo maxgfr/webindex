@@ -2015,6 +2015,19 @@ async function ytdlpVersionAge(run = defaultVideoRunner, now = Date.now()) {
   const released = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
   return { version, ageDays: Math.max(0, Math.floor((now - released) / 864e5)) };
 }
+async function downloadMedia(args, dir, stem, opts) {
+  let stderr = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const timeoutMs = typeof opts.timeoutMs === "function" ? opts.timeoutMs() : opts.timeoutMs;
+    const r = await runYtdlp([...args, "--no-warnings", "-o", join2(dir, `${stem}.%(ext)s`)], { run: opts.run, url: opts.url, timeoutMs, signal: opts.signal });
+    const file = readdirSync2(dir).find((f) => f.startsWith(`${stem}.`) && !f.endsWith(".part") && !f.endsWith(".ytdl"));
+    if (file) return { file };
+    if (opts.signal?.aborted) return { error: "cancelled" };
+    if (r.status === 124) return { error: "timed out", timedOut: true };
+    stderr = r.stderr;
+  }
+  return { error: classifyYtdlpError(stderr) };
+}
 
 // src/video/vtt.ts
 var TIMING = /^((?:\d+:)?\d{1,2}:\d{2}\.\d{3})\s+-->\s+((?:\d+:)?\d{1,2}:\d{2}\.\d{3})/;
@@ -2095,7 +2108,7 @@ function mergeSegments(cues, breaks = []) {
 }
 
 // src/video/whisper.ts
-import { existsSync as existsSync2, readdirSync as readdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "fs";
+import { existsSync as existsSync2, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "fs";
 import { join as join3 } from "path";
 var DEFAULT_MAX = 3;
 var DEFAULT_TIMEOUT_MS2 = 30 * 6e4;
@@ -2141,15 +2154,11 @@ async function whisperTranscribe(info, language, run, signal) {
   return withTempDir("whisper", async (dir) => {
     const infoPath = join3(dir, "info.json");
     writeFileSync3(infoPath, info);
-    const dl = await runYtdlp(["--load-info-json", infoPath, "-f", "bestaudio/best", "--no-warnings", "-o", join3(dir, "audio.%(ext)s")], {
-      run,
-      timeoutMs: left(),
-      signal
-    });
+    const dl = await downloadMedia(["--load-info-json", infoPath, "-f", "bestaudio/best"], dir, "audio", { run, timeoutMs: left, signal });
     if (signal?.aborted) return refund({ failed: "whisper: cancelled" });
-    if (dl.status === 124) return timedOut;
-    const audio = readdirSync3(dir).find((f) => f.startsWith("audio.") && !f.endsWith(".part"));
-    if (!audio) return refund({ failed: `whisper: the audio download failed${dl.stderr ? ` (${dl.stderr.trim().split("\n").pop()})` : ""}` });
+    if ("timedOut" in dl) return timedOut;
+    if ("error" in dl) return refund({ failed: `whisper: the audio download failed (${dl.error})` });
+    const audio = dl.file;
     const wav = join3(dir, "speech.wav");
     const ff = await run("ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", join3(dir, audio), "-ar", "16000", "-ac", "1", wav], {
       timeoutMs: left(),
@@ -2352,7 +2361,7 @@ function transcriptMarkdown(t) {
 }
 
 // src/video/run.ts
-import { existsSync as existsSync3, readdirSync as readdirSync4, readFileSync as readFileSync5, statSync } from "fs";
+import { existsSync as existsSync3, readdirSync as readdirSync3, readFileSync as readFileSync5, statSync } from "fs";
 import { tmpdir as tmpdir3 } from "os";
 import { join as join4, resolve } from "path";
 
@@ -3483,7 +3492,7 @@ function listVideoRuns(dir) {
   if (self) return [{ dir, ...self }];
   let names = [];
   try {
-    names = readdirSync4(dir).sort();
+    names = readdirSync3(dir).sort();
   } catch {
     return [];
   }
@@ -3525,6 +3534,183 @@ function searchVideoRuns(dir, query, opts = {}) {
   }
   const index = buildBm25Index(query, docs);
   return docs.map((d) => ({ ...d.hit, score: Math.round(bm25Score(index, d) * 1e3) / 1e3 })).filter((h) => h.score > 0).sort((a, b) => b.score - a.score || a.videoId.localeCompare(b.videoId) || a.start - b.start).slice(0, opts.limit ?? 10);
+}
+
+// src/video/frames.ts
+import { copyFileSync, existsSync as existsSync4, mkdirSync as mkdirSync2, readdirSync as readdirSync4, readFileSync as readFileSync6, rmSync as rmSync3 } from "fs";
+import { join as join5 } from "path";
+
+// src/video/align.ts
+var BEFORE_S = 5;
+var AFTER_S = 10;
+function transcriptAround(segments, t) {
+  return segments.filter((s) => s.end >= t - BEFORE_S && s.start <= t + AFTER_S).map((s) => `[${formatStamp(s.start)}] ${s.text}`).join("\n");
+}
+var chapterAt2 = (chapters, t) => [...chapters].sort((a, b) => b.start - a.start).find((c) => c.start <= t + 0.5)?.title;
+function alignFrames(frames, segments, chapters) {
+  return frames.map((f) => {
+    const chapter = chapterAt2(chapters, f.time);
+    return { file: f.file, time: f.time, stamp: formatStamp(f.time), kind: f.kind, ...chapter ? { chapter } : {}, text: transcriptAround(segments, f.time) };
+  });
+}
+function framesMarkdown(meta, frames, note) {
+  const out = [`# ${meta.title} \u2014 frames`, "", `- URL: ${meta.webpageUrl}`, `- ${note}`, ""];
+  const quoted = /* @__PURE__ */ new Set();
+  for (const f of frames) {
+    out.push(`## [${f.stamp}]${f.chapter ? ` ${f.chapter}` : ""}`, "", `![${f.stamp}](${f.file})`, "");
+    const lines = f.text ? f.text.split("\n") : [];
+    const fresh = lines.filter((l) => !quoted.has(l));
+    for (const l of fresh) quoted.add(l);
+    if (fresh.length) out.push(...fresh.map((l) => `> ${l}`), "");
+    else if (lines.length) out.push(`_(said over the passage quoted above, from ${lines[0].slice(0, lines[0].indexOf("]") + 1)})_`, "");
+    else out.push("_(nothing said around this frame)_", "");
+  }
+  return out.join("\n").trimEnd() + "\n";
+}
+
+// src/video/dhash.ts
+var DHASH_FRAME_BYTES = 72;
+var DHASH_SAME = 6;
+function dhash(gray) {
+  if (gray.length < DHASH_FRAME_BYTES) throw new Error(`dhash needs ${DHASH_FRAME_BYTES} bytes, got ${gray.length}`);
+  let h = 0n;
+  for (let y = 0; y < 8; y++) {
+    for (let x = 0; x < 8; x++) {
+      h = h << 1n | (gray[y * 9 + x] > gray[y * 9 + x + 1] ? 1n : 0n);
+    }
+  }
+  return h;
+}
+function hamming(a, b) {
+  let x = a ^ b;
+  let n = 0;
+  while (x) {
+    x &= x - 1n;
+    n++;
+  }
+  return n;
+}
+function dhashStream(raw) {
+  const out = [];
+  for (let at = 0; at + DHASH_FRAME_BYTES <= raw.length; at += DHASH_FRAME_BYTES) out.push(dhash(raw.subarray(at, at + DHASH_FRAME_BYTES)));
+  return out;
+}
+
+// src/video/frames.ts
+var FRAME_EFFORT = { low: 20, med: 50, high: 100 };
+var SCENE_THRESHOLD = 0.3;
+var FRAMES_TIMEOUT_MS = 30 * 6e4;
+var MIN_FRAMES = 3;
+var INTERVAL_FRAMES = 10;
+var JPEG_FILTER = "scale='min(1280,iw)':-2:out_range=full,format=yuvj420p";
+function parseShowinfo(stderr) {
+  const out = [];
+  for (const m of stderr.matchAll(/\bn:\s*(\d+)\s+pts:\s*-?\d+\s+pts_time:(-?[\d.]+)/g)) out[Number(m[1])] = Number(m[2]);
+  return out.filter((t) => Number.isFinite(t));
+}
+function capFrames(frames, max) {
+  const kept = [...frames].sort((a, b) => a.time - b.time);
+  const limit = Math.max(1, max);
+  while (kept.length > limit) {
+    const spareChapters = kept.some((f) => f.kind !== "chapter");
+    let worst = kept.length - 1;
+    let gap = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < kept.length; i++) {
+      if (spareChapters && kept[i].kind === "chapter") continue;
+      const g = i ? kept[i].time - kept[i - 1].time : kept[1].time - kept[0].time;
+      if (g < gap) {
+        gap = g;
+        worst = i;
+      }
+    }
+    kept.splice(worst, 1);
+  }
+  return kept;
+}
+var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+var fileStamp = (t) => formatStamp(t).replace(/:/g, "-");
+async function extractFrames(runDir, opts = {}) {
+  const run = readVideoRun(runDir);
+  if (!run) return { ok: false, reason: `no video run in ${runDir} \u2014 fetch the video first` };
+  if (isNoWrite()) return { ok: false, reason: "frames are image files, and nothing may be written (NO_WRITE)" };
+  const deps = videoDeps(opts.deps);
+  if (!deps.have("ffmpeg")) return { ok: false, reason: "frames need ffmpeg" };
+  const effort = opts.effort ?? "med";
+  const { meta, segments } = run;
+  const duration = meta.duration ?? 0;
+  return withTempDir("frames", async (tmp) => {
+    const dl = await downloadMedia(["-f", "bv*[height<=720]/b[height<=720]/bv*/b", "--no-playlist"], tmp, "video", {
+      run: deps.run,
+      url: `https://www.youtube.com/watch?v=${meta.id}`,
+      timeoutMs: FRAMES_TIMEOUT_MS,
+      signal: opts.signal
+    });
+    if (opts.signal?.aborted) return { ok: false, reason: "cancelled" };
+    if ("error" in dl) return { ok: false, reason: `the video download failed: ${dl.error}` };
+    const video = dl.file;
+    const input = join5(tmp, video);
+    const ffmpeg = (args) => deps.run("ffmpeg", ["-nostdin", "-hide_banner", ...args], { timeoutMs: FRAMES_TIMEOUT_MS, signal: opts.signal });
+    const sceneDir = join5(tmp, "scene");
+    mkdirSync2(sceneDir);
+    const scenes = await ffmpeg([
+      "-i",
+      input,
+      "-vf",
+      `select='gt(scene,${SCENE_THRESHOLD})',showinfo,${JPEG_FILTER}`,
+      "-fps_mode",
+      "vfr",
+      "-q:v",
+      "3",
+      join5(sceneDir, "%04d.jpg")
+    ]);
+    if (opts.signal?.aborted) return { ok: false, reason: "cancelled" };
+    const times = parseShowinfo(scenes.stderr);
+    const sceneFiles = readdirSync4(sceneDir).sort();
+    const candidates = sceneFiles.slice(0, times.length).map((f, i) => ({ path: join5(sceneDir, f), time: times[i], kind: "scene" }));
+    const single = async (time, kind) => {
+      const path = join5(tmp, `${kind}-${candidates.length}.jpg`);
+      await ffmpeg(["-loglevel", "error", "-ss", time.toFixed(2), "-i", input, "-frames:v", "1", "-vf", JPEG_FILTER, "-q:v", "3", "-y", path]);
+      if (existsSync4(path)) candidates.push({ path, time, kind });
+    };
+    const last = duration > 1 ? duration - 0.5 : Number.POSITIVE_INFINITY;
+    for (const c of meta.chapters ?? []) await single(Math.min(c.start + 1, last), "chapter");
+    if (candidates.length < MIN_FRAMES && duration > 0) {
+      const n = Math.min(FRAME_EFFORT[effort], INTERVAL_FRAMES);
+      for (let i = 0; i < n; i++) await single(duration * (i + 0.5) / n, "interval");
+    }
+    if (opts.signal?.aborted) return { ok: false, reason: "cancelled" };
+    if (!candidates.length)
+      return { ok: false, reason: `ffmpeg took no frame from the video${scenes.ok ? "" : ` (${scenes.stderr.trim().split("\n").pop()})`}` };
+    candidates.sort((a, b) => a.time - b.time);
+    const candDir = join5(tmp, "cand");
+    mkdirSync2(candDir);
+    candidates.forEach((c, i) => copyFileSync(c.path, join5(candDir, `${String(i + 1).padStart(4, "0")}.jpg`)));
+    const raw = join5(tmp, "hash.raw");
+    await ffmpeg(["-loglevel", "error", "-i", join5(candDir, "%04d.jpg"), "-vf", "scale=9:8,format=gray", "-f", "rawvideo", "-y", raw]);
+    const hashes = existsSync4(raw) ? dhashStream(readFileSync6(raw)) : [];
+    const kept = [];
+    for (const [i, c] of candidates.entries()) {
+      const hash = hashes.length === candidates.length ? hashes[i] : void 0;
+      if (hash !== void 0 && kept.some((k) => k.hash !== void 0 && hamming(k.hash, hash) <= DHASH_SAME)) continue;
+      kept.push({ ...c, ...hash !== void 0 ? { hash } : {} });
+    }
+    const chosen = capFrames(kept, FRAME_EFFORT[effort]);
+    const framesDir = join5(runDir, "frames");
+    rmSync3(framesDir, { recursive: true, force: true });
+    mkdirSync2(framesDir, { recursive: true });
+    const placed = chosen.map((c, i) => {
+      const file = `frames/${String(i + 1).padStart(4, "0")}_${fileStamp(c.time)}.jpg`;
+      copyFileSync(c.path, join5(runDir, file));
+      return { file, time: c.time, kind: c.kind };
+    });
+    const frames = alignFrames(placed, segments, meta.chapters ?? []);
+    const dropped = candidates.length - kept.length;
+    const note = `${plural(frames.length, "frame")} (effort ${effort}: at most ${FRAME_EFFORT[effort]}) from ${plural(candidates.length, "candidate")} \u2014 scene changes above ${SCENE_THRESHOLD}, one per chapter start, ${plural(dropped, "near-duplicate")} dropped`;
+    const markdown = writeArtifact(join5(runDir, "FRAMES.md"), framesMarkdown(meta, frames, note));
+    writeArtifact(join5(runDir, "frames.json"), `${JSON.stringify(frames, null, 2)}
+`);
+    return { ok: true, dir: framesDir, markdown, frames, candidates: candidates.length, duplicates: candidates.length - kept.length, effort };
+  });
 }
 
 // src/mime.ts
@@ -5964,9 +6150,9 @@ function resolveEutils(raw, op) {
 
 // src/repo.ts
 import { createHash, randomBytes } from "crypto";
-import { existsSync as existsSync4, mkdirSync as mkdirSync2, readdirSync as readdirSync5, renameSync as renameSync2, rmSync as rmSync3, statSync as statSync2 } from "fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync3, readdirSync as readdirSync5, renameSync as renameSync2, rmSync as rmSync4, statSync as statSync2 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
-import { basename, join as join5, resolve as resolve2 } from "path";
+import { basename, join as join6, resolve as resolve2 } from "path";
 
 // src/forge-host.ts
 var KINDS = /* @__PURE__ */ new Set(["github", "gitlab", "gitea"]);
@@ -5998,7 +6184,7 @@ function hostForgeKind(host) {
 
 // src/repo.ts
 function repoCacheRoot() {
-  return env("REPO_DIR") ?? brand().repoDir ?? join5(tmpdir4(), brand().name, "repos");
+  return env("REPO_DIR") ?? brand().repoDir ?? join6(tmpdir4(), brand().name, "repos");
 }
 var cloneTimeoutMs = () => envInt("GIT_CLONE_TIMEOUT_MS", 3e5, 1e3);
 var fetchTimeoutMs = () => envInt("GIT_FETCH_TIMEOUT_MS", 12e4, 1e3);
@@ -6007,7 +6193,7 @@ function resolveRepo(raw, opts = {}) {
   const trimmed = raw.trim();
   if (trimmed && opts.local !== false) {
     const asPath = resolve2(trimmed);
-    if (existsSync4(asPath) && statSync2(asPath).isDirectory()) {
+    if (existsSync5(asPath) && statSync2(asPath).isDirectory()) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename(asPath)}-${asPath}`)}` };
     }
   }
@@ -6117,7 +6303,7 @@ async function ensureClone(ref, opts = {}) {
   if (!have("git")) throw new Error(`git is not installed or not on PATH \u2014 cannot clone ${ref.cloneUrl}`);
   const branch = opts.branch?.trim() || void 0;
   if (branch?.startsWith("-")) throw new Error(`"${branch}" is not a branch name`);
-  const dir = join5(repoCacheRoot(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
+  const dir = join6(repoCacheRoot(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
   const pending = inflight.get(dir);
   if (pending && !opts.refresh) {
     return pending.catch((e) => {
@@ -6138,17 +6324,17 @@ function branchSlug(branch) {
 }
 async function obtainClone(ref, dir, opts) {
   let target = dir;
-  if (!existsSync4(join5(dir, ".git")) && !opts.branch) {
+  if (!existsSync5(join6(dir, ".git")) && !opts.branch) {
     for (const old of legacySlugs(ref)) {
-      const legacy = join5(repoCacheRoot(), old);
-      const origin = existsSync4(join5(legacy, ".git")) ? originUrl(legacy) : void 0;
+      const legacy = join6(repoCacheRoot(), old);
+      const origin = existsSync5(join6(legacy, ".git")) ? originUrl(legacy) : void 0;
       if (origin && resolveRepo(origin).slug === ref.slug) {
         target = legacy;
         break;
       }
     }
   }
-  if (existsSync4(join5(target, ".git"))) return opts.refresh ? refreshClone(ref, target, opts.branch) : target;
+  if (existsSync5(join6(target, ".git"))) return opts.refresh ? refreshClone(ref, target, opts.branch) : target;
   return freshClone(ref, dir, opts.branch);
 }
 async function refreshClone(ref, dir, branch) {
@@ -6171,25 +6357,25 @@ async function refreshClone(ref, dir, branch) {
 var STALE_STAGING_MS = 24 * 60 * 60 * 1e3;
 function discard(path) {
   try {
-    rmSync3(path, { recursive: true, force: true });
+    rmSync4(path, { recursive: true, force: true });
   } catch {
   }
 }
 function sweepStaging(staging) {
   try {
     for (const name of readdirSync5(staging)) {
-      const at = join5(staging, name);
-      if (Date.now() - statSync2(at).mtimeMs > STALE_STAGING_MS) rmSync3(at, { recursive: true, force: true });
+      const at = join6(staging, name);
+      if (Date.now() - statSync2(at).mtimeMs > STALE_STAGING_MS) rmSync4(at, { recursive: true, force: true });
     }
   } catch {
   }
 }
 async function freshClone(ref, dir, branch) {
-  const staging = join5(repoCacheRoot(), ".partial");
-  mkdirSync2(staging, { recursive: true });
+  const staging = join6(repoCacheRoot(), ".partial");
+  mkdirSync3(staging, { recursive: true });
   sweepStaging(staging);
   const attempt = async (filter) => {
-    const tmp = join5(staging, `${basename(dir)}-${process.pid}-${randomBytes(4).toString("hex")}`);
+    const tmp = join6(staging, `${basename(dir)}-${process.pid}-${randomBytes(4).toString("hex")}`);
     const args = ["clone", "--depth", "1", ...filter ? ["--filter=blob:none"] : [], ...branch ? ["--branch", branch] : [], "--", ref.cloneUrl, tmp];
     const r = await shAsync("git", args, { timeoutMs: cloneTimeoutMs() });
     if (!r.ok) discard(tmp);
@@ -6209,13 +6395,13 @@ async function freshClone(ref, dir, branch) {
       );
     }
   }
-  if (!existsSync4(done.tmp) || readdirSync5(done.tmp).length === 0) throw new Error(`clone produced an empty tree for ${ref.cloneUrl}`);
-  if (existsSync4(dir) && !existsSync4(join5(dir, ".git"))) rmSync3(dir, { recursive: true, force: true });
+  if (!existsSync5(done.tmp) || readdirSync5(done.tmp).length === 0) throw new Error(`clone produced an empty tree for ${ref.cloneUrl}`);
+  if (existsSync5(dir) && !existsSync5(join6(dir, ".git"))) rmSync4(dir, { recursive: true, force: true });
   try {
     renameSync2(done.tmp, dir);
   } catch (e) {
     discard(done.tmp);
-    if (!existsSync4(join5(dir, ".git"))) throw new Error(`could not move the clone of ${ref.cloneUrl} into ${dir}: ${e.message}`);
+    if (!existsSync5(join6(dir, ".git"))) throw new Error(`could not move the clone of ${ref.cloneUrl} into ${dir}: ${e.message}`);
   }
   return dir;
 }
@@ -8241,16 +8427,16 @@ function closingNote(rungs, cancelled) {
 
 // src/stack.ts
 import { spawnSync as spawnSync3 } from "child_process";
-import { existsSync as existsSync6, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync7, statSync as statSync4, writeFileSync as writeFileSync5 } from "fs";
-import { dirname as dirname2, join as join7, resolve as resolve4 } from "path";
+import { existsSync as existsSync7, lstatSync as lstatSync2, mkdirSync as mkdirSync5, readFileSync as readFileSync8, statSync as statSync4, writeFileSync as writeFileSync5 } from "fs";
+import { dirname as dirname2, join as join8, resolve as resolve4 } from "path";
 
 // src/cache.ts
-import { chmodSync, existsSync as existsSync5, lstatSync, mkdirSync as mkdirSync3, readFileSync as readFileSync6, readdirSync as readdirSync6, rmSync as rmSync4, statSync as statSync3 } from "fs";
-import { dirname, join as join6 } from "path";
+import { chmodSync, existsSync as existsSync6, lstatSync, mkdirSync as mkdirSync4, readFileSync as readFileSync7, readdirSync as readdirSync6, rmSync as rmSync5, statSync as statSync3 } from "fs";
+import { dirname, join as join7 } from "path";
 import { tmpdir as tmpdir5 } from "os";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
-  return namedCacheDir() ?? join6(tmpdir5(), userScoped(brand().name), "cache");
+  return namedCacheDir() ?? join7(tmpdir5(), userScoped(brand().name), "cache");
 }
 var namedCacheDir = () => env("CACHE_DIR") ?? brand().cacheDir;
 function userScoped(name) {
@@ -8261,7 +8447,7 @@ function cachePath(url, acceptLanguage = "", extractor = "native", variant = "")
   const canon = canonicalizeUrl(url);
   const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
   const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
-  return join6(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
+  return join7(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
 }
 var TEXT_VARIANTS = ["", "consent", "full"];
 var MARKDOWN_VARIANTS = ["md", "consent-md", "full-md"];
@@ -8336,11 +8522,11 @@ function entryPaths(url, acceptLanguage, extractor, variant) {
 function readCache(url, acceptLanguage = "", extractor = "native", variant = "") {
   if (!entryDir(false)) return void 0;
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
-  if (!existsSync5(meta)) return void 0;
+  if (!existsSync6(meta)) return void 0;
   try {
-    const entry = JSON.parse(readFileSync6(meta, "utf8"));
+    const entry = JSON.parse(readFileSync7(meta, "utf8"));
     if (typeof entry.cachedAt !== "number") return void 0;
-    const text = existsSync5(body) ? readFileSync6(body, "utf8") : entry.text;
+    const text = existsSync6(body) ? readFileSync7(body, "utf8") : entry.text;
     if (!text?.trim()) return void 0;
     return { ...entry, text };
   } catch {
@@ -8369,7 +8555,7 @@ function writeCache(url, res, now, acceptLanguage = "", extractor = "native", va
 var ensured = /* @__PURE__ */ new Set();
 function ensureDir2(dir) {
   if (ensured.has(dir)) return;
-  mkdirSync3(dir, { recursive: true });
+  mkdirSync4(dir, { recursive: true });
   ensured.add(dir);
 }
 function openCacheDir(create) {
@@ -8379,7 +8565,7 @@ function openCacheDir(create) {
     if (create) ensureDir2(dir);
     return { dir };
   }
-  if (create) mkdirSync3(dirname(dirname(dir)), { recursive: true });
+  if (create) mkdirSync4(dirname(dirname(dir)), { recursive: true });
   for (const p of [dirname(dir), dir]) {
     if (create) mkdirPrivate(p);
     let st;
@@ -8404,7 +8590,7 @@ function openCacheDir(create) {
 }
 function mkdirPrivate(p) {
   try {
-    mkdirSync3(p, { mode: 448 });
+    mkdirSync4(p, { mode: 448 });
   } catch (e) {
     if (e.code !== "EEXIST") throw e;
   }
@@ -8490,7 +8676,7 @@ function ownFile(name) {
 }
 function readEntryMeta(abs) {
   try {
-    const entry = JSON.parse(readFileSync6(abs, "utf8"));
+    const entry = JSON.parse(readFileSync7(abs, "utf8"));
     return entry && typeof entry.cachedAt === "number" && typeof entry.finalUrl === "string" ? entry : void 0;
   } catch {
     return void 0;
@@ -8509,13 +8695,13 @@ function cacheStats(now = Date.now()) {
   const out = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
   const { refused } = openCacheDir(false);
   if (refused) return { ...out, refused };
-  if (!existsSync5(dir)) return out;
+  if (!existsSync6(dir)) return out;
   let oldest = Number.POSITIVE_INFINITY;
   let newest = 0;
   for (const name of readdirSync6(dir)) {
     const own = ownFile(name);
     if (!own) continue;
-    const abs = join6(dir, name);
+    const abs = join7(dir, name);
     if (own.kind !== "json") {
       out.bytes += sizeOf(abs);
       continue;
@@ -8537,12 +8723,12 @@ function cacheStats(now = Date.now()) {
 }
 function cacheClean(all = false, now = Date.now()) {
   const dir = cacheDir();
-  if (isNoWrite() || !openCacheDir(false).dir || !existsSync5(dir)) return 0;
+  if (isNoWrite() || !openCacheDir(false).dir || !existsSync6(dir)) return 0;
   const names = readdirSync6(dir);
   const present = new Set(names);
   const remove = (name) => {
     try {
-      rmSync4(join6(dir, name), { force: true });
+      rmSync5(join7(dir, name), { force: true });
       return true;
     } catch {
       return false;
@@ -8550,7 +8736,7 @@ function cacheClean(all = false, now = Date.now()) {
   };
   const abandoned = (name) => {
     try {
-      return all || now - statSync3(join6(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
+      return all || now - statSync3(join7(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
     } catch {
       return false;
     }
@@ -8560,7 +8746,7 @@ function cacheClean(all = false, now = Date.now()) {
     const own = ownFile(name);
     if (!own) continue;
     if (own.kind === "json") {
-      const entry = readEntryMeta(join6(dir, name));
+      const entry = readEntryMeta(join7(dir, name));
       if (!entry || !all && isCacheFresh(entry, now) || !remove(name)) continue;
       remove(`${own.stem}.body`);
       removed++;
@@ -8832,11 +9018,11 @@ function renderAsset(template) {
   return template.replaceAll("{{CLI}}", brand().cli);
 }
 function composeAssets() {
-  const base2 = join7(cacheDir(), "compose");
+  const base2 = join8(cacheDir(), "compose");
   return [
-    { path: join7(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
-    { path: join7(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
-    { path: join7(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
+    { path: join8(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
+    { path: join8(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
+    { path: join8(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
   ];
 }
 function ensureComposeMaterialized() {
@@ -8849,7 +9035,7 @@ function untrustedStack() {
   for (const a of assets) {
     let body;
     try {
-      body = readFileSync7(a.path, "utf8");
+      body = readFileSync8(a.path, "utf8");
     } catch {
     }
     if (body !== a.content) return `${a.path} does not hold the stack this binary ships, and could not be rewritten`;
@@ -8877,8 +9063,8 @@ function untrustedStack() {
 }
 function writeIfChanged(path, content) {
   try {
-    if (existsSync6(path) && readFileSync7(path, "utf8") === content) return;
-    mkdirSync4(dirname2(path), { recursive: true, mode: 448 });
+    if (existsSync7(path) && readFileSync8(path, "utf8") === content) return;
+    mkdirSync5(dirname2(path), { recursive: true, mode: 448 });
     writeFileSync5(path, content);
   } catch {
   }
@@ -9060,8 +9246,8 @@ function resetRunLocks() {
 }
 
 // src/run.ts
-import { join as join8 } from "path";
-import { readFileSync as readFileSync8 } from "fs";
+import { join as join9 } from "path";
+import { readFileSync as readFileSync9 } from "fs";
 function pad(n) {
   return String(n).padStart(2, "0");
 }
@@ -9073,16 +9259,16 @@ function shq(s) {
 }
 function readJsonSafe(path) {
   try {
-    return JSON.parse(readFileSync8(path, "utf8"));
+    return JSON.parse(readFileSync9(path, "utf8"));
   } catch {
     return void 0;
   }
 }
 function readManifest(dir, file = "manifest.json") {
-  return readJsonSafe(join8(dir, file));
+  return readJsonSafe(join9(dir, file));
 }
 function writeManifest(dir, value, file = "manifest.json") {
-  return writeArtifact(join8(dir, file), `${JSON.stringify(value, null, 2)}
+  return writeArtifact(join9(dir, file), `${JSON.stringify(value, null, 2)}
 `);
 }
 
@@ -10023,11 +10209,11 @@ function extractNumerals(text, max = 8) {
 }
 
 // src/orchestrate.ts
-import { existsSync as existsSync7 } from "fs";
-import { join as join10, resolve as resolve5 } from "path";
+import { existsSync as existsSync8 } from "fs";
+import { join as join11, resolve as resolve5 } from "path";
 
 // src/orchestrate/templates.ts
-import { join as join9 } from "path";
+import { join as join10 } from "path";
 var WORKFLOW_FORBIDDEN = ["Date.now(", "Math.random(", "new Date("];
 function oneWriterFooter(runAbs, opts = {}) {
   const forbidden = opts.writingCommands?.length ? ` Do not run any engine command that writes (${opts.writingCommands.map((c) => `\`${c}\``).join(", ")}).` : "";
@@ -10038,7 +10224,7 @@ Return ONLY the structured output specified above. Do NOT write, edit, or delete
 
 One sanctioned exception: ${opts.sanctioned}` : ""}
 
-Exception for oversized prose: if a note is too large to return, write ONLY to \`${join9(runAbs, "orchestration", "out")}/<role>-<batch>.md\` \u2014 a file namespaced to you alone \u2014 and return its path.
+Exception for oversized prose: if a note is too large to return, write ONLY to \`${join10(runAbs, "orchestration", "out")}/<role>-<batch>.md\` \u2014 a file namespaced to you alone \u2014 and return its path.
 `;
 }
 var SMALL_WORKLIST = 3;
@@ -10063,7 +10249,7 @@ function assertWorkflowSafe(script, phaseName) {
 }
 function emitWorkflowScript(phase, emission, runAbs, engineAbs, smallWorklist, constants = {}) {
   const cli = brand().cli;
-  const scriptPath = join9(runAbs, "orchestration", `${phase.name}.workflow.mjs`);
+  const scriptPath = join10(runAbs, "orchestration", `${phase.name}.workflow.mjs`);
   const meta = { name: `${cli}-${phase.name}`, description: emission.description(phase.items), phases: [{ title: emission.title }] };
   const batches = phaseBatches(phase, emission, smallWorklist);
   const hint = emission.applyHint(runAbs, engineAbs, phase);
@@ -10143,7 +10329,7 @@ function runbookMd(phases, defs, runAbs, engineAbs, cli, preamble = [], smallWor
       const batches = phaseBatches(ph, emission, smallWorklist);
       const widest = batches.reduce((w, b) => Math.max(w, b.length), 0);
       lines.push(
-        `Fan out: \`Workflow({ scriptPath: "${join9(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
+        `Fan out: \`Workflow({ scriptPath: "${join10(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
         `(${batches.length} agent(s) of at most ${widest} item(s), contract \`agents/${emission.role}.md\`).`,
         ``,
         `Sequentially instead: play \`agents/${emission.role}.md\` yourself over ${shq(ph.ids.join(","))}.`,
@@ -10164,7 +10350,7 @@ var BATCH_SIZE = 8;
 function listPhases(runDir, engineAbs, defs) {
   const run = resolve5(runDir);
   return defs.map((def) => {
-    const worklist = join10(run, def.worklist);
+    const worklist = join11(run, def.worklist);
     const parsed = readJsonSafe(worklist);
     const ids = def.ids(parsed, run, engineAbs);
     const ready = ids !== void 0;
@@ -10181,7 +10367,7 @@ function listPhases(runDir, engineAbs, defs) {
 }
 function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
   const run = resolve5(runDir);
-  if (!existsSync7(run)) {
+  if (!existsSync8(run)) {
     return { exitCode: 2, written: [], notices: [], errors: [`run dir not found: ${run}`], phases: [] };
   }
   const phases = listPhases(run, engineAbs, defs);
@@ -10210,14 +10396,14 @@ function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
     }
     selected = [ph];
   }
-  const orchDir = join10(run, "orchestration");
-  const agentsDir = join10(orchDir, "agents");
-  ensureDir(join10(orchDir, "out"));
+  const orchDir = join11(run, "orchestration");
+  const agentsDir = join11(orchDir, "agents");
+  ensureDir(join11(orchDir, "out"));
   ensureDir(agentsDir);
   const written = [];
   const notices = [];
   for (const [name, content] of Object.entries(contracts(run, engineAbs, phases))) {
-    written.push(writeArtifact(join10(agentsDir, `${name}.md`), content));
+    written.push(writeArtifact(join11(agentsDir, `${name}.md`), content));
   }
   if (!opts.eco) {
     for (const ph of selected) {
@@ -10231,10 +10417,10 @@ function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
       if (ph.items <= floor) {
         notices.push(`phase "${ph.name}": only ${ph.items} item(s) \u2014 the sequential --eco path is equivalent and cheaper.`);
       }
-      written.push(writeArtifact(join10(orchDir, `${ph.name}.workflow.mjs`), emitWorkflowScript(ph, def, run, engineAbs, small, opts.constants)));
+      written.push(writeArtifact(join11(orchDir, `${ph.name}.workflow.mjs`), emitWorkflowScript(ph, def, run, engineAbs, small, opts.constants)));
     }
   }
-  written.push(writeArtifact(join10(orchDir, "RUNBOOK.md"), runbookMd(phases, defs, run, engineAbs, brand().cli, opts.runbookPreamble, small)));
+  written.push(writeArtifact(join11(orchDir, "RUNBOOK.md"), runbookMd(phases, defs, run, engineAbs, brand().cli, opts.runbookPreamble, small)));
   return { exitCode: 0, written, notices, errors: [], phases };
 }
 
@@ -10461,8 +10647,8 @@ function isOriginAllowed(origin, allowed = []) {
 }
 
 // src/mcp/resources.ts
-import { existsSync as existsSync8, readdirSync as readdirSync7, readFileSync as readFileSync9, realpathSync, statSync as statSync5 } from "fs";
-import { basename as basename3, dirname as dirname3, join as join11, relative, resolve as resolve6, sep } from "path";
+import { existsSync as existsSync9, readdirSync as readdirSync7, readFileSync as readFileSync10, realpathSync, statSync as statSync5 } from "fs";
+import { basename as basename3, dirname as dirname3, join as join12, relative, resolve as resolve6, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
@@ -10470,17 +10656,17 @@ function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname3(fileURLToPath(import.meta.url));
   const name = brand().name;
   const candidates = [resolve6(here, ".."), resolve6(here, "..", "skills", name), resolve6(here, "..", "..", "skills", name)];
-  return candidates.find((dir) => existsSync8(join11(dir, "SKILL.md")));
+  return candidates.find((dir) => existsSync9(join12(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
-  const refDir = join11(root, "references");
-  if (!existsSync8(refDir)) return out;
+  const refDir = join12(root, "references");
+  if (!existsSync9(refDir)) return out;
   for (const file of readdirSync7(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join11("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
+    out.push(describe(root, join12("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
   }
   return out;
 }
@@ -10508,7 +10694,7 @@ function readResource(uri, moduleDir) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
   if (!statSync5(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
-  return { uri, mimeType: "text/markdown", text: readFileSync9(targetReal, "utf8") };
+  return { uri, mimeType: "text/markdown", text: readFileSync10(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
 };
@@ -10519,14 +10705,14 @@ function describe(root, rel, fallbackTitle) {
     title: fallbackTitle,
     mimeType: "text/markdown"
   };
-  const summary = firstProse(join11(root, rel));
+  const summary = firstProse(join12(root, rel));
   if (summary) decl.description = summary;
   return decl;
 }
 function firstProse(file) {
   let text;
   try {
-    text = readFileSync9(file, "utf8");
+    text = readFileSync10(file, "utf8");
   } catch {
     return void 0;
   }
@@ -11102,6 +11288,7 @@ export {
   FILE_LINE_TOKEN,
   FIRECRAWL_DEFAULT_BASE,
   FIRECRAWL_ENV,
+  FRAME_EFFORT,
   InvalidParamsError,
   KEYLESS_ENGINES,
   LATEST_PROTOCOL,
@@ -11226,6 +11413,7 @@ export {
   externalHosts,
   extractClaimUnits,
   extractDocument,
+  extractFrames,
   extractJsonLd,
   extractMainHtml,
   extractMetaTags,

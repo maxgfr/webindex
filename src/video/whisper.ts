@@ -1,8 +1,8 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { env, envInt, envName } from "../brand.js";
 import type { VideoSegment } from "./vtt.js";
-import { runYtdlp, withTempDir, type VideoRunner } from "./ytdlp.js";
+import { downloadMedia, withTempDir, type VideoRunner } from "./ytdlp.js";
 
 // The last rung: transcribe the audio on this machine.
 //
@@ -88,15 +88,11 @@ export async function whisperTranscribe(info: string, language: string | undefin
   return withTempDir("whisper", async (dir) => {
     const infoPath = join(dir, "info.json");
     writeFileSync(infoPath, info);
-    const dl = await runYtdlp(["--load-info-json", infoPath, "-f", "bestaudio/best", "--no-warnings", "-o", join(dir, "audio.%(ext)s")], {
-      run,
-      timeoutMs: left(),
-      signal,
-    });
+    const dl = await downloadMedia(["--load-info-json", infoPath, "-f", "bestaudio/best"], dir, "audio", { run, timeoutMs: left, signal });
     if (signal?.aborted) return refund({ failed: "whisper: cancelled" });
-    if (dl.status === 124) return timedOut;
-    const audio = readdirSync(dir).find((f) => f.startsWith("audio.") && !f.endsWith(".part"));
-    if (!audio) return refund({ failed: `whisper: the audio download failed${dl.stderr ? ` (${dl.stderr.trim().split("\n").pop()})` : ""}` });
+    if ("timedOut" in dl) return timedOut;
+    if ("error" in dl) return refund({ failed: `whisper: the audio download failed (${dl.error})` });
+    const audio = dl.file;
 
     const wav = join(dir, "speech.wav");
     const ff = await run("ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", join(dir, audio), "-ar", "16000", "-ac", "1", wav], {

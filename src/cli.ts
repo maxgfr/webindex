@@ -24,6 +24,9 @@ import { DOC_EXTRACTORS, docFormatForUrl, extractDocument, enabledDocExtractors,
 import { enabledExtractors, extractPdf, ocrBudgetLeft, ocrTools, PDF_EXTRACTORS } from "./pdf.js";
 import {
   enabledTranscribers,
+  extractFrames,
+  FRAME_EFFORT,
+  type FrameEffort,
   fetchVideoRun,
   formatStamp,
   searchVideoRuns,
@@ -32,6 +35,7 @@ import {
   whisperBudgetLeft,
   whisperModel,
   ytdlpVersionAge,
+  youtubeVideoId,
 } from "./video.js";
 import { videoDeps } from "./video/ladder.js";
 import { ANYDOC_SPEC, PDF_INSPECTOR_SPEC } from "./pdf/exec.js";
@@ -142,6 +146,7 @@ USAGE
   webindex skill     init <name> [--root <dir>]
   webindex video     fetch <url> [--out <dir>] [--lang <tag>] [--refresh] [--json]
   webindex video     search <query> [--out <dir>] [--limit <n>] [--json]
+  webindex video     frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]
   webindex doctor [--json]
   webindex version
 
@@ -298,8 +303,13 @@ COMMANDS
              on the next call — no yt-dlp at all — unless --refresh. 'search'
              ranks ~45 s passages of every video under --out (or of one video's
              own directory) against a question, each with its [mm:ss] stamp
-             and a link that opens the video there. The directory is --out,
-             else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
+             and a link that opens the video there. 'frames' takes what is
+             on screen — a frame at every scene change and chapter start,
+             near-duplicates dropped, at most 20, 50 or 100 by --effort (med
+             by default) — into <id>/frames/, and FRAMES.md pairs each with
+             what was said from 5 s before it to 10 s after; it needs ffmpeg,
+             and fetches the video first when given a URL. The directory is
+             --out, else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which
@@ -415,6 +425,7 @@ export const VALUE_FLAGS = [
   "extract-root",
   "format",
   "out",
+  "effort",
 ];
 export const BOOL_FLAGS = [
   "json",
@@ -468,7 +479,7 @@ const SPEC: CliSpec = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: 
 const SKILL_ACTIONS = ["check", "bundle", "vendor", "copy", "doctor", "init", "repin", "finish", "recall"];
 
 /** What `webindex video` does. */
-const VIDEO_ACTIONS = ["fetch", "search"];
+const VIDEO_ACTIONS = ["fetch", "search", "frames"];
 
 /** A yt-dlp release older than this is flagged by doctor: YouTube breaks old ones. */
 const YTDLP_STALE_DAYS = 60;
@@ -2312,6 +2323,35 @@ async function dispatch(argv: string[]): Promise<void> {
           .filter(Boolean)
           .join(" · ");
         process.stdout.write(`${r.transcript}\n  ${m.title} — ${facts}${r.reused ? " (already on disk)" : ""}\n`);
+      }
+      return;
+    }
+
+    if (action === "frames") {
+      const target = args.positional[1];
+      const frameUsage = "usage: webindex video frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]";
+      if (!target) usage(frameUsage);
+      const effort = argValue(args, "effort") ?? "med";
+      if (!(effort in FRAME_EFFORT)) usage(`--effort must be low, med or high, not "${effort}"`);
+      // A URL is fetched first (or found already on disk); an id names a run
+      // under the directory; anything else is a run directory itself.
+      let runDir: string;
+      if (youtubeVideoId(target)) {
+        const r = await fetchVideoRun(target, root, { lang: argValue(args, "lang") });
+        if (!r.ok) fail(`no transcript for ${target}: ${r.reason}`);
+        runDir = r.dir;
+      } else runDir = existsSync(join(root, target, "meta.json")) ? join(root, target) : resolve(target);
+      const r = await extractFrames(runDir, { effort: effort as FrameEffort });
+      if (!r.ok) {
+        if (asJson) process.stdout.write(jsonLine(r));
+        fail(r.reason);
+      }
+      if (asJson) process.stdout.write(jsonLine(r));
+      else {
+        const n = (k: number, w: string) => `${k} ${w}${k === 1 ? "" : "s"}`;
+        process.stdout.write(
+          `${r.markdown}\n  ${n(r.frames.length, "frame")} in ${r.dir} (${n(r.candidates, "candidate")}, ${n(r.duplicates, "near-duplicate")} dropped, effort ${r.effort})\n`,
+        );
       }
       return;
     }
