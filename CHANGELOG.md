@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.23.0](https://github.com/maxgfr/webindex/compare/v1.22.0...v1.23.0) (2026-09-30)
+
+
+### Features
+
+* **video:** keep a video on disk and search it without reading it again ([ae7b347](https://github.com/maxgfr/webindex/commit/ae7b347888834a9343bc740012ca171a6c18776c))
+
 # [1.22.0](https://github.com/maxgfr/webindex/compare/v1.21.2...v1.22.0) (2026-09-30)
 
 
