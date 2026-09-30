@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.22.0](https://github.com/maxgfr/webindex/compare/v1.21.2...v1.22.0) (2026-09-30)
+
+
+### Bug Fixes
+
+* **video:** cancel, bound and harden the transcript ladder ([b6b614a](https://github.com/maxgfr/webindex/commit/b6b614af280f381ac24d20093ed06f67e6db7965))
+
+
+### Features
+
+* **video:** read a YouTube video as a citable, timestamped transcript ([0d545a7](https://github.com/maxgfr/webindex/commit/0d545a78836aeadc6d54214f68972ba002641b98))
+
 ## [1.21.2](https://github.com/maxgfr/webindex/compare/v1.21.1...v1.21.2) (2026-09-29)
 
 

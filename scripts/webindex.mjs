@@ -609,7 +609,7 @@ function decodeWith(bytes, encoding) {
 }
 
 // src/version.ts
-var ENGINE_VERSION = "1.21.2";
+var ENGINE_VERSION = "1.22.0";
 
 // src/doc/formats.ts
 var BINARY = { textFallback: false };
