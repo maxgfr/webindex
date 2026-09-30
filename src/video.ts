@@ -36,3 +36,13 @@ export {
   type VideoTranscript,
 } from "./video/ladder.js";
 export { formatStamp, transcriptMarkdown } from "./video/markdown.js";
+export {
+  fetchVideoRun,
+  listVideoRuns,
+  readVideoRun,
+  searchVideoRuns,
+  videoRoot,
+  type VideoHit,
+  type VideoRunMeta,
+  type VideoRunResult,
+} from "./video/run.js";

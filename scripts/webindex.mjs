@@ -90,7 +90,7 @@ async function finishRepin(root) {
       const previous = new Set(existing.map((r) => r.databaseId));
       gh(["workflow", "run", workflow, "--ref", "main"]);
       for (let attempt = 0; attempt < 30 && !run; attempt++) {
-        await new Promise((resolve8) => setTimeout(resolve8, 2e3));
+        await new Promise((resolve9) => setTimeout(resolve9, 2e3));
         existing = runs();
         run = existing.find((r) => !previous.has(r.databaseId) && r.event === "workflow_dispatch");
       }
@@ -211,6 +211,9 @@ function writeFileAtomic(path, content) {
     }
     throw e;
   }
+}
+function takeArtifacts() {
+  return collected.splice(0, collected.length);
 }
 
 // src/run.ts
@@ -439,9 +442,9 @@ async function repinSkill(root, config) {
 }
 
 // src/cli.ts
-import { existsSync as existsSync8, readFileSync as readFileSync15, realpathSync as realpathSync3, statSync as statSync6 } from "fs";
+import { existsSync as existsSync9, readFileSync as readFileSync16, realpathSync as realpathSync3, statSync as statSync7 } from "fs";
 import { isIP as isIP2 } from "net";
-import { basename as basename4, extname, isAbsolute as isAbsolute3, join as join17, relative as relative4, resolve as resolve7 } from "path";
+import { basename as basename4, extname, isAbsolute as isAbsolute3, join as join18, relative as relative4, resolve as resolve8 } from "path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL } from "url";
 
 // src/mime.ts
@@ -765,7 +768,7 @@ function binaryName(name) {
   return process.platform === "win32" && name === "npx" ? "npx.cmd" : name;
 }
 function runWithInput(cmd, args, input, timeoutMs, opts = {}) {
-  return new Promise((resolve8) => {
+  return new Promise((resolve9) => {
     let child;
     try {
       const bin = binaryName(cmd);
@@ -774,7 +777,7 @@ function runWithInput(cmd, args, input, timeoutMs, opts = {}) {
       const common = { stdio: ["pipe", "pipe", "pipe"], ...opts.env ? { env: opts.env } : {} };
       child = viaShell ? spawn2([bin, ...args].map(quote).join(" "), { ...common, shell: true, windowsHide: true }) : spawn2(bin, args, common);
     } catch (e) {
-      resolve8({ ok: false, stdout: "", error: e.message });
+      resolve9({ ok: false, stdout: "", error: e.message });
       return;
     }
     const chunks = [];
@@ -793,7 +796,7 @@ ${stderrTail}` : stderrHead + stderrTail).trim();
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve8(r);
+      resolve9(r);
     };
     const timer = setTimeout(() => {
       killTree(child);
@@ -2390,7 +2393,7 @@ function sh(cmd, args, opts = {}) {
 function shAsync(cmd, args, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   if (opts.signal?.aborted) return Promise.resolve({ ok: false, status: 130, stdout: "", stderr: "aborted" });
-  return new Promise((resolve8) => {
+  return new Promise((resolve9) => {
     let settled = false;
     let timer;
     let onAbort;
@@ -2399,7 +2402,7 @@ function shAsync(cmd, args, opts = {}) {
       settled = true;
       clearTimeout(timer);
       if (onAbort) opts.signal?.removeEventListener("abort", onAbort);
-      resolve8(r);
+      resolve9(r);
     };
     let child;
     try {
@@ -2865,237 +2868,10 @@ function transcriptMarkdown(t) {
   return [...head, ...body].join("\n").trimEnd() + "\n";
 }
 
-// src/entities.ts
-var NAMED = `
-  quot 22 amp 26 apos 27 lt 3c gt 3e QUOT 22 AMP 26 LT 3c GT 3e COPY a9 REG ae
-  nbsp a0 iexcl a1 cent a2 pound a3 curren a4 yen a5 brvbar a6 sect a7 uml a8 copy a9 ordf aa laquo ab not ac shy ad reg ae macr af
-  deg b0 plusmn b1 sup2 b2 sup3 b3 acute b4 micro b5 para b6 middot b7 cedil b8 sup1 b9 ordm ba raquo bb frac14 bc frac12 bd frac34 be iquest bf
-  Agrave c0 Aacute c1 Acirc c2 Atilde c3 Auml c4 Aring c5 AElig c6 Ccedil c7 Egrave c8 Eacute c9 Ecirc ca Euml cb Igrave cc Iacute cd Icirc ce Iuml cf
-  ETH d0 Ntilde d1 Ograve d2 Oacute d3 Ocirc d4 Otilde d5 Ouml d6 times d7 Oslash d8 Ugrave d9 Uacute da Ucirc db Uuml dc Yacute dd THORN de szlig df
-  agrave e0 aacute e1 acirc e2 atilde e3 auml e4 aring e5 aelig e6 ccedil e7 egrave e8 eacute e9 ecirc ea euml eb igrave ec iacute ed icirc ee iuml ef
-  eth f0 ntilde f1 ograve f2 oacute f3 ocirc f4 otilde f5 ouml f6 divide f7 oslash f8 ugrave f9 uacute fa ucirc fb uuml fc yacute fd thorn fe yuml ff
-  OElig 152 oelig 153 Scaron 160 scaron 161 Yuml 178 fnof 192 circ 2c6 tilde 2dc
-  Alpha 391 Beta 392 Gamma 393 Delta 394 Epsilon 395 Zeta 396 Eta 397 Theta 398 Iota 399 Kappa 39a Lambda 39b Mu 39c Nu 39d Xi 39e Omicron 39f
-  Pi 3a0 Rho 3a1 Sigma 3a3 Tau 3a4 Upsilon 3a5 Phi 3a6 Chi 3a7 Psi 3a8 Omega 3a9
-  alpha 3b1 beta 3b2 gamma 3b3 delta 3b4 epsilon 3b5 zeta 3b6 eta 3b7 theta 3b8 iota 3b9 kappa 3ba lambda 3bb mu 3bc nu 3bd xi 3be omicron 3bf
-  pi 3c0 rho 3c1 sigmaf 3c2 sigma 3c3 tau 3c4 upsilon 3c5 phi 3c6 chi 3c7 psi 3c8 omega 3c9 thetasym 3d1 upsih 3d2 piv 3d6
-  ensp 2002 emsp 2003 thinsp 2009 zwnj 200c zwj 200d lrm 200e rlm 200f ndash 2013 mdash 2014 lsquo 2018 rsquo 2019 sbquo 201a
-  ldquo 201c rdquo 201d bdquo 201e dagger 2020 Dagger 2021 bull 2022 hellip 2026 permil 2030 prime 2032 Prime 2033 lsaquo 2039 rsaquo 203a
-  oline 203e frasl 2044 euro 20ac image 2111 weierp 2118 real 211c trade 2122 alefsym 2135
-  larr 2190 uarr 2191 rarr 2192 darr 2193 harr 2194 crarr 21b5 lArr 21d0 uArr 21d1 rArr 21d2 dArr 21d3 hArr 21d4
-  forall 2200 part 2202 exist 2203 empty 2205 nabla 2207 isin 2208 notin 2209 ni 220b prod 220f sum 2211 minus 2212 lowast 2217 radic 221a
-  prop 221d infin 221e ang 2220 and 2227 or 2228 cap 2229 cup 222a int 222b there4 2234 sim 223c cong 2245 asymp 2248 ne 2260 equiv 2261
-  le 2264 ge 2265 sub 2282 sup 2283 nsub 2284 sube 2286 supe 2287 oplus 2295 otimes 2297 perp 22a5 sdot 22c5
-  lceil 2308 rceil 2309 lfloor 230a rfloor 230b lang 27e8 rang 27e9 loz 25ca spades 2660 clubs 2663 hearts 2665 diams 2666
-`;
-var INVISIBLE = /* @__PURE__ */ new Set([173, 8203, 8204, 8205, 8206, 8207, 8288, 65279]);
-var charFor = (cp) => INVISIBLE.has(cp) ? "" : String.fromCodePoint(cp);
-var ENTITY_BY_NAME = /* @__PURE__ */ new Map();
-{
-  const parts = NAMED.trim().split(/\s+/);
-  for (let i = 0; i < parts.length; i += 2) ENTITY_BY_NAME.set(parts[i], charFor(Number.parseInt(parts[i + 1], 16)));
-  ENTITY_BY_NAME.set("nbsp", " ");
-}
-var ENTITY_RE = /&(#[xX][0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g;
-function numericChar(n) {
-  if (n >= 128 && n <= 159) return String.fromCodePoint(CP1252_C1[n - 128]);
-  if (n === 0 || !(n <= 1114111) || n >= 55296 && n <= 57343) return "\uFFFD";
-  return charFor(n);
-}
-function decodeEntities(s) {
-  return s.replace(ENTITY_RE, (m, ref) => {
-    if (ref[0] !== "#") return ENTITY_BY_NAME.get(ref) ?? m;
-    return numericChar(ref[1] === "x" || ref[1] === "X" ? Number.parseInt(ref.slice(2), 16) : Number(ref.slice(1)));
-  });
-}
-
-// src/html.ts
-var BLOCK_TAGS = /* @__PURE__ */ new Set([
-  "p",
-  "div",
-  "section",
-  "article",
-  "li",
-  "tr",
-  "td",
-  "th",
-  "ul",
-  "ol",
-  "pre",
-  "blockquote",
-  "table",
-  "caption",
-  "dl",
-  "dt",
-  "dd",
-  "header",
-  "footer",
-  "nav",
-  "aside",
-  "main",
-  "search",
-  "figure",
-  "figcaption",
-  "details",
-  "summary",
-  "address",
-  "form",
-  "fieldset",
-  "legend",
-  "hgroup",
-  "center",
-  "dialog",
-  "menu"
-]);
-var INLINE_TAGS = /* @__PURE__ */ new Set([
-  "a",
-  "abbr",
-  "acronym",
-  "b",
-  "bdi",
-  "bdo",
-  "big",
-  "cite",
-  "code",
-  "data",
-  "del",
-  "dfn",
-  "em",
-  "font",
-  "i",
-  "ins",
-  "kbd",
-  "label",
-  "mark",
-  "nobr",
-  "q",
-  "s",
-  "samp",
-  "small",
-  "span",
-  "strike",
-  "strong",
-  "sub",
-  "sup",
-  "time",
-  "tt",
-  "u",
-  "var",
-  "wbr"
-]);
-var TAG_RE = /<[a-zA-Z!/?][^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/g;
-var LOOSE_TAG_RE = /<[a-zA-Z!/?][^<>]*>/g;
-var tagName = (tag) => /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
-var CLOSE_TAG_RE = /* @__PURE__ */ new Map();
-function closeTagRe(name) {
-  let re = CLOSE_TAG_RE.get(name);
-  if (!re) CLOSE_TAG_RE.set(name, re = new RegExp(`</${name}\\s*>`, "gi"));
-  return re;
-}
-function htmlAttributes(tag) {
-  const attrs = /* @__PURE__ */ new Map();
-  for (const m of tag.matchAll(/(?<![^\s"'<>/=])([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) {
-    const name = m[1].toLowerCase();
-    if (!attrs.has(name)) attrs.set(name, m[2] ?? m[3] ?? m[4] ?? "");
-  }
-  return attrs;
-}
-var RCDATA_ELEMENTS = /* @__PURE__ */ new Set(["title"]);
-function dropElements(html, names, toEof = /* @__PURE__ */ new Set()) {
-  const drop = new Set(names);
-  const open = new RegExp(`<!--|${TAG_RE.source}|<(${names.join("|")})(?=[\\s/>])`, "gi");
-  const unclosed = /* @__PURE__ */ new Set();
-  let out = "";
-  let last = 0;
-  let m;
-  while (m = open.exec(html)) {
-    const tag = m[0];
-    const name = m[1]?.toLowerCase() ?? (tag === "<!--" ? "!--" : tag[1] === "/" ? "" : tagName(tag));
-    const opaque = !drop.has(name) && RCDATA_ELEMENTS.has(name);
-    if (name !== "!--" && !drop.has(name) && !opaque || unclosed.has(name)) continue;
-    let end;
-    if (name === "!--") {
-      const close = html.indexOf("-->", m.index + 2);
-      end = close < 0 ? -1 : close + 3;
-    } else {
-      const close = closeTagRe(name);
-      close.lastIndex = open.lastIndex;
-      const c = close.exec(html);
-      end = c ? c.index + c[0].length : toEof.has(name) ? html.length : -1;
-    }
-    if (end < 0) {
-      unclosed.add(name);
-      continue;
-    }
-    if (!opaque) {
-      out += html.slice(last, m.index) + " ";
-      last = end;
-    }
-    open.lastIndex = end;
-  }
-  return last === 0 ? html : out + html.slice(last);
-}
-function balancedRegions(html, tag, isCandidate) {
-  const re = new RegExp(`<${tag}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>|</${tag}\\s*>`, "gi");
-  const stack = [];
-  const out = [];
-  let m;
-  while (m = re.exec(html)) {
-    if (m[0][1] === "/") {
-      const top = stack.pop();
-      if (top?.open) out.push({ start: top.start, end: m.index, from: top.from, to: re.lastIndex, open: top.open });
-    } else {
-      stack.push({ start: re.lastIndex, from: m.index, open: isCandidate(m[0]) ? m[0] : void 0 });
-    }
-  }
-  return out;
-}
-function dropLandmarks(html, roles) {
-  const role = `\\srole\\s*=\\s*["']?(?:${roles.join("|")})(?=["'\\s/>])`;
-  const hasRole = new RegExp(role, "i");
-  const names = /* @__PURE__ */ new Set();
-  for (const m of html.matchAll(new RegExp(`<([a-zA-Z][a-zA-Z0-9-]*)(?=[\\s/>])[^<>]*${role}`, "gi"))) names.add(m[1].toLowerCase());
-  if (!names.size) return html;
-  const regions = [...names].flatMap((name) => balancedRegions(html, name, (open) => hasRole.test(open))).sort((a, b) => a.from - b.from);
-  let out = "";
-  let last = 0;
-  for (const r of regions) {
-    if (r.from < last) continue;
-    out += `${html.slice(last, r.from)} `;
-    last = r.to;
-  }
-  return last === 0 ? html : out + html.slice(last);
-}
-var CHROME_ROLES = ["navigation", "banner", "contentinfo"];
-var HIDDEN_ELEMENTS = ["script", "style", "noscript", "head", "svg", "template", "select", "datalist"];
-var CHROME_ELEMENTS = ["nav", "footer"];
-var RAW_TEXT_ELEMENTS = /* @__PURE__ */ new Set(["script", "style"]);
-
-// src/retry.ts
-var maxAttempts = () => envInt("MAX_ATTEMPTS", 2, 1, 5);
-var defaultRetryMs = () => envInt("RETRY_MS", 600, 0, 5e3);
-var RETRY_AFTER_CAP_MS = 5e3;
-function retryDelayMs(retryAfterMs) {
-  if (retryAfterMs === void 0) return defaultRetryMs();
-  return retryAfterMs <= RETRY_AFTER_CAP_MS ? retryAfterMs : void 0;
-}
-var PERMANENT_CODES = /* @__PURE__ */ new Set([
-  "ENOTFOUND",
-  "ERR_INVALID_URL",
-  "ERR_TLS_CERT_ALTNAME_INVALID",
-  "CERT_HAS_EXPIRED",
-  "DEPTH_ZERO_SELF_SIGNED_CERT",
-  "SELF_SIGNED_CERT_IN_CHAIN",
-  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
-  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"
-]);
-var PERMANENT_MESSAGE = /redirect count exceeded|scheme must be|unknown scheme|bad port|invalid url|failed to parse url/i;
-function isPermanentFailure(e) {
-  const err = e;
-  const code = err?.cause?.code ?? err?.code;
-  if (typeof code === "string" && PERMANENT_CODES.has(code)) return true;
-  return [err?.message, err?.cause?.message].some((m) => typeof m === "string" && PERMANENT_MESSAGE.test(m));
-}
+// src/video/run.ts
+import { existsSync as existsSync3, readdirSync as readdirSync4, readFileSync as readFileSync10, statSync } from "fs";
+import { tmpdir as tmpdir3 } from "os";
+import { join as join10, resolve } from "path";
 
 // src/url.ts
 var TRACKING_PARAMS = /^(utm_|fbclid$|gclid$|gclsrc$|dclid$|msclkid$|yclid$|twclid$|ttclid$|li_fat_id$|mkt_tok$|_gl$|mc_|ref_src$|ref_url$|spm$|_hsenc$|_hsmi$|igshid$|igsh$)/i;
@@ -3487,6 +3263,688 @@ function slugify(input, opts = {}) {
   const tag = fnv1a64(normalized).toString(16).padStart(16, "0").slice(0, 8);
   const head = s.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");
   return head ? `${head}-${tag}` : tag;
+}
+
+// src/rank.ts
+function rrf(lists, keyOf, k = 60) {
+  const score = /* @__PURE__ */ new Map();
+  for (const list of lists) {
+    const seen = /* @__PURE__ */ new Set();
+    list.forEach((item, idx) => {
+      const key = keyOf(item);
+      if (seen.has(key)) return;
+      seen.add(key);
+      score.set(key, (score.get(key) ?? 0) + 1 / (k + idx + 1));
+    });
+  }
+  return score;
+}
+var byCodeUnit = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+var indexTokenCache = /* @__PURE__ */ new WeakMap();
+function bm25Tokenize(text, opts = {}) {
+  return tokenize(text, opts.subtokens !== false);
+}
+var WORD_SPLIT = /[^\p{L}\p{M}\p{N}_]+/u;
+var NON_ASCII2 = /[^\p{ASCII}]/u;
+var CJK_CHAR2 = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
+var CJK_RUNS2 = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
+var IDENT_BOUNDARY = new RegExp("_|[\\p{Ll}\\p{N}]\\p{Lu}|\\p{Lu}\\p{Lu}\\p{Ll}|\\p{L}\\p{N}|\\p{N}\\p{L}", "u");
+var MAX_IDENT = 64;
+function tokenize(text, expand2) {
+  if (!text) return [];
+  const out = [];
+  const nonAscii = NON_ASCII2.test(text);
+  for (const raw of (nonAscii ? text.normalize("NFC") : text).split(WORD_SPLIT)) {
+    if (!raw) continue;
+    if (nonAscii && CJK_CHAR2.test(raw)) {
+      for (const piece of raw.split(CJK_RUNS2)) {
+        if (!piece) continue;
+        if (CJK_CHAR2.test(piece)) pushBigrams(piece, out);
+        else pushTerm(piece, out, expand2);
+      }
+    } else pushTerm(raw, out, expand2);
+  }
+  return out;
+}
+function pushTerm(raw, out, expand2) {
+  if (raw.length < 2 || isStopword(raw)) return;
+  const t = foldCached(raw);
+  if (t.length < 2) return;
+  out.push(t);
+  if (!expand2 || raw.length > MAX_IDENT) return;
+  for (const sub of subtermsCached(raw, t)) out.push(sub);
+}
+function pushBigrams(run, out) {
+  const chars = Array.from(run);
+  if (chars.length === 1) {
+    out.push(run);
+    return;
+  }
+  for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1]);
+}
+var FOLD_CACHE_MAX = 5e4;
+var foldCache = /* @__PURE__ */ new Map();
+function foldCached(raw) {
+  const hit = foldCache.get(raw);
+  if (hit !== void 0) return hit;
+  const t = foldTerm(raw);
+  if (foldCache.size >= FOLD_CACHE_MAX) foldCache.clear();
+  foldCache.set(raw, t);
+  return t;
+}
+var NO_SUBTERMS = [];
+var subtermCache = /* @__PURE__ */ new Map();
+var subtermExtras = { list: void 0, length: 0 };
+function subtermsCached(raw, folded) {
+  const list = brand().extraStopwords;
+  if (list !== subtermExtras.list || (list?.length ?? 0) !== subtermExtras.length) {
+    subtermCache.clear();
+    subtermExtras = { list, length: list?.length ?? 0 };
+  }
+  const hit = subtermCache.get(raw);
+  if (hit !== void 0) return hit;
+  let subs = NO_SUBTERMS;
+  if (IDENT_BOUNDARY.test(raw)) {
+    subs = subtokens(raw).map(foldCached).filter((sub) => sub !== folded && sub.length >= 2);
+  }
+  if (subtermCache.size >= FOLD_CACHE_MAX) subtermCache.clear();
+  subtermCache.set(raw, subs);
+  return subs;
+}
+function docTokens(doc, titleWeight, headingWeight, body) {
+  const out = body ? [...body] : bm25Tokenize(doc.body);
+  const headings = bm25Tokenize(doc.headings);
+  for (let r = 0; r < headingWeight; r++) out.push(...headings);
+  const title = bm25Tokenize(doc.title);
+  for (let r = 0; r < titleWeight; r++) out.push(...title);
+  return out;
+}
+function proximityBonus(tokens, queryTerms, window = 6, cap = 0.1) {
+  if (queryTerms.length < 2) return 0;
+  const q = new Set(queryTerms);
+  const hits = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (q.has(tok)) hits.push({ pos: i, term: tok });
+  }
+  if (hits.length < 2) return 0;
+  let close = 0;
+  for (let i = 1; i < hits.length; i++) {
+    if (hits[i].term !== hits[i - 1].term && hits[i].pos - hits[i - 1].pos <= window) close++;
+  }
+  return Math.min(cap, cap * (close / Math.max(1, queryTerms.length - 1)));
+}
+function buildBm25Index(question, docs, opts = {}) {
+  const k1 = opts.k1 ?? 1.2;
+  const b = opts.b ?? 0.75;
+  const titleWeight = 3;
+  const headingWeight = 2;
+  const queryTerms = [...new Set(bm25Tokenize(question))];
+  const N = docs.length;
+  const df = /* @__PURE__ */ new Map();
+  const tokenCache = /* @__PURE__ */ new WeakMap();
+  let totalLen = 0;
+  for (const doc of docs) {
+    const toks = docTokens(doc, titleWeight, headingWeight, opts.tokensOf?.(doc));
+    tokenCache.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens: toks });
+    totalLen += toks.length;
+    for (const t of new Set(toks)) df.set(t, (df.get(t) ?? 0) + 1);
+  }
+  const avgdl = N ? totalLen / N : 0;
+  const idf = /* @__PURE__ */ new Map();
+  for (const t of queryTerms) {
+    if (N < 3) {
+      idf.set(t, 1);
+      continue;
+    }
+    const dfi = df.get(t) ?? 0;
+    idf.set(t, Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5)));
+  }
+  const index = { idf, avgdl, N, queryTerms, k1, b, titleWeight, headingWeight };
+  indexTokenCache.set(index, tokenCache);
+  return index;
+}
+function indexedDocTokens(index, doc) {
+  const cache2 = indexTokenCache.get(index);
+  const cached = cache2?.get(doc);
+  if (cached && cached.title === doc.title && cached.headings === doc.headings && cached.body === doc.body) return cached.tokens;
+  const tokens = docTokens(doc, index.titleWeight, index.headingWeight);
+  cache2?.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens });
+  return tokens;
+}
+function bm25Score(index, doc) {
+  if (!index.queryTerms.length) return 0;
+  const toks = indexedDocTokens(index, doc);
+  const dl = toks.length;
+  if (!dl) return 0;
+  const tf = /* @__PURE__ */ new Map();
+  for (const t of toks) tf.set(t, (tf.get(t) ?? 0) + 1);
+  const { k1, b, avgdl } = index;
+  const lenNorm = 1 - b + b * (avgdl ? dl / avgdl : 1);
+  let score = 0;
+  for (const term of index.queryTerms) {
+    const f = tf.get(term);
+    if (!f) continue;
+    const idf = index.idf.get(term) ?? 0;
+    score += idf * (f * (k1 + 1)) / (f + k1 * lenNorm);
+  }
+  return score * (1 + proximityBonus(toks, index.queryTerms));
+}
+function bm25MatchedTerms(index, doc) {
+  if (!index.queryTerms.length) return [];
+  const present = new Set(indexedDocTokens(index, doc));
+  return index.queryTerms.filter((t) => present.has(t));
+}
+function simhashLanes(toks, out) {
+  out[0] = 0;
+  out[1] = 0;
+  if (!toks.length) return;
+  const v = new Int32Array(64);
+  const words = new Uint32Array(2);
+  const pieces = toks.length < 3 ? [""] : ["", " ", "", " ", ""];
+  const n = toks.length < 3 ? toks.length : toks.length - 2;
+  for (let i = 0; i < n; i++) {
+    if (toks.length < 3) pieces[0] = toks[i];
+    else {
+      pieces[0] = toks[i];
+      pieces[2] = toks[i + 1];
+      pieces[4] = toks[i + 2];
+    }
+    fnv1a64Words(pieces, words);
+    const hi2 = words[0];
+    const lo2 = words[1];
+    for (let b = 0; b < 32; b++) {
+      v[b] = v[b] + (lo2 >>> b & 1);
+      v[b + 32] = v[b + 32] + (hi2 >>> b & 1);
+    }
+  }
+  let lo = 0;
+  let hi = 0;
+  for (let b = 0; b < 32; b++) {
+    if (2 * v[b] > n) lo |= 1 << b;
+    if (2 * v[b + 32] > n) hi |= 1 << b;
+  }
+  out[0] = hi;
+  out[1] = lo;
+}
+function popcount32(n) {
+  let x = n - (n >>> 1 & 1431655765);
+  x = (x & 858993459) + (x >>> 2 & 858993459);
+  return Math.imul(x + (x >>> 4) & 252645135, 16843009) >>> 24;
+}
+function dedupeNearDuplicates(items, opts = {}) {
+  const maxBits = opts.maxBits ?? 3;
+  const minChars = opts.minChars ?? 500;
+  const better = (a, b) => a.score !== b.score ? a.score > b.score : byCodeUnit(a.url, b.url) < 0;
+  const kept = [];
+  const hashed = [];
+  const his = [];
+  const los = [];
+  const lanes = new Uint32Array(2);
+  const dups = [];
+  for (const it of items) {
+    const text = it.text || "";
+    if (text.length < minChars) {
+      kept.push({ it });
+      continue;
+    }
+    simhashLanes(opts.tokensOf ? opts.tokensOf(it) : tokenize(text, false), lanes);
+    const hi = lanes[0];
+    const lo = lanes[1];
+    let at = -1;
+    for (let k = 0; k < hashed.length; k++) {
+      if (popcount32(his[k] ^ hi) + popcount32(los[k] ^ lo) <= maxBits) {
+        at = k;
+        break;
+      }
+    }
+    if (at < 0) {
+      const cluster = { it };
+      kept.push(cluster);
+      hashed.push(cluster);
+      his.push(hi);
+      los.push(lo);
+      continue;
+    }
+    const dup = hashed[at];
+    if (better(it, dup.it)) {
+      dups.push({ url: dup.it.url, cluster: dup });
+      dup.it = it;
+      his[at] = hi;
+      los[at] = lo;
+    } else dups.push({ url: it.url, cluster: dup });
+  }
+  return { items: kept.map((k) => k.it), dropped: dups.length, duplicates: dups.map((d) => ({ url: d.url, of: d.cluster.it.url })) };
+}
+function diversify(items, tokensOf, lambda = 0.75, opts = {}) {
+  const sorted = [...items].sort((a, b) => b.score - a.score || byCodeUnit(a.url, b.url));
+  if (sorted.length <= 2) return sorted;
+  const window = opts.window !== void 0 && opts.window > 0 ? Math.floor(opts.window) : sorted.length;
+  if (window >= sorted.length) return mmr(sorted, tokensOf, lambda);
+  return [...window > 2 ? mmr(sorted.slice(0, window), tokensOf, lambda) : sorted.slice(0, window), ...sorted.slice(window)];
+}
+var PAIR_CACHE_MAX = 2048;
+function mmr(sorted, tokensOf, lambda) {
+  const m = sorted.length;
+  let max = 1e-9;
+  for (const it of sorted) if (it.score > max) max = it.score;
+  const ids = /* @__PURE__ */ new Map();
+  const sets = [];
+  for (const it of sorted) {
+    const raw = [];
+    for (const t of tokensOf(it)) {
+      let id = ids.get(t);
+      if (id === void 0) {
+        id = ids.size;
+        ids.set(t, id);
+      }
+      raw.push(id);
+    }
+    const all = Int32Array.from(raw).sort();
+    let k = 0;
+    for (let j = 0; j < all.length; j++) if (j === 0 || all[j] !== all[j - 1]) all[k++] = all[j];
+    sets.push(all.subarray(0, k));
+  }
+  const cache2 = m <= PAIR_CACHE_MAX ? new Float64Array(m * (m - 1) / 2) : void 0;
+  const pair = (i, j) => i < j ? i * (2 * m - i - 1) / 2 + (j - i - 1) : j * (2 * m - j - 1) / 2 + (i - j - 1);
+  let simMax = 0;
+  for (let i = 0; i < m; i++) {
+    for (let j = i + 1; j < m; j++) {
+      const v = jaccardSorted(sets[i], sets[j]);
+      if (cache2) cache2[pair(i, j)] = v;
+      if (v > simMax) simMax = v;
+    }
+  }
+  const sim = (i, j) => simMax > 0 ? (cache2 ? cache2[pair(i, j)] : jaccardSorted(sets[i], sets[j])) / simMax : 0;
+  const out = [sorted[0]];
+  const remaining = [];
+  for (let i = 1; i < m; i++) remaining.push(i);
+  const maxSim = new Float64Array(m);
+  for (const i of remaining) maxSim[i] = sim(i, 0);
+  let relevantLeft = 0;
+  for (const i of remaining) if (sorted[i].score > 0) relevantLeft++;
+  while (remaining.length) {
+    let bestPos = -1;
+    let bestVal = Number.NEGATIVE_INFINITY;
+    for (let p = 0; p < remaining.length; p++) {
+      const it = sorted[remaining[p]];
+      if (relevantLeft > 0 && !(it.score > 0)) continue;
+      const val = lambda * (it.score / max) - (1 - lambda) * maxSim[remaining[p]];
+      if (bestPos < 0 || val > bestVal || val === bestVal && byCodeUnit(it.url, sorted[remaining[bestPos]].url) < 0) {
+        bestVal = val;
+        bestPos = p;
+      }
+    }
+    const picked = remaining.splice(bestPos, 1)[0];
+    if (sorted[picked].score > 0) relevantLeft--;
+    out.push(sorted[picked]);
+    for (const i of remaining) {
+      const v = sim(i, picked);
+      if (v > maxSim[i]) maxSim[i] = v;
+    }
+  }
+  return out;
+}
+function jaccardSorted(a, b) {
+  const na = a.length;
+  const nb = b.length;
+  if (!na || !nb) return 0;
+  let i = 0;
+  let j = 0;
+  let inter = 0;
+  while (i < na && j < nb) {
+    const x = a[i];
+    const y = b[j];
+    if (x === y) {
+      inter++;
+      i++;
+      j++;
+    } else if (x < y) i++;
+    else j++;
+  }
+  return inter / (na + nb - inter);
+}
+
+// src/video/run.ts
+function videoRoot(out) {
+  return resolve(out ?? env("VIDEO_DIR") ?? join10(tmpdir3(), brand().name, "video"));
+}
+var readJson = (path) => {
+  try {
+    return JSON.parse(readFileSync10(path, "utf8"));
+  } catch {
+    return void 0;
+  }
+};
+function readVideoRun(dir) {
+  const meta = readJson(join10(dir, "meta.json"));
+  const segments = readJson(join10(dir, "segments.json"));
+  if (!meta?.id || !Array.isArray(segments)) return void 0;
+  return { meta, segments };
+}
+async function fetchVideoRun(url, root, opts = {}) {
+  const id = youtubeVideoId(url);
+  if (!id) return { ok: false, reason: `not a YouTube video URL: ${url}` };
+  const dir = join10(root, id);
+  const transcriptPath = join10(dir, "TRANSCRIPT.md");
+  if (!opts.refresh) {
+    const kept = readVideoRun(dir);
+    if (kept && existsSync3(transcriptPath))
+      return { ok: true, id, dir, transcript: transcriptPath, reused: true, meta: kept.meta, segments: kept.segments.length };
+  }
+  const t = await transcribeVideo(url, opts);
+  if (!t.via || !t.meta) return { ok: false, id, reason: t.reason ?? "no transcript" };
+  const meta = { ...t.meta, via: t.via, fetchedAt: (/* @__PURE__ */ new Date()).toISOString() };
+  ensureDir(dir);
+  writeArtifact(join10(dir, "segments.json"), `${JSON.stringify(t.segments, null, 1)}
+`);
+  writeArtifact(join10(dir, "meta.json"), `${JSON.stringify(meta, null, 2)}
+`);
+  writeArtifact(transcriptPath, transcriptMarkdown(t));
+  return { ok: true, id, dir, transcript: transcriptPath, reused: false, meta, segments: t.segments.length };
+}
+var PASSAGE_S = 45;
+function videoPassages(segments) {
+  const out = [];
+  let cur;
+  for (const s of segments) {
+    cur = cur ? { start: cur.start, end: s.end, text: `${cur.text} ${s.text}` } : { ...s };
+    if (cur.end - cur.start >= PASSAGE_S) {
+      out.push(cur);
+      cur = void 0;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+function videoUrlAt(webpageUrl, seconds3) {
+  try {
+    const u = new URL(webpageUrl);
+    u.searchParams.set("t", `${Math.floor(seconds3)}s`);
+    return u.toString();
+  } catch {
+    return webpageUrl;
+  }
+}
+function listVideoRuns(dir) {
+  const self = readVideoRun(dir);
+  if (self) return [{ dir, ...self }];
+  let names = [];
+  try {
+    names = readdirSync4(dir).sort();
+  } catch {
+    return [];
+  }
+  return names.flatMap((name) => {
+    const child = join10(dir, name);
+    try {
+      if (!statSync(child).isDirectory()) return [];
+    } catch {
+      return [];
+    }
+    const run = readVideoRun(child);
+    return run ? [{ dir: child, ...run }] : [];
+  });
+}
+var chapterAt = (chapters, t) => [...chapters].reverse().find((c) => c.start <= t + 0.5)?.title;
+function searchVideoRuns(dir, query, opts = {}) {
+  const docs = [];
+  for (const run of listVideoRuns(dir)) {
+    const { meta } = run;
+    for (const p of videoPassages(run.segments)) {
+      const chapter = chapterAt(meta.chapters ?? [], p.start);
+      docs.push({
+        id: `${meta.id}@${p.start}`,
+        title: "",
+        headings: chapter ?? "",
+        body: p.text,
+        hit: {
+          label: opts.labels?.get(meta.id) ?? meta.id,
+          videoId: meta.id,
+          title: meta.title,
+          ...chapter ? { chapter } : {},
+          start: p.start,
+          stamp: formatStamp(p.start),
+          url: videoUrlAt(meta.webpageUrl, p.start),
+          text: p.text
+        }
+      });
+    }
+  }
+  const index = buildBm25Index(query, docs);
+  return docs.map((d) => ({ ...d.hit, score: Math.round(bm25Score(index, d) * 1e3) / 1e3 })).filter((h) => h.score > 0).sort((a, b) => b.score - a.score || a.videoId.localeCompare(b.videoId) || a.start - b.start).slice(0, opts.limit ?? 10);
+}
+
+// src/entities.ts
+var NAMED = `
+  quot 22 amp 26 apos 27 lt 3c gt 3e QUOT 22 AMP 26 LT 3c GT 3e COPY a9 REG ae
+  nbsp a0 iexcl a1 cent a2 pound a3 curren a4 yen a5 brvbar a6 sect a7 uml a8 copy a9 ordf aa laquo ab not ac shy ad reg ae macr af
+  deg b0 plusmn b1 sup2 b2 sup3 b3 acute b4 micro b5 para b6 middot b7 cedil b8 sup1 b9 ordm ba raquo bb frac14 bc frac12 bd frac34 be iquest bf
+  Agrave c0 Aacute c1 Acirc c2 Atilde c3 Auml c4 Aring c5 AElig c6 Ccedil c7 Egrave c8 Eacute c9 Ecirc ca Euml cb Igrave cc Iacute cd Icirc ce Iuml cf
+  ETH d0 Ntilde d1 Ograve d2 Oacute d3 Ocirc d4 Otilde d5 Ouml d6 times d7 Oslash d8 Ugrave d9 Uacute da Ucirc db Uuml dc Yacute dd THORN de szlig df
+  agrave e0 aacute e1 acirc e2 atilde e3 auml e4 aring e5 aelig e6 ccedil e7 egrave e8 eacute e9 ecirc ea euml eb igrave ec iacute ed icirc ee iuml ef
+  eth f0 ntilde f1 ograve f2 oacute f3 ocirc f4 otilde f5 ouml f6 divide f7 oslash f8 ugrave f9 uacute fa ucirc fb uuml fc yacute fd thorn fe yuml ff
+  OElig 152 oelig 153 Scaron 160 scaron 161 Yuml 178 fnof 192 circ 2c6 tilde 2dc
+  Alpha 391 Beta 392 Gamma 393 Delta 394 Epsilon 395 Zeta 396 Eta 397 Theta 398 Iota 399 Kappa 39a Lambda 39b Mu 39c Nu 39d Xi 39e Omicron 39f
+  Pi 3a0 Rho 3a1 Sigma 3a3 Tau 3a4 Upsilon 3a5 Phi 3a6 Chi 3a7 Psi 3a8 Omega 3a9
+  alpha 3b1 beta 3b2 gamma 3b3 delta 3b4 epsilon 3b5 zeta 3b6 eta 3b7 theta 3b8 iota 3b9 kappa 3ba lambda 3bb mu 3bc nu 3bd xi 3be omicron 3bf
+  pi 3c0 rho 3c1 sigmaf 3c2 sigma 3c3 tau 3c4 upsilon 3c5 phi 3c6 chi 3c7 psi 3c8 omega 3c9 thetasym 3d1 upsih 3d2 piv 3d6
+  ensp 2002 emsp 2003 thinsp 2009 zwnj 200c zwj 200d lrm 200e rlm 200f ndash 2013 mdash 2014 lsquo 2018 rsquo 2019 sbquo 201a
+  ldquo 201c rdquo 201d bdquo 201e dagger 2020 Dagger 2021 bull 2022 hellip 2026 permil 2030 prime 2032 Prime 2033 lsaquo 2039 rsaquo 203a
+  oline 203e frasl 2044 euro 20ac image 2111 weierp 2118 real 211c trade 2122 alefsym 2135
+  larr 2190 uarr 2191 rarr 2192 darr 2193 harr 2194 crarr 21b5 lArr 21d0 uArr 21d1 rArr 21d2 dArr 21d3 hArr 21d4
+  forall 2200 part 2202 exist 2203 empty 2205 nabla 2207 isin 2208 notin 2209 ni 220b prod 220f sum 2211 minus 2212 lowast 2217 radic 221a
+  prop 221d infin 221e ang 2220 and 2227 or 2228 cap 2229 cup 222a int 222b there4 2234 sim 223c cong 2245 asymp 2248 ne 2260 equiv 2261
+  le 2264 ge 2265 sub 2282 sup 2283 nsub 2284 sube 2286 supe 2287 oplus 2295 otimes 2297 perp 22a5 sdot 22c5
+  lceil 2308 rceil 2309 lfloor 230a rfloor 230b lang 27e8 rang 27e9 loz 25ca spades 2660 clubs 2663 hearts 2665 diams 2666
+`;
+var INVISIBLE = /* @__PURE__ */ new Set([173, 8203, 8204, 8205, 8206, 8207, 8288, 65279]);
+var charFor = (cp) => INVISIBLE.has(cp) ? "" : String.fromCodePoint(cp);
+var ENTITY_BY_NAME = /* @__PURE__ */ new Map();
+{
+  const parts = NAMED.trim().split(/\s+/);
+  for (let i = 0; i < parts.length; i += 2) ENTITY_BY_NAME.set(parts[i], charFor(Number.parseInt(parts[i + 1], 16)));
+  ENTITY_BY_NAME.set("nbsp", " ");
+}
+var ENTITY_RE = /&(#[xX][0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g;
+function numericChar(n) {
+  if (n >= 128 && n <= 159) return String.fromCodePoint(CP1252_C1[n - 128]);
+  if (n === 0 || !(n <= 1114111) || n >= 55296 && n <= 57343) return "\uFFFD";
+  return charFor(n);
+}
+function decodeEntities(s) {
+  return s.replace(ENTITY_RE, (m, ref) => {
+    if (ref[0] !== "#") return ENTITY_BY_NAME.get(ref) ?? m;
+    return numericChar(ref[1] === "x" || ref[1] === "X" ? Number.parseInt(ref.slice(2), 16) : Number(ref.slice(1)));
+  });
+}
+
+// src/html.ts
+var BLOCK_TAGS = /* @__PURE__ */ new Set([
+  "p",
+  "div",
+  "section",
+  "article",
+  "li",
+  "tr",
+  "td",
+  "th",
+  "ul",
+  "ol",
+  "pre",
+  "blockquote",
+  "table",
+  "caption",
+  "dl",
+  "dt",
+  "dd",
+  "header",
+  "footer",
+  "nav",
+  "aside",
+  "main",
+  "search",
+  "figure",
+  "figcaption",
+  "details",
+  "summary",
+  "address",
+  "form",
+  "fieldset",
+  "legend",
+  "hgroup",
+  "center",
+  "dialog",
+  "menu"
+]);
+var INLINE_TAGS = /* @__PURE__ */ new Set([
+  "a",
+  "abbr",
+  "acronym",
+  "b",
+  "bdi",
+  "bdo",
+  "big",
+  "cite",
+  "code",
+  "data",
+  "del",
+  "dfn",
+  "em",
+  "font",
+  "i",
+  "ins",
+  "kbd",
+  "label",
+  "mark",
+  "nobr",
+  "q",
+  "s",
+  "samp",
+  "small",
+  "span",
+  "strike",
+  "strong",
+  "sub",
+  "sup",
+  "time",
+  "tt",
+  "u",
+  "var",
+  "wbr"
+]);
+var TAG_RE = /<[a-zA-Z!/?][^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/g;
+var LOOSE_TAG_RE = /<[a-zA-Z!/?][^<>]*>/g;
+var tagName = (tag) => /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
+var CLOSE_TAG_RE = /* @__PURE__ */ new Map();
+function closeTagRe(name) {
+  let re = CLOSE_TAG_RE.get(name);
+  if (!re) CLOSE_TAG_RE.set(name, re = new RegExp(`</${name}\\s*>`, "gi"));
+  return re;
+}
+function htmlAttributes(tag) {
+  const attrs = /* @__PURE__ */ new Map();
+  for (const m of tag.matchAll(/(?<![^\s"'<>/=])([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) {
+    const name = m[1].toLowerCase();
+    if (!attrs.has(name)) attrs.set(name, m[2] ?? m[3] ?? m[4] ?? "");
+  }
+  return attrs;
+}
+var RCDATA_ELEMENTS = /* @__PURE__ */ new Set(["title"]);
+function dropElements(html, names, toEof = /* @__PURE__ */ new Set()) {
+  const drop = new Set(names);
+  const open = new RegExp(`<!--|${TAG_RE.source}|<(${names.join("|")})(?=[\\s/>])`, "gi");
+  const unclosed = /* @__PURE__ */ new Set();
+  let out = "";
+  let last = 0;
+  let m;
+  while (m = open.exec(html)) {
+    const tag = m[0];
+    const name = m[1]?.toLowerCase() ?? (tag === "<!--" ? "!--" : tag[1] === "/" ? "" : tagName(tag));
+    const opaque = !drop.has(name) && RCDATA_ELEMENTS.has(name);
+    if (name !== "!--" && !drop.has(name) && !opaque || unclosed.has(name)) continue;
+    let end;
+    if (name === "!--") {
+      const close = html.indexOf("-->", m.index + 2);
+      end = close < 0 ? -1 : close + 3;
+    } else {
+      const close = closeTagRe(name);
+      close.lastIndex = open.lastIndex;
+      const c = close.exec(html);
+      end = c ? c.index + c[0].length : toEof.has(name) ? html.length : -1;
+    }
+    if (end < 0) {
+      unclosed.add(name);
+      continue;
+    }
+    if (!opaque) {
+      out += html.slice(last, m.index) + " ";
+      last = end;
+    }
+    open.lastIndex = end;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
+function balancedRegions(html, tag, isCandidate) {
+  const re = new RegExp(`<${tag}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>|</${tag}\\s*>`, "gi");
+  const stack = [];
+  const out = [];
+  let m;
+  while (m = re.exec(html)) {
+    if (m[0][1] === "/") {
+      const top = stack.pop();
+      if (top?.open) out.push({ start: top.start, end: m.index, from: top.from, to: re.lastIndex, open: top.open });
+    } else {
+      stack.push({ start: re.lastIndex, from: m.index, open: isCandidate(m[0]) ? m[0] : void 0 });
+    }
+  }
+  return out;
+}
+function dropLandmarks(html, roles) {
+  const role = `\\srole\\s*=\\s*["']?(?:${roles.join("|")})(?=["'\\s/>])`;
+  const hasRole = new RegExp(role, "i");
+  const names = /* @__PURE__ */ new Set();
+  for (const m of html.matchAll(new RegExp(`<([a-zA-Z][a-zA-Z0-9-]*)(?=[\\s/>])[^<>]*${role}`, "gi"))) names.add(m[1].toLowerCase());
+  if (!names.size) return html;
+  const regions = [...names].flatMap((name) => balancedRegions(html, name, (open) => hasRole.test(open))).sort((a, b) => a.from - b.from);
+  let out = "";
+  let last = 0;
+  for (const r of regions) {
+    if (r.from < last) continue;
+    out += `${html.slice(last, r.from)} `;
+    last = r.to;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
+var CHROME_ROLES = ["navigation", "banner", "contentinfo"];
+var HIDDEN_ELEMENTS = ["script", "style", "noscript", "head", "svg", "template", "select", "datalist"];
+var CHROME_ELEMENTS = ["nav", "footer"];
+var RAW_TEXT_ELEMENTS = /* @__PURE__ */ new Set(["script", "style"]);
+
+// src/retry.ts
+var maxAttempts = () => envInt("MAX_ATTEMPTS", 2, 1, 5);
+var defaultRetryMs = () => envInt("RETRY_MS", 600, 0, 5e3);
+var RETRY_AFTER_CAP_MS = 5e3;
+function retryDelayMs(retryAfterMs) {
+  if (retryAfterMs === void 0) return defaultRetryMs();
+  return retryAfterMs <= RETRY_AFTER_CAP_MS ? retryAfterMs : void 0;
+}
+var PERMANENT_CODES = /* @__PURE__ */ new Set([
+  "ENOTFOUND",
+  "ERR_INVALID_URL",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "CERT_HAS_EXPIRED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"
+]);
+var PERMANENT_MESSAGE = /redirect count exceeded|scheme must be|unknown scheme|bad port|invalid url|failed to parse url/i;
+function isPermanentFailure(e) {
+  const err = e;
+  const code = err?.cause?.code ?? err?.code;
+  if (typeof code === "string" && PERMANENT_CODES.has(code)) return true;
+  return [err?.message, err?.cause?.message].some((m) => typeof m === "string" && PERMANENT_MESSAGE.test(m));
 }
 
 // src/tables.ts
@@ -4532,12 +4990,12 @@ function sleep(ms, signal) {
   return signal ? sleepUnlessAborted(ms, signal) : new Promise((r) => setTimeout(r, ms));
 }
 function sleepUnlessAborted(ms, signal) {
-  return new Promise((resolve8) => {
-    if (signal?.aborted) return resolve8();
+  return new Promise((resolve9) => {
+    if (signal?.aborted) return resolve9();
     const done = () => {
       clearTimeout(t);
       signal?.removeEventListener("abort", done);
-      resolve8();
+      resolve9();
     };
     const t = setTimeout(done, ms);
     signal?.addEventListener("abort", done, { once: true });
@@ -5312,16 +5770,16 @@ function metaDescriptionOf(html) {
 
 // src/stack.ts
 import { spawnSync as spawnSync3 } from "child_process";
-import { existsSync as existsSync4, lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync11, statSync as statSync2, writeFileSync as writeFileSync6 } from "fs";
-import { dirname as dirname2, join as join11, resolve } from "path";
+import { existsSync as existsSync5, lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync12, statSync as statSync3, writeFileSync as writeFileSync6 } from "fs";
+import { dirname as dirname2, join as join12, resolve as resolve2 } from "path";
 
 // src/cache.ts
-import { chmodSync, existsSync as existsSync3, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync10, readdirSync as readdirSync4, rmSync as rmSync3, statSync } from "fs";
-import { dirname, join as join10 } from "path";
-import { tmpdir as tmpdir3 } from "os";
+import { chmodSync, existsSync as existsSync4, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync11, readdirSync as readdirSync5, rmSync as rmSync3, statSync as statSync2 } from "fs";
+import { dirname, join as join11 } from "path";
+import { tmpdir as tmpdir4 } from "os";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
-  return namedCacheDir() ?? join10(tmpdir3(), userScoped(brand().name), "cache");
+  return namedCacheDir() ?? join11(tmpdir4(), userScoped(brand().name), "cache");
 }
 var namedCacheDir = () => env("CACHE_DIR") ?? brand().cacheDir;
 function userScoped(name) {
@@ -5332,7 +5790,7 @@ function cachePath(url, acceptLanguage = "", extractor = "native", variant = "")
   const canon = canonicalizeUrl(url);
   const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
   const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
-  return join10(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
+  return join11(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
 }
 var TEXT_VARIANTS = ["", "consent", "full"];
 var MARKDOWN_VARIANTS = ["md", "consent-md", "full-md"];
@@ -5401,11 +5859,11 @@ function entryPaths(url, acceptLanguage, extractor, variant) {
 function readCache(url, acceptLanguage = "", extractor = "native", variant = "") {
   if (!entryDir(false)) return void 0;
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
-  if (!existsSync3(meta)) return void 0;
+  if (!existsSync4(meta)) return void 0;
   try {
-    const entry = JSON.parse(readFileSync10(meta, "utf8"));
+    const entry = JSON.parse(readFileSync11(meta, "utf8"));
     if (typeof entry.cachedAt !== "number") return void 0;
-    const text = existsSync3(body) ? readFileSync10(body, "utf8") : entry.text;
+    const text = existsSync4(body) ? readFileSync11(body, "utf8") : entry.text;
     if (!text?.trim()) return void 0;
     return { ...entry, text };
   } catch {
@@ -5555,7 +6013,7 @@ function ownFile(name) {
 }
 function readEntryMeta(abs) {
   try {
-    const entry = JSON.parse(readFileSync10(abs, "utf8"));
+    const entry = JSON.parse(readFileSync11(abs, "utf8"));
     return entry && typeof entry.cachedAt === "number" && typeof entry.finalUrl === "string" ? entry : void 0;
   } catch {
     return void 0;
@@ -5564,7 +6022,7 @@ function readEntryMeta(abs) {
 var ORPHAN_GRACE_MS = 10 * 60 * 1e3;
 function sizeOf(abs) {
   try {
-    return statSync(abs).size;
+    return statSync2(abs).size;
   } catch {
     return 0;
   }
@@ -5574,13 +6032,13 @@ function cacheStats(now = Date.now()) {
   const out = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
   const { refused } = openCacheDir(false);
   if (refused) return { ...out, refused };
-  if (!existsSync3(dir)) return out;
+  if (!existsSync4(dir)) return out;
   let oldest = Number.POSITIVE_INFINITY;
   let newest = 0;
-  for (const name of readdirSync4(dir)) {
+  for (const name of readdirSync5(dir)) {
     const own = ownFile(name);
     if (!own) continue;
-    const abs = join10(dir, name);
+    const abs = join11(dir, name);
     if (own.kind !== "json") {
       out.bytes += sizeOf(abs);
       continue;
@@ -5602,12 +6060,12 @@ function cacheStats(now = Date.now()) {
 }
 function cacheClean(all = false, now = Date.now()) {
   const dir = cacheDir();
-  if (isNoWrite() || !openCacheDir(false).dir || !existsSync3(dir)) return 0;
-  const names = readdirSync4(dir);
+  if (isNoWrite() || !openCacheDir(false).dir || !existsSync4(dir)) return 0;
+  const names = readdirSync5(dir);
   const present = new Set(names);
   const remove = (name) => {
     try {
-      rmSync3(join10(dir, name), { force: true });
+      rmSync3(join11(dir, name), { force: true });
       return true;
     } catch {
       return false;
@@ -5615,7 +6073,7 @@ function cacheClean(all = false, now = Date.now()) {
   };
   const abandoned = (name) => {
     try {
-      return all || now - statSync(join10(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
+      return all || now - statSync2(join11(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
     } catch {
       return false;
     }
@@ -5625,7 +6083,7 @@ function cacheClean(all = false, now = Date.now()) {
     const own = ownFile(name);
     if (!own) continue;
     if (own.kind === "json") {
-      const entry = readEntryMeta(join10(dir, name));
+      const entry = readEntryMeta(join11(dir, name));
       if (!entry || !all && isCacheFresh(entry, now) || !remove(name)) continue;
       remove(`${own.stem}.body`);
       removed++;
@@ -5897,11 +6355,11 @@ function renderAsset(template) {
   return template.replaceAll("{{CLI}}", brand().cli);
 }
 function composeAssets() {
-  const base2 = join11(cacheDir(), "compose");
+  const base2 = join12(cacheDir(), "compose");
   return [
-    { path: join11(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
-    { path: join11(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
-    { path: join11(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
+    { path: join12(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
+    { path: join12(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
+    { path: join12(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
   ];
 }
 function ensureComposeMaterialized() {
@@ -5914,23 +6372,23 @@ function untrustedStack() {
   for (const a of assets) {
     let body;
     try {
-      body = readFileSync11(a.path, "utf8");
+      body = readFileSync12(a.path, "utf8");
     } catch {
     }
     if (body !== a.content) return `${a.path} does not hold the stack this binary ships, and could not be rewritten`;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
   if (uid === void 0) return void 0;
-  const root = resolve(cacheDir());
+  const root = resolve2(cacheDir());
   const chosen = !!(env("CACHE_DIR") ?? brand().cacheDir);
   const top = chosen ? root : dirname2(root);
   const paths = /* @__PURE__ */ new Set();
   for (const a of assets) {
-    for (let p = resolve(a.path); p !== top && p !== dirname2(p); p = dirname2(p)) paths.add(p);
+    for (let p = resolve2(a.path); p !== top && p !== dirname2(p); p = dirname2(p)) paths.add(p);
   }
   for (const p of [top, ...paths]) {
     try {
-      const st = p === top && chosen ? statSync2(p) : lstatSync2(p);
+      const st = p === top && chosen ? statSync3(p) : lstatSync2(p);
       if (st.isSymbolicLink()) return `${p} is a symbolic link`;
       if (st.uid !== uid) return `${p} belongs to another user`;
       if (st.mode & 2 && !(st.isDirectory() && st.mode & 512)) return `${p} is writable by anyone`;
@@ -5942,7 +6400,7 @@ function untrustedStack() {
 }
 function writeIfChanged(path, content) {
   try {
-    if (existsSync4(path) && readFileSync11(path, "utf8") === content) return;
+    if (existsSync5(path) && readFileSync12(path, "utf8") === content) return;
     mkdirSync3(dirname2(path), { recursive: true, mode: 448 });
     writeFileSync6(path, content);
   } catch {
@@ -6202,346 +6660,6 @@ function cosine(a, b) {
   if (ma === 0 || mb === 0) return 0;
   const r = dot / (Math.sqrt(ma) * Math.sqrt(mb));
   return Number.isFinite(r) ? r : 0;
-}
-
-// src/rank.ts
-function rrf(lists, keyOf, k = 60) {
-  const score = /* @__PURE__ */ new Map();
-  for (const list of lists) {
-    const seen = /* @__PURE__ */ new Set();
-    list.forEach((item, idx) => {
-      const key = keyOf(item);
-      if (seen.has(key)) return;
-      seen.add(key);
-      score.set(key, (score.get(key) ?? 0) + 1 / (k + idx + 1));
-    });
-  }
-  return score;
-}
-var byCodeUnit = (a, b) => a < b ? -1 : a > b ? 1 : 0;
-var indexTokenCache = /* @__PURE__ */ new WeakMap();
-function bm25Tokenize(text, opts = {}) {
-  return tokenize(text, opts.subtokens !== false);
-}
-var WORD_SPLIT = /[^\p{L}\p{M}\p{N}_]+/u;
-var NON_ASCII2 = /[^\p{ASCII}]/u;
-var CJK_CHAR2 = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
-var CJK_RUNS2 = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
-var IDENT_BOUNDARY = new RegExp("_|[\\p{Ll}\\p{N}]\\p{Lu}|\\p{Lu}\\p{Lu}\\p{Ll}|\\p{L}\\p{N}|\\p{N}\\p{L}", "u");
-var MAX_IDENT = 64;
-function tokenize(text, expand2) {
-  if (!text) return [];
-  const out = [];
-  const nonAscii = NON_ASCII2.test(text);
-  for (const raw of (nonAscii ? text.normalize("NFC") : text).split(WORD_SPLIT)) {
-    if (!raw) continue;
-    if (nonAscii && CJK_CHAR2.test(raw)) {
-      for (const piece of raw.split(CJK_RUNS2)) {
-        if (!piece) continue;
-        if (CJK_CHAR2.test(piece)) pushBigrams(piece, out);
-        else pushTerm(piece, out, expand2);
-      }
-    } else pushTerm(raw, out, expand2);
-  }
-  return out;
-}
-function pushTerm(raw, out, expand2) {
-  if (raw.length < 2 || isStopword(raw)) return;
-  const t = foldCached(raw);
-  if (t.length < 2) return;
-  out.push(t);
-  if (!expand2 || raw.length > MAX_IDENT) return;
-  for (const sub of subtermsCached(raw, t)) out.push(sub);
-}
-function pushBigrams(run, out) {
-  const chars = Array.from(run);
-  if (chars.length === 1) {
-    out.push(run);
-    return;
-  }
-  for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1]);
-}
-var FOLD_CACHE_MAX = 5e4;
-var foldCache = /* @__PURE__ */ new Map();
-function foldCached(raw) {
-  const hit = foldCache.get(raw);
-  if (hit !== void 0) return hit;
-  const t = foldTerm(raw);
-  if (foldCache.size >= FOLD_CACHE_MAX) foldCache.clear();
-  foldCache.set(raw, t);
-  return t;
-}
-var NO_SUBTERMS = [];
-var subtermCache = /* @__PURE__ */ new Map();
-var subtermExtras = { list: void 0, length: 0 };
-function subtermsCached(raw, folded) {
-  const list = brand().extraStopwords;
-  if (list !== subtermExtras.list || (list?.length ?? 0) !== subtermExtras.length) {
-    subtermCache.clear();
-    subtermExtras = { list, length: list?.length ?? 0 };
-  }
-  const hit = subtermCache.get(raw);
-  if (hit !== void 0) return hit;
-  let subs = NO_SUBTERMS;
-  if (IDENT_BOUNDARY.test(raw)) {
-    subs = subtokens(raw).map(foldCached).filter((sub) => sub !== folded && sub.length >= 2);
-  }
-  if (subtermCache.size >= FOLD_CACHE_MAX) subtermCache.clear();
-  subtermCache.set(raw, subs);
-  return subs;
-}
-function docTokens(doc, titleWeight, headingWeight, body) {
-  const out = body ? [...body] : bm25Tokenize(doc.body);
-  const headings = bm25Tokenize(doc.headings);
-  for (let r = 0; r < headingWeight; r++) out.push(...headings);
-  const title = bm25Tokenize(doc.title);
-  for (let r = 0; r < titleWeight; r++) out.push(...title);
-  return out;
-}
-function proximityBonus(tokens, queryTerms, window = 6, cap = 0.1) {
-  if (queryTerms.length < 2) return 0;
-  const q = new Set(queryTerms);
-  const hits = [];
-  for (let i = 0; i < tokens.length; i++) {
-    const tok = tokens[i];
-    if (q.has(tok)) hits.push({ pos: i, term: tok });
-  }
-  if (hits.length < 2) return 0;
-  let close = 0;
-  for (let i = 1; i < hits.length; i++) {
-    if (hits[i].term !== hits[i - 1].term && hits[i].pos - hits[i - 1].pos <= window) close++;
-  }
-  return Math.min(cap, cap * (close / Math.max(1, queryTerms.length - 1)));
-}
-function buildBm25Index(question, docs, opts = {}) {
-  const k1 = opts.k1 ?? 1.2;
-  const b = opts.b ?? 0.75;
-  const titleWeight = 3;
-  const headingWeight = 2;
-  const queryTerms = [...new Set(bm25Tokenize(question))];
-  const N = docs.length;
-  const df = /* @__PURE__ */ new Map();
-  const tokenCache = /* @__PURE__ */ new WeakMap();
-  let totalLen = 0;
-  for (const doc of docs) {
-    const toks = docTokens(doc, titleWeight, headingWeight, opts.tokensOf?.(doc));
-    tokenCache.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens: toks });
-    totalLen += toks.length;
-    for (const t of new Set(toks)) df.set(t, (df.get(t) ?? 0) + 1);
-  }
-  const avgdl = N ? totalLen / N : 0;
-  const idf = /* @__PURE__ */ new Map();
-  for (const t of queryTerms) {
-    if (N < 3) {
-      idf.set(t, 1);
-      continue;
-    }
-    const dfi = df.get(t) ?? 0;
-    idf.set(t, Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5)));
-  }
-  const index = { idf, avgdl, N, queryTerms, k1, b, titleWeight, headingWeight };
-  indexTokenCache.set(index, tokenCache);
-  return index;
-}
-function indexedDocTokens(index, doc) {
-  const cache2 = indexTokenCache.get(index);
-  const cached = cache2?.get(doc);
-  if (cached && cached.title === doc.title && cached.headings === doc.headings && cached.body === doc.body) return cached.tokens;
-  const tokens = docTokens(doc, index.titleWeight, index.headingWeight);
-  cache2?.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens });
-  return tokens;
-}
-function bm25Score(index, doc) {
-  if (!index.queryTerms.length) return 0;
-  const toks = indexedDocTokens(index, doc);
-  const dl = toks.length;
-  if (!dl) return 0;
-  const tf = /* @__PURE__ */ new Map();
-  for (const t of toks) tf.set(t, (tf.get(t) ?? 0) + 1);
-  const { k1, b, avgdl } = index;
-  const lenNorm = 1 - b + b * (avgdl ? dl / avgdl : 1);
-  let score = 0;
-  for (const term of index.queryTerms) {
-    const f = tf.get(term);
-    if (!f) continue;
-    const idf = index.idf.get(term) ?? 0;
-    score += idf * (f * (k1 + 1)) / (f + k1 * lenNorm);
-  }
-  return score * (1 + proximityBonus(toks, index.queryTerms));
-}
-function bm25MatchedTerms(index, doc) {
-  if (!index.queryTerms.length) return [];
-  const present = new Set(indexedDocTokens(index, doc));
-  return index.queryTerms.filter((t) => present.has(t));
-}
-function simhashLanes(toks, out) {
-  out[0] = 0;
-  out[1] = 0;
-  if (!toks.length) return;
-  const v = new Int32Array(64);
-  const words = new Uint32Array(2);
-  const pieces = toks.length < 3 ? [""] : ["", " ", "", " ", ""];
-  const n = toks.length < 3 ? toks.length : toks.length - 2;
-  for (let i = 0; i < n; i++) {
-    if (toks.length < 3) pieces[0] = toks[i];
-    else {
-      pieces[0] = toks[i];
-      pieces[2] = toks[i + 1];
-      pieces[4] = toks[i + 2];
-    }
-    fnv1a64Words(pieces, words);
-    const hi2 = words[0];
-    const lo2 = words[1];
-    for (let b = 0; b < 32; b++) {
-      v[b] = v[b] + (lo2 >>> b & 1);
-      v[b + 32] = v[b + 32] + (hi2 >>> b & 1);
-    }
-  }
-  let lo = 0;
-  let hi = 0;
-  for (let b = 0; b < 32; b++) {
-    if (2 * v[b] > n) lo |= 1 << b;
-    if (2 * v[b + 32] > n) hi |= 1 << b;
-  }
-  out[0] = hi;
-  out[1] = lo;
-}
-function popcount32(n) {
-  let x = n - (n >>> 1 & 1431655765);
-  x = (x & 858993459) + (x >>> 2 & 858993459);
-  return Math.imul(x + (x >>> 4) & 252645135, 16843009) >>> 24;
-}
-function dedupeNearDuplicates(items, opts = {}) {
-  const maxBits = opts.maxBits ?? 3;
-  const minChars = opts.minChars ?? 500;
-  const better = (a, b) => a.score !== b.score ? a.score > b.score : byCodeUnit(a.url, b.url) < 0;
-  const kept = [];
-  const hashed = [];
-  const his = [];
-  const los = [];
-  const lanes = new Uint32Array(2);
-  const dups = [];
-  for (const it of items) {
-    const text = it.text || "";
-    if (text.length < minChars) {
-      kept.push({ it });
-      continue;
-    }
-    simhashLanes(opts.tokensOf ? opts.tokensOf(it) : tokenize(text, false), lanes);
-    const hi = lanes[0];
-    const lo = lanes[1];
-    let at = -1;
-    for (let k = 0; k < hashed.length; k++) {
-      if (popcount32(his[k] ^ hi) + popcount32(los[k] ^ lo) <= maxBits) {
-        at = k;
-        break;
-      }
-    }
-    if (at < 0) {
-      const cluster = { it };
-      kept.push(cluster);
-      hashed.push(cluster);
-      his.push(hi);
-      los.push(lo);
-      continue;
-    }
-    const dup = hashed[at];
-    if (better(it, dup.it)) {
-      dups.push({ url: dup.it.url, cluster: dup });
-      dup.it = it;
-      his[at] = hi;
-      los[at] = lo;
-    } else dups.push({ url: it.url, cluster: dup });
-  }
-  return { items: kept.map((k) => k.it), dropped: dups.length, duplicates: dups.map((d) => ({ url: d.url, of: d.cluster.it.url })) };
-}
-function diversify(items, tokensOf, lambda = 0.75, opts = {}) {
-  const sorted = [...items].sort((a, b) => b.score - a.score || byCodeUnit(a.url, b.url));
-  if (sorted.length <= 2) return sorted;
-  const window = opts.window !== void 0 && opts.window > 0 ? Math.floor(opts.window) : sorted.length;
-  if (window >= sorted.length) return mmr(sorted, tokensOf, lambda);
-  return [...window > 2 ? mmr(sorted.slice(0, window), tokensOf, lambda) : sorted.slice(0, window), ...sorted.slice(window)];
-}
-var PAIR_CACHE_MAX = 2048;
-function mmr(sorted, tokensOf, lambda) {
-  const m = sorted.length;
-  let max = 1e-9;
-  for (const it of sorted) if (it.score > max) max = it.score;
-  const ids = /* @__PURE__ */ new Map();
-  const sets = [];
-  for (const it of sorted) {
-    const raw = [];
-    for (const t of tokensOf(it)) {
-      let id = ids.get(t);
-      if (id === void 0) {
-        id = ids.size;
-        ids.set(t, id);
-      }
-      raw.push(id);
-    }
-    const all = Int32Array.from(raw).sort();
-    let k = 0;
-    for (let j = 0; j < all.length; j++) if (j === 0 || all[j] !== all[j - 1]) all[k++] = all[j];
-    sets.push(all.subarray(0, k));
-  }
-  const cache2 = m <= PAIR_CACHE_MAX ? new Float64Array(m * (m - 1) / 2) : void 0;
-  const pair = (i, j) => i < j ? i * (2 * m - i - 1) / 2 + (j - i - 1) : j * (2 * m - j - 1) / 2 + (i - j - 1);
-  let simMax = 0;
-  for (let i = 0; i < m; i++) {
-    for (let j = i + 1; j < m; j++) {
-      const v = jaccardSorted(sets[i], sets[j]);
-      if (cache2) cache2[pair(i, j)] = v;
-      if (v > simMax) simMax = v;
-    }
-  }
-  const sim = (i, j) => simMax > 0 ? (cache2 ? cache2[pair(i, j)] : jaccardSorted(sets[i], sets[j])) / simMax : 0;
-  const out = [sorted[0]];
-  const remaining = [];
-  for (let i = 1; i < m; i++) remaining.push(i);
-  const maxSim = new Float64Array(m);
-  for (const i of remaining) maxSim[i] = sim(i, 0);
-  let relevantLeft = 0;
-  for (const i of remaining) if (sorted[i].score > 0) relevantLeft++;
-  while (remaining.length) {
-    let bestPos = -1;
-    let bestVal = Number.NEGATIVE_INFINITY;
-    for (let p = 0; p < remaining.length; p++) {
-      const it = sorted[remaining[p]];
-      if (relevantLeft > 0 && !(it.score > 0)) continue;
-      const val = lambda * (it.score / max) - (1 - lambda) * maxSim[remaining[p]];
-      if (bestPos < 0 || val > bestVal || val === bestVal && byCodeUnit(it.url, sorted[remaining[bestPos]].url) < 0) {
-        bestVal = val;
-        bestPos = p;
-      }
-    }
-    const picked = remaining.splice(bestPos, 1)[0];
-    if (sorted[picked].score > 0) relevantLeft--;
-    out.push(sorted[picked]);
-    for (const i of remaining) {
-      const v = sim(i, picked);
-      if (v > maxSim[i]) maxSim[i] = v;
-    }
-  }
-  return out;
-}
-function jaccardSorted(a, b) {
-  const na = a.length;
-  const nb = b.length;
-  if (!na || !nb) return 0;
-  let i = 0;
-  let j = 0;
-  let inter = 0;
-  while (i < na && j < nb) {
-    const x = a[i];
-    const y = b[j];
-    if (x === y) {
-      inter++;
-      i++;
-      j++;
-    } else if (x < y) i++;
-    else j++;
-  }
-  return inter / (na + nb - inter);
 }
 
 // src/vector.ts
@@ -7331,8 +7449,8 @@ async function crawlSite(seed, opts = {}) {
   const authorizeUrl = (url) => authorizeHop(url, false);
   const authorizeSeed = (url) => authorizeHop(url, true);
   let settleSeed;
-  const seedSettled = new Promise((resolve8) => {
-    settleSeed = resolve8;
+  const seedSettled = new Promise((resolve9) => {
+    settleSeed = resolve9;
   });
   const authorizeSitemap = async (url) => {
     if (!sameOrigin(url, seedOrigin)) await seedSettled;
@@ -7576,8 +7694,8 @@ async function hasChanged(url, previous, opts = {}) {
 }
 
 // src/skillkit/usage.ts
-import { readdirSync as readdirSync5, readFileSync as readFileSync12, statSync as statSync3 } from "fs";
-import { dirname as dirname3, join as join12, relative, resolve as resolve2 } from "path";
+import { readdirSync as readdirSync6, readFileSync as readFileSync13, statSync as statSync4 } from "fs";
+import { dirname as dirname3, join as join13, relative, resolve as resolve3 } from "path";
 var DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|enum)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm;
 var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']((?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs))["']/g;
 function engineExports(dts) {
@@ -7592,13 +7710,13 @@ function engineExports(dts) {
 function walkSources(dir, skip = "vendor", out = []) {
   let entries;
   try {
-    entries = readdirSync5(dir);
+    entries = readdirSync6(dir);
   } catch {
     return out;
   }
   for (const e of entries) {
-    const p = join12(dir, e);
-    if (statSync3(p).isDirectory()) {
+    const p = join13(dir, e);
+    if (statSync4(p).isDirectory()) {
       if (e !== skip) walkSources(p, skip, out);
     } else if (e.endsWith(".ts")) out.push(p);
   }
@@ -7606,13 +7724,13 @@ function walkSources(dir, skip = "vendor", out = []) {
 }
 function auditEngineUsage(root, config, dts, engineName) {
   const surface = engineExports(dts);
-  const files = walkSources(join12(root, "src"));
+  const files = walkSources(join13(root, "src"));
   const forks = new Map(Object.entries(config.forks));
   const collisions = [];
   const tolerated = [];
   const imported = /* @__PURE__ */ new Set();
   for (const file of files) {
-    const src = readFileSync12(file, "utf8");
+    const src = readFileSync13(file, "utf8");
     const rel = relative(root, file);
     for (const m of src.matchAll(DECL)) {
       const name = m[1] ?? m[2];
@@ -7629,7 +7747,7 @@ function auditEngineUsage(root, config, dts, engineName) {
         } else {
           let shim = "";
           try {
-            shim = readFileSync12(resolve2(dirname3(file), spec.replace(/\.js$/, ".ts")), "utf8");
+            shim = readFileSync13(resolve3(dirname3(file), spec.replace(/\.js$/, ".ts")), "utf8");
           } catch {
             continue;
           }
@@ -7648,8 +7766,8 @@ function auditEngineUsage(root, config, dts, engineName) {
 }
 
 // src/skillkit/bundle.ts
-import { existsSync as existsSync5, readdirSync as readdirSync6, readFileSync as readFileSync13 } from "fs";
-import { join as join13 } from "path";
+import { existsSync as existsSync6, readdirSync as readdirSync7, readFileSync as readFileSync14 } from "fs";
+import { join as join14 } from "path";
 
 // src/cli-kit.ts
 import { basename } from "path";
@@ -7765,17 +7883,17 @@ function auditSkillBundle(root, config, cli) {
   const out = [];
   const check = (ok, message) => out.push({ ok, message });
   const name = config.name;
-  const skillDir = join13(root, "skills", name);
+  const skillDir = join14(root, "skills", name);
   check(
-    !existsSync5(join13(root, "SKILL.md")),
-    existsSync5(join13(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name}/SKILL.md` : "no root SKILL.md"
+    !existsSync6(join14(root, "SKILL.md")),
+    existsSync6(join14(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name}/SKILL.md` : "no root SKILL.md"
   );
-  const skillMd = join13(skillDir, "SKILL.md");
-  if (!existsSync5(skillMd)) {
+  const skillMd = join14(skillDir, "SKILL.md");
+  if (!existsSync6(skillMd)) {
     check(false, `missing skills/${name}/SKILL.md \u2014 the skill package has no SKILL.md`);
     return out;
   }
-  const raw = readFileSync13(skillMd, "utf8");
+  const raw = readFileSync14(skillMd, "utf8");
   const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
   if (!fm) {
     check(false, `skills/${name}/SKILL.md has no frontmatter block`);
@@ -7798,13 +7916,13 @@ function auditSkillBundle(root, config, cli) {
       len <= DESC_MAX ? `description ${len} chars (<= ${DESC_MAX})` : `description ${len} chars exceeds the ${DESC_MAX}-char headroom cap`
     );
   }
-  const refsDir = join13(skillDir, "references");
-  if (existsSync5(refsDir)) {
-    const files = readdirSync6(refsDir).filter((f) => f.endsWith(".md"));
+  const refsDir = join14(skillDir, "references");
+  if (existsSync6(refsDir)) {
+    const files = readdirSync7(refsDir).filter((f) => f.endsWith(".md"));
     for (const m of new Set(raw.match(/references\/[\w.-]+\.md/g) ?? [])) {
       check(
-        existsSync5(join13(skillDir, m)),
-        existsSync5(join13(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
+        existsSync6(join14(skillDir, m)),
+        existsSync6(join14(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
       );
     }
     for (const f of files) {
@@ -7815,12 +7933,12 @@ function auditSkillBundle(root, config, cli) {
     }
   }
   const bundleRel = `scripts/${name}.mjs`;
-  const rootBundle = join13(root, bundleRel);
-  const pkgBundle = join13(skillDir, bundleRel);
-  if (!existsSync5(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
-  else if (!existsSync5(pkgBundle)) check(false, `missing skills/${name}/${bundleRel} \u2014 run \`skill copy\``);
+  const rootBundle = join14(root, bundleRel);
+  const pkgBundle = join14(skillDir, bundleRel);
+  if (!existsSync6(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
+  else if (!existsSync6(pkgBundle)) check(false, `missing skills/${name}/${bundleRel} \u2014 run \`skill copy\``);
   else {
-    const same = readFileSync13(rootBundle).equals(readFileSync13(pkgBundle));
+    const same = readFileSync14(rootBundle).equals(readFileSync14(pkgBundle));
     check(
       same,
       same ? `embedded engine is byte-identical to ${bundleRel}` : `skills/${name}/${bundleRel} differs from ${bundleRel} \u2014 run \`skill copy\` and commit`
@@ -7829,8 +7947,8 @@ function auditSkillBundle(root, config, cli) {
   if (!cli) return out;
   const universe = /* @__PURE__ */ new Set([...cli.valueFlags, ...cli.boolFlags, "help", "version", ...config.allowedForeignFlags]);
   const docs = [["SKILL.md", raw]];
-  if (existsSync5(refsDir)) {
-    for (const f of readdirSync6(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync13(join13(refsDir, f), "utf8")]);
+  if (existsSync6(refsDir)) {
+    for (const f of readdirSync7(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync14(join14(refsDir, f), "utf8")]);
   }
   let unknown = 0;
   for (const [file, text] of docs) {
@@ -7851,7 +7969,7 @@ function auditSkillBundle(root, config, cli) {
 }
 
 // src/skillkit/scaffold.ts
-import { join as join14 } from "path";
+import { join as join15 } from "path";
 var enginesJson = (engine, repo, minRef) => JSON.stringify(
   {
     _comment: "The packaging contract for this skill, read by `skill vendor|check|bundle`. `forks` is a ratchet: entries may leave, never arrive \u2014 so the next declaration shadowing an engine export is an argued decision rather than a quiet copy. `usageFloor` goes up when a layer lands and never down to make a red run pass.",
@@ -7950,8 +8068,8 @@ function scaffoldSkill(root, name, opts = {}) {
     // scaffolding; any older floor lets the staleness gate pass a pin that old.
     [SKILL_CONFIG]: `${enginesJson(name, opts.engineRepo ?? "maxgfr/webindex", opts.minRef ?? `v${ENGINE_VERSION}`)}
 `,
-    [join14("src", "engine.ts")]: engineShim(name, prefix),
-    [join14("skills", name, "SKILL.md")]: `---
+    [join15("src", "engine.ts")]: engineShim(name, prefix),
+    [join15("skills", name, "SKILL.md")]: `---
 name: ${name}
 description: TODO \u2014 one sentence saying WHEN to use this skill, under 1000 characters.
 ---
@@ -7960,18 +8078,18 @@ description: TODO \u2014 one sentence saying WHEN to use this skill, under 1000 
 
 TODO
 `,
-    [join14(".github", "workflows", "ci.yml")]: ci(),
+    [join15(".github", "workflows", "ci.yml")]: ci(),
     ".gitignore": gitignore
   };
   const written = [];
   const exists = opts.exists;
   for (const [rel, content] of Object.entries(files)) {
-    const path = join14(root, rel);
+    const path = join15(root, rel);
     if (exists?.(path)) {
       errors.push(`${rel} already exists \u2014 left alone.`);
       continue;
     }
-    ensureDir(join14(path, ".."));
+    ensureDir(join15(path, ".."));
     written.push(writeArtifact(path, content));
   }
   return { written, errors };
@@ -8705,9 +8823,9 @@ function resolveUrl2(url, base2) {
 
 // src/repo.ts
 import { createHash as createHash3, randomBytes } from "crypto";
-import { existsSync as existsSync6, mkdirSync as mkdirSync4, readdirSync as readdirSync7, renameSync as renameSync2, rmSync as rmSync4, statSync as statSync4 } from "fs";
-import { tmpdir as tmpdir4 } from "os";
-import { basename as basename2, join as join15, resolve as resolve3 } from "path";
+import { existsSync as existsSync7, mkdirSync as mkdirSync4, readdirSync as readdirSync8, renameSync as renameSync2, rmSync as rmSync4, statSync as statSync5 } from "fs";
+import { tmpdir as tmpdir5 } from "os";
+import { basename as basename2, join as join16, resolve as resolve4 } from "path";
 
 // src/forge-host.ts
 var KINDS = /* @__PURE__ */ new Set(["github", "gitlab", "gitea"]);
@@ -8741,8 +8859,8 @@ function hostForgeKind(host) {
 function resolveRepo(raw, opts = {}) {
   const trimmed = raw.trim();
   if (trimmed && opts.local !== false) {
-    const asPath = resolve3(trimmed);
-    if (existsSync6(asPath) && statSync4(asPath).isDirectory()) {
+    const asPath = resolve4(trimmed);
+    if (existsSync7(asPath) && statSync5(asPath).isDirectory()) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename2(asPath)}-${asPath}`)}` };
     }
   }
@@ -8843,13 +8961,13 @@ function originUrl(dir) {
 }
 
 // src/forge.ts
-import { resolve as resolve4 } from "path";
+import { resolve as resolve5 } from "path";
 function forgeKind(host, opts = {}) {
   return opts.kind ?? hostForgeKind(host);
 }
 function forgeRef(ref, opts = {}) {
   if (!ref.isLocal) return ref;
-  const origin = originUrl(resolve4(ref.raw));
+  const origin = originUrl(resolve5(ref.raw));
   if (!origin) return ref;
   const remote = resolveRepo(origin.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]*@/i, "$1"), opts);
   return remote.host === "generic" || remote.isLocal ? ref : remote;
@@ -9615,26 +9733,26 @@ function isOriginAllowed(origin, allowed = []) {
 }
 
 // src/mcp/resources.ts
-import { existsSync as existsSync7, readdirSync as readdirSync8, readFileSync as readFileSync14, realpathSync, statSync as statSync5 } from "fs";
-import { basename as basename3, dirname as dirname4, join as join16, relative as relative2, resolve as resolve5, sep } from "path";
+import { existsSync as existsSync8, readdirSync as readdirSync9, readFileSync as readFileSync15, realpathSync, statSync as statSync6 } from "fs";
+import { basename as basename3, dirname as dirname4, join as join17, relative as relative2, resolve as resolve6, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
 function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname4(fileURLToPath(import.meta.url));
   const name = brand().name;
-  const candidates = [resolve5(here, ".."), resolve5(here, "..", "skills", name), resolve5(here, "..", "..", "skills", name)];
-  return candidates.find((dir) => existsSync7(join16(dir, "SKILL.md")));
+  const candidates = [resolve6(here, ".."), resolve6(here, "..", "skills", name), resolve6(here, "..", "..", "skills", name)];
+  return candidates.find((dir) => existsSync8(join17(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
-  const refDir = join16(root, "references");
-  if (!existsSync7(refDir)) return out;
-  for (const file of readdirSync8(refDir).sort()) {
+  const refDir = join17(root, "references");
+  if (!existsSync8(refDir)) return out;
+  for (const file of readdirSync9(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join16("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
+    out.push(describe(root, join17("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
   }
   return out;
 }
@@ -9646,7 +9764,7 @@ function readResource(uri, moduleDir) {
   if (!root) throw new ResourceError("no skill payload found next to this build \u2014 nothing to read");
   const rel = uri.slice(URI_SCHEME.length);
   if (!rel) throw new ResourceError("empty resource path");
-  const target = resolve5(root, rel);
+  const target = resolve6(root, rel);
   const served = relative2(root, target).split(sep).join("/");
   if (served !== "SKILL.md" && !/^references\/[^/]+\.md$/.test(served)) {
     throw new ResourceError(`not a resource this server serves: ${uri} (resources/list names them)`);
@@ -9661,8 +9779,8 @@ function readResource(uri, moduleDir) {
   if (targetReal !== rootReal && !targetReal.startsWith(rootReal + sep)) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
-  if (!statSync5(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
-  return { uri, mimeType: "text/markdown", text: readFileSync14(targetReal, "utf8") };
+  if (!statSync6(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
+  return { uri, mimeType: "text/markdown", text: readFileSync15(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
 };
@@ -9673,14 +9791,14 @@ function describe(root, rel, fallbackTitle) {
     title: fallbackTitle,
     mimeType: "text/markdown"
   };
-  const summary = firstProse(join16(root, rel));
+  const summary = firstProse(join17(root, rel));
   if (summary) decl.description = summary;
   return decl;
 }
 function firstProse(file) {
   let text;
   try {
-    text = readFileSync14(file, "utf8");
+    text = readFileSync15(file, "utf8");
   } catch {
     return void 0;
   }
@@ -9946,7 +10064,7 @@ async function runStdioServer(adapter, opts = {}) {
     const ticket = { cancelled: false };
     queued.set(id, ticket);
     try {
-      while (active >= MAX_IN_FLIGHT) await new Promise((resolve8) => waiting.push(resolve8));
+      while (active >= MAX_IN_FLIGHT) await new Promise((resolve9) => waiting.push(resolve9));
     } finally {
       if (queued.get(id) === ticket) queued.delete(id);
     }
@@ -10050,14 +10168,14 @@ async function startHttpServer(adapter, opts = {}) {
   server.requestTimeout = REQUEST_TIMEOUT_MS;
   server.headersTimeout = 6e4;
   server.keepAliveTimeout = 12e4;
-  return new Promise((resolve8, reject) => {
+  return new Promise((resolve9, reject) => {
     server.once("error", reject);
     server.listen(opts.port ?? 0, bind, () => {
       server.removeListener("error", reject);
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : opts.port ?? 0;
       const host = bind.includes(":") ? `[${bind}]` : bind;
-      resolve8({
+      resolve9({
         server,
         port,
         url: `http://${host}:${port}${MCP_PATH}`,
@@ -10202,7 +10320,7 @@ function sendJson(res, status, body, origin, extra = {}) {
 }
 var DRAIN_LIMIT = MAX_BODY_BYTES2 * 8;
 function readBody(req) {
-  return new Promise((resolve8, reject) => {
+  return new Promise((resolve9, reject) => {
     const chunks = [];
     let size = 0;
     let over = false;
@@ -10226,7 +10344,7 @@ function readBody(req) {
     });
     req.on("end", () => {
       if (over) reject(new Error("too large"));
-      else resolve8(Buffer.concat(chunks).toString("utf8"));
+      else resolve9(Buffer.concat(chunks).toString("utf8"));
     });
     req.on("error", reject);
     req.on("aborted", () => reject(new Error("client aborted the request")));
@@ -10237,7 +10355,7 @@ function readBody(req) {
 import { lookup as dnsLookup } from "dns/promises";
 import { realpathSync as realpathSync2 } from "fs";
 import { isIP } from "net";
-import { isAbsolute as isAbsolute2, relative as relative3, resolve as resolve6, sep as sep2 } from "path";
+import { isAbsolute as isAbsolute2, relative as relative3, resolve as resolve7, sep as sep2 } from "path";
 var V4_NON_PUBLIC = [
   ["0.0.0.0", 8],
   // "this network" — 0.0.0.0 itself reaches the local host
@@ -10333,14 +10451,14 @@ function publicUrlsOnly(lookup2) {
   return async (url) => await publicUrlRefusal(url, lookup2) === void 0;
 }
 function confinePath(root, requested) {
-  const rootLex = resolve6(root);
+  const rootLex = resolve7(root);
   const rootReal = realpathSync2(root);
   const under = (base2, p) => {
     const rel = relative3(base2, p);
     return !isAbsolute2(rel) && rel !== ".." && !rel.startsWith(`..${sep2}`);
   };
   const outside = new Error(`${requested} is outside ${rootLex}, the only directory this server reads files from`);
-  const target = resolve6(rootLex, requested);
+  const target = resolve7(rootLex, requested);
   if (!under(rootLex, target) && !under(rootReal, target)) throw outside;
   let real;
   try {
@@ -10400,6 +10518,8 @@ USAGE
   webindex skill     finish [--root <dir>]
   webindex skill     recall [--ref <baseline>] [--root <dir>]
   webindex skill     init <name> [--root <dir>]
+  webindex video     fetch <url> [--out <dir>] [--lang <tag>] [--refresh] [--json]
+  webindex video     search <query> [--out <dir>] [--limit <n>] [--json]
   webindex doctor [--json]
   webindex version
 
@@ -10550,6 +10670,14 @@ COMMANDS
              that regenerated artifacts kept every identity of the --ref
              baseline (HEAD by default).
              Dev-time only \u2014 it reads a repo, it never runs inside one.
+  video      A YouTube video kept on disk, so a question about it never reads
+             it twice. 'fetch' writes <dir>/<id>/TRANSCRIPT.md (what fetch
+             prints for a video), segments.json and meta.json, and reuses them
+             on the next call \u2014 no yt-dlp at all \u2014 unless --refresh. 'search'
+             ranks ~45 s passages of every video under --out (or of one video's
+             own directory) against a question, each with its [mm:ss] stamp
+             and a link that opens the video there. The directory is --out,
+             else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which
@@ -10580,6 +10708,7 @@ ENVIRONMENT
                          whisper's model (default small), videos one process may
                          transcribe (3), one video's budget (1800000)
   WEBINDEX_YTDLP_ARGS    extra yt-dlp flags on every call: browser cookies, a proxy
+  WEBINDEX_VIDEO_DIR     where \`video\` keeps its runs (default <tmp>/webindex/video)
   WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
   WEBINDEX_QDRANT        vector store base URL, or "off"      (default http://localhost:6333)
   WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
@@ -10651,7 +10780,8 @@ var VALUE_FLAGS = [
   "forge",
   "prefix",
   "extract-root",
-  "format"
+  "format",
+  "out"
 ];
 var BOOL_FLAGS = [
   "json",
@@ -10694,11 +10824,13 @@ var COMMANDS = [
   "embed",
   "hybrid",
   "changed",
+  "video",
   ...STACK_SERVICES.filter((s) => s !== "all"),
   "stack"
 ];
 var SPEC = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS };
 var SKILL_ACTIONS = ["check", "bundle", "vendor", "copy", "doctor", "init", "repin", "finish", "recall"];
+var VIDEO_ACTIONS = ["fetch", "search"];
 var YTDLP_STALE_DAYS = 60;
 function fail(msg) {
   process.stderr.write(`webindex: ${msg}
@@ -10727,10 +10859,10 @@ function mcpPolicy(args, allowRemote) {
   const rootArg = argValue(args, "extract-root") ?? env("EXTRACT_ROOT");
   let extractRoot;
   if (rootArg !== void 0) {
-    extractRoot = resolve7(rootArg);
+    extractRoot = resolve8(rootArg);
     let isDir = false;
     try {
-      isDir = statSync6(extractRoot).isDirectory();
+      isDir = statSync7(extractRoot).isDirectory();
     } catch {
       isDir = false;
     }
@@ -10773,7 +10905,7 @@ function forgeTarget(raw, kind) {
 async function extractLocal(path, fullPage = false, given, format = "text") {
   let bytes;
   try {
-    bytes = given ?? readFileSync15(path);
+    bytes = given ?? readFileSync16(path);
   } catch (e) {
     throw new ToolError(`cannot read ${path}: ${e.message}`);
   }
@@ -10907,7 +11039,7 @@ function readDocsInput(args, usageLine) {
   if (src === void 0 && process.stdin.isTTY) usage(usageLine);
   const label = `--docs ${src === void 0 || src === "-" ? "(stdin)" : src}`;
   try {
-    return { text: readFileSync15(src === void 0 || src === "-" ? 0 : src, "utf8"), label };
+    return { text: readFileSync16(src === void 0 || src === "-" ? 0 : src, "utf8"), label };
   } catch (e) {
     fail(`cannot read ${src === void 0 || src === "-" ? "stdin" : src}: ${e.message}`);
   }
@@ -10915,7 +11047,7 @@ function readDocsInput(args, usageLine) {
 function readStdin(usageLine) {
   if (process.stdin.isTTY) usage(usageLine);
   try {
-    return readFileSync15(0);
+    return readFileSync16(0);
   } catch (e) {
     fail(`cannot read stdin: ${e.message}`);
   }
@@ -10930,7 +11062,7 @@ async function readPage(target, accept, usageLine) {
   if (target === "-") bytes = readStdin(usageLine);
   else {
     try {
-      bytes = readFileSync15(target.startsWith("file:") ? fileURLToPath2(target) : target);
+      bytes = readFileSync16(target.startsWith("file:") ? fileURLToPath2(target) : target);
     } catch (e) {
       fail(`${target} is neither an http(s) URL nor a readable file (${e.code ?? e.message})`);
     }
@@ -11026,7 +11158,7 @@ function webindexAdapter(policy = {}) {
     if (named && root !== void 0) {
       try {
         const under = confinePath(root, named);
-        if (statSync6(under).isDirectory()) return resolveRepo(under, kind);
+        if (statSync7(under).isDirectory()) return resolveRepo(under, kind);
       } catch {
       }
     }
@@ -11581,6 +11713,7 @@ function positionalLimit(args) {
   if (cmd === "rank" || cmd === "hybrid") return { max: 0, hint: 'the question goes in --query "<q>"' };
   if (cmd === "doctor" || cmd === "mcp") return { max: 0 };
   if (cmd === "skill") return { max: args.positional[0] === "init" ? 2 : 1 };
+  if (cmd === "video") return args.positional[0] === "search" ? { max: Number.POSITIVE_INFINITY } : { max: 2 };
   if (cmd === "issues" || cmd === "prs") return { max: 1, hint: 'search words go in --terms "<words>"' };
   if (cmd === "repo" || cmd === "releases" || cmd === "tags") return { max: 1, hint: "quote a path that contains spaces" };
   return { max: 1 };
@@ -11641,7 +11774,7 @@ async function dispatch(argv) {
     const bad = urls.find((u) => !/^https?:\/\//i.test(u));
     if (bad !== void 0) {
       fail(
-        `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync8(bad) ? ` \u2014 for a file on disk, \`webindex extract ${bad}\`` : ""}`
+        `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync9(bad) ? ` \u2014 for a file on disk, \`webindex extract ${bad}\`` : ""}`
       );
     }
     const fullPage = argBool(args, "full-page");
@@ -12116,9 +12249,47 @@ async function dispatch(argv) {
     if (v.changed === void 0) process.exit(EXIT_FAILURE);
     return;
   }
+  if (cmd === "video") {
+    const action = args.positional[0] ?? "";
+    if (!VIDEO_ACTIONS.includes(action)) usage(`usage: webindex video ${VIDEO_ACTIONS.join("|")}`);
+    const root = videoRoot(argValue(args, "out"));
+    const asJson = argBool(args, "json");
+    if (action === "fetch") {
+      const url = args.positional[1];
+      if (!url) usage("usage: webindex video fetch <url> [--out <dir>] [--lang <tag>] [--refresh] [--json]");
+      const r = await fetchVideoRun(url, root, { refresh: argBool(args, "refresh"), lang: argValue(args, "lang") });
+      if (!r.ok) {
+        if (asJson) process.stdout.write(jsonLine(r));
+        fail(`no transcript for ${url}: ${r.reason}`);
+      }
+      const summary = { ...r, title: r.meta.title, via: r.meta.via, duration: r.meta.duration };
+      if (asJson) process.stdout.write(jsonLine(summary));
+      else if (isNoWrite()) {
+        process.stdout.write(takeArtifacts().find((a) => a.path === r.transcript)?.content ?? "");
+      } else {
+        const m = r.meta;
+        const facts = [m.channel, m.duration !== void 0 ? formatStamp(m.duration) : void 0, m.via, `${r.segments} segment${r.segments === 1 ? "" : "s"}`].filter(Boolean).join(" \xB7 ");
+        process.stdout.write(`${r.transcript}
+  ${m.title} \u2014 ${facts}${r.reused ? " (already on disk)" : ""}
+`);
+      }
+      return;
+    }
+    const query = args.positional.slice(1).join(" ").trim();
+    if (!query) usage("usage: webindex video search <query> [--out <dir>] [--limit <n>] [--json]");
+    const hits = searchVideoRuns(root, query, { limit: argInt(args, "limit", { min: 1 }) ?? 10 });
+    if (asJson) process.stdout.write(jsonLine({ dir: root, query, hits }));
+    else for (const h of hits) process.stdout.write(`[${h.label} ${h.stamp}] ${h.title}${h.chapter ? ` \u2014 ${h.chapter}` : ""}
+  ${h.url}
+  ${h.text}
+
+`);
+    if (!hits.length) fail(`nothing under ${root} matches "${query}" \u2014 \`webindex video fetch <url>\` reads a video first`);
+    return;
+  }
   if (cmd === "skill") {
     const action = args.positional[0] ?? "";
-    const root = resolve7(argValue(args, "root") ?? process.cwd());
+    const root = resolve8(argValue(args, "root") ?? process.cwd());
     const asJson = argBool(args, "json");
     if (!SKILL_ACTIONS.includes(action)) usage(`usage: webindex skill ${SKILL_ACTIONS.join("|")}`);
     if (action === "init") {
@@ -12126,7 +12297,7 @@ async function dispatch(argv) {
       if (!name) usage("usage: webindex skill init <name> [--root <dir>]");
       const badName = skillNameProblem(name);
       if (badName) usage(badName);
-      const r = scaffoldSkill(root, name, { exists: existsSync8 });
+      const r = scaffoldSkill(root, name, { exists: existsSync9 });
       for (const e of r.errors) process.stderr.write(`  ${e}
 `);
       if (asJson) process.stdout.write(jsonLine(r));
@@ -12213,7 +12384,7 @@ async function dispatch(argv) {
         const dtsFile = pin?.files?.find((f) => f.local.endsWith(".d.mts"))?.local;
         let dts = "";
         try {
-          dts = readFileSync15(join17(root, config.vendorDir, dtsFile ?? ""), "utf8");
+          dts = readFileSync16(join18(root, config.vendorDir, dtsFile ?? ""), "utf8");
         } catch {
           fail(`cannot read the vendored declarations for "${engineName}" \u2014 run \`webindex skill vendor --ref <tag>\` first`);
         }
@@ -12247,11 +12418,11 @@ async function dispatch(argv) {
       return;
     }
     if (action === "bundle") {
-      const built = join17(root, "scripts", `${config.name}.mjs`);
+      const built = join18(root, "scripts", `${config.name}.mjs`);
       let surface;
       let surfaceProblem;
       const flagList = (v) => v == null || typeof v === "string" || typeof v[Symbol.iterator] !== "function" ? void 0 : [...v];
-      if (existsSync8(built)) {
+      if (existsSync9(built)) {
         try {
           const mod = await import(pathToFileURL(built).href);
           const valueFlags = flagList(mod.VALUE_FLAGS);
@@ -12284,11 +12455,11 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
       return;
     }
     if (action === "copy") {
-      const from = join17(root, "scripts", `${config.name}.mjs`);
-      if (!existsSync8(from)) fail(`missing ${relative4(root, from)} \u2014 run the build first`);
-      const to = join17(root, "skills", config.name, "scripts", `${config.name}.mjs`);
-      ensureDir(join17(to, ".."));
-      writeArtifact(to, readFileSync15(from, "utf8"));
+      const from = join18(root, "scripts", `${config.name}.mjs`);
+      if (!existsSync9(from)) fail(`missing ${relative4(root, from)} \u2014 run the build first`);
+      const to = join18(root, "skills", config.name, "scripts", `${config.name}.mjs`);
+      ensureDir(join18(to, ".."));
+      writeArtifact(to, readFileSync16(from, "utf8"));
       process.stdout.write(`  copied ${relative4(root, from)} -> ${relative4(root, to)}
 `);
       return;

@@ -13,7 +13,7 @@ brew install maxgfr/tap/webindex
 
 ## Everything it does
 
-Three surfaces over one engine: **348 library exports**, **27 CLI commands**, **16 MCP
+Three surfaces over one engine: **353 library exports**, **28 CLI commands**, **16 MCP
 tools**. Nothing below needs an API key, and every optional helper degrades to a note
 rather than an error.
 
@@ -63,6 +63,7 @@ rather than an error.
 | `webindex hybrid --query <q>` | Rank documents with BM25F **and** a dense lane, fused by RRF. Each hit reports its rank in each lane. The dense lane sends the model its task prefixes — nomic's `search_query:` / `search_document:`, mxbai's, e5's; `WEBINDEX_EMBED_QUERY_PREFIX` / `WEBINDEX_EMBED_DOC_PREFIX` override them — and at most `WEBINDEX_EMBED_MAX_CHARS` (8000) of each document. Degrades to the lexical half, with a note on stderr, when no embedding server answers. |
 | `webindex changed <url>` | Fingerprint a URL, or — given `--etag` / `--last-modified` / `--hash` — say whether it changed and how it was decided. A baseline prints `etag`, `last-modified`, `hash` (SHA-256 of the raw bytes, what `sha256sum` of the download gives) and `status`, and exits non-zero instead of printing one it could not read. `--timeout <ms>` bounds the request. Exits non-zero on "could not tell", so a watcher never reads an error as "nothing to do". |
 | `webindex skill <action>` | Packaging gates for a repo built on this engine, driven by its `skill.json`: `vendor` (pin by tag + sha256, `--check` for the offline drift/staleness gate), `check` (no module may re-declare an engine export), `bundle` (`skills add` would install a working skill), `copy`, `doctor`, `init`, and the repin workflow's three steps — `repin`, `finish`, `recall` (see below). |
+| `webindex video fetch\|search` | A YouTube video kept on disk, so a question about it never reads it twice. `fetch <url>` writes `<dir>/<videoId>/TRANSCRIPT.md` (the Markdown `fetch` prints for a video), `segments.json` (every timed segment) and `meta.json` (title, channel, date, duration, chapters, tracks, the rung that read it and when), then reuses them on the next call without running yt-dlp at all — `--refresh` reads the video again, `--lang` picks the subtitle language. `search <query>` ranks ~45 s passages of every video under the directory (or of one video's own directory) with BM25F, chapter titles weighted as headings, and prints each with its `[mm:ss]` stamp and a link that opens the video there (`--limit`, default 10; `--json` for the hits). The directory is `--out <dir>`, else `WEBINDEX_VIDEO_DIR`, else `<tmp>/webindex/video`; under `WEBINDEX_NO_WRITE` nothing is written and `fetch` prints the transcript. |
 | `webindex doctor` | Which optional helpers answer — SearXNG, Firecrawl, Ollama, Qdrant — and what each extraction rung will do on this machine: installed, downloads on first use, not installed, built-in, or switched off and by which variable. The npx rungs are checked against npm's cache, never installed. The video rungs show yt-dlp's version and age (flagged past 60 days — YouTube breaks old releases) and whether whisper has `uvx` and `ffmpeg`. `--json` returns each service's state and each rung as data (`rungs.pdf`, `rungs.doc`, `rungs.video`, and `ytdlp`). |
 | `webindex version` | The engine version. |
 
@@ -104,6 +105,7 @@ default, and one out of range is clamped to it.
 | `WEBINDEX_OCR_MAX`, `WEBINDEX_OCR_LANG`, `WEBINDEX_OCR_TIMEOUT_MS` | documents one process may OCR (default 3), tesseract's language (default `eng`), and one document's budget (default 300000) |
 | `WEBINDEX_VIDEO_ENGINES` | the YouTube transcript rungs to run, in order: a comma list of `manual-subs`, `auto-subs`, `whisper`, or `none` |
 | `WEBINDEX_WHISPER_MODEL`, `WEBINDEX_WHISPER_MAX`, `WEBINDEX_WHISPER_TIMEOUT_MS` | the whisper model (default `small`, about 500 MB on first use), videos one process may transcribe locally (default 3), and one video's budget (default 1800000) |
+| `WEBINDEX_VIDEO_DIR` | where `video` keeps its runs (default `<tmp>/webindex/video`, under the consumer's own name when vendored) |
 | `WEBINDEX_YTDLP_ARGS` | extra flags appended to every yt-dlp call, split on whitespace — yt-dlp's browser-cookies option when YouTube asks to sign in, or a proxy |
 | `WEBINDEX_NO_ROBOTS` | `robots` and `crawl` do not consult robots.txt — only right on a site you own |
 | `WEBINDEX_ROBOTS_UA` | the user-agent token robots.txt groups are matched against (default `webindex`) |

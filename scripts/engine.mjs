@@ -543,7 +543,7 @@ function binaryName(name) {
   return process.platform === "win32" && name === "npx" ? "npx.cmd" : name;
 }
 function runWithInput(cmd, args, input, timeoutMs, opts = {}) {
-  return new Promise((resolve6) => {
+  return new Promise((resolve7) => {
     let child;
     try {
       const bin = binaryName(cmd);
@@ -552,7 +552,7 @@ function runWithInput(cmd, args, input, timeoutMs, opts = {}) {
       const common = { stdio: ["pipe", "pipe", "pipe"], ...opts.env ? { env: opts.env } : {} };
       child = viaShell ? spawn2([bin, ...args].map(quote).join(" "), { ...common, shell: true, windowsHide: true }) : spawn2(bin, args, common);
     } catch (e) {
-      resolve6({ ok: false, stdout: "", error: e.message });
+      resolve7({ ok: false, stdout: "", error: e.message });
       return;
     }
     const chunks = [];
@@ -571,7 +571,7 @@ ${stderrTail}` : stderrHead + stderrTail).trim();
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve6(r);
+      resolve7(r);
     };
     const timer = setTimeout(() => {
       killTree(child);
@@ -1866,7 +1866,7 @@ function sh(cmd, args, opts = {}) {
 function shAsync(cmd, args, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   if (opts.signal?.aborted) return Promise.resolve({ ok: false, status: 130, stdout: "", stderr: "aborted" });
-  return new Promise((resolve6) => {
+  return new Promise((resolve7) => {
     let settled = false;
     let timer;
     let onAbort;
@@ -1875,7 +1875,7 @@ function shAsync(cmd, args, opts = {}) {
       settled = true;
       clearTimeout(timer);
       if (onAbort) opts.signal?.removeEventListener("abort", onAbort);
-      resolve6(r);
+      resolve7(r);
     };
     let child;
     try {
@@ -2351,400 +2351,55 @@ function transcriptMarkdown(t) {
   return [...head, ...body].join("\n").trimEnd() + "\n";
 }
 
-// src/mime.ts
-var AMBIGUOUS_TYPES = /* @__PURE__ */ new Set([
-  "",
-  "application/octet-stream",
-  "binary/octet-stream",
-  "application/x-download",
-  "application/force-download",
-  "application/download",
-  "application/unknown",
-  "application/zip",
-  "application/x-zip-compressed"
-]);
+// src/video/run.ts
+import { existsSync as existsSync3, readdirSync as readdirSync4, readFileSync as readFileSync5, statSync } from "fs";
+import { tmpdir as tmpdir3 } from "os";
+import { join as join4, resolve } from "path";
 
-// src/charset.ts
-function bomEncoding(bytes) {
-  if (bytes.length >= 3 && bytes[0] === 239 && bytes[1] === 187 && bytes[2] === 191) return { encoding: "utf-8", skip: 3 };
-  if (bytes.length >= 2 && bytes[0] === 255 && bytes[1] === 254) return { encoding: "utf-16le", skip: 2 };
-  if (bytes.length >= 2 && bytes[0] === 254 && bytes[1] === 255) return { encoding: "utf-16be", skip: 2 };
-  return void 0;
+// src/no-write.ts
+import { mkdirSync, renameSync, unlinkSync, writeFileSync as writeFileSync4 } from "fs";
+var flagged = false;
+function setNoWrite(on) {
+  flagged = on;
 }
-var CHARSET_IN_CONTENT_TYPE = /charset\s*=\s*["']?([a-z0-9_:.+-]+)/i;
-function charsetFromContentType(contentType) {
-  return CHARSET_IN_CONTENT_TYPE.exec(contentType ?? "")?.[1]?.toLowerCase();
+function isNoWrite() {
+  return flagged || envFlag("NO_WRITE");
 }
-var UTF16_LABELS = /* @__PURE__ */ new Set(["utf-16", "utf-16le", "utf-16be", "unicode", "unicodefeff", "unicodefffe", "ucs-2", "csunicode", "iso-10646-ucs-2"]);
-function prescanLabel(label) {
-  const lower = label.toLowerCase();
-  if (UTF16_LABELS.has(lower)) return "utf-8";
-  return lower === "x-user-defined" ? "windows-1252" : lower;
+var collected = [];
+function ensureDir(dir) {
+  if (isNoWrite()) return;
+  mkdirSync(dir, { recursive: true });
 }
-var META_TAG = /<meta\b(?:[^>"']|"[^"]*(?:"|$)|'[^']*(?:'|$))*(?:>|$)/gi;
-var TAG_ATTRIBUTE = /([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)(?:"|$)|'([^']*)(?:'|$)|([^\s"'=<>`]+)))?/g;
-function metaAttributes(tag) {
-  const attrs = /* @__PURE__ */ new Map();
-  for (const m of tag.slice(5).matchAll(TAG_ATTRIBUTE)) {
-    const value = m[2] ?? m[3] ?? m[4];
-    const name = m[1].toLowerCase();
-    if (value !== void 0 && !attrs.has(name)) attrs.set(name, value);
+function writeArtifact(path, content) {
+  if (isNoWrite()) {
+    const at = collected.findIndex((a) => a.path === path);
+    if (at !== -1) collected[at] = { path, content };
+    else collected.push({ path, content });
+    return path;
   }
-  return attrs;
+  writeFileAtomic(path, content);
+  return path;
 }
-function charsetFromHtml(head) {
-  for (const [tag] of head.slice(0, 4096).matchAll(META_TAG)) {
-    const attrs = metaAttributes(tag);
-    const direct = attrs.get("charset")?.trim();
-    if (direct) return prescanLabel(direct);
-    if (attrs.get("http-equiv")?.trim().toLowerCase() !== "content-type") continue;
-    const pragma = charsetFromContentType(attrs.get("content") ?? "");
-    if (pragma) return prescanLabel(pragma);
-  }
-  return void 0;
-}
-var XML_DECLARATION = /^\s*<\?xml\b[^>]*?\bencoding\s*=\s*["']([A-Za-z0-9._:-]+)["']/;
-function charsetFromXmlDeclaration(bytes) {
-  const label = XML_DECLARATION.exec(bytes.subarray(0, 256).toString("latin1"))?.[1];
-  return label ? prescanLabel(label) : void 0;
-}
-var isUtf8Label = (label) => label === "utf-8" || label === "utf8";
-var SNIFFABLE_MIME = /* @__PURE__ */ new Set(["text/html", "application/xhtml+xml", ...AMBIGUOUS_TYPES]);
-function readsAsUtf8(text) {
-  let valid = 0;
-  let replaced = 0;
-  for (let i = 0; i < text.length; i++) {
-    const c = text.charCodeAt(i);
-    if (c < 128 || c >= 56320 && c <= 57343) continue;
-    if (c === 65533) replaced++;
-    else valid++;
-  }
-  return valid > replaced;
-}
-function decodeUtf8OrCp1252(bytes) {
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  let text;
+var tmpCounter = 0;
+function writeFileAtomic(path, content) {
+  const tmp = `${path}.${process.pid}.${tmpCounter++}.tmp`;
   try {
-    text = decoder.decode(bytes, { stream: true });
-  } catch {
-    const lenient = new TextDecoder("utf-8").decode(bytes);
-    return readsAsUtf8(lenient) ? lenient : decodeCp1252(bytes);
-  }
-  try {
-    return text + decoder.decode();
-  } catch {
-    return /[\x80-\uffff]/.test(text) ? text : decodeCp1252(bytes);
-  }
-}
-function decodeBody(bytes, contentType = "") {
-  const bom = bomEncoding(bytes);
-  if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
-  const declared = charsetFromContentType(contentType);
-  if (declared && !isUtf8Label(declared)) return decodeWith(bytes, declared);
-  if (declared) return bytes.toString("utf8");
-  const mime = contentType.split(";")[0].trim().toLowerCase();
-  const own = charsetFromXmlDeclaration(bytes) ?? (SNIFFABLE_MIME.has(mime) ? charsetFromHtml(bytes.subarray(0, 4096).toString("latin1")) : void 0);
-  if (own && !isUtf8Label(own)) return decodeWith(bytes, own);
-  return decodeUtf8OrCp1252(bytes);
-}
-function decodeLocal(bytes, opts = {}) {
-  const bom = bomEncoding(bytes);
-  if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
-  const own = charsetFromXmlDeclaration(bytes) ?? (opts.sniffHtmlCharset === false ? void 0 : charsetFromHtml(bytes.subarray(0, 4096).toString("latin1")));
-  if (own && !isUtf8Label(own)) return decodeWith(bytes, own);
-  return decodeUtf8OrCp1252(bytes);
-}
-var CP1252_C1 = [
-  8364,
-  129,
-  8218,
-  402,
-  8222,
-  8230,
-  8224,
-  8225,
-  710,
-  8240,
-  352,
-  8249,
-  338,
-  141,
-  381,
-  143,
-  144,
-  8216,
-  8217,
-  8220,
-  8221,
-  8226,
-  8211,
-  8212,
-  732,
-  8482,
-  353,
-  8250,
-  339,
-  157,
-  382,
-  376
-];
-var CP1252_LABELS = /* @__PURE__ */ new Set([
-  "windows-1252",
-  "cp1252",
-  "cp-1252",
-  "x-cp1252",
-  "ansi_x3.4-1968",
-  "iso-8859-1",
-  "iso8859-1",
-  "latin1",
-  "l1",
-  "us-ascii",
-  "ascii"
-]);
-var CP1252_C1_RANGE = /[\x80-\x9f]/g;
-var cp1252C1 = (c) => String.fromCharCode(CP1252_C1[c.charCodeAt(0) - 128]);
-function decodeCp1252(bytes) {
-  return bytes.toString("latin1").replace(CP1252_C1_RANGE, cp1252C1);
-}
-function decodeWith(bytes, encoding) {
-  if (CP1252_LABELS.has(encoding)) return decodeCp1252(bytes);
-  try {
-    return new TextDecoder(encoding, { fatal: false }).decode(bytes);
-  } catch {
-    return bytes.toString("utf8");
-  }
-}
-
-// src/entities.ts
-var NAMED = `
-  quot 22 amp 26 apos 27 lt 3c gt 3e QUOT 22 AMP 26 LT 3c GT 3e COPY a9 REG ae
-  nbsp a0 iexcl a1 cent a2 pound a3 curren a4 yen a5 brvbar a6 sect a7 uml a8 copy a9 ordf aa laquo ab not ac shy ad reg ae macr af
-  deg b0 plusmn b1 sup2 b2 sup3 b3 acute b4 micro b5 para b6 middot b7 cedil b8 sup1 b9 ordm ba raquo bb frac14 bc frac12 bd frac34 be iquest bf
-  Agrave c0 Aacute c1 Acirc c2 Atilde c3 Auml c4 Aring c5 AElig c6 Ccedil c7 Egrave c8 Eacute c9 Ecirc ca Euml cb Igrave cc Iacute cd Icirc ce Iuml cf
-  ETH d0 Ntilde d1 Ograve d2 Oacute d3 Ocirc d4 Otilde d5 Ouml d6 times d7 Oslash d8 Ugrave d9 Uacute da Ucirc db Uuml dc Yacute dd THORN de szlig df
-  agrave e0 aacute e1 acirc e2 atilde e3 auml e4 aring e5 aelig e6 ccedil e7 egrave e8 eacute e9 ecirc ea euml eb igrave ec iacute ed icirc ee iuml ef
-  eth f0 ntilde f1 ograve f2 oacute f3 ocirc f4 otilde f5 ouml f6 divide f7 oslash f8 ugrave f9 uacute fa ucirc fb uuml fc yacute fd thorn fe yuml ff
-  OElig 152 oelig 153 Scaron 160 scaron 161 Yuml 178 fnof 192 circ 2c6 tilde 2dc
-  Alpha 391 Beta 392 Gamma 393 Delta 394 Epsilon 395 Zeta 396 Eta 397 Theta 398 Iota 399 Kappa 39a Lambda 39b Mu 39c Nu 39d Xi 39e Omicron 39f
-  Pi 3a0 Rho 3a1 Sigma 3a3 Tau 3a4 Upsilon 3a5 Phi 3a6 Chi 3a7 Psi 3a8 Omega 3a9
-  alpha 3b1 beta 3b2 gamma 3b3 delta 3b4 epsilon 3b5 zeta 3b6 eta 3b7 theta 3b8 iota 3b9 kappa 3ba lambda 3bb mu 3bc nu 3bd xi 3be omicron 3bf
-  pi 3c0 rho 3c1 sigmaf 3c2 sigma 3c3 tau 3c4 upsilon 3c5 phi 3c6 chi 3c7 psi 3c8 omega 3c9 thetasym 3d1 upsih 3d2 piv 3d6
-  ensp 2002 emsp 2003 thinsp 2009 zwnj 200c zwj 200d lrm 200e rlm 200f ndash 2013 mdash 2014 lsquo 2018 rsquo 2019 sbquo 201a
-  ldquo 201c rdquo 201d bdquo 201e dagger 2020 Dagger 2021 bull 2022 hellip 2026 permil 2030 prime 2032 Prime 2033 lsaquo 2039 rsaquo 203a
-  oline 203e frasl 2044 euro 20ac image 2111 weierp 2118 real 211c trade 2122 alefsym 2135
-  larr 2190 uarr 2191 rarr 2192 darr 2193 harr 2194 crarr 21b5 lArr 21d0 uArr 21d1 rArr 21d2 dArr 21d3 hArr 21d4
-  forall 2200 part 2202 exist 2203 empty 2205 nabla 2207 isin 2208 notin 2209 ni 220b prod 220f sum 2211 minus 2212 lowast 2217 radic 221a
-  prop 221d infin 221e ang 2220 and 2227 or 2228 cap 2229 cup 222a int 222b there4 2234 sim 223c cong 2245 asymp 2248 ne 2260 equiv 2261
-  le 2264 ge 2265 sub 2282 sup 2283 nsub 2284 sube 2286 supe 2287 oplus 2295 otimes 2297 perp 22a5 sdot 22c5
-  lceil 2308 rceil 2309 lfloor 230a rfloor 230b lang 27e8 rang 27e9 loz 25ca spades 2660 clubs 2663 hearts 2665 diams 2666
-`;
-var INVISIBLE = /* @__PURE__ */ new Set([173, 8203, 8204, 8205, 8206, 8207, 8288, 65279]);
-var charFor = (cp) => INVISIBLE.has(cp) ? "" : String.fromCodePoint(cp);
-var ENTITY_BY_NAME = /* @__PURE__ */ new Map();
-{
-  const parts = NAMED.trim().split(/\s+/);
-  for (let i = 0; i < parts.length; i += 2) ENTITY_BY_NAME.set(parts[i], charFor(Number.parseInt(parts[i + 1], 16)));
-  ENTITY_BY_NAME.set("nbsp", " ");
-}
-var ENTITY_RE = /&(#[xX][0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g;
-function numericChar(n) {
-  if (n >= 128 && n <= 159) return String.fromCodePoint(CP1252_C1[n - 128]);
-  if (n === 0 || !(n <= 1114111) || n >= 55296 && n <= 57343) return "\uFFFD";
-  return charFor(n);
-}
-function decodeEntities(s) {
-  return s.replace(ENTITY_RE, (m, ref) => {
-    if (ref[0] !== "#") return ENTITY_BY_NAME.get(ref) ?? m;
-    return numericChar(ref[1] === "x" || ref[1] === "X" ? Number.parseInt(ref.slice(2), 16) : Number(ref.slice(1)));
-  });
-}
-
-// src/html.ts
-var BLOCK_TAGS = /* @__PURE__ */ new Set([
-  "p",
-  "div",
-  "section",
-  "article",
-  "li",
-  "tr",
-  "td",
-  "th",
-  "ul",
-  "ol",
-  "pre",
-  "blockquote",
-  "table",
-  "caption",
-  "dl",
-  "dt",
-  "dd",
-  "header",
-  "footer",
-  "nav",
-  "aside",
-  "main",
-  "search",
-  "figure",
-  "figcaption",
-  "details",
-  "summary",
-  "address",
-  "form",
-  "fieldset",
-  "legend",
-  "hgroup",
-  "center",
-  "dialog",
-  "menu"
-]);
-var INLINE_TAGS = /* @__PURE__ */ new Set([
-  "a",
-  "abbr",
-  "acronym",
-  "b",
-  "bdi",
-  "bdo",
-  "big",
-  "cite",
-  "code",
-  "data",
-  "del",
-  "dfn",
-  "em",
-  "font",
-  "i",
-  "ins",
-  "kbd",
-  "label",
-  "mark",
-  "nobr",
-  "q",
-  "s",
-  "samp",
-  "small",
-  "span",
-  "strike",
-  "strong",
-  "sub",
-  "sup",
-  "time",
-  "tt",
-  "u",
-  "var",
-  "wbr"
-]);
-var TAG_RE = /<[a-zA-Z!/?][^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/g;
-var LOOSE_TAG_RE = /<[a-zA-Z!/?][^<>]*>/g;
-var tagName = (tag) => /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
-var CLOSE_TAG_RE = /* @__PURE__ */ new Map();
-function closeTagRe(name) {
-  let re = CLOSE_TAG_RE.get(name);
-  if (!re) CLOSE_TAG_RE.set(name, re = new RegExp(`</${name}\\s*>`, "gi"));
-  return re;
-}
-function htmlAttributes(tag) {
-  const attrs = /* @__PURE__ */ new Map();
-  for (const m of tag.matchAll(/(?<![^\s"'<>/=])([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) {
-    const name = m[1].toLowerCase();
-    if (!attrs.has(name)) attrs.set(name, m[2] ?? m[3] ?? m[4] ?? "");
-  }
-  return attrs;
-}
-var RCDATA_ELEMENTS = /* @__PURE__ */ new Set(["title"]);
-function dropElements(html, names, toEof = /* @__PURE__ */ new Set()) {
-  const drop = new Set(names);
-  const open = new RegExp(`<!--|${TAG_RE.source}|<(${names.join("|")})(?=[\\s/>])`, "gi");
-  const unclosed = /* @__PURE__ */ new Set();
-  let out = "";
-  let last = 0;
-  let m;
-  while (m = open.exec(html)) {
-    const tag = m[0];
-    const name = m[1]?.toLowerCase() ?? (tag === "<!--" ? "!--" : tag[1] === "/" ? "" : tagName(tag));
-    const opaque = !drop.has(name) && RCDATA_ELEMENTS.has(name);
-    if (name !== "!--" && !drop.has(name) && !opaque || unclosed.has(name)) continue;
-    let end;
-    if (name === "!--") {
-      const close = html.indexOf("-->", m.index + 2);
-      end = close < 0 ? -1 : close + 3;
-    } else {
-      const close = closeTagRe(name);
-      close.lastIndex = open.lastIndex;
-      const c = close.exec(html);
-      end = c ? c.index + c[0].length : toEof.has(name) ? html.length : -1;
+    writeFileSync4(tmp, content);
+    renameSync(tmp, path);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
     }
-    if (end < 0) {
-      unclosed.add(name);
-      continue;
-    }
-    if (!opaque) {
-      out += html.slice(last, m.index) + " ";
-      last = end;
-    }
-    open.lastIndex = end;
+    throw e;
   }
-  return last === 0 ? html : out + html.slice(last);
 }
-function balancedRegions(html, tag, isCandidate) {
-  const re = new RegExp(`<${tag}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>|</${tag}\\s*>`, "gi");
-  const stack = [];
-  const out = [];
-  let m;
-  while (m = re.exec(html)) {
-    if (m[0][1] === "/") {
-      const top = stack.pop();
-      if (top?.open) out.push({ start: top.start, end: m.index, from: top.from, to: re.lastIndex, open: top.open });
-    } else {
-      stack.push({ start: re.lastIndex, from: m.index, open: isCandidate(m[0]) ? m[0] : void 0 });
-    }
-  }
-  return out;
+function takeArtifacts() {
+  return collected.splice(0, collected.length);
 }
-function dropLandmarks(html, roles) {
-  const role = `\\srole\\s*=\\s*["']?(?:${roles.join("|")})(?=["'\\s/>])`;
-  const hasRole = new RegExp(role, "i");
-  const names = /* @__PURE__ */ new Set();
-  for (const m of html.matchAll(new RegExp(`<([a-zA-Z][a-zA-Z0-9-]*)(?=[\\s/>])[^<>]*${role}`, "gi"))) names.add(m[1].toLowerCase());
-  if (!names.size) return html;
-  const regions = [...names].flatMap((name) => balancedRegions(html, name, (open) => hasRole.test(open))).sort((a, b) => a.from - b.from);
-  let out = "";
-  let last = 0;
-  for (const r of regions) {
-    if (r.from < last) continue;
-    out += `${html.slice(last, r.from)} `;
-    last = r.to;
-  }
-  return last === 0 ? html : out + html.slice(last);
-}
-var CHROME_ROLES = ["navigation", "banner", "contentinfo"];
-var HIDDEN_ELEMENTS = ["script", "style", "noscript", "head", "svg", "template", "select", "datalist"];
-var CHROME_ELEMENTS = ["nav", "footer"];
-var RAW_TEXT_ELEMENTS = /* @__PURE__ */ new Set(["script", "style"]);
-
-// src/retry.ts
-var maxAttempts = () => envInt("MAX_ATTEMPTS", 2, 1, 5);
-var defaultRetryMs = () => envInt("RETRY_MS", 600, 0, 5e3);
-var RETRY_AFTER_CAP_MS = 5e3;
-function retryDelayMs(retryAfterMs) {
-  if (retryAfterMs === void 0) return defaultRetryMs();
-  return retryAfterMs <= RETRY_AFTER_CAP_MS ? retryAfterMs : void 0;
-}
-var PERMANENT_CODES = /* @__PURE__ */ new Set([
-  "ENOTFOUND",
-  "ERR_INVALID_URL",
-  "ERR_TLS_CERT_ALTNAME_INVALID",
-  "CERT_HAS_EXPIRED",
-  "DEPTH_ZERO_SELF_SIGNED_CERT",
-  "SELF_SIGNED_CERT_IN_CHAIN",
-  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
-  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"
-]);
-var PERMANENT_MESSAGE = /redirect count exceeded|scheme must be|unknown scheme|bad port|invalid url|failed to parse url/i;
-function isPermanentFailure(e) {
-  const err = e;
-  const code = err?.cause?.code ?? err?.code;
-  if (typeof code === "string" && PERMANENT_CODES.has(code)) return true;
-  return [err?.message, err?.cause?.message].some((m) => typeof m === "string" && PERMANENT_MESSAGE.test(m));
+function resetNoWrite() {
+  flagged = false;
+  collected.length = 0;
 }
 
 // src/url.ts
@@ -3287,6 +2942,985 @@ function slugify(input, opts = {}) {
   const tag = fnv1a64(normalized).toString(16).padStart(16, "0").slice(0, 8);
   const head = s.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");
   return head ? `${head}-${tag}` : tag;
+}
+
+// src/rank.ts
+function rrf(lists, keyOf, k = 60) {
+  const score = /* @__PURE__ */ new Map();
+  for (const list of lists) {
+    const seen = /* @__PURE__ */ new Set();
+    list.forEach((item, idx) => {
+      const key = keyOf(item);
+      if (seen.has(key)) return;
+      seen.add(key);
+      score.set(key, (score.get(key) ?? 0) + 1 / (k + idx + 1));
+    });
+  }
+  return score;
+}
+var byCodeUnit = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function trimTrailing(s, ch) {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === ch) end--;
+  return s.slice(0, end);
+}
+function arxivIdFromUrl(url) {
+  let host;
+  let path;
+  try {
+    const u = new URL(url.trim());
+    host = u.hostname.toLowerCase();
+    path = trimTrailing(u.pathname, "/");
+  } catch {
+    return void 0;
+  }
+  if (!/(^|\.)arxiv\.org$/.test(host)) return void 0;
+  const modern = /\/(?:abs|pdf|html|format)\/(\d{4}\.\d{4,5})(?:v\d+)?(?:\.pdf)?$/i.exec(path);
+  if (modern) return modern[1].toLowerCase();
+  const legacy = /\/(?:abs|pdf|html|format)\/([a-z-]+(?:\.[A-Z]{2})?\/\d{7})(?:v\d+)?(?:\.pdf)?$/i.exec(path);
+  if (legacy) return legacy[1].toLowerCase();
+  return void 0;
+}
+function doiFromUrl(url) {
+  let host;
+  let path;
+  let search2;
+  try {
+    const u = new URL(url.trim());
+    host = u.hostname.toLowerCase();
+    path = u.pathname;
+    search2 = u.search;
+  } catch {
+    return void 0;
+  }
+  const decode2 = (s) => {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  };
+  if (/(^|\.)(dx\.)?doi\.org$/.test(host)) {
+    const doi2 = normalizeDoi(decode2(trimTrailing(path.replace(/^\/+/, ""), "/")));
+    return /^10\.\d{4,9}\//.test(doi2) ? doi2 : void 0;
+  }
+  const m = /\/doi(?:\/(?:abs|full|pdf|epdf|e?pub))?\/(10\.\d{4,9}\/[^\s?#]+)/i.exec(path);
+  if (m) return normalizeDoi(trimTrailing(decode2(m[1]), "/"));
+  const loose = /(?:^|[/=])(10\.\d{4,9}\/[^\s?#&]+)/.exec(`${path}${search2}`);
+  if (!loose) return void 0;
+  let doi = normalizeDoi(trimTrailing(decode2(loose[1]), "/")).replace(/\.pdf$/, "");
+  if (doi.startsWith("10.1101/")) doi = doi.replace(/\.(?:full|abstract|supplementary-material|article-info|article-metrics)$/, "").replace(/v\d+$/, "");
+  return doi;
+}
+function dedupeByUrl(items) {
+  const best = /* @__PURE__ */ new Map();
+  const order = [];
+  let dropped = 0;
+  for (const it of items) {
+    const key = canonicalizeUrl(it.url);
+    const prev = best.get(key);
+    if (!prev) {
+      best.set(key, it);
+      order.push(key);
+    } else {
+      dropped++;
+      if (it.score > prev.score) best.set(key, it);
+    }
+  }
+  return { items: order.map((k) => best.get(k)), dropped };
+}
+var indexTokenCache = /* @__PURE__ */ new WeakMap();
+function bm25Tokenize(text, opts = {}) {
+  return tokenize(text, opts.subtokens !== false);
+}
+var WORD_SPLIT = /[^\p{L}\p{M}\p{N}_]+/u;
+var NON_ASCII2 = /[^\p{ASCII}]/u;
+var CJK_CHAR2 = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
+var CJK_RUNS2 = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
+var IDENT_BOUNDARY = new RegExp("_|[\\p{Ll}\\p{N}]\\p{Lu}|\\p{Lu}\\p{Lu}\\p{Ll}|\\p{L}\\p{N}|\\p{N}\\p{L}", "u");
+var MAX_IDENT = 64;
+function tokenize(text, expand2) {
+  if (!text) return [];
+  const out = [];
+  const nonAscii = NON_ASCII2.test(text);
+  for (const raw of (nonAscii ? text.normalize("NFC") : text).split(WORD_SPLIT)) {
+    if (!raw) continue;
+    if (nonAscii && CJK_CHAR2.test(raw)) {
+      for (const piece of raw.split(CJK_RUNS2)) {
+        if (!piece) continue;
+        if (CJK_CHAR2.test(piece)) pushBigrams(piece, out);
+        else pushTerm(piece, out, expand2);
+      }
+    } else pushTerm(raw, out, expand2);
+  }
+  return out;
+}
+function pushTerm(raw, out, expand2) {
+  if (raw.length < 2 || isStopword(raw)) return;
+  const t = foldCached(raw);
+  if (t.length < 2) return;
+  out.push(t);
+  if (!expand2 || raw.length > MAX_IDENT) return;
+  for (const sub of subtermsCached(raw, t)) out.push(sub);
+}
+function pushBigrams(run, out) {
+  const chars = Array.from(run);
+  if (chars.length === 1) {
+    out.push(run);
+    return;
+  }
+  for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1]);
+}
+var FOLD_CACHE_MAX = 5e4;
+var foldCache = /* @__PURE__ */ new Map();
+function foldCached(raw) {
+  const hit = foldCache.get(raw);
+  if (hit !== void 0) return hit;
+  const t = foldTerm(raw);
+  if (foldCache.size >= FOLD_CACHE_MAX) foldCache.clear();
+  foldCache.set(raw, t);
+  return t;
+}
+var NO_SUBTERMS = [];
+var subtermCache = /* @__PURE__ */ new Map();
+var subtermExtras = { list: void 0, length: 0 };
+function subtermsCached(raw, folded) {
+  const list = brand().extraStopwords;
+  if (list !== subtermExtras.list || (list?.length ?? 0) !== subtermExtras.length) {
+    subtermCache.clear();
+    subtermExtras = { list, length: list?.length ?? 0 };
+  }
+  const hit = subtermCache.get(raw);
+  if (hit !== void 0) return hit;
+  let subs = NO_SUBTERMS;
+  if (IDENT_BOUNDARY.test(raw)) {
+    subs = subtokens(raw).map(foldCached).filter((sub) => sub !== folded && sub.length >= 2);
+  }
+  if (subtermCache.size >= FOLD_CACHE_MAX) subtermCache.clear();
+  subtermCache.set(raw, subs);
+  return subs;
+}
+function docTokens(doc, titleWeight, headingWeight, body) {
+  const out = body ? [...body] : bm25Tokenize(doc.body);
+  const headings = bm25Tokenize(doc.headings);
+  for (let r = 0; r < headingWeight; r++) out.push(...headings);
+  const title = bm25Tokenize(doc.title);
+  for (let r = 0; r < titleWeight; r++) out.push(...title);
+  return out;
+}
+function proximityBonus(tokens, queryTerms, window = 6, cap = 0.1) {
+  if (queryTerms.length < 2) return 0;
+  const q = new Set(queryTerms);
+  const hits = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (q.has(tok)) hits.push({ pos: i, term: tok });
+  }
+  if (hits.length < 2) return 0;
+  let close = 0;
+  for (let i = 1; i < hits.length; i++) {
+    if (hits[i].term !== hits[i - 1].term && hits[i].pos - hits[i - 1].pos <= window) close++;
+  }
+  return Math.min(cap, cap * (close / Math.max(1, queryTerms.length - 1)));
+}
+function buildBm25Index(question, docs, opts = {}) {
+  const k1 = opts.k1 ?? 1.2;
+  const b = opts.b ?? 0.75;
+  const titleWeight = 3;
+  const headingWeight = 2;
+  const queryTerms = [...new Set(bm25Tokenize(question))];
+  const N = docs.length;
+  const df = /* @__PURE__ */ new Map();
+  const tokenCache = /* @__PURE__ */ new WeakMap();
+  let totalLen = 0;
+  for (const doc of docs) {
+    const toks = docTokens(doc, titleWeight, headingWeight, opts.tokensOf?.(doc));
+    tokenCache.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens: toks });
+    totalLen += toks.length;
+    for (const t of new Set(toks)) df.set(t, (df.get(t) ?? 0) + 1);
+  }
+  const avgdl = N ? totalLen / N : 0;
+  const idf = /* @__PURE__ */ new Map();
+  for (const t of queryTerms) {
+    if (N < 3) {
+      idf.set(t, 1);
+      continue;
+    }
+    const dfi = df.get(t) ?? 0;
+    idf.set(t, Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5)));
+  }
+  const index = { idf, avgdl, N, queryTerms, k1, b, titleWeight, headingWeight };
+  indexTokenCache.set(index, tokenCache);
+  return index;
+}
+function indexedDocTokens(index, doc) {
+  const cache2 = indexTokenCache.get(index);
+  const cached = cache2?.get(doc);
+  if (cached && cached.title === doc.title && cached.headings === doc.headings && cached.body === doc.body) return cached.tokens;
+  const tokens = docTokens(doc, index.titleWeight, index.headingWeight);
+  cache2?.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens });
+  return tokens;
+}
+function bm25Score(index, doc) {
+  if (!index.queryTerms.length) return 0;
+  const toks = indexedDocTokens(index, doc);
+  const dl = toks.length;
+  if (!dl) return 0;
+  const tf = /* @__PURE__ */ new Map();
+  for (const t of toks) tf.set(t, (tf.get(t) ?? 0) + 1);
+  const { k1, b, avgdl } = index;
+  const lenNorm = 1 - b + b * (avgdl ? dl / avgdl : 1);
+  let score = 0;
+  for (const term of index.queryTerms) {
+    const f = tf.get(term);
+    if (!f) continue;
+    const idf = index.idf.get(term) ?? 0;
+    score += idf * (f * (k1 + 1)) / (f + k1 * lenNorm);
+  }
+  return score * (1 + proximityBonus(toks, index.queryTerms));
+}
+function bm25MatchedTerms(index, doc) {
+  if (!index.queryTerms.length) return [];
+  const present = new Set(indexedDocTokens(index, doc));
+  return index.queryTerms.filter((t) => present.has(t));
+}
+function applyRelevanceFloor(ranked, matchedOf, queryTerms, floor) {
+  const isAlpha = (t) => new RegExp("\\p{L}", "u").test(t);
+  const alphaTerms = queryTerms.filter(isAlpha);
+  if (queryTerms.length < 2 || alphaTerms.length < 1) return { kept: [...ranked], dropped: [] };
+  const offTopic = (t) => {
+    const m = matchedOf(t);
+    return m.length === 0 || m.every((term) => !isAlpha(term));
+  };
+  const kept = [];
+  const dropped = [];
+  for (const t of ranked) (offTopic(t) ? dropped : kept).push(t);
+  while (kept.length < floor && dropped.length) kept.push(dropped.shift());
+  return { kept, dropped };
+}
+function contentCoverage(matcher, text) {
+  if (!matcher.canonicals.length || !text) return 0;
+  const hit = /* @__PURE__ */ new Set();
+  for (const line of text.split("\n")) {
+    for (const c of matcher.matchLine(line)) hit.add(c);
+    if (hit.size === matcher.canonicals.length) break;
+  }
+  return hit.size / matcher.canonicals.length;
+}
+function recencyScore(meta, minYear, maxYear) {
+  const y = typeof meta?.year === "number" ? meta.year : void 0;
+  if (y === void 0 || maxYear <= minYear) return 0.5;
+  const clamped = Math.min(maxYear, Math.max(minYear, y));
+  return (clamped - minYear) / (maxYear - minYear);
+}
+function simhash(text, opts = {}) {
+  const lanes = new Uint32Array(2);
+  simhashLanes(opts.tokens ?? tokenize(text, false), lanes);
+  return BigInt(lanes[0]) << 32n | BigInt(lanes[1]);
+}
+function simhashLanes(toks, out) {
+  out[0] = 0;
+  out[1] = 0;
+  if (!toks.length) return;
+  const v = new Int32Array(64);
+  const words = new Uint32Array(2);
+  const pieces = toks.length < 3 ? [""] : ["", " ", "", " ", ""];
+  const n = toks.length < 3 ? toks.length : toks.length - 2;
+  for (let i = 0; i < n; i++) {
+    if (toks.length < 3) pieces[0] = toks[i];
+    else {
+      pieces[0] = toks[i];
+      pieces[2] = toks[i + 1];
+      pieces[4] = toks[i + 2];
+    }
+    fnv1a64Words(pieces, words);
+    const hi2 = words[0];
+    const lo2 = words[1];
+    for (let b = 0; b < 32; b++) {
+      v[b] = v[b] + (lo2 >>> b & 1);
+      v[b + 32] = v[b + 32] + (hi2 >>> b & 1);
+    }
+  }
+  let lo = 0;
+  let hi = 0;
+  for (let b = 0; b < 32; b++) {
+    if (2 * v[b] > n) lo |= 1 << b;
+    if (2 * v[b + 32] > n) hi |= 1 << b;
+  }
+  out[0] = hi;
+  out[1] = lo;
+}
+var MASK32 = 0xffffffffn;
+function popcount32(n) {
+  let x = n - (n >>> 1 & 1431655765);
+  x = (x & 858993459) + (x >>> 2 & 858993459);
+  return Math.imul(x + (x >>> 4) & 252645135, 16843009) >>> 24;
+}
+function hammingDistance(a, b) {
+  let x = a ^ b;
+  let count = popcount32(Number(x & MASK32)) + popcount32(Number(x >> 32n & MASK32));
+  x >>= 64n;
+  while (x) {
+    x &= x - 1n;
+    count++;
+  }
+  return count;
+}
+function dedupeNearDuplicates(items, opts = {}) {
+  const maxBits = opts.maxBits ?? 3;
+  const minChars = opts.minChars ?? 500;
+  const better = (a, b) => a.score !== b.score ? a.score > b.score : byCodeUnit(a.url, b.url) < 0;
+  const kept = [];
+  const hashed = [];
+  const his = [];
+  const los = [];
+  const lanes = new Uint32Array(2);
+  const dups = [];
+  for (const it of items) {
+    const text = it.text || "";
+    if (text.length < minChars) {
+      kept.push({ it });
+      continue;
+    }
+    simhashLanes(opts.tokensOf ? opts.tokensOf(it) : tokenize(text, false), lanes);
+    const hi = lanes[0];
+    const lo = lanes[1];
+    let at = -1;
+    for (let k = 0; k < hashed.length; k++) {
+      if (popcount32(his[k] ^ hi) + popcount32(los[k] ^ lo) <= maxBits) {
+        at = k;
+        break;
+      }
+    }
+    if (at < 0) {
+      const cluster = { it };
+      kept.push(cluster);
+      hashed.push(cluster);
+      his.push(hi);
+      los.push(lo);
+      continue;
+    }
+    const dup = hashed[at];
+    if (better(it, dup.it)) {
+      dups.push({ url: dup.it.url, cluster: dup });
+      dup.it = it;
+      his[at] = hi;
+      los[at] = lo;
+    } else dups.push({ url: it.url, cluster: dup });
+  }
+  return { items: kept.map((k) => k.it), dropped: dups.length, duplicates: dups.map((d) => ({ url: d.url, of: d.cluster.it.url })) };
+}
+function diversify(items, tokensOf, lambda = 0.75, opts = {}) {
+  const sorted = [...items].sort((a, b) => b.score - a.score || byCodeUnit(a.url, b.url));
+  if (sorted.length <= 2) return sorted;
+  const window = opts.window !== void 0 && opts.window > 0 ? Math.floor(opts.window) : sorted.length;
+  if (window >= sorted.length) return mmr(sorted, tokensOf, lambda);
+  return [...window > 2 ? mmr(sorted.slice(0, window), tokensOf, lambda) : sorted.slice(0, window), ...sorted.slice(window)];
+}
+var PAIR_CACHE_MAX = 2048;
+function mmr(sorted, tokensOf, lambda) {
+  const m = sorted.length;
+  let max = 1e-9;
+  for (const it of sorted) if (it.score > max) max = it.score;
+  const ids = /* @__PURE__ */ new Map();
+  const sets = [];
+  for (const it of sorted) {
+    const raw = [];
+    for (const t of tokensOf(it)) {
+      let id = ids.get(t);
+      if (id === void 0) {
+        id = ids.size;
+        ids.set(t, id);
+      }
+      raw.push(id);
+    }
+    const all = Int32Array.from(raw).sort();
+    let k = 0;
+    for (let j = 0; j < all.length; j++) if (j === 0 || all[j] !== all[j - 1]) all[k++] = all[j];
+    sets.push(all.subarray(0, k));
+  }
+  const cache2 = m <= PAIR_CACHE_MAX ? new Float64Array(m * (m - 1) / 2) : void 0;
+  const pair = (i, j) => i < j ? i * (2 * m - i - 1) / 2 + (j - i - 1) : j * (2 * m - j - 1) / 2 + (i - j - 1);
+  let simMax = 0;
+  for (let i = 0; i < m; i++) {
+    for (let j = i + 1; j < m; j++) {
+      const v = jaccardSorted(sets[i], sets[j]);
+      if (cache2) cache2[pair(i, j)] = v;
+      if (v > simMax) simMax = v;
+    }
+  }
+  const sim = (i, j) => simMax > 0 ? (cache2 ? cache2[pair(i, j)] : jaccardSorted(sets[i], sets[j])) / simMax : 0;
+  const out = [sorted[0]];
+  const remaining = [];
+  for (let i = 1; i < m; i++) remaining.push(i);
+  const maxSim = new Float64Array(m);
+  for (const i of remaining) maxSim[i] = sim(i, 0);
+  let relevantLeft = 0;
+  for (const i of remaining) if (sorted[i].score > 0) relevantLeft++;
+  while (remaining.length) {
+    let bestPos = -1;
+    let bestVal = Number.NEGATIVE_INFINITY;
+    for (let p = 0; p < remaining.length; p++) {
+      const it = sorted[remaining[p]];
+      if (relevantLeft > 0 && !(it.score > 0)) continue;
+      const val = lambda * (it.score / max) - (1 - lambda) * maxSim[remaining[p]];
+      if (bestPos < 0 || val > bestVal || val === bestVal && byCodeUnit(it.url, sorted[remaining[bestPos]].url) < 0) {
+        bestVal = val;
+        bestPos = p;
+      }
+    }
+    const picked = remaining.splice(bestPos, 1)[0];
+    if (sorted[picked].score > 0) relevantLeft--;
+    out.push(sorted[picked]);
+    for (const i of remaining) {
+      const v = sim(i, picked);
+      if (v > maxSim[i]) maxSim[i] = v;
+    }
+  }
+  return out;
+}
+function jaccardSorted(a, b) {
+  const na = a.length;
+  const nb = b.length;
+  if (!na || !nb) return 0;
+  let i = 0;
+  let j = 0;
+  let inter = 0;
+  while (i < na && j < nb) {
+    const x = a[i];
+    const y = b[j];
+    if (x === y) {
+      inter++;
+      i++;
+      j++;
+    } else if (x < y) i++;
+    else j++;
+  }
+  return inter / (na + nb - inter);
+}
+var URL_IN_TEXT = /https?:\/\/(?:[^\s/@?#]+@)?[\p{L}\p{N}.-]+/giu;
+function unglued(match) {
+  const hostStart = Math.max(match.indexOf("//") + 2, match.lastIndexOf("@") + 1);
+  const dot = match.lastIndexOf(".");
+  if (dot <= hostStart) return match;
+  const label = match.slice(dot + 1);
+  const turn = label.search(/[\u0080-\uffff]/);
+  return turn > 0 && /^[A-Za-z0-9]/.test(label) ? match.slice(0, dot + 1 + turn) : match;
+}
+function externalHosts(url, text) {
+  const self = domainOf(url).replace(/^www\./, "");
+  const out = /* @__PURE__ */ new Set();
+  for (const m of text.match(URL_IN_TEXT) ?? []) {
+    const h = trimTrailing(domainOf(unglued(trimTrailing(m, "."))), ".").replace(/^www\./, "");
+    if (h && h !== self) out.add(h);
+  }
+  return out;
+}
+
+// src/video/run.ts
+function videoRoot(out) {
+  return resolve(out ?? env("VIDEO_DIR") ?? join4(tmpdir3(), brand().name, "video"));
+}
+var readJson = (path) => {
+  try {
+    return JSON.parse(readFileSync5(path, "utf8"));
+  } catch {
+    return void 0;
+  }
+};
+function readVideoRun(dir) {
+  const meta = readJson(join4(dir, "meta.json"));
+  const segments = readJson(join4(dir, "segments.json"));
+  if (!meta?.id || !Array.isArray(segments)) return void 0;
+  return { meta, segments };
+}
+async function fetchVideoRun(url, root, opts = {}) {
+  const id = youtubeVideoId(url);
+  if (!id) return { ok: false, reason: `not a YouTube video URL: ${url}` };
+  const dir = join4(root, id);
+  const transcriptPath = join4(dir, "TRANSCRIPT.md");
+  if (!opts.refresh) {
+    const kept = readVideoRun(dir);
+    if (kept && existsSync3(transcriptPath))
+      return { ok: true, id, dir, transcript: transcriptPath, reused: true, meta: kept.meta, segments: kept.segments.length };
+  }
+  const t = await transcribeVideo(url, opts);
+  if (!t.via || !t.meta) return { ok: false, id, reason: t.reason ?? "no transcript" };
+  const meta = { ...t.meta, via: t.via, fetchedAt: (/* @__PURE__ */ new Date()).toISOString() };
+  ensureDir(dir);
+  writeArtifact(join4(dir, "segments.json"), `${JSON.stringify(t.segments, null, 1)}
+`);
+  writeArtifact(join4(dir, "meta.json"), `${JSON.stringify(meta, null, 2)}
+`);
+  writeArtifact(transcriptPath, transcriptMarkdown(t));
+  return { ok: true, id, dir, transcript: transcriptPath, reused: false, meta, segments: t.segments.length };
+}
+var PASSAGE_S = 45;
+function videoPassages(segments) {
+  const out = [];
+  let cur;
+  for (const s of segments) {
+    cur = cur ? { start: cur.start, end: s.end, text: `${cur.text} ${s.text}` } : { ...s };
+    if (cur.end - cur.start >= PASSAGE_S) {
+      out.push(cur);
+      cur = void 0;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+function videoUrlAt(webpageUrl, seconds3) {
+  try {
+    const u = new URL(webpageUrl);
+    u.searchParams.set("t", `${Math.floor(seconds3)}s`);
+    return u.toString();
+  } catch {
+    return webpageUrl;
+  }
+}
+function listVideoRuns(dir) {
+  const self = readVideoRun(dir);
+  if (self) return [{ dir, ...self }];
+  let names = [];
+  try {
+    names = readdirSync4(dir).sort();
+  } catch {
+    return [];
+  }
+  return names.flatMap((name) => {
+    const child = join4(dir, name);
+    try {
+      if (!statSync(child).isDirectory()) return [];
+    } catch {
+      return [];
+    }
+    const run = readVideoRun(child);
+    return run ? [{ dir: child, ...run }] : [];
+  });
+}
+var chapterAt = (chapters, t) => [...chapters].reverse().find((c) => c.start <= t + 0.5)?.title;
+function searchVideoRuns(dir, query, opts = {}) {
+  const docs = [];
+  for (const run of listVideoRuns(dir)) {
+    const { meta } = run;
+    for (const p of videoPassages(run.segments)) {
+      const chapter = chapterAt(meta.chapters ?? [], p.start);
+      docs.push({
+        id: `${meta.id}@${p.start}`,
+        title: "",
+        headings: chapter ?? "",
+        body: p.text,
+        hit: {
+          label: opts.labels?.get(meta.id) ?? meta.id,
+          videoId: meta.id,
+          title: meta.title,
+          ...chapter ? { chapter } : {},
+          start: p.start,
+          stamp: formatStamp(p.start),
+          url: videoUrlAt(meta.webpageUrl, p.start),
+          text: p.text
+        }
+      });
+    }
+  }
+  const index = buildBm25Index(query, docs);
+  return docs.map((d) => ({ ...d.hit, score: Math.round(bm25Score(index, d) * 1e3) / 1e3 })).filter((h) => h.score > 0).sort((a, b) => b.score - a.score || a.videoId.localeCompare(b.videoId) || a.start - b.start).slice(0, opts.limit ?? 10);
+}
+
+// src/mime.ts
+var AMBIGUOUS_TYPES = /* @__PURE__ */ new Set([
+  "",
+  "application/octet-stream",
+  "binary/octet-stream",
+  "application/x-download",
+  "application/force-download",
+  "application/download",
+  "application/unknown",
+  "application/zip",
+  "application/x-zip-compressed"
+]);
+
+// src/charset.ts
+function bomEncoding(bytes) {
+  if (bytes.length >= 3 && bytes[0] === 239 && bytes[1] === 187 && bytes[2] === 191) return { encoding: "utf-8", skip: 3 };
+  if (bytes.length >= 2 && bytes[0] === 255 && bytes[1] === 254) return { encoding: "utf-16le", skip: 2 };
+  if (bytes.length >= 2 && bytes[0] === 254 && bytes[1] === 255) return { encoding: "utf-16be", skip: 2 };
+  return void 0;
+}
+var CHARSET_IN_CONTENT_TYPE = /charset\s*=\s*["']?([a-z0-9_:.+-]+)/i;
+function charsetFromContentType(contentType) {
+  return CHARSET_IN_CONTENT_TYPE.exec(contentType ?? "")?.[1]?.toLowerCase();
+}
+var UTF16_LABELS = /* @__PURE__ */ new Set(["utf-16", "utf-16le", "utf-16be", "unicode", "unicodefeff", "unicodefffe", "ucs-2", "csunicode", "iso-10646-ucs-2"]);
+function prescanLabel(label) {
+  const lower = label.toLowerCase();
+  if (UTF16_LABELS.has(lower)) return "utf-8";
+  return lower === "x-user-defined" ? "windows-1252" : lower;
+}
+var META_TAG = /<meta\b(?:[^>"']|"[^"]*(?:"|$)|'[^']*(?:'|$))*(?:>|$)/gi;
+var TAG_ATTRIBUTE = /([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)(?:"|$)|'([^']*)(?:'|$)|([^\s"'=<>`]+)))?/g;
+function metaAttributes(tag) {
+  const attrs = /* @__PURE__ */ new Map();
+  for (const m of tag.slice(5).matchAll(TAG_ATTRIBUTE)) {
+    const value = m[2] ?? m[3] ?? m[4];
+    const name = m[1].toLowerCase();
+    if (value !== void 0 && !attrs.has(name)) attrs.set(name, value);
+  }
+  return attrs;
+}
+function charsetFromHtml(head) {
+  for (const [tag] of head.slice(0, 4096).matchAll(META_TAG)) {
+    const attrs = metaAttributes(tag);
+    const direct = attrs.get("charset")?.trim();
+    if (direct) return prescanLabel(direct);
+    if (attrs.get("http-equiv")?.trim().toLowerCase() !== "content-type") continue;
+    const pragma = charsetFromContentType(attrs.get("content") ?? "");
+    if (pragma) return prescanLabel(pragma);
+  }
+  return void 0;
+}
+var XML_DECLARATION = /^\s*<\?xml\b[^>]*?\bencoding\s*=\s*["']([A-Za-z0-9._:-]+)["']/;
+function charsetFromXmlDeclaration(bytes) {
+  const label = XML_DECLARATION.exec(bytes.subarray(0, 256).toString("latin1"))?.[1];
+  return label ? prescanLabel(label) : void 0;
+}
+var isUtf8Label = (label) => label === "utf-8" || label === "utf8";
+var SNIFFABLE_MIME = /* @__PURE__ */ new Set(["text/html", "application/xhtml+xml", ...AMBIGUOUS_TYPES]);
+function readsAsUtf8(text) {
+  let valid = 0;
+  let replaced = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 128 || c >= 56320 && c <= 57343) continue;
+    if (c === 65533) replaced++;
+    else valid++;
+  }
+  return valid > replaced;
+}
+function decodeUtf8OrCp1252(bytes) {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let text;
+  try {
+    text = decoder.decode(bytes, { stream: true });
+  } catch {
+    const lenient = new TextDecoder("utf-8").decode(bytes);
+    return readsAsUtf8(lenient) ? lenient : decodeCp1252(bytes);
+  }
+  try {
+    return text + decoder.decode();
+  } catch {
+    return /[\x80-\uffff]/.test(text) ? text : decodeCp1252(bytes);
+  }
+}
+function decodeBody(bytes, contentType = "") {
+  const bom = bomEncoding(bytes);
+  if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
+  const declared = charsetFromContentType(contentType);
+  if (declared && !isUtf8Label(declared)) return decodeWith(bytes, declared);
+  if (declared) return bytes.toString("utf8");
+  const mime = contentType.split(";")[0].trim().toLowerCase();
+  const own = charsetFromXmlDeclaration(bytes) ?? (SNIFFABLE_MIME.has(mime) ? charsetFromHtml(bytes.subarray(0, 4096).toString("latin1")) : void 0);
+  if (own && !isUtf8Label(own)) return decodeWith(bytes, own);
+  return decodeUtf8OrCp1252(bytes);
+}
+function decodeLocal(bytes, opts = {}) {
+  const bom = bomEncoding(bytes);
+  if (bom) return decodeWith(bytes.subarray(bom.skip), bom.encoding);
+  const own = charsetFromXmlDeclaration(bytes) ?? (opts.sniffHtmlCharset === false ? void 0 : charsetFromHtml(bytes.subarray(0, 4096).toString("latin1")));
+  if (own && !isUtf8Label(own)) return decodeWith(bytes, own);
+  return decodeUtf8OrCp1252(bytes);
+}
+var CP1252_C1 = [
+  8364,
+  129,
+  8218,
+  402,
+  8222,
+  8230,
+  8224,
+  8225,
+  710,
+  8240,
+  352,
+  8249,
+  338,
+  141,
+  381,
+  143,
+  144,
+  8216,
+  8217,
+  8220,
+  8221,
+  8226,
+  8211,
+  8212,
+  732,
+  8482,
+  353,
+  8250,
+  339,
+  157,
+  382,
+  376
+];
+var CP1252_LABELS = /* @__PURE__ */ new Set([
+  "windows-1252",
+  "cp1252",
+  "cp-1252",
+  "x-cp1252",
+  "ansi_x3.4-1968",
+  "iso-8859-1",
+  "iso8859-1",
+  "latin1",
+  "l1",
+  "us-ascii",
+  "ascii"
+]);
+var CP1252_C1_RANGE = /[\x80-\x9f]/g;
+var cp1252C1 = (c) => String.fromCharCode(CP1252_C1[c.charCodeAt(0) - 128]);
+function decodeCp1252(bytes) {
+  return bytes.toString("latin1").replace(CP1252_C1_RANGE, cp1252C1);
+}
+function decodeWith(bytes, encoding) {
+  if (CP1252_LABELS.has(encoding)) return decodeCp1252(bytes);
+  try {
+    return new TextDecoder(encoding, { fatal: false }).decode(bytes);
+  } catch {
+    return bytes.toString("utf8");
+  }
+}
+
+// src/entities.ts
+var NAMED = `
+  quot 22 amp 26 apos 27 lt 3c gt 3e QUOT 22 AMP 26 LT 3c GT 3e COPY a9 REG ae
+  nbsp a0 iexcl a1 cent a2 pound a3 curren a4 yen a5 brvbar a6 sect a7 uml a8 copy a9 ordf aa laquo ab not ac shy ad reg ae macr af
+  deg b0 plusmn b1 sup2 b2 sup3 b3 acute b4 micro b5 para b6 middot b7 cedil b8 sup1 b9 ordm ba raquo bb frac14 bc frac12 bd frac34 be iquest bf
+  Agrave c0 Aacute c1 Acirc c2 Atilde c3 Auml c4 Aring c5 AElig c6 Ccedil c7 Egrave c8 Eacute c9 Ecirc ca Euml cb Igrave cc Iacute cd Icirc ce Iuml cf
+  ETH d0 Ntilde d1 Ograve d2 Oacute d3 Ocirc d4 Otilde d5 Ouml d6 times d7 Oslash d8 Ugrave d9 Uacute da Ucirc db Uuml dc Yacute dd THORN de szlig df
+  agrave e0 aacute e1 acirc e2 atilde e3 auml e4 aring e5 aelig e6 ccedil e7 egrave e8 eacute e9 ecirc ea euml eb igrave ec iacute ed icirc ee iuml ef
+  eth f0 ntilde f1 ograve f2 oacute f3 ocirc f4 otilde f5 ouml f6 divide f7 oslash f8 ugrave f9 uacute fa ucirc fb uuml fc yacute fd thorn fe yuml ff
+  OElig 152 oelig 153 Scaron 160 scaron 161 Yuml 178 fnof 192 circ 2c6 tilde 2dc
+  Alpha 391 Beta 392 Gamma 393 Delta 394 Epsilon 395 Zeta 396 Eta 397 Theta 398 Iota 399 Kappa 39a Lambda 39b Mu 39c Nu 39d Xi 39e Omicron 39f
+  Pi 3a0 Rho 3a1 Sigma 3a3 Tau 3a4 Upsilon 3a5 Phi 3a6 Chi 3a7 Psi 3a8 Omega 3a9
+  alpha 3b1 beta 3b2 gamma 3b3 delta 3b4 epsilon 3b5 zeta 3b6 eta 3b7 theta 3b8 iota 3b9 kappa 3ba lambda 3bb mu 3bc nu 3bd xi 3be omicron 3bf
+  pi 3c0 rho 3c1 sigmaf 3c2 sigma 3c3 tau 3c4 upsilon 3c5 phi 3c6 chi 3c7 psi 3c8 omega 3c9 thetasym 3d1 upsih 3d2 piv 3d6
+  ensp 2002 emsp 2003 thinsp 2009 zwnj 200c zwj 200d lrm 200e rlm 200f ndash 2013 mdash 2014 lsquo 2018 rsquo 2019 sbquo 201a
+  ldquo 201c rdquo 201d bdquo 201e dagger 2020 Dagger 2021 bull 2022 hellip 2026 permil 2030 prime 2032 Prime 2033 lsaquo 2039 rsaquo 203a
+  oline 203e frasl 2044 euro 20ac image 2111 weierp 2118 real 211c trade 2122 alefsym 2135
+  larr 2190 uarr 2191 rarr 2192 darr 2193 harr 2194 crarr 21b5 lArr 21d0 uArr 21d1 rArr 21d2 dArr 21d3 hArr 21d4
+  forall 2200 part 2202 exist 2203 empty 2205 nabla 2207 isin 2208 notin 2209 ni 220b prod 220f sum 2211 minus 2212 lowast 2217 radic 221a
+  prop 221d infin 221e ang 2220 and 2227 or 2228 cap 2229 cup 222a int 222b there4 2234 sim 223c cong 2245 asymp 2248 ne 2260 equiv 2261
+  le 2264 ge 2265 sub 2282 sup 2283 nsub 2284 sube 2286 supe 2287 oplus 2295 otimes 2297 perp 22a5 sdot 22c5
+  lceil 2308 rceil 2309 lfloor 230a rfloor 230b lang 27e8 rang 27e9 loz 25ca spades 2660 clubs 2663 hearts 2665 diams 2666
+`;
+var INVISIBLE = /* @__PURE__ */ new Set([173, 8203, 8204, 8205, 8206, 8207, 8288, 65279]);
+var charFor = (cp) => INVISIBLE.has(cp) ? "" : String.fromCodePoint(cp);
+var ENTITY_BY_NAME = /* @__PURE__ */ new Map();
+{
+  const parts = NAMED.trim().split(/\s+/);
+  for (let i = 0; i < parts.length; i += 2) ENTITY_BY_NAME.set(parts[i], charFor(Number.parseInt(parts[i + 1], 16)));
+  ENTITY_BY_NAME.set("nbsp", " ");
+}
+var ENTITY_RE = /&(#[xX][0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g;
+function numericChar(n) {
+  if (n >= 128 && n <= 159) return String.fromCodePoint(CP1252_C1[n - 128]);
+  if (n === 0 || !(n <= 1114111) || n >= 55296 && n <= 57343) return "\uFFFD";
+  return charFor(n);
+}
+function decodeEntities(s) {
+  return s.replace(ENTITY_RE, (m, ref) => {
+    if (ref[0] !== "#") return ENTITY_BY_NAME.get(ref) ?? m;
+    return numericChar(ref[1] === "x" || ref[1] === "X" ? Number.parseInt(ref.slice(2), 16) : Number(ref.slice(1)));
+  });
+}
+
+// src/html.ts
+var BLOCK_TAGS = /* @__PURE__ */ new Set([
+  "p",
+  "div",
+  "section",
+  "article",
+  "li",
+  "tr",
+  "td",
+  "th",
+  "ul",
+  "ol",
+  "pre",
+  "blockquote",
+  "table",
+  "caption",
+  "dl",
+  "dt",
+  "dd",
+  "header",
+  "footer",
+  "nav",
+  "aside",
+  "main",
+  "search",
+  "figure",
+  "figcaption",
+  "details",
+  "summary",
+  "address",
+  "form",
+  "fieldset",
+  "legend",
+  "hgroup",
+  "center",
+  "dialog",
+  "menu"
+]);
+var INLINE_TAGS = /* @__PURE__ */ new Set([
+  "a",
+  "abbr",
+  "acronym",
+  "b",
+  "bdi",
+  "bdo",
+  "big",
+  "cite",
+  "code",
+  "data",
+  "del",
+  "dfn",
+  "em",
+  "font",
+  "i",
+  "ins",
+  "kbd",
+  "label",
+  "mark",
+  "nobr",
+  "q",
+  "s",
+  "samp",
+  "small",
+  "span",
+  "strike",
+  "strong",
+  "sub",
+  "sup",
+  "time",
+  "tt",
+  "u",
+  "var",
+  "wbr"
+]);
+var TAG_RE = /<[a-zA-Z!/?][^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/g;
+var LOOSE_TAG_RE = /<[a-zA-Z!/?][^<>]*>/g;
+var tagName = (tag) => /^<\/?([a-zA-Z][^\s/>]*)/.exec(tag)?.[1]?.toLowerCase() ?? "";
+var CLOSE_TAG_RE = /* @__PURE__ */ new Map();
+function closeTagRe(name) {
+  let re = CLOSE_TAG_RE.get(name);
+  if (!re) CLOSE_TAG_RE.set(name, re = new RegExp(`</${name}\\s*>`, "gi"));
+  return re;
+}
+function htmlAttributes(tag) {
+  const attrs = /* @__PURE__ */ new Map();
+  for (const m of tag.matchAll(/(?<![^\s"'<>/=])([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) {
+    const name = m[1].toLowerCase();
+    if (!attrs.has(name)) attrs.set(name, m[2] ?? m[3] ?? m[4] ?? "");
+  }
+  return attrs;
+}
+var RCDATA_ELEMENTS = /* @__PURE__ */ new Set(["title"]);
+function dropElements(html, names, toEof = /* @__PURE__ */ new Set()) {
+  const drop = new Set(names);
+  const open = new RegExp(`<!--|${TAG_RE.source}|<(${names.join("|")})(?=[\\s/>])`, "gi");
+  const unclosed = /* @__PURE__ */ new Set();
+  let out = "";
+  let last = 0;
+  let m;
+  while (m = open.exec(html)) {
+    const tag = m[0];
+    const name = m[1]?.toLowerCase() ?? (tag === "<!--" ? "!--" : tag[1] === "/" ? "" : tagName(tag));
+    const opaque = !drop.has(name) && RCDATA_ELEMENTS.has(name);
+    if (name !== "!--" && !drop.has(name) && !opaque || unclosed.has(name)) continue;
+    let end;
+    if (name === "!--") {
+      const close = html.indexOf("-->", m.index + 2);
+      end = close < 0 ? -1 : close + 3;
+    } else {
+      const close = closeTagRe(name);
+      close.lastIndex = open.lastIndex;
+      const c = close.exec(html);
+      end = c ? c.index + c[0].length : toEof.has(name) ? html.length : -1;
+    }
+    if (end < 0) {
+      unclosed.add(name);
+      continue;
+    }
+    if (!opaque) {
+      out += html.slice(last, m.index) + " ";
+      last = end;
+    }
+    open.lastIndex = end;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
+function balancedRegions(html, tag, isCandidate) {
+  const re = new RegExp(`<${tag}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>|</${tag}\\s*>`, "gi");
+  const stack = [];
+  const out = [];
+  let m;
+  while (m = re.exec(html)) {
+    if (m[0][1] === "/") {
+      const top = stack.pop();
+      if (top?.open) out.push({ start: top.start, end: m.index, from: top.from, to: re.lastIndex, open: top.open });
+    } else {
+      stack.push({ start: re.lastIndex, from: m.index, open: isCandidate(m[0]) ? m[0] : void 0 });
+    }
+  }
+  return out;
+}
+function dropLandmarks(html, roles) {
+  const role = `\\srole\\s*=\\s*["']?(?:${roles.join("|")})(?=["'\\s/>])`;
+  const hasRole = new RegExp(role, "i");
+  const names = /* @__PURE__ */ new Set();
+  for (const m of html.matchAll(new RegExp(`<([a-zA-Z][a-zA-Z0-9-]*)(?=[\\s/>])[^<>]*${role}`, "gi"))) names.add(m[1].toLowerCase());
+  if (!names.size) return html;
+  const regions = [...names].flatMap((name) => balancedRegions(html, name, (open) => hasRole.test(open))).sort((a, b) => a.from - b.from);
+  let out = "";
+  let last = 0;
+  for (const r of regions) {
+    if (r.from < last) continue;
+    out += `${html.slice(last, r.from)} `;
+    last = r.to;
+  }
+  return last === 0 ? html : out + html.slice(last);
+}
+var CHROME_ROLES = ["navigation", "banner", "contentinfo"];
+var HIDDEN_ELEMENTS = ["script", "style", "noscript", "head", "svg", "template", "select", "datalist"];
+var CHROME_ELEMENTS = ["nav", "footer"];
+var RAW_TEXT_ELEMENTS = /* @__PURE__ */ new Set(["script", "style"]);
+
+// src/retry.ts
+var maxAttempts = () => envInt("MAX_ATTEMPTS", 2, 1, 5);
+var defaultRetryMs = () => envInt("RETRY_MS", 600, 0, 5e3);
+var RETRY_AFTER_CAP_MS = 5e3;
+function retryDelayMs(retryAfterMs) {
+  if (retryAfterMs === void 0) return defaultRetryMs();
+  return retryAfterMs <= RETRY_AFTER_CAP_MS ? retryAfterMs : void 0;
+}
+var PERMANENT_CODES = /* @__PURE__ */ new Set([
+  "ENOTFOUND",
+  "ERR_INVALID_URL",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "CERT_HAS_EXPIRED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"
+]);
+var PERMANENT_MESSAGE = /redirect count exceeded|scheme must be|unknown scheme|bad port|invalid url|failed to parse url/i;
+function isPermanentFailure(e) {
+  const err = e;
+  const code = err?.cause?.code ?? err?.code;
+  if (typeof code === "string" && PERMANENT_CODES.has(code)) return true;
+  return [err?.message, err?.cause?.message].some((m) => typeof m === "string" && PERMANENT_MESSAGE.test(m));
 }
 
 // src/tables.ts
@@ -4341,12 +4975,12 @@ function sleep(ms, signal) {
   return signal ? sleepUnlessAborted(ms, signal) : new Promise((r) => setTimeout(r, ms));
 }
 function sleepUnlessAborted(ms, signal) {
-  return new Promise((resolve6) => {
-    if (signal?.aborted) return resolve6();
+  return new Promise((resolve7) => {
+    if (signal?.aborted) return resolve7();
     const done = () => {
       clearTimeout(t);
       signal?.removeEventListener("abort", done);
-      resolve6();
+      resolve7();
     };
     const t = setTimeout(done, ms);
     signal?.addEventListener("abort", done, { once: true });
@@ -5201,479 +5835,6 @@ function capExtract(text, depth) {
   return (lastNl > cap * 0.6 ? slice.slice(0, lastNl) : slice) + "\n\n\u2026 [truncated]";
 }
 
-// src/rank.ts
-function rrf(lists, keyOf, k = 60) {
-  const score = /* @__PURE__ */ new Map();
-  for (const list of lists) {
-    const seen = /* @__PURE__ */ new Set();
-    list.forEach((item, idx) => {
-      const key = keyOf(item);
-      if (seen.has(key)) return;
-      seen.add(key);
-      score.set(key, (score.get(key) ?? 0) + 1 / (k + idx + 1));
-    });
-  }
-  return score;
-}
-var byCodeUnit = (a, b) => a < b ? -1 : a > b ? 1 : 0;
-function trimTrailing(s, ch) {
-  let end = s.length;
-  while (end > 0 && s[end - 1] === ch) end--;
-  return s.slice(0, end);
-}
-function arxivIdFromUrl(url) {
-  let host;
-  let path;
-  try {
-    const u = new URL(url.trim());
-    host = u.hostname.toLowerCase();
-    path = trimTrailing(u.pathname, "/");
-  } catch {
-    return void 0;
-  }
-  if (!/(^|\.)arxiv\.org$/.test(host)) return void 0;
-  const modern = /\/(?:abs|pdf|html|format)\/(\d{4}\.\d{4,5})(?:v\d+)?(?:\.pdf)?$/i.exec(path);
-  if (modern) return modern[1].toLowerCase();
-  const legacy = /\/(?:abs|pdf|html|format)\/([a-z-]+(?:\.[A-Z]{2})?\/\d{7})(?:v\d+)?(?:\.pdf)?$/i.exec(path);
-  if (legacy) return legacy[1].toLowerCase();
-  return void 0;
-}
-function doiFromUrl(url) {
-  let host;
-  let path;
-  let search2;
-  try {
-    const u = new URL(url.trim());
-    host = u.hostname.toLowerCase();
-    path = u.pathname;
-    search2 = u.search;
-  } catch {
-    return void 0;
-  }
-  const decode2 = (s) => {
-    try {
-      return decodeURIComponent(s);
-    } catch {
-      return s;
-    }
-  };
-  if (/(^|\.)(dx\.)?doi\.org$/.test(host)) {
-    const doi2 = normalizeDoi(decode2(trimTrailing(path.replace(/^\/+/, ""), "/")));
-    return /^10\.\d{4,9}\//.test(doi2) ? doi2 : void 0;
-  }
-  const m = /\/doi(?:\/(?:abs|full|pdf|epdf|e?pub))?\/(10\.\d{4,9}\/[^\s?#]+)/i.exec(path);
-  if (m) return normalizeDoi(trimTrailing(decode2(m[1]), "/"));
-  const loose = /(?:^|[/=])(10\.\d{4,9}\/[^\s?#&]+)/.exec(`${path}${search2}`);
-  if (!loose) return void 0;
-  let doi = normalizeDoi(trimTrailing(decode2(loose[1]), "/")).replace(/\.pdf$/, "");
-  if (doi.startsWith("10.1101/")) doi = doi.replace(/\.(?:full|abstract|supplementary-material|article-info|article-metrics)$/, "").replace(/v\d+$/, "");
-  return doi;
-}
-function dedupeByUrl(items) {
-  const best = /* @__PURE__ */ new Map();
-  const order = [];
-  let dropped = 0;
-  for (const it of items) {
-    const key = canonicalizeUrl(it.url);
-    const prev = best.get(key);
-    if (!prev) {
-      best.set(key, it);
-      order.push(key);
-    } else {
-      dropped++;
-      if (it.score > prev.score) best.set(key, it);
-    }
-  }
-  return { items: order.map((k) => best.get(k)), dropped };
-}
-var indexTokenCache = /* @__PURE__ */ new WeakMap();
-function bm25Tokenize(text, opts = {}) {
-  return tokenize(text, opts.subtokens !== false);
-}
-var WORD_SPLIT = /[^\p{L}\p{M}\p{N}_]+/u;
-var NON_ASCII2 = /[^\p{ASCII}]/u;
-var CJK_CHAR2 = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
-var CJK_RUNS2 = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
-var IDENT_BOUNDARY = new RegExp("_|[\\p{Ll}\\p{N}]\\p{Lu}|\\p{Lu}\\p{Lu}\\p{Ll}|\\p{L}\\p{N}|\\p{N}\\p{L}", "u");
-var MAX_IDENT = 64;
-function tokenize(text, expand2) {
-  if (!text) return [];
-  const out = [];
-  const nonAscii = NON_ASCII2.test(text);
-  for (const raw of (nonAscii ? text.normalize("NFC") : text).split(WORD_SPLIT)) {
-    if (!raw) continue;
-    if (nonAscii && CJK_CHAR2.test(raw)) {
-      for (const piece of raw.split(CJK_RUNS2)) {
-        if (!piece) continue;
-        if (CJK_CHAR2.test(piece)) pushBigrams(piece, out);
-        else pushTerm(piece, out, expand2);
-      }
-    } else pushTerm(raw, out, expand2);
-  }
-  return out;
-}
-function pushTerm(raw, out, expand2) {
-  if (raw.length < 2 || isStopword(raw)) return;
-  const t = foldCached(raw);
-  if (t.length < 2) return;
-  out.push(t);
-  if (!expand2 || raw.length > MAX_IDENT) return;
-  for (const sub of subtermsCached(raw, t)) out.push(sub);
-}
-function pushBigrams(run, out) {
-  const chars = Array.from(run);
-  if (chars.length === 1) {
-    out.push(run);
-    return;
-  }
-  for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1]);
-}
-var FOLD_CACHE_MAX = 5e4;
-var foldCache = /* @__PURE__ */ new Map();
-function foldCached(raw) {
-  const hit = foldCache.get(raw);
-  if (hit !== void 0) return hit;
-  const t = foldTerm(raw);
-  if (foldCache.size >= FOLD_CACHE_MAX) foldCache.clear();
-  foldCache.set(raw, t);
-  return t;
-}
-var NO_SUBTERMS = [];
-var subtermCache = /* @__PURE__ */ new Map();
-var subtermExtras = { list: void 0, length: 0 };
-function subtermsCached(raw, folded) {
-  const list = brand().extraStopwords;
-  if (list !== subtermExtras.list || (list?.length ?? 0) !== subtermExtras.length) {
-    subtermCache.clear();
-    subtermExtras = { list, length: list?.length ?? 0 };
-  }
-  const hit = subtermCache.get(raw);
-  if (hit !== void 0) return hit;
-  let subs = NO_SUBTERMS;
-  if (IDENT_BOUNDARY.test(raw)) {
-    subs = subtokens(raw).map(foldCached).filter((sub) => sub !== folded && sub.length >= 2);
-  }
-  if (subtermCache.size >= FOLD_CACHE_MAX) subtermCache.clear();
-  subtermCache.set(raw, subs);
-  return subs;
-}
-function docTokens(doc, titleWeight, headingWeight, body) {
-  const out = body ? [...body] : bm25Tokenize(doc.body);
-  const headings = bm25Tokenize(doc.headings);
-  for (let r = 0; r < headingWeight; r++) out.push(...headings);
-  const title = bm25Tokenize(doc.title);
-  for (let r = 0; r < titleWeight; r++) out.push(...title);
-  return out;
-}
-function proximityBonus(tokens, queryTerms, window = 6, cap = 0.1) {
-  if (queryTerms.length < 2) return 0;
-  const q = new Set(queryTerms);
-  const hits = [];
-  for (let i = 0; i < tokens.length; i++) {
-    const tok = tokens[i];
-    if (q.has(tok)) hits.push({ pos: i, term: tok });
-  }
-  if (hits.length < 2) return 0;
-  let close = 0;
-  for (let i = 1; i < hits.length; i++) {
-    if (hits[i].term !== hits[i - 1].term && hits[i].pos - hits[i - 1].pos <= window) close++;
-  }
-  return Math.min(cap, cap * (close / Math.max(1, queryTerms.length - 1)));
-}
-function buildBm25Index(question, docs, opts = {}) {
-  const k1 = opts.k1 ?? 1.2;
-  const b = opts.b ?? 0.75;
-  const titleWeight = 3;
-  const headingWeight = 2;
-  const queryTerms = [...new Set(bm25Tokenize(question))];
-  const N = docs.length;
-  const df = /* @__PURE__ */ new Map();
-  const tokenCache = /* @__PURE__ */ new WeakMap();
-  let totalLen = 0;
-  for (const doc of docs) {
-    const toks = docTokens(doc, titleWeight, headingWeight, opts.tokensOf?.(doc));
-    tokenCache.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens: toks });
-    totalLen += toks.length;
-    for (const t of new Set(toks)) df.set(t, (df.get(t) ?? 0) + 1);
-  }
-  const avgdl = N ? totalLen / N : 0;
-  const idf = /* @__PURE__ */ new Map();
-  for (const t of queryTerms) {
-    if (N < 3) {
-      idf.set(t, 1);
-      continue;
-    }
-    const dfi = df.get(t) ?? 0;
-    idf.set(t, Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5)));
-  }
-  const index = { idf, avgdl, N, queryTerms, k1, b, titleWeight, headingWeight };
-  indexTokenCache.set(index, tokenCache);
-  return index;
-}
-function indexedDocTokens(index, doc) {
-  const cache2 = indexTokenCache.get(index);
-  const cached = cache2?.get(doc);
-  if (cached && cached.title === doc.title && cached.headings === doc.headings && cached.body === doc.body) return cached.tokens;
-  const tokens = docTokens(doc, index.titleWeight, index.headingWeight);
-  cache2?.set(doc, { title: doc.title, headings: doc.headings, body: doc.body, tokens });
-  return tokens;
-}
-function bm25Score(index, doc) {
-  if (!index.queryTerms.length) return 0;
-  const toks = indexedDocTokens(index, doc);
-  const dl = toks.length;
-  if (!dl) return 0;
-  const tf = /* @__PURE__ */ new Map();
-  for (const t of toks) tf.set(t, (tf.get(t) ?? 0) + 1);
-  const { k1, b, avgdl } = index;
-  const lenNorm = 1 - b + b * (avgdl ? dl / avgdl : 1);
-  let score = 0;
-  for (const term of index.queryTerms) {
-    const f = tf.get(term);
-    if (!f) continue;
-    const idf = index.idf.get(term) ?? 0;
-    score += idf * (f * (k1 + 1)) / (f + k1 * lenNorm);
-  }
-  return score * (1 + proximityBonus(toks, index.queryTerms));
-}
-function bm25MatchedTerms(index, doc) {
-  if (!index.queryTerms.length) return [];
-  const present = new Set(indexedDocTokens(index, doc));
-  return index.queryTerms.filter((t) => present.has(t));
-}
-function applyRelevanceFloor(ranked, matchedOf, queryTerms, floor) {
-  const isAlpha = (t) => new RegExp("\\p{L}", "u").test(t);
-  const alphaTerms = queryTerms.filter(isAlpha);
-  if (queryTerms.length < 2 || alphaTerms.length < 1) return { kept: [...ranked], dropped: [] };
-  const offTopic = (t) => {
-    const m = matchedOf(t);
-    return m.length === 0 || m.every((term) => !isAlpha(term));
-  };
-  const kept = [];
-  const dropped = [];
-  for (const t of ranked) (offTopic(t) ? dropped : kept).push(t);
-  while (kept.length < floor && dropped.length) kept.push(dropped.shift());
-  return { kept, dropped };
-}
-function contentCoverage(matcher, text) {
-  if (!matcher.canonicals.length || !text) return 0;
-  const hit = /* @__PURE__ */ new Set();
-  for (const line of text.split("\n")) {
-    for (const c of matcher.matchLine(line)) hit.add(c);
-    if (hit.size === matcher.canonicals.length) break;
-  }
-  return hit.size / matcher.canonicals.length;
-}
-function recencyScore(meta, minYear, maxYear) {
-  const y = typeof meta?.year === "number" ? meta.year : void 0;
-  if (y === void 0 || maxYear <= minYear) return 0.5;
-  const clamped = Math.min(maxYear, Math.max(minYear, y));
-  return (clamped - minYear) / (maxYear - minYear);
-}
-function simhash(text, opts = {}) {
-  const lanes = new Uint32Array(2);
-  simhashLanes(opts.tokens ?? tokenize(text, false), lanes);
-  return BigInt(lanes[0]) << 32n | BigInt(lanes[1]);
-}
-function simhashLanes(toks, out) {
-  out[0] = 0;
-  out[1] = 0;
-  if (!toks.length) return;
-  const v = new Int32Array(64);
-  const words = new Uint32Array(2);
-  const pieces = toks.length < 3 ? [""] : ["", " ", "", " ", ""];
-  const n = toks.length < 3 ? toks.length : toks.length - 2;
-  for (let i = 0; i < n; i++) {
-    if (toks.length < 3) pieces[0] = toks[i];
-    else {
-      pieces[0] = toks[i];
-      pieces[2] = toks[i + 1];
-      pieces[4] = toks[i + 2];
-    }
-    fnv1a64Words(pieces, words);
-    const hi2 = words[0];
-    const lo2 = words[1];
-    for (let b = 0; b < 32; b++) {
-      v[b] = v[b] + (lo2 >>> b & 1);
-      v[b + 32] = v[b + 32] + (hi2 >>> b & 1);
-    }
-  }
-  let lo = 0;
-  let hi = 0;
-  for (let b = 0; b < 32; b++) {
-    if (2 * v[b] > n) lo |= 1 << b;
-    if (2 * v[b + 32] > n) hi |= 1 << b;
-  }
-  out[0] = hi;
-  out[1] = lo;
-}
-var MASK32 = 0xffffffffn;
-function popcount32(n) {
-  let x = n - (n >>> 1 & 1431655765);
-  x = (x & 858993459) + (x >>> 2 & 858993459);
-  return Math.imul(x + (x >>> 4) & 252645135, 16843009) >>> 24;
-}
-function hammingDistance(a, b) {
-  let x = a ^ b;
-  let count = popcount32(Number(x & MASK32)) + popcount32(Number(x >> 32n & MASK32));
-  x >>= 64n;
-  while (x) {
-    x &= x - 1n;
-    count++;
-  }
-  return count;
-}
-function dedupeNearDuplicates(items, opts = {}) {
-  const maxBits = opts.maxBits ?? 3;
-  const minChars = opts.minChars ?? 500;
-  const better = (a, b) => a.score !== b.score ? a.score > b.score : byCodeUnit(a.url, b.url) < 0;
-  const kept = [];
-  const hashed = [];
-  const his = [];
-  const los = [];
-  const lanes = new Uint32Array(2);
-  const dups = [];
-  for (const it of items) {
-    const text = it.text || "";
-    if (text.length < minChars) {
-      kept.push({ it });
-      continue;
-    }
-    simhashLanes(opts.tokensOf ? opts.tokensOf(it) : tokenize(text, false), lanes);
-    const hi = lanes[0];
-    const lo = lanes[1];
-    let at = -1;
-    for (let k = 0; k < hashed.length; k++) {
-      if (popcount32(his[k] ^ hi) + popcount32(los[k] ^ lo) <= maxBits) {
-        at = k;
-        break;
-      }
-    }
-    if (at < 0) {
-      const cluster = { it };
-      kept.push(cluster);
-      hashed.push(cluster);
-      his.push(hi);
-      los.push(lo);
-      continue;
-    }
-    const dup = hashed[at];
-    if (better(it, dup.it)) {
-      dups.push({ url: dup.it.url, cluster: dup });
-      dup.it = it;
-      his[at] = hi;
-      los[at] = lo;
-    } else dups.push({ url: it.url, cluster: dup });
-  }
-  return { items: kept.map((k) => k.it), dropped: dups.length, duplicates: dups.map((d) => ({ url: d.url, of: d.cluster.it.url })) };
-}
-function diversify(items, tokensOf, lambda = 0.75, opts = {}) {
-  const sorted = [...items].sort((a, b) => b.score - a.score || byCodeUnit(a.url, b.url));
-  if (sorted.length <= 2) return sorted;
-  const window = opts.window !== void 0 && opts.window > 0 ? Math.floor(opts.window) : sorted.length;
-  if (window >= sorted.length) return mmr(sorted, tokensOf, lambda);
-  return [...window > 2 ? mmr(sorted.slice(0, window), tokensOf, lambda) : sorted.slice(0, window), ...sorted.slice(window)];
-}
-var PAIR_CACHE_MAX = 2048;
-function mmr(sorted, tokensOf, lambda) {
-  const m = sorted.length;
-  let max = 1e-9;
-  for (const it of sorted) if (it.score > max) max = it.score;
-  const ids = /* @__PURE__ */ new Map();
-  const sets = [];
-  for (const it of sorted) {
-    const raw = [];
-    for (const t of tokensOf(it)) {
-      let id = ids.get(t);
-      if (id === void 0) {
-        id = ids.size;
-        ids.set(t, id);
-      }
-      raw.push(id);
-    }
-    const all = Int32Array.from(raw).sort();
-    let k = 0;
-    for (let j = 0; j < all.length; j++) if (j === 0 || all[j] !== all[j - 1]) all[k++] = all[j];
-    sets.push(all.subarray(0, k));
-  }
-  const cache2 = m <= PAIR_CACHE_MAX ? new Float64Array(m * (m - 1) / 2) : void 0;
-  const pair = (i, j) => i < j ? i * (2 * m - i - 1) / 2 + (j - i - 1) : j * (2 * m - j - 1) / 2 + (i - j - 1);
-  let simMax = 0;
-  for (let i = 0; i < m; i++) {
-    for (let j = i + 1; j < m; j++) {
-      const v = jaccardSorted(sets[i], sets[j]);
-      if (cache2) cache2[pair(i, j)] = v;
-      if (v > simMax) simMax = v;
-    }
-  }
-  const sim = (i, j) => simMax > 0 ? (cache2 ? cache2[pair(i, j)] : jaccardSorted(sets[i], sets[j])) / simMax : 0;
-  const out = [sorted[0]];
-  const remaining = [];
-  for (let i = 1; i < m; i++) remaining.push(i);
-  const maxSim = new Float64Array(m);
-  for (const i of remaining) maxSim[i] = sim(i, 0);
-  let relevantLeft = 0;
-  for (const i of remaining) if (sorted[i].score > 0) relevantLeft++;
-  while (remaining.length) {
-    let bestPos = -1;
-    let bestVal = Number.NEGATIVE_INFINITY;
-    for (let p = 0; p < remaining.length; p++) {
-      const it = sorted[remaining[p]];
-      if (relevantLeft > 0 && !(it.score > 0)) continue;
-      const val = lambda * (it.score / max) - (1 - lambda) * maxSim[remaining[p]];
-      if (bestPos < 0 || val > bestVal || val === bestVal && byCodeUnit(it.url, sorted[remaining[bestPos]].url) < 0) {
-        bestVal = val;
-        bestPos = p;
-      }
-    }
-    const picked = remaining.splice(bestPos, 1)[0];
-    if (sorted[picked].score > 0) relevantLeft--;
-    out.push(sorted[picked]);
-    for (const i of remaining) {
-      const v = sim(i, picked);
-      if (v > maxSim[i]) maxSim[i] = v;
-    }
-  }
-  return out;
-}
-function jaccardSorted(a, b) {
-  const na = a.length;
-  const nb = b.length;
-  if (!na || !nb) return 0;
-  let i = 0;
-  let j = 0;
-  let inter = 0;
-  while (i < na && j < nb) {
-    const x = a[i];
-    const y = b[j];
-    if (x === y) {
-      inter++;
-      i++;
-      j++;
-    } else if (x < y) i++;
-    else j++;
-  }
-  return inter / (na + nb - inter);
-}
-var URL_IN_TEXT = /https?:\/\/(?:[^\s/@?#]+@)?[\p{L}\p{N}.-]+/giu;
-function unglued(match) {
-  const hostStart = Math.max(match.indexOf("//") + 2, match.lastIndexOf("@") + 1);
-  const dot = match.lastIndexOf(".");
-  if (dot <= hostStart) return match;
-  const label = match.slice(dot + 1);
-  const turn = label.search(/[\u0080-\uffff]/);
-  return turn > 0 && /^[A-Za-z0-9]/.test(label) ? match.slice(0, dot + 1 + turn) : match;
-}
-function externalHosts(url, text) {
-  const self = domainOf(url).replace(/^www\./, "");
-  const out = /* @__PURE__ */ new Set();
-  for (const m of text.match(URL_IN_TEXT) ?? []) {
-    const h = trimTrailing(domainOf(unglued(trimTrailing(m, "."))), ".").replace(/^www\./, "");
-    if (h && h !== self) out.add(h);
-  }
-  return out;
-}
-
 // src/citable.ts
 var API_HOSTS = /* @__PURE__ */ new Set([
   "eutils.ncbi.nlm.nih.gov",
@@ -5803,9 +5964,9 @@ function resolveEutils(raw, op) {
 
 // src/repo.ts
 import { createHash, randomBytes } from "crypto";
-import { existsSync as existsSync3, mkdirSync, readdirSync as readdirSync4, renameSync, rmSync as rmSync3, statSync } from "fs";
-import { tmpdir as tmpdir3 } from "os";
-import { basename, join as join4, resolve } from "path";
+import { existsSync as existsSync4, mkdirSync as mkdirSync2, readdirSync as readdirSync5, renameSync as renameSync2, rmSync as rmSync3, statSync as statSync2 } from "fs";
+import { tmpdir as tmpdir4 } from "os";
+import { basename, join as join5, resolve as resolve2 } from "path";
 
 // src/forge-host.ts
 var KINDS = /* @__PURE__ */ new Set(["github", "gitlab", "gitea"]);
@@ -5837,7 +5998,7 @@ function hostForgeKind(host) {
 
 // src/repo.ts
 function repoCacheRoot() {
-  return env("REPO_DIR") ?? brand().repoDir ?? join4(tmpdir3(), brand().name, "repos");
+  return env("REPO_DIR") ?? brand().repoDir ?? join5(tmpdir4(), brand().name, "repos");
 }
 var cloneTimeoutMs = () => envInt("GIT_CLONE_TIMEOUT_MS", 3e5, 1e3);
 var fetchTimeoutMs = () => envInt("GIT_FETCH_TIMEOUT_MS", 12e4, 1e3);
@@ -5845,8 +6006,8 @@ var historyTimeoutMs = () => envInt("GIT_HISTORY_TIMEOUT_MS", 3e5, 1e3);
 function resolveRepo(raw, opts = {}) {
   const trimmed = raw.trim();
   if (trimmed && opts.local !== false) {
-    const asPath = resolve(trimmed);
-    if (existsSync3(asPath) && statSync(asPath).isDirectory()) {
+    const asPath = resolve2(trimmed);
+    if (existsSync4(asPath) && statSync2(asPath).isDirectory()) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename(asPath)}-${asPath}`)}` };
     }
   }
@@ -5951,12 +6112,12 @@ function repoSegments(host, rest, kind) {
   return segments.filter(Boolean).length ? segments.filter(Boolean) : void 0;
 }
 async function ensureClone(ref, opts = {}) {
-  if (ref.isLocal) return resolve(ref.raw);
+  if (ref.isLocal) return resolve2(ref.raw);
   if (!ref.cloneUrl) throw new Error(`"${ref.raw}" does not name a repository that can be cloned`);
   if (!have("git")) throw new Error(`git is not installed or not on PATH \u2014 cannot clone ${ref.cloneUrl}`);
   const branch = opts.branch?.trim() || void 0;
   if (branch?.startsWith("-")) throw new Error(`"${branch}" is not a branch name`);
-  const dir = join4(repoCacheRoot(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
+  const dir = join5(repoCacheRoot(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
   const pending = inflight.get(dir);
   if (pending && !opts.refresh) {
     return pending.catch((e) => {
@@ -5977,17 +6138,17 @@ function branchSlug(branch) {
 }
 async function obtainClone(ref, dir, opts) {
   let target = dir;
-  if (!existsSync3(join4(dir, ".git")) && !opts.branch) {
+  if (!existsSync4(join5(dir, ".git")) && !opts.branch) {
     for (const old of legacySlugs(ref)) {
-      const legacy = join4(repoCacheRoot(), old);
-      const origin = existsSync3(join4(legacy, ".git")) ? originUrl(legacy) : void 0;
+      const legacy = join5(repoCacheRoot(), old);
+      const origin = existsSync4(join5(legacy, ".git")) ? originUrl(legacy) : void 0;
       if (origin && resolveRepo(origin).slug === ref.slug) {
         target = legacy;
         break;
       }
     }
   }
-  if (existsSync3(join4(target, ".git"))) return opts.refresh ? refreshClone(ref, target, opts.branch) : target;
+  if (existsSync4(join5(target, ".git"))) return opts.refresh ? refreshClone(ref, target, opts.branch) : target;
   return freshClone(ref, dir, opts.branch);
 }
 async function refreshClone(ref, dir, branch) {
@@ -6016,19 +6177,19 @@ function discard(path) {
 }
 function sweepStaging(staging) {
   try {
-    for (const name of readdirSync4(staging)) {
-      const at = join4(staging, name);
-      if (Date.now() - statSync(at).mtimeMs > STALE_STAGING_MS) rmSync3(at, { recursive: true, force: true });
+    for (const name of readdirSync5(staging)) {
+      const at = join5(staging, name);
+      if (Date.now() - statSync2(at).mtimeMs > STALE_STAGING_MS) rmSync3(at, { recursive: true, force: true });
     }
   } catch {
   }
 }
 async function freshClone(ref, dir, branch) {
-  const staging = join4(repoCacheRoot(), ".partial");
-  mkdirSync(staging, { recursive: true });
+  const staging = join5(repoCacheRoot(), ".partial");
+  mkdirSync2(staging, { recursive: true });
   sweepStaging(staging);
   const attempt = async (filter) => {
-    const tmp = join4(staging, `${basename(dir)}-${process.pid}-${randomBytes(4).toString("hex")}`);
+    const tmp = join5(staging, `${basename(dir)}-${process.pid}-${randomBytes(4).toString("hex")}`);
     const args = ["clone", "--depth", "1", ...filter ? ["--filter=blob:none"] : [], ...branch ? ["--branch", branch] : [], "--", ref.cloneUrl, tmp];
     const r = await shAsync("git", args, { timeoutMs: cloneTimeoutMs() });
     if (!r.ok) discard(tmp);
@@ -6048,13 +6209,13 @@ async function freshClone(ref, dir, branch) {
       );
     }
   }
-  if (!existsSync3(done.tmp) || readdirSync4(done.tmp).length === 0) throw new Error(`clone produced an empty tree for ${ref.cloneUrl}`);
-  if (existsSync3(dir) && !existsSync3(join4(dir, ".git"))) rmSync3(dir, { recursive: true, force: true });
+  if (!existsSync4(done.tmp) || readdirSync5(done.tmp).length === 0) throw new Error(`clone produced an empty tree for ${ref.cloneUrl}`);
+  if (existsSync4(dir) && !existsSync4(join5(dir, ".git"))) rmSync3(dir, { recursive: true, force: true });
   try {
-    renameSync(done.tmp, dir);
+    renameSync2(done.tmp, dir);
   } catch (e) {
     discard(done.tmp);
-    if (!existsSync3(join4(dir, ".git"))) throw new Error(`could not move the clone of ${ref.cloneUrl} into ${dir}: ${e.message}`);
+    if (!existsSync4(join5(dir, ".git"))) throw new Error(`could not move the clone of ${ref.cloneUrl} into ${dir}: ${e.message}`);
   }
   return dir;
 }
@@ -6105,13 +6266,13 @@ function sameCommit(a, b) {
 }
 
 // src/forge.ts
-import { resolve as resolve2 } from "path";
+import { resolve as resolve3 } from "path";
 function forgeKind(host, opts = {}) {
   return opts.kind ?? hostForgeKind(host);
 }
 function forgeRef(ref, opts = {}) {
   if (!ref.isLocal) return ref;
-  const origin = originUrl(resolve2(ref.raw));
+  const origin = originUrl(resolve3(ref.raw));
   if (!origin) return ref;
   const remote = resolveRepo(origin.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]*@/i, "$1"), opts);
   return remote.host === "generic" || remote.isLocal ? ref : remote;
@@ -8080,64 +8241,16 @@ function closingNote(rungs, cancelled) {
 
 // src/stack.ts
 import { spawnSync as spawnSync3 } from "child_process";
-import { existsSync as existsSync5, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync6, statSync as statSync3, writeFileSync as writeFileSync5 } from "fs";
-import { dirname as dirname2, join as join6, resolve as resolve3 } from "path";
+import { existsSync as existsSync6, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync7, statSync as statSync4, writeFileSync as writeFileSync5 } from "fs";
+import { dirname as dirname2, join as join7, resolve as resolve4 } from "path";
 
 // src/cache.ts
-import { chmodSync, existsSync as existsSync4, lstatSync, mkdirSync as mkdirSync3, readFileSync as readFileSync5, readdirSync as readdirSync5, rmSync as rmSync4, statSync as statSync2 } from "fs";
-import { dirname, join as join5 } from "path";
-import { tmpdir as tmpdir4 } from "os";
-
-// src/no-write.ts
-import { mkdirSync as mkdirSync2, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "fs";
-var flagged = false;
-function setNoWrite(on) {
-  flagged = on;
-}
-function isNoWrite() {
-  return flagged || envFlag("NO_WRITE");
-}
-var collected = [];
-function ensureDir(dir) {
-  if (isNoWrite()) return;
-  mkdirSync2(dir, { recursive: true });
-}
-function writeArtifact(path, content) {
-  if (isNoWrite()) {
-    const at = collected.findIndex((a) => a.path === path);
-    if (at !== -1) collected[at] = { path, content };
-    else collected.push({ path, content });
-    return path;
-  }
-  writeFileAtomic(path, content);
-  return path;
-}
-var tmpCounter = 0;
-function writeFileAtomic(path, content) {
-  const tmp = `${path}.${process.pid}.${tmpCounter++}.tmp`;
-  try {
-    writeFileSync4(tmp, content);
-    renameSync2(tmp, path);
-  } catch (e) {
-    try {
-      unlinkSync(tmp);
-    } catch {
-    }
-    throw e;
-  }
-}
-function takeArtifacts() {
-  return collected.splice(0, collected.length);
-}
-function resetNoWrite() {
-  flagged = false;
-  collected.length = 0;
-}
-
-// src/cache.ts
+import { chmodSync, existsSync as existsSync5, lstatSync, mkdirSync as mkdirSync3, readFileSync as readFileSync6, readdirSync as readdirSync6, rmSync as rmSync4, statSync as statSync3 } from "fs";
+import { dirname, join as join6 } from "path";
+import { tmpdir as tmpdir5 } from "os";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
-  return namedCacheDir() ?? join5(tmpdir4(), userScoped(brand().name), "cache");
+  return namedCacheDir() ?? join6(tmpdir5(), userScoped(brand().name), "cache");
 }
 var namedCacheDir = () => env("CACHE_DIR") ?? brand().cacheDir;
 function userScoped(name) {
@@ -8148,7 +8261,7 @@ function cachePath(url, acceptLanguage = "", extractor = "native", variant = "")
   const canon = canonicalizeUrl(url);
   const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
   const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
-  return join5(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
+  return join6(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
 }
 var TEXT_VARIANTS = ["", "consent", "full"];
 var MARKDOWN_VARIANTS = ["md", "consent-md", "full-md"];
@@ -8223,11 +8336,11 @@ function entryPaths(url, acceptLanguage, extractor, variant) {
 function readCache(url, acceptLanguage = "", extractor = "native", variant = "") {
   if (!entryDir(false)) return void 0;
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
-  if (!existsSync4(meta)) return void 0;
+  if (!existsSync5(meta)) return void 0;
   try {
-    const entry = JSON.parse(readFileSync5(meta, "utf8"));
+    const entry = JSON.parse(readFileSync6(meta, "utf8"));
     if (typeof entry.cachedAt !== "number") return void 0;
-    const text = existsSync4(body) ? readFileSync5(body, "utf8") : entry.text;
+    const text = existsSync5(body) ? readFileSync6(body, "utf8") : entry.text;
     if (!text?.trim()) return void 0;
     return { ...entry, text };
   } catch {
@@ -8377,7 +8490,7 @@ function ownFile(name) {
 }
 function readEntryMeta(abs) {
   try {
-    const entry = JSON.parse(readFileSync5(abs, "utf8"));
+    const entry = JSON.parse(readFileSync6(abs, "utf8"));
     return entry && typeof entry.cachedAt === "number" && typeof entry.finalUrl === "string" ? entry : void 0;
   } catch {
     return void 0;
@@ -8386,7 +8499,7 @@ function readEntryMeta(abs) {
 var ORPHAN_GRACE_MS = 10 * 60 * 1e3;
 function sizeOf(abs) {
   try {
-    return statSync2(abs).size;
+    return statSync3(abs).size;
   } catch {
     return 0;
   }
@@ -8396,13 +8509,13 @@ function cacheStats(now = Date.now()) {
   const out = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
   const { refused } = openCacheDir(false);
   if (refused) return { ...out, refused };
-  if (!existsSync4(dir)) return out;
+  if (!existsSync5(dir)) return out;
   let oldest = Number.POSITIVE_INFINITY;
   let newest = 0;
-  for (const name of readdirSync5(dir)) {
+  for (const name of readdirSync6(dir)) {
     const own = ownFile(name);
     if (!own) continue;
-    const abs = join5(dir, name);
+    const abs = join6(dir, name);
     if (own.kind !== "json") {
       out.bytes += sizeOf(abs);
       continue;
@@ -8424,12 +8537,12 @@ function cacheStats(now = Date.now()) {
 }
 function cacheClean(all = false, now = Date.now()) {
   const dir = cacheDir();
-  if (isNoWrite() || !openCacheDir(false).dir || !existsSync4(dir)) return 0;
-  const names = readdirSync5(dir);
+  if (isNoWrite() || !openCacheDir(false).dir || !existsSync5(dir)) return 0;
+  const names = readdirSync6(dir);
   const present = new Set(names);
   const remove = (name) => {
     try {
-      rmSync4(join5(dir, name), { force: true });
+      rmSync4(join6(dir, name), { force: true });
       return true;
     } catch {
       return false;
@@ -8437,7 +8550,7 @@ function cacheClean(all = false, now = Date.now()) {
   };
   const abandoned = (name) => {
     try {
-      return all || now - statSync2(join5(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
+      return all || now - statSync3(join6(dir, name)).mtimeMs > ORPHAN_GRACE_MS;
     } catch {
       return false;
     }
@@ -8447,7 +8560,7 @@ function cacheClean(all = false, now = Date.now()) {
     const own = ownFile(name);
     if (!own) continue;
     if (own.kind === "json") {
-      const entry = readEntryMeta(join5(dir, name));
+      const entry = readEntryMeta(join6(dir, name));
       if (!entry || !all && isCacheFresh(entry, now) || !remove(name)) continue;
       remove(`${own.stem}.body`);
       removed++;
@@ -8719,11 +8832,11 @@ function renderAsset(template) {
   return template.replaceAll("{{CLI}}", brand().cli);
 }
 function composeAssets() {
-  const base2 = join6(cacheDir(), "compose");
+  const base2 = join7(cacheDir(), "compose");
   return [
-    { path: join6(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
-    { path: join6(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
-    { path: join6(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
+    { path: join7(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
+    { path: join7(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
+    { path: join7(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
   ];
 }
 function ensureComposeMaterialized() {
@@ -8736,23 +8849,23 @@ function untrustedStack() {
   for (const a of assets) {
     let body;
     try {
-      body = readFileSync6(a.path, "utf8");
+      body = readFileSync7(a.path, "utf8");
     } catch {
     }
     if (body !== a.content) return `${a.path} does not hold the stack this binary ships, and could not be rewritten`;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
   if (uid === void 0) return void 0;
-  const root = resolve3(cacheDir());
+  const root = resolve4(cacheDir());
   const chosen = !!(env("CACHE_DIR") ?? brand().cacheDir);
   const top = chosen ? root : dirname2(root);
   const paths = /* @__PURE__ */ new Set();
   for (const a of assets) {
-    for (let p = resolve3(a.path); p !== top && p !== dirname2(p); p = dirname2(p)) paths.add(p);
+    for (let p = resolve4(a.path); p !== top && p !== dirname2(p); p = dirname2(p)) paths.add(p);
   }
   for (const p of [top, ...paths]) {
     try {
-      const st = p === top && chosen ? statSync3(p) : lstatSync2(p);
+      const st = p === top && chosen ? statSync4(p) : lstatSync2(p);
       if (st.isSymbolicLink()) return `${p} is a symbolic link`;
       if (st.uid !== uid) return `${p} belongs to another user`;
       if (st.mode & 2 && !(st.isDirectory() && st.mode & 512)) return `${p} is writable by anyone`;
@@ -8764,7 +8877,7 @@ function untrustedStack() {
 }
 function writeIfChanged(path, content) {
   try {
-    if (existsSync5(path) && readFileSync6(path, "utf8") === content) return;
+    if (existsSync6(path) && readFileSync7(path, "utf8") === content) return;
     mkdirSync4(dirname2(path), { recursive: true, mode: 448 });
     writeFileSync5(path, content);
   } catch {
@@ -8947,8 +9060,8 @@ function resetRunLocks() {
 }
 
 // src/run.ts
-import { join as join7 } from "path";
-import { readFileSync as readFileSync7 } from "fs";
+import { join as join8 } from "path";
+import { readFileSync as readFileSync8 } from "fs";
 function pad(n) {
   return String(n).padStart(2, "0");
 }
@@ -8960,16 +9073,16 @@ function shq(s) {
 }
 function readJsonSafe(path) {
   try {
-    return JSON.parse(readFileSync7(path, "utf8"));
+    return JSON.parse(readFileSync8(path, "utf8"));
   } catch {
     return void 0;
   }
 }
 function readManifest(dir, file = "manifest.json") {
-  return readJsonSafe(join7(dir, file));
+  return readJsonSafe(join8(dir, file));
 }
 function writeManifest(dir, value, file = "manifest.json") {
-  return writeArtifact(join7(dir, file), `${JSON.stringify(value, null, 2)}
+  return writeArtifact(join8(dir, file), `${JSON.stringify(value, null, 2)}
 `);
 }
 
@@ -9242,8 +9355,8 @@ async function crawlSite(seed, opts = {}) {
   const authorizeUrl = (url) => authorizeHop(url, false);
   const authorizeSeed = (url) => authorizeHop(url, true);
   let settleSeed;
-  const seedSettled = new Promise((resolve6) => {
-    settleSeed = resolve6;
+  const seedSettled = new Promise((resolve7) => {
+    settleSeed = resolve7;
   });
   const authorizeSitemap = async (url) => {
     if (!sameOrigin(url, seedOrigin)) await seedSettled;
@@ -9910,11 +10023,11 @@ function extractNumerals(text, max = 8) {
 }
 
 // src/orchestrate.ts
-import { existsSync as existsSync6 } from "fs";
-import { join as join9, resolve as resolve4 } from "path";
+import { existsSync as existsSync7 } from "fs";
+import { join as join10, resolve as resolve5 } from "path";
 
 // src/orchestrate/templates.ts
-import { join as join8 } from "path";
+import { join as join9 } from "path";
 var WORKFLOW_FORBIDDEN = ["Date.now(", "Math.random(", "new Date("];
 function oneWriterFooter(runAbs, opts = {}) {
   const forbidden = opts.writingCommands?.length ? ` Do not run any engine command that writes (${opts.writingCommands.map((c) => `\`${c}\``).join(", ")}).` : "";
@@ -9925,7 +10038,7 @@ Return ONLY the structured output specified above. Do NOT write, edit, or delete
 
 One sanctioned exception: ${opts.sanctioned}` : ""}
 
-Exception for oversized prose: if a note is too large to return, write ONLY to \`${join8(runAbs, "orchestration", "out")}/<role>-<batch>.md\` \u2014 a file namespaced to you alone \u2014 and return its path.
+Exception for oversized prose: if a note is too large to return, write ONLY to \`${join9(runAbs, "orchestration", "out")}/<role>-<batch>.md\` \u2014 a file namespaced to you alone \u2014 and return its path.
 `;
 }
 var SMALL_WORKLIST = 3;
@@ -9950,7 +10063,7 @@ function assertWorkflowSafe(script, phaseName) {
 }
 function emitWorkflowScript(phase, emission, runAbs, engineAbs, smallWorklist, constants = {}) {
   const cli = brand().cli;
-  const scriptPath = join8(runAbs, "orchestration", `${phase.name}.workflow.mjs`);
+  const scriptPath = join9(runAbs, "orchestration", `${phase.name}.workflow.mjs`);
   const meta = { name: `${cli}-${phase.name}`, description: emission.description(phase.items), phases: [{ title: emission.title }] };
   const batches = phaseBatches(phase, emission, smallWorklist);
   const hint = emission.applyHint(runAbs, engineAbs, phase);
@@ -10030,7 +10143,7 @@ function runbookMd(phases, defs, runAbs, engineAbs, cli, preamble = [], smallWor
       const batches = phaseBatches(ph, emission, smallWorklist);
       const widest = batches.reduce((w, b) => Math.max(w, b.length), 0);
       lines.push(
-        `Fan out: \`Workflow({ scriptPath: "${join8(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
+        `Fan out: \`Workflow({ scriptPath: "${join9(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
         `(${batches.length} agent(s) of at most ${widest} item(s), contract \`agents/${emission.role}.md\`).`,
         ``,
         `Sequentially instead: play \`agents/${emission.role}.md\` yourself over ${shq(ph.ids.join(","))}.`,
@@ -10049,9 +10162,9 @@ function runbookMd(phases, defs, runAbs, engineAbs, cli, preamble = [], smallWor
 // src/orchestrate.ts
 var BATCH_SIZE = 8;
 function listPhases(runDir, engineAbs, defs) {
-  const run = resolve4(runDir);
+  const run = resolve5(runDir);
   return defs.map((def) => {
-    const worklist = join9(run, def.worklist);
+    const worklist = join10(run, def.worklist);
     const parsed = readJsonSafe(worklist);
     const ids = def.ids(parsed, run, engineAbs);
     const ready = ids !== void 0;
@@ -10067,8 +10180,8 @@ function listPhases(runDir, engineAbs, defs) {
   });
 }
 function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
-  const run = resolve4(runDir);
-  if (!existsSync6(run)) {
+  const run = resolve5(runDir);
+  if (!existsSync7(run)) {
     return { exitCode: 2, written: [], notices: [], errors: [`run dir not found: ${run}`], phases: [] };
   }
   const phases = listPhases(run, engineAbs, defs);
@@ -10097,14 +10210,14 @@ function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
     }
     selected = [ph];
   }
-  const orchDir = join9(run, "orchestration");
-  const agentsDir = join9(orchDir, "agents");
-  ensureDir(join9(orchDir, "out"));
+  const orchDir = join10(run, "orchestration");
+  const agentsDir = join10(orchDir, "agents");
+  ensureDir(join10(orchDir, "out"));
   ensureDir(agentsDir);
   const written = [];
   const notices = [];
   for (const [name, content] of Object.entries(contracts(run, engineAbs, phases))) {
-    written.push(writeArtifact(join9(agentsDir, `${name}.md`), content));
+    written.push(writeArtifact(join10(agentsDir, `${name}.md`), content));
   }
   if (!opts.eco) {
     for (const ph of selected) {
@@ -10118,10 +10231,10 @@ function orchestrateRun(runDir, engineAbs, defs, contracts, opts = {}) {
       if (ph.items <= floor) {
         notices.push(`phase "${ph.name}": only ${ph.items} item(s) \u2014 the sequential --eco path is equivalent and cheaper.`);
       }
-      written.push(writeArtifact(join9(orchDir, `${ph.name}.workflow.mjs`), emitWorkflowScript(ph, def, run, engineAbs, small, opts.constants)));
+      written.push(writeArtifact(join10(orchDir, `${ph.name}.workflow.mjs`), emitWorkflowScript(ph, def, run, engineAbs, small, opts.constants)));
     }
   }
-  written.push(writeArtifact(join9(orchDir, "RUNBOOK.md"), runbookMd(phases, defs, run, engineAbs, brand().cli, opts.runbookPreamble, small)));
+  written.push(writeArtifact(join10(orchDir, "RUNBOOK.md"), runbookMd(phases, defs, run, engineAbs, brand().cli, opts.runbookPreamble, small)));
   return { exitCode: 0, written, notices, errors: [], phases };
 }
 
@@ -10348,26 +10461,26 @@ function isOriginAllowed(origin, allowed = []) {
 }
 
 // src/mcp/resources.ts
-import { existsSync as existsSync7, readdirSync as readdirSync6, readFileSync as readFileSync8, realpathSync, statSync as statSync4 } from "fs";
-import { basename as basename3, dirname as dirname3, join as join10, relative, resolve as resolve5, sep } from "path";
+import { existsSync as existsSync8, readdirSync as readdirSync7, readFileSync as readFileSync9, realpathSync, statSync as statSync5 } from "fs";
+import { basename as basename3, dirname as dirname3, join as join11, relative, resolve as resolve6, sep } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
 function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname3(fileURLToPath(import.meta.url));
   const name = brand().name;
-  const candidates = [resolve5(here, ".."), resolve5(here, "..", "skills", name), resolve5(here, "..", "..", "skills", name)];
-  return candidates.find((dir) => existsSync7(join10(dir, "SKILL.md")));
+  const candidates = [resolve6(here, ".."), resolve6(here, "..", "skills", name), resolve6(here, "..", "..", "skills", name)];
+  return candidates.find((dir) => existsSync8(join11(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
-  const refDir = join10(root, "references");
-  if (!existsSync7(refDir)) return out;
-  for (const file of readdirSync6(refDir).sort()) {
+  const refDir = join11(root, "references");
+  if (!existsSync8(refDir)) return out;
+  for (const file of readdirSync7(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join10("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
+    out.push(describe(root, join11("references", file), `${skillName()} reference: ${basename3(file, ".md")}`));
   }
   return out;
 }
@@ -10379,7 +10492,7 @@ function readResource(uri, moduleDir) {
   if (!root) throw new ResourceError("no skill payload found next to this build \u2014 nothing to read");
   const rel = uri.slice(URI_SCHEME.length);
   if (!rel) throw new ResourceError("empty resource path");
-  const target = resolve5(root, rel);
+  const target = resolve6(root, rel);
   const served = relative(root, target).split(sep).join("/");
   if (served !== "SKILL.md" && !/^references\/[^/]+\.md$/.test(served)) {
     throw new ResourceError(`not a resource this server serves: ${uri} (resources/list names them)`);
@@ -10394,8 +10507,8 @@ function readResource(uri, moduleDir) {
   if (targetReal !== rootReal && !targetReal.startsWith(rootReal + sep)) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
-  if (!statSync4(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
-  return { uri, mimeType: "text/markdown", text: readFileSync8(targetReal, "utf8") };
+  if (!statSync5(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
+  return { uri, mimeType: "text/markdown", text: readFileSync9(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
 };
@@ -10406,14 +10519,14 @@ function describe(root, rel, fallbackTitle) {
     title: fallbackTitle,
     mimeType: "text/markdown"
   };
-  const summary = firstProse(join10(root, rel));
+  const summary = firstProse(join11(root, rel));
   if (summary) decl.description = summary;
   return decl;
 }
 function firstProse(file) {
   let text;
   try {
-    text = readFileSync8(file, "utf8");
+    text = readFileSync9(file, "utf8");
   } catch {
     return void 0;
   }
@@ -10679,7 +10792,7 @@ async function runStdioServer(adapter, opts = {}) {
     const ticket = { cancelled: false };
     queued.set(id, ticket);
     try {
-      while (active >= MAX_IN_FLIGHT) await new Promise((resolve6) => waiting.push(resolve6));
+      while (active >= MAX_IN_FLIGHT) await new Promise((resolve7) => waiting.push(resolve7));
     } finally {
       if (queued.get(id) === ticket) queued.delete(id);
     }
@@ -10783,14 +10896,14 @@ async function startHttpServer(adapter, opts = {}) {
   server.requestTimeout = REQUEST_TIMEOUT_MS;
   server.headersTimeout = 6e4;
   server.keepAliveTimeout = 12e4;
-  return new Promise((resolve6, reject) => {
+  return new Promise((resolve7, reject) => {
     server.once("error", reject);
     server.listen(opts.port ?? 0, bind, () => {
       server.removeListener("error", reject);
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : opts.port ?? 0;
       const host = bind.includes(":") ? `[${bind}]` : bind;
-      resolve6({
+      resolve7({
         server,
         port,
         url: `http://${host}:${port}${MCP_PATH}`,
@@ -10935,7 +11048,7 @@ function sendJson(res, status, body, origin, extra = {}) {
 }
 var DRAIN_LIMIT = MAX_BODY_BYTES2 * 8;
 function readBody(req) {
-  return new Promise((resolve6, reject) => {
+  return new Promise((resolve7, reject) => {
     const chunks = [];
     let size = 0;
     let over = false;
@@ -10959,7 +11072,7 @@ function readBody(req) {
     });
     req.on("end", () => {
       if (over) reject(new Error("too large"));
-      else resolve6(Buffer.concat(chunks).toString("utf8"));
+      else resolve7(Buffer.concat(chunks).toString("utf8"));
     });
     req.on("error", reject);
     req.on("aborted", () => reject(new Error("client aborted the request")));
@@ -11123,6 +11236,7 @@ export {
   fetchFeed,
   fetchRobots,
   fetchSitemap,
+  fetchVideoRun,
   fingerprint,
   firecrawlBase,
   firecrawlIsExplicit,
@@ -11165,6 +11279,7 @@ export {
   listReleases,
   listResources,
   listTags,
+  listVideoRuns,
   looksLikeChallenge,
   looksLikeFirecrawl,
   looksLikeJunkExtraction,
@@ -11226,6 +11341,7 @@ export {
   readJsonSafe,
   readManifest,
   readResource,
+  readVideoRun,
   recencyScore,
   renderAsset,
   repoCacheRoot,
@@ -11270,6 +11386,7 @@ export {
   searchViaFirecrawl,
   searchViaKeyless,
   searchViaSearxng,
+  searchVideoRuns,
   searxngBase,
   searxngIsExplicit,
   searxngLanguage,
@@ -11305,6 +11422,7 @@ export {
   urlDeclaresIdentity,
   validateArgs,
   videoMetaFromInfo,
+  videoRoot,
   whisperBudgetLeft,
   whisperModel,
   withRunLock,

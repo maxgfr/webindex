@@ -15,7 +15,7 @@ import { resetOllamaProbe } from "../src/embed.js";
 import { resetCacheMode } from "../src/cache.js";
 import { resetHaveCache } from "../src/exec.js";
 import { resetSearxngProbeCache } from "../src/search.js";
-import { setVideoDeps } from "../src/video.js";
+import { resetVideoLadderCache, setVideoDeps } from "../src/video.js";
 
 // Every stack service the engine knows, except `all` — the CLI spells that one
 // `stack`. Derived rather than typed out, because a hand-written list is exactly
@@ -2257,6 +2257,81 @@ describe("the docs↔CLI drift gate", () => {
     const readme = readFileSync(join(srcDir, "..", "README.md"), "utf8");
     expect([...read].filter((v) => !readme.includes(`WEBINDEX_${v}`)).sort()).toEqual([]);
     for (const v of ["SEARXNG", "NO_ROBOTS", "FIRECRAWL_KEY", "DOCKER_PULL_TIMEOUT_MS", "OCR_LANG"]) expect(HELP, v).toContain(`WEBINDEX_${v}`);
+  });
+});
+
+// `webindex video`, driven through main() with yt-dlp replaced by a runner.
+describe("webindex video", () => {
+  const info = {
+    id: "jNQXAC9IVRw",
+    title: "Me at the zoo",
+    channel: "jawed",
+    duration: 19,
+    webpage_url: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    subtitles: { en: [] },
+    automatic_captions: {},
+    chapters: [{ start_time: 0, end_time: 19, title: "Intro" }],
+  };
+  const vtt =
+    "WEBVTT\n\n00:01.200 --> 00:03.360\nAll right, so here we are, in front of the elephants\n\n00:05.000 --> 00:08.000\nthey have really long trunks\n";
+  let ytdlp: number;
+  beforeEach(() => {
+    ytdlp = 0;
+    setVideoDeps({
+      run: async (_cmd, args) => {
+        ytdlp++;
+        if (args.includes("-J")) return { ok: true, status: 0, stdout: JSON.stringify(info), stderr: "" };
+        const o = args[args.indexOf("-o") + 1]!;
+        writeFileSync(join(o.slice(0, o.lastIndexOf("/")), "sub.en.vtt"), vtt);
+        return { ok: true, status: 0, stdout: "", stderr: "" };
+      },
+      have: () => true,
+    });
+  });
+  afterEach(() => {
+    setVideoDeps();
+    resetVideoLadderCache();
+    delete process.env[envName("NO_WRITE")];
+  });
+
+  it("fetches into --out, then reuses the run without yt-dlp", async () => {
+    expect(await run(["video", "fetch", "https://youtu.be/jNQXAC9IVRw", "--out", dir])).toBe(0);
+    expect(stdout()).toContain(join(dir, "jNQXAC9IVRw", "TRANSCRIPT.md"));
+    expect(stdout()).toContain("Me at the zoo — jawed · 00:19 · manual-subs · 1 segment\n");
+    expect(readFileSync(join(dir, "jNQXAC9IVRw", "TRANSCRIPT.md"), "utf8")).toContain("[00:01] All right");
+    const calls = ytdlp;
+    out.length = 0;
+    expect(await run(["video", "fetch", "https://www.youtube.com/watch?v=jNQXAC9IVRw", "--out", dir, "--json"])).toBe(0);
+    expect(JSON.parse(stdout())).toMatchObject({ ok: true, reused: true, via: "manual-subs", id: "jNQXAC9IVRw" });
+    expect(ytdlp).toBe(calls);
+  });
+
+  it("searches what it kept, with a stamp and a link", async () => {
+    await run(["video", "fetch", "https://youtu.be/jNQXAC9IVRw", "--out", dir]);
+    out.length = 0;
+    expect(await run(["video", "search", "long", "trunks", "--out", dir, "--json"])).toBe(0);
+    const j = JSON.parse(stdout());
+    expect(j.query).toBe("long trunks");
+    expect(j.hits[0]).toMatchObject({ videoId: "jNQXAC9IVRw", stamp: "00:01", url: "https://www.youtube.com/watch?v=jNQXAC9IVRw&t=1s" });
+    out.length = 0;
+    expect(await run(["video", "search", "giraffes", "--out", dir])).toBe(1);
+    expect(stderr()).toContain('matches "giraffes"');
+  });
+
+  it("prints the transcript and writes nothing under no-write", async () => {
+    process.env[envName("NO_WRITE")] = "1";
+    expect(await run(["video", "fetch", "https://youtu.be/jNQXAC9IVRw", "--out", dir])).toBe(0);
+    expect(stdout()).toMatch(/^# Me at the zoo\n/);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it("fails with the reason, and rejects a bad invocation", async () => {
+    expect(await run(["video", "fetch", "https://example.com/x", "--out", dir])).toBe(1);
+    expect(stderr()).toContain("not a YouTube video URL");
+    expect(await run(["video", "watch"])).toBe(2);
+    expect(await run(["video", "fetch"])).toBe(2);
+    expect(await run(["video", "search"])).toBe(2);
+    expect(await run(["video", "fetch", "a", "b"])).toBe(2);
   });
 });
 
