@@ -17,6 +17,7 @@ import {
   metaDescriptionOf,
   htmlCanonicalUrl,
   cleanInline,
+  extractFromHtml,
 } from "../src/fetch.js";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -355,6 +356,34 @@ describe("capExtract", () => {
     expect(capExtract(long, "deep")).toBe(long);
     expect(capExtract(long, "standard").length).toBeLessThan(long.length);
     expect(capExtract(long, "standard")).toContain("… [truncated]");
+  });
+});
+
+describe("extractFromHtml", () => {
+  const page =
+    '<html><head><title>Guide</title><link rel="canonical" href="/canon"><meta name="description" content="A summary."></head>' +
+    `<body><nav>Home About</nav><article><h1>Limits</h1><p>${"Token buckets smooth bursts. ".repeat(12)} <a href="ref">ref</a></p>` +
+    "<p>Accept all cookies</p></article></body></html>";
+
+  it("is the HTML tail of fetchAndExtract, for every shape option", async () => {
+    installFetchMock(() => ({ body: page, contentType: "text/html", url: "https://d.test/a/guide" }));
+    const shapes = [{}, { format: "markdown" as const }, { fullPage: true }, { stripConsent: true }, { keepHtml: true }];
+    for (const o of shapes) {
+      const fetched = await fetchAndExtract("https://d.test/a/guide", o);
+      const own = extractFromHtml(page, "https://d.test/a/guide", o);
+      const { text, consentDropped, title, canonical, metaDescription, html } = fetched;
+      expect(own).toEqual({ text, consentDropped, title, canonical, metaDescription, ...(html !== undefined ? { html } : {}) });
+    }
+  });
+
+  it("returns the page's title, canonical and description, and the html only on request", () => {
+    const r = extractFromHtml(page, "https://d.test/a/guide", { stripConsent: true });
+    expect(r).toMatchObject({ title: "Guide", canonical: "https://d.test/canon", metaDescription: "A summary.", consentDropped: 1 });
+    expect(r.text).toContain("# Limits");
+    expect(r.text).not.toContain("Accept all cookies");
+    expect(r).not.toHaveProperty("html");
+    expect(extractFromHtml(page, "https://d.test/a/guide", { keepHtml: true }).html).toBe(page);
+    expect(extractFromHtml(page, "https://d.test/a/guide", { format: "markdown" }).text).toContain("[ref](https://d.test/a/ref)");
   });
 });
 

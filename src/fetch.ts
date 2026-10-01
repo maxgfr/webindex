@@ -1405,17 +1405,9 @@ export async function fetchAndExtract(
   // A document URL's fetch asked for bytes and got a web page instead.
   const body = !res.body && res.bytes ? decodeBody(res.bytes, res.contentType) : res.body;
   const isHtml = HTML_TYPE_RE.test(mime) || (ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(body));
-  const markdown = opts.format === "markdown";
-  const main = isHtml ? (opts.fullPage ? body : extractMainHtml(body)) : body;
-  // The base is read off the whole page: its <base href> sits in the <head>
-  // that main-content isolation has just cut away. It is applied once — with
-  // fullPage, or when isolation keeps the whole document, the <base> is still
-  // in `main`, and a relative one (`docs/`) applied twice is a directory off.
-  const stripped = !isHtml ? body : markdown ? markdownAgainst(main, documentBaseUrl(body, res.url), opts.fullPage) : htmlToText(main, opts);
-  const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped, { markdown }) : { text: stripped, dropped: 0 };
-  const title = isHtml ? pageTitle(body) : undefined;
-  const canonical = isHtml ? absoluteCanonical(htmlCanonicalUrl(body), res.url) : undefined;
-  const metaDescription = isHtml ? metaDescriptionOf(body) : undefined;
+  const extracted = isHtml
+    ? extractFromHtml(body, res.url, opts)
+    : { text: body, consentDropped: 0, title: undefined, canonical: undefined, metaDescription: undefined };
   const notDocument = answeredHtml
     ? `${url} looked like ${claimsPdf ? "a PDF" : "an office document"} but the server returned HTML (a login wall or landing page?), so it was read as a web page.`
     : undefined;
@@ -1423,17 +1415,43 @@ export async function fetchAndExtract(
   // caller quoting the page must be able to tell it did not see the rest.
   const cut = res.truncated ? `Read only the first ${res.bytesRead} bytes of ${url} (the response size cap), so this text is a prefix.` : undefined;
   return {
-    text: consent.text,
-    consentDropped: consent.dropped,
-    title,
-    canonical,
-    metaDescription,
-    ...(opts.keepHtml && isHtml ? { html: body } : {}),
+    ...extracted,
     finalUrl: res.url,
     status: res.status,
     note: [firecrawlNote, notDocument, cut].filter(Boolean).join(" ") || undefined,
     ...(res.truncated ? { truncated: true } : {}),
     ...validators,
+  };
+}
+
+/**
+ * Read an HTML page the way fetchAndExtract reads one: main-content isolation
+ * (unless `fullPage`), text or Markdown, consent lines dropped on request, and
+ * the title, canonical URL and description off the whole page. `finalUrl` is
+ * the address the HTML came from, which relative links and the canonical are
+ * resolved against. For a caller that already holds the HTML — a page a
+ * browser rendered — and wants the same text a fetch would have given.
+ */
+export function extractFromHtml(
+  html: string,
+  finalUrl: string,
+  opts: { format?: "text" | "markdown"; fullPage?: boolean; stripConsent?: boolean; keepHtml?: boolean } = {},
+): Pick<ExtractResult, "text" | "consentDropped" | "title" | "canonical" | "metaDescription" | "html"> {
+  const markdown = opts.format === "markdown";
+  const main = opts.fullPage ? html : extractMainHtml(html);
+  // The base is read off the whole page: its <base href> sits in the <head>
+  // that main-content isolation has just cut away. It is applied once — with
+  // fullPage, or when isolation keeps the whole document, the <base> is still
+  // in `main`, and a relative one (`docs/`) applied twice is a directory off.
+  const stripped = markdown ? markdownAgainst(main, documentBaseUrl(html, finalUrl), opts.fullPage) : htmlToText(main, opts);
+  const consent = opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped, { markdown }) : { text: stripped, dropped: 0 };
+  return {
+    text: consent.text,
+    consentDropped: consent.dropped,
+    title: pageTitle(html),
+    canonical: absoluteCanonical(htmlCanonicalUrl(html), finalUrl),
+    metaDescription: metaDescriptionOf(html),
+    ...(opts.keepHtml ? { html } : {}),
   };
 }
 
