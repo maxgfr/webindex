@@ -133,7 +133,7 @@ describe("help and version", () => {
   });
 
   it("gives every command a help of its own", async () => {
-    for (const cmd of [...SERVICE_ROUTES, "search", "prs", "stack", "skill", "doctor", "hybrid"]) {
+    for (const cmd of [...SERVICE_ROUTES, "search", "prs", "stack", "skill", "doctor", "hybrid", "browser"]) {
       out = [];
       expect(await run([cmd, "--help"]), cmd).toBe(0);
       expect(stdout(), cmd).toMatch(new RegExp(`^\\s+webindex ${cmd}\\b`, "m"));
@@ -176,6 +176,14 @@ describe("help and version", () => {
     ]) {
       expect(help, cmd).toMatch(new RegExp(`^\\s+webindex ${cmd}\\b`, "m"));
     }
+  });
+
+  it("exits 2 on a malformed browser command, naming the action's usage", async () => {
+    expect(await run(["browser", "click"])).toBe(2);
+    expect(stderr()).toMatch(/usage: \S+ browser click <ref>/);
+    err = [];
+    expect(await run(["browser", "wait", "--text", "a", "--gone", "b"])).toBe(2);
+    expect(await run(["browser"])).toBe(2);
   });
 
   it("routes every service the engine declares, not a hand-written subset", async () => {

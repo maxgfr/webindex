@@ -113,7 +113,7 @@ USAGE
                           [--timeout <ms>]
   webindex fetch <url> [<url> …] [--json] [--format text|markdown]
                        [--firecrawl <base>|off] [--lang <tag>] [--full-page] [--cache]
-                       [--refresh] [--offline] [--timeout <ms>]
+                       [--refresh] [--offline] [--timeout <ms>] [--browser]
   webindex extract <file|-> [--json] [--format text|markdown] [--full-page]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--dense] [--json]
   webindex repo <ref> [--forge github|gitlab|gitea] [--json]
@@ -151,6 +151,19 @@ USAGE
   webindex video     search <query> [--out <dir>] [--limit <n>] [--json]
   webindex video     frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]
   webindex video     list <playlist|channel> [--limit <n>] [--out <dir>] [--refresh] [--json]
+  webindex browser   open <url> [--new-tab] [--headless] [--profile <n>] [--cdp <port|url>]
+                     [--capture] [--snapshot]
+  webindex browser   attach <port|url> | status | close [--all]
+  webindex browser   snapshot [<ref>] [--interactive] [--max-chars <n>]
+  webindex browser   click|hover <ref> [--confirm] | type <ref> <text> [--submit]
+  webindex browser   fill <ref> <text> | select <ref> <val…> | press <key> [--confirm]
+  webindex browser   upload <ref> <file…> | scroll <ref|up|down|top|bottom>
+  webindex browser   wait --text|--gone|--selector|--url <s> | --idle | --load | --clear
+                     | --ms <n> [--timeout <ms>]
+  webindex browser   eval <expr|-> | screenshot [<ref>] [--full] [--out <file>]
+  webindex browser   network [list|get <n>|clear] | tabs [list|new|select <tN>|close <tN>]
+  webindex browser   back|forward|reload | dialog accept|dismiss
+  webindex browser   profile import <chrome|brave|path> [--force] | reset | path
   webindex doctor [--json]
   webindex version
 
@@ -191,6 +204,9 @@ COMMANDS
              auto-captions (never a machine translation), else a local
              whisper transcription — through yt-dlp, which has to be
              installed. A post on such a host with no video is read as a page.
+             --browser renders the page in the dedicated browser (see browser),
+             for a page only JavaScript fills; WEBINDEX_BROWSER_FETCH=fallback
+             does it only when the plain read is refused, walled or near empty.
   extract    Same extraction, on a file already on disk (- reads stdin),
              recognised by its bytes when its name says otherwise. --full-page
              keeps the whole HTML page, navigation and consent banners included;
@@ -321,6 +337,21 @@ COMMANDS
              site, two at a time, and writes CORPUS.md naming them V1…Vn;
              'search' on that directory then labels its hits V1…Vn. The directory is --out,
              else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
+  browser    Drive a real Chrome, Brave, Chromium or Edge for an agent: a
+             SEPARATE browser on a dedicated profile, never your own, launched
+             on first use (headed unless --headless) and picked up again by
+             every later call — the tab, its refs and the session last between
+             commands. attach <port|url> (or --cdp) drives one already running
+             on a loopback port instead; close shuts down only a browser it
+             launched. snapshot prints the accessibility tree with refs (e12)
+             that click, type, fill, select, upload, scroll and screenshot take;
+             a ref from before a navigation is refused: take a new snapshot. A
+             click or an Enter that looks irreversible (pay, order, delete,
+             send, publish…) or submits a password is refused unless --confirm:
+             ask the user first. A challenge (captcha, anti-bot wall) is named,
+             never bypassed: the human solves it, then wait --clear. --capture
+             records the JSON the page fetches (network list|get). Exit 1 is a
+             stale ref, a timeout or a refusal; --json on every action.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which
@@ -384,6 +415,9 @@ ENVIRONMENT
   WEBINDEX_EXTRACT_ROOT  the directory \`mcp\` confines webindex_extract to (--extract-root)
   WEBINDEX_MCP_TOKEN     the bearer token \`mcp --transport http\` then requires
   WEBINDEX_UA            override the browser User-Agent
+  WEBINDEX_BROWSER_DIR   where \`browser\` keeps its profiles and session (default ~/.webindex/browser)
+  WEBINDEX_BROWSER_BIN   the browser it drives (default the first Chrome, Brave, Chromium or Edge found)
+  WEBINDEX_BROWSER_FETCH fetch renders pages in that browser: always, fallback or off (default)
   GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, GITEA_TOKEN
                          optional forge tokens (WEBINDEX_GITHUB_TOKEN and its kin win over
                          them); each goes only to github.com, gitlab.com, or a host listed
@@ -437,6 +471,14 @@ export const VALUE_FLAGS = [
   "format",
   "out",
   "effort",
+  "profile",
+  "cdp",
+  "max-chars",
+  "text",
+  "gone",
+  "selector",
+  "url",
+  "ms",
 ];
 export const BOOL_FLAGS = [
   "json",
@@ -454,6 +496,19 @@ export const BOOL_FLAGS = [
   "lines",
   "public-only",
   "allow-private",
+  "new-tab",
+  "headless",
+  "capture",
+  "snapshot",
+  "interactive",
+  "confirm",
+  "submit",
+  "idle",
+  "load",
+  "clear",
+  "full",
+  "browser",
+  "force",
 ];
 export const COMMANDS = [
   "search",
@@ -480,6 +535,7 @@ export const COMMANDS = [
   "hybrid",
   "changed",
   "video",
+  "browser",
   ...STACK_SERVICES.filter((s) => s !== "all"),
   "stack",
 ];
@@ -1906,6 +1962,8 @@ function positionalLimit(args: CommandArgs): { max: number; hint?: string } {
   if (cmd === "doctor" || cmd === "mcp") return { max: 0 };
   if (cmd === "skill") return { max: args.positional[0] === "init" ? 2 : 1 };
   if (cmd === "video") return args.positional[0] === "search" ? { max: Number.POSITIVE_INFINITY } : { max: 2 };
+  // Each action checks its own arguments: type and fill take a text, select and upload a list.
+  if (cmd === "browser") return { max: Number.POSITIVE_INFINITY };
   if (cmd === "issues" || cmd === "prs") return { max: 1, hint: 'search words go in --terms "<words>"' };
   if (cmd === "repo" || cmd === "releases" || cmd === "tags") return { max: 1, hint: "quote a path that contains spaces" };
   return { max: 1 };
@@ -1985,6 +2043,8 @@ async function dispatch(argv: string[]): Promise<void> {
       stripConsent: !fullPage,
       format,
       timeoutMs: argTimeout(args),
+      // A flag, not a value: `--browser` is a switch on mcp too. Fallback mode is WEBINDEX_BROWSER_FETCH's.
+      ...(argBool(args, "browser") ? { browser: "always" as const } : {}),
     };
     const cache = argBool(args, "cache") || refresh;
     const json = argBool(args, "json");
@@ -2583,6 +2643,51 @@ async function dispatch(argv: string[]): Promise<void> {
     else for (const h of hits) process.stdout.write(`[${h.label} ${h.stamp}] ${h.title}${h.chapter ? ` — ${h.chapter}` : ""}\n  ${h.url}\n  ${h.text}\n\n`);
     if (!hits.length) fail(`nothing under ${root} matches "${query}" — \`webindex video fetch <url>\` reads a video first`);
     return;
+  }
+
+  // A real browser, driven one action per call; see src/browser/cli.ts.
+  if (cmd === "browser") {
+    const action = args.positional[0] ?? "";
+    const asJson = argBool(args, "json");
+    const { runBrowserCommand } = await import("./browser/cli.js");
+    const r = await runBrowserCommand(
+      action,
+      args.positional.slice(1),
+      {
+        json: asJson,
+        newTab: argBool(args, "new-tab"),
+        headless: argBool(args, "headless"),
+        profile: argValue(args, "profile"),
+        cdp: argValue(args, "cdp"),
+        capture: argBool(args, "capture"),
+        snapshot: argBool(args, "snapshot"),
+        interactive: argBool(args, "interactive"),
+        maxChars: argInt(args, "max-chars", { min: 1 }),
+        confirm: argBool(args, "confirm"),
+        submit: argBool(args, "submit"),
+        text: argValue(args, "text"),
+        gone: argValue(args, "gone"),
+        selector: argValue(args, "selector"),
+        url: argValue(args, "url"),
+        idle: argBool(args, "idle"),
+        load: argBool(args, "load"),
+        clear: argBool(args, "clear"),
+        ms: argInt(args, "ms", { min: 0 }),
+        timeout: argTimeout(args),
+        full: argBool(args, "full"),
+        out: argValue(args, "out"),
+        all: argBool(args, "all"),
+        force: argBool(args, "force"),
+      },
+      { stdin: () => readStdin("usage: webindex browser eval <expr|->").toString("utf8") },
+    );
+    if (r.exitCode === 0) {
+      process.stdout.write(asJson ? jsonLine(r.json) : `${r.text}\n`);
+      return;
+    }
+    if (asJson) process.stdout.write(jsonLine(r.json));
+    if (r.exitCode === EXIT_USAGE) usage(r.text);
+    fail(r.text);
   }
 
   // The packaging toolchain for a repo built ON this engine. Dev-time: it reads
