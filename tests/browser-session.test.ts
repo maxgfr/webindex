@@ -44,6 +44,7 @@ const methods = (sessionId?: string) => fake.calls.filter((c) => sessionId === u
 const ours = (over: Partial<Session> = {}): Session => ({
   version: 1,
   port: fake.port,
+  wsBrowserUrl: fake.browserWsUrl,
   pid: 4242,
   launchedByUs: true,
   profile: "default",
@@ -121,6 +122,16 @@ describe("openBrowserSession", () => {
     await expect(openBrowserSession({ cdp: fake.port, deps: deps() })).rejects.toThrow(/attach refused/);
   });
 
+  it("closes the tab it created for newTab when attaching to it fails", async () => {
+    fake.addTarget();
+    fake.handle("Target.attachToTarget", () => {
+      throw { message: "attach refused" };
+    });
+    await expect(openBrowserSession({ cdp: fake.port, newTab: true, deps: deps() })).rejects.toThrow(/attach refused/);
+    expect(fake.requests).toContain("GET /json/close/T2");
+    expect(fake.targets.map((t) => t.id)).toEqual(["T1"]);
+  });
+
   it("launches a separate browser when nothing is running", async () => {
     fake.addTarget();
     const spawned = fakeSpawn({ port: fake.port });
@@ -195,6 +206,15 @@ describe("navigation", () => {
     });
     expect((await s.navigate("https://gone.test/")).status).toBeUndefined();
   });
+
+  it("gives up on the status after ~2 s instead of holding the lock for 30 s (an alert() on load)", async () => {
+    fake.addTarget();
+    const s = await attach();
+    fake.handle("Runtime.evaluate", () => new Promise(() => {}));
+    const t = Date.now();
+    expect((await s.navigate("https://alert.test/")).status).toBeUndefined();
+    expect(Date.now() - t).toBeLessThan(5000);
+  }, 10_000);
 
   it("stops waiting when the connection drops mid-navigation", async () => {
     fake.addTarget();
@@ -293,6 +313,17 @@ describe("tabs", () => {
     expect(s.targetId).toBe("T2");
     const blank = await s.newTab();
     expect(blank).toMatchObject({ id: "t3", url: "about:blank" });
+  });
+
+  it("closes the tab newTab created when it cannot be attached to", async () => {
+    fake.addTarget("https://a.test/");
+    const s = await attach();
+    fake.handle("Target.attachToTarget", () => {
+      throw { message: "attach refused" };
+    });
+    await expect(s.newTab()).rejects.toThrow(/attach refused/);
+    expect(fake.targets.map((t) => t.id)).toEqual(["T1"]);
+    expect(s.targetId).toBe("T1");
   });
 
   it("closes a tab, forgets its state, and moves off it when it was current", async () => {
@@ -427,6 +458,39 @@ describe("browserStatus and closeBrowser (no session to open)", () => {
     expect(fake.calls).toHaveLength(0);
   });
 
+  it("saves the ids it hands out and numbers new tabs independently of /json/list order", async () => {
+    fake.addTarget("https://a.test/", "A");
+    fake.addTarget("https://b.test/", "B");
+    fake.addTarget("https://c.test/", "C");
+    writeSession(ours({ tabs: { t1: "T1" } }));
+    const ids = (st: Awaited<ReturnType<typeof browserStatus>>) => st.tabs?.map((t) => [t.id, t.targetId]);
+    const first = ids(await browserStatus({ deps: deps() }));
+    expect(first).toEqual([
+      ["t1", "T1"],
+      ["t2", "T2"],
+      ["t3", "T3"],
+    ]);
+    expect(readSession()?.tabs).toEqual({ t1: "T1", t2: "T2", t3: "T3" });
+    // Chrome orders /json/list by recent activity: the ids must not follow it.
+    fake.targets.reverse();
+    expect(ids(await browserStatus({ deps: deps() }))).toEqual(first);
+    const s = await attach();
+    expect((await s.listTabs()).map((t) => [t.id, t.targetId])).toEqual(first);
+  });
+
+  it("numbers unseen tabs by target id, whatever order /json/list gives", async () => {
+    fake.addTarget("https://a.test/");
+    fake.addTarget("https://b.test/");
+    fake.addTarget("https://c.test/");
+    fake.targets.reverse();
+    const s = await attach({ newTab: false });
+    expect((await s.listTabs()).map((t) => [t.id, t.targetId])).toEqual([
+      ["t1", "T1"],
+      ["t2", "T2"],
+      ["t3", "T3"],
+    ]);
+  });
+
   it("closeBrowser shuts a launched browser without spawning one", async () => {
     fake.addTarget();
     writeSession(ours());
@@ -434,6 +498,15 @@ describe("browserStatus and closeBrowser (no session to open)", () => {
     expect(await closeBrowser({ deps: deps({ spawn: spawned.spawn }) })).toEqual({ closed: true, launchedByUs: true });
     expect(methods()).toContain("Browser.close");
     expect(spawned.calls).toHaveLength(0);
+    expect(readSession()).toBeNull();
+  });
+
+  it("closeBrowser never closes another browser that took over our saved port", async () => {
+    fake.addTarget();
+    writeSession(ours({ wsBrowserUrl: `ws://127.0.0.1:${fake.port}/devtools/browser/our-dead-guid` }));
+    expect(await closeBrowser({ deps: deps() })).toEqual({ closed: false, launchedByUs: true });
+    expect(methods()).not.toContain("Browser.close");
+    expect(kills).toEqual([]);
     expect(readSession()).toBeNull();
   });
 

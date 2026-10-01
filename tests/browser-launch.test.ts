@@ -28,6 +28,7 @@ const chrome = { kind: "chrome" as const, path: "/fake/chrome" };
 const saved = (over: Partial<Session> = {}): Session => ({
   version: 1,
   port: fake.port,
+  wsBrowserUrl: fake.browserWsUrl,
   pid: 777,
   launchedByUs: true,
   profile: "default",
@@ -80,7 +81,8 @@ describe("launch policy order", () => {
   });
 
   it("reuses a saved session that is still alive, with its ownership", async () => {
-    writeSession(saved({ launchedByUs: false, pid: undefined, profile: "work", headless: true }));
+    // An attached browser may have been saved without its socket path (`browser attach`).
+    writeSession(saved({ launchedByUs: false, pid: undefined, wsBrowserUrl: undefined, profile: "work", headless: true }));
     const { spawn, calls } = fakeSpawn();
     const ep = await resolveEndpoint({ deps: launchDeps(spawn) });
     expect(ep).toEqual({ host: "127.0.0.1", port: fake.port, launchedByUs: false, profile: "work", headless: true });
@@ -91,6 +93,23 @@ describe("launch policy order", () => {
     writeSession(saved());
     const ep = await resolveEndpoint({ profile: "default", deps: launchDeps(fakeSpawn().spawn) });
     expect(ep).toMatchObject({ port: fake.port, launchedByUs: true, pid: 777 });
+  });
+
+  it("does not claim a browser that took over the saved port: another socket path means ours is gone", async () => {
+    writeSession(saved({ wsBrowserUrl: `ws://127.0.0.1:${fake.port}/devtools/browser/our-dead-guid` }));
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    const ep = await resolveEndpoint({ deps: launchDeps(spawn) });
+    expect(calls).toHaveLength(1);
+    expect(ep.pid).toBe(4242);
+    expect(readSession()).toBeNull();
+  });
+
+  it("does not trust a saved browser of ours that recorded no socket path", async () => {
+    writeSession(saved({ wsBrowserUrl: undefined }));
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    const ep = await resolveEndpoint({ deps: launchDeps(spawn) });
+    expect(calls).toHaveLength(1);
+    expect(ep.pid).toBe(4242);
   });
 
   it("spawns a new browser when the saved session is for another profile", async () => {
@@ -174,6 +193,17 @@ describe("spawning a separate browser", () => {
     expect(ep).toEqual({ host: "127.0.0.1", port: fake.port, launchedByUs: true, profile: "work", headless: false });
   });
 
+  it("does not reuse a live port from DevToolsActivePort when another browser answers there", async () => {
+    const dir = profileDir("work");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, "DevToolsActivePort"), `${fake.port}\n/devtools/browser/our-dead-guid\n`);
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    const ep = await resolveEndpoint({ profile: "work", deps: launchDeps(spawn) });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.staleFileAtSpawn).toBe(false);
+    expect(ep).toMatchObject({ launchedByUs: true, pid: 4242 });
+  });
+
   it("says the profile may be busy when the browser exits at once with code 0", async () => {
     const { spawn } = fakeSpawn({ exitCode: 0 });
     await expect(resolveEndpoint({ deps: launchDeps(spawn) })).rejects.toThrow(/code 0.*already running on the profile/);
@@ -205,8 +235,9 @@ describe("spawning a separate browser", () => {
     expect(children[0]?.signals).toEqual(["SIGTERM"]);
   });
 
-  it("keeps polling past a malformed or not-yet-live DevToolsActivePort", async () => {
-    for (const content of ["garbage\n/devtools/browser/x\n", "9222", "70000\n/devtools/browser/x\n"]) {
+  it("keeps polling past a malformed, not-yet-live or foreign DevToolsActivePort", async () => {
+    const foreign = `${fake.port}\n/devtools/browser/not-the-one-we-started\n`;
+    for (const content of ["garbage\n/devtools/browser/x\n", "9222", "70000\n/devtools/browser/x\n", foreign]) {
       const malformed = fakeSpawn({ content, immediate: true });
       await expect(resolveEndpoint({ deps: launchDeps(malformed.spawn, fakeClock()) })).rejects.toThrow(/within 20 s/);
     }

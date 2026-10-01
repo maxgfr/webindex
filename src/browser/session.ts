@@ -17,11 +17,13 @@
 import type { CdpClient, CdpHandler, CdpSession } from "./cdp.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
 import type { TargetInfo } from "./discovery.js";
-import { type Endpoint, type LaunchOptions, resolveEndpoint } from "./launch.js";
+import { type Endpoint, isSameBrowser, type LaunchOptions, resolveEndpoint } from "./launch.js";
 import { clearNetwork, clearRefs, clearSession, readSession, withBrowserLock, writeSession } from "./state.js";
 
 const NAVIGATION_TIMEOUT_MS = 30_000;
 const BROWSER_CLOSE_TIMEOUT_MS = 5000;
+/** A page showing a dialog on load never answers Runtime.evaluate; the status is not worth waiting for. */
+const STATUS_TIMEOUT_MS = 2000;
 const TAB_ID = /^t([1-9]\d*)$/;
 
 export interface OpenOptions extends LaunchOptions {
@@ -98,12 +100,16 @@ function cleanTabs(v: unknown): Record<string, string> {
   return out;
 }
 
+const sameTabs = (a: Record<string, string>, b: Record<string, string>): boolean =>
+  Object.keys(a).length === Object.keys(b).length && Object.entries(a).every(([k, v]) => b[k] === v);
+
 const tabNumber = (id: string): number => Number(TAB_ID.exec(id)?.[1] ?? 0);
 
 /**
  * Bring the map in line with the pages that exist: vanished tabs are dropped,
  * new ones numbered after the highest id the map held — counting the vanished,
- * so a closed `t2` is not handed straight to a different tab.
+ * so a closed `t2` is not handed straight to a different tab — in target id
+ * order: /json/list is sorted by recent activity, and ids must not follow it.
  */
 function syncTabs(map: Record<string, string>, pages: TargetInfo[]): Record<string, string> {
   const live = new Set(pages.map((p) => p.id));
@@ -117,7 +123,8 @@ function syncTabs(map: Record<string, string>, pages: TargetInfo[]): Record<stri
       kept.add(targetId);
     }
   }
-  for (const p of pages) if (!kept.has(p.id)) out[`t${++high}`] = p.id;
+  const unseen = pages.map((p) => p.id).filter((id) => !kept.has(id));
+  for (const id of unseen.sort()) out[`t${++high}`] = id;
   return out;
 }
 
@@ -283,10 +290,11 @@ export class BrowserSession {
   /** The document's HTTP status from the Navigation Timing entry; undefined when the page does not say. */
   private async responseStatus(): Promise<number | undefined> {
     try {
-      const r = await this.page.send<{ result?: { value?: unknown } }>("Runtime.evaluate", {
-        expression: "performance.getEntriesByType('navigation')[0]?.responseStatus",
-        returnByValue: true,
-      });
+      const r = await this.page.send<{ result?: { value?: unknown } }>(
+        "Runtime.evaluate",
+        { expression: "performance.getEntriesByType('navigation')[0]?.responseStatus", returnByValue: true },
+        { timeoutMs: STATUS_TIMEOUT_MS },
+      );
       const v = r.result?.value;
       return typeof v === "number" && v > 0 ? v : undefined;
     } catch {
@@ -443,7 +451,13 @@ export class BrowserSession {
   /** Open a tab, make it current and, given a url, load it. */
   async newTab(url?: string, opts: NavigateOptions = {}): Promise<BrowserTab> {
     const targetId = await createTarget(this.cdp);
-    await this.switchTo(targetId);
+    try {
+      await this.switchTo(targetId);
+    } catch (e) {
+      // A tab we opened and could not use is only clutter.
+      await this.deps.discovery.closeTarget(this.port, targetId, this.host).catch(() => {});
+      throw e;
+    }
     if (url !== undefined) await this.navigate(url, opts);
     return pick(await this.listTabs(), targetId);
   }
@@ -517,10 +531,11 @@ export async function openBrowserSession(opts: OpenOptions = {}): Promise<Browse
   const same = saved !== null && saved.port === endpoint.port && (saved.host ?? "127.0.0.1") === endpoint.host ? saved : null;
   const { webSocketDebuggerUrl } = await deps.discovery.getVersion(endpoint.port, endpoint.host);
   const cdp = await deps.connectCdp(webSocketDebuggerUrl);
+  let created: string | undefined;
   try {
     const pages = await deps.discovery.listPages(endpoint.port, endpoint.host);
     let targetId: string;
-    if (opts.newTab) targetId = await createTarget(cdp);
+    if (opts.newTab) targetId = created = await createTarget(cdp);
     else if (same && pages.some((p) => p.id === same.targetId)) targetId = same.targetId;
     else targetId = pages[0]?.id ?? (await createTarget(cdp));
     const sessionId = await attachPage(cdp, targetId);
@@ -529,12 +544,17 @@ export async function openBrowserSession(opts: OpenOptions = {}): Promise<Browse
     if (opts.url !== undefined) await session.navigate(opts.url);
     return session;
   } catch (e) {
+    // A tab opened for this session and never handed out is only clutter.
+    if (created !== undefined) await deps.discovery.closeTarget(endpoint.port, created, endpoint.host).catch(() => {});
     await cdp.close();
     throw e;
   }
 }
 
-/** What is running, from session.json and /json/list alone: never launches, attaches or throws. */
+/**
+ * What is running, from session.json and /json/list alone: never launches,
+ * attaches or throws. The only write is the tab ids it hands out, saved.
+ */
 export async function browserStatus(opts: { deps?: Partial<BrowserDeps> } = {}): Promise<BrowserStatus> {
   const deps = browserDeps(opts.deps);
   const saved = readSession();
@@ -547,7 +567,27 @@ export async function browserStatus(opts: { deps?: Partial<BrowserDeps> } = {}):
   } catch {
     return { alive: false, ...base };
   }
-  const tabs = tabList(syncTabs(cleanTabs(saved.tabs), pages), pages, saved.targetId);
+  let map = syncTabs(cleanTabs(saved.tabs), pages);
+  if (!sameTabs(map, cleanTabs(saved.tabs))) {
+    // Ids handed out must name the same tabs on the next call, so they are saved:
+    // under the lock, onto the session as it is by then. A busy lock skips it;
+    // the numbering is deterministic, so the next call arrives at the same ids.
+    try {
+      map = await withBrowserLock(
+        async () => {
+          const current = readSession();
+          if (!current || current.port !== saved.port || (current.host ?? "127.0.0.1") !== host) return map;
+          const next = syncTabs(cleanTabs(current.tabs), pages);
+          writeSession({ ...current, tabs: next, updatedAt: deps.now() });
+          return next;
+        },
+        { deps, waitMs: 2000 },
+      );
+    } catch {
+      /* busy: shown, not saved */
+    }
+  }
+  const tabs = tabList(map, pages, saved.targetId);
   const cur = tabs.find((t) => t.active);
   return { alive: true, ...base, url: cur?.url ?? "", title: cur?.title ?? "", tabs };
 }
@@ -562,7 +602,8 @@ export async function closeBrowser(opts: CloseOptions & { deps?: Partial<Browser
   let closed = false;
   if (saved?.launchedByUs) {
     const host = saved.host ?? "127.0.0.1";
-    if (await deps.discovery.isPortAlive(saved.port, host)) {
+    // Only the very browser we started: another one may answer on its port by now.
+    if (saved.wsBrowserUrl && (await isSameBrowser(deps, saved.port, host, saved.wsBrowserUrl))) {
       const cdp = await deps.connectCdp((await deps.discovery.getVersion(saved.port, host)).webSocketDebuggerUrl);
       try {
         await closeLaunched(cdp, saved.pid, deps);

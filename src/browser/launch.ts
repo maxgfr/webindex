@@ -71,7 +71,15 @@ export async function resolveEndpoint(opts: LaunchOptions = {}): Promise<Endpoin
   const saved = readSession();
   if (saved && (opts.profile === undefined || saved.profile === opts.profile)) {
     const host = saved.host ?? "127.0.0.1";
-    if (await deps.discovery.isPortAlive(saved.port, host)) {
+    // A live port is not enough: ours may have died and the port gone to another
+    // browser, which `close` would then shut down. The browser socket path (a
+    // per-run GUID) says whether it is still the same one. A browser of ours whose
+    // path was not recorded cannot be told apart, so it counts as gone; one we only
+    // attached to is never closed, so its port answering is enough.
+    const same = saved.wsBrowserUrl
+      ? await isSameBrowser(deps, saved.port, host, saved.wsBrowserUrl)
+      : !saved.launchedByUs && (await deps.discovery.isPortAlive(saved.port, host));
+    if (same) {
       return {
         host,
         port: saved.port,
@@ -81,7 +89,7 @@ export async function resolveEndpoint(opts: LaunchOptions = {}): Promise<Endpoin
         headless: saved.headless,
       };
     }
-    clearSession(); // its browser is gone; the one launched below replaces it
+    clearSession(); // its browser is gone (or is someone else's now); the one launched below replaces it
   }
 
   return launch(deps, opts.binary, profile, headless);
@@ -99,12 +107,14 @@ async function launch(deps: BrowserDeps, binary: string | undefined, profile: st
   const portFile = join(dir, "DevToolsActivePort");
   // A browser of ours may still be running on this profile, saved under another
   // session since: Chrome would hand a second launch to it and exit, so use it.
+  // Only if that port still serves the browser socket the file names: a crashed
+  // run's port may since belong to another browser, which is not ours to close.
   const running = await readActivePort(deps, portFile);
-  if (running !== undefined && (await deps.discovery.isPortAlive(running))) {
-    return { host: "127.0.0.1", port: running, launchedByUs: true, profile, headless };
+  if (running && (await isSameBrowser(deps, running.port, "127.0.0.1", running.path))) {
+    return { host: "127.0.0.1", port: running.port, launchedByUs: true, profile, headless };
   }
-  // Otherwise the file is a crashed run's, naming a dead port: it must go before
-  // the start, or the poll below could read it.
+  // Otherwise the file is a crashed run's: it must go before the start, or the
+  // poll below could read it.
   await deps.fs.rm(portFile, { force: true });
 
   const args = ["--remote-debugging-port=0", `--user-data-dir=${dir}`, "--no-first-run", "--no-default-browser-check"];
@@ -128,8 +138,9 @@ async function launch(deps: BrowserDeps, binary: string | undefined, profile: st
   const deadline = deps.now() + STARTUP_TIMEOUT_MS;
   for (;;) {
     // A live port first: a launcher that exits once the browser is up still succeeded.
-    const port = await readActivePort(deps, portFile);
-    if (port !== undefined && (await deps.discovery.isPortAlive(port))) {
+    const active = await readActivePort(deps, portFile);
+    if (active && (await isSameBrowser(deps, active.port, "127.0.0.1", active.path))) {
+      const port = active.port;
       return { host: "127.0.0.1", port, launchedByUs: true, ...(child.pid !== undefined ? { pid: child.pid } : {}), profile, headless };
     }
     if (failure) throw new Error(failure);
@@ -141,17 +152,40 @@ async function launch(deps: BrowserDeps, binary: string | undefined, profile: st
   }
 }
 
-/** The port on line 1 of DevToolsActivePort, or undefined while it is absent or half-written. */
-async function readActivePort(deps: BrowserDeps, file: string): Promise<number | undefined> {
+/** Line 1 (the port) and line 2 (the browser socket path) of DevToolsActivePort, or undefined while it is absent or half-written. */
+async function readActivePort(deps: BrowserDeps, file: string): Promise<{ port: number; path: string } | undefined> {
   let text: string;
   try {
     text = await deps.fs.readFile(file, "utf8");
   } catch {
     return undefined;
   }
-  const [first = "", second] = text.split("\n");
+  const [first = "", second = ""] = text.split("\n");
   const port = Number(first.trim());
-  // Line 2 (the browser socket path) is written with it; without it the file is still being written.
-  if (!Number.isInteger(port) || port < 1 || port > 65535 || second === undefined) return undefined;
-  return port;
+  const path = second.trim();
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || !path) return undefined;
+  return { port, path };
+}
+
+/** The path of a browser socket URL (`/devtools/browser/<guid>`); a bare path is returned as is. */
+function socketPath(urlOrPath: string): string {
+  try {
+    return new URL(urlOrPath).pathname;
+  } catch {
+    return urlOrPath;
+  }
+}
+
+/**
+ * Whether the browser answering on `port` is the one whose socket is
+ * `wsBrowserUrl` (a URL or just its path). The path carries a GUID drawn at each
+ * browser start, so a different browser on a reused port never matches. Never throws.
+ */
+export async function isSameBrowser(deps: BrowserDeps, port: number, host: string, wsBrowserUrl: string): Promise<boolean> {
+  try {
+    const { webSocketDebuggerUrl } = await deps.discovery.getVersion(port, host);
+    return socketPath(webSocketDebuggerUrl) === socketPath(wsBrowserUrl);
+  } catch {
+    return false;
+  }
 }
