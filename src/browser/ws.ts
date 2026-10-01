@@ -181,19 +181,27 @@ export class WsClient extends EventEmitter {
   }
 
   private feed(chunk: Buffer): void {
-    const messages: string[] = [];
-    let failure: unknown;
+    let frames: Frame[];
     try {
-      for (const frame of this.parser.push(chunk)) {
-        const text = this.onFrame(frame);
-        if (text !== undefined) messages.push(text);
-      }
+      frames = this.parser.push(chunk);
     } catch (e) {
-      failure = e;
+      this.fail(e as Error, e instanceof WsProtocolError ? e.code : 1002);
+      return;
     }
-    // Listeners run outside the try: a throwing one is the consumer's bug, not a protocol violation.
-    for (const text of messages) this.deliver(text);
-    if (failure) this.fail(failure as Error, failure instanceof WsProtocolError ? failure.code : 1002);
+    // Frames are handled strictly in wire order, so a message that precedes a
+    // close frame in the same chunk is delivered before 'close'. Listeners run
+    // outside the try: a throwing one is the consumer's bug, not a protocol violation.
+    for (const frame of frames) {
+      if (this.done) return;
+      let text: string | undefined;
+      try {
+        text = this.onFrame(frame);
+      } catch (e) {
+        this.fail(e as Error, e instanceof WsProtocolError ? e.code : 1002);
+        return;
+      }
+      if (text !== undefined) this.deliver(text);
+    }
   }
 
   private deliver(text: string): void {

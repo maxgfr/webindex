@@ -194,6 +194,34 @@ describe("WsClient", () => {
     expect(s.frames[0]?.payload.readUInt16BE(0)).toBe(4000);
   });
 
+  it("delivers a message before 'close' when both arrive in one chunk", async () => {
+    const s = await serve((socket) => {
+      const close = Buffer.alloc(2);
+      close.writeUInt16BE(1000, 0);
+      socket.write(Buffer.concat([encodeFrame(0x1, Buffer.from("last"), { mask: false }), encodeFrame(0x8, close, { mask: false })]));
+    });
+    const c = await connect(s.url);
+    const order: string[] = [];
+    c.on("message", (m: string) => order.push(`message:${m}`));
+    c.on("close", () => order.push("close"));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(order).toEqual(["message:last", "close"]);
+  });
+
+  it("stops delivering once a listener closes the connection", async () => {
+    const s = await serve((socket) => {
+      socket.write(Buffer.concat([encodeFrame(0x1, Buffer.from("a"), { mask: false }), encodeFrame(0x1, Buffer.from("b"), { mask: false })]));
+    });
+    const c = await connect(s.url);
+    const got: string[] = [];
+    c.on("message", (m: string) => {
+      got.push(m);
+      c.terminate();
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(got).toEqual(["a"]);
+  });
+
   it("defaults to 1005 when a close frame has no status", async () => {
     const s = await serve((_sock, send) => send(0x8));
     const c = await connect(s.url);
