@@ -64,8 +64,8 @@ export async function repinSkill(root: string, config: SkillConfig): Promise<str
     const installed = JSON.parse(readFileSync(join(root, "node_modules/@maxgfr/webindex/package.json"), "utf8"));
     if (compareTags(toolTag, `v${installed.version}`) < 0) throw new Error("Refusing maintenance-tool downgrade");
     pkg.devDependencies = { ...pkg.devDependencies, "@maxgfr/webindex": toolUrl };
-    // GITHUB_TOKEN cannot push workflow-definition changes. The reusable shell
-    // is pinned separately and only maintainers advance that reviewed reference.
+    // GITHUB_TOKEN cannot push workflow-definition changes. Consumers call the
+    // reusable shell through the `v1` major tag, which each release moves forward.
     changes.push(`skillkit -> ${toolTag} (${toolCommit})`);
   }
   if (changes.length) writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
