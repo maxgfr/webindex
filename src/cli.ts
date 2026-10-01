@@ -97,6 +97,7 @@ import type { JsonSchemaProp } from "./mcp/protocol.js";
 import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
+import { browserDoctor } from "./browser/doctor.js";
 import { BROWSER_CAP_ADVICE, browserToolDecls, createBrowserToolHost } from "./browser/mcp.js";
 import { confinePath, publicUrlRefusal, publicUrlsOnly, toolTimeoutMs } from "./mcp/policy.js";
 
@@ -2998,6 +2999,7 @@ async function dispatch(argv: string[]): Promise<void> {
     const pdf = rungRows(PDF_EXTRACTORS, pdfRungs, "PDF_ENGINE");
     const doc = rungRows(DOC_EXTRACTORS, docRungs, "DOC_ENGINE");
     const video = rungRows(VIDEO_TRANSCRIBERS, enabledTranscribers(), "VIDEO_ENGINES");
+    const browser = await browserDoctor();
     if (argBool(args, "json")) {
       const service = (base: string | null | undefined, up: boolean, extra: Record<string, string> = {}) =>
         base ? { state: up ? "answering" : "unreachable", base, ...(up ? extra : {}) } : { state: "disabled" };
@@ -3012,12 +3014,21 @@ async function dispatch(argv: string[]): Promise<void> {
           },
           rungs: { pdf, doc, video },
           ytdlp: ytdlp ? { ...ytdlp, stale: ytdlpStale } : { state: "not installed" },
+          browser,
         }),
       );
       return;
     }
     const rungLines = (label: string, rows: { id: string; state: string }[]) =>
       rows.map(({ id, state }, i) => `  ${(i ? "" : label).padEnd(12)}${id.padEnd(15)}${state}`);
+    const bin = browser.binary;
+    const sess = browser.session;
+    const browserLines = [
+      `  browser     ${bin.state === "found" ? `${bin.kind} at ${bin.path}` : bin.state === "error" ? bin.error : `not found — ${bin.hint}`}`,
+      `              home ${browser.home}${browser.profiles.length ? ` (profiles: ${browser.profiles.join(", ")})` : ""}`,
+      `              session ${sess.state === "none" ? "none" : `port ${sess.port}, profile ${sess.profile}, ${sess.launchedByUs ? "launched by webindex" : "attached"}, ${sess.state === "alive" ? "answering" : "not answering"}`}`,
+      `              fetch ${browser.fetch.mode === "off" ? `off (${envName("BROWSER_FETCH")}=always|fallback turns it on)` : browser.fetch.mode}, concurrency ${browser.fetch.concurrency}`,
+    ];
     const lines = [
       `webindex ${ENGINE_VERSION}`,
       `  searxng     ${sx ? (sxUp ? `answering at ${sx}` : `not reachable at ${sx} — \`webindex searxng up\` starts it`) : "disabled"}`,
@@ -3027,6 +3038,7 @@ async function dispatch(argv: string[]): Promise<void> {
       ...rungLines("pdf rungs", pdf),
       ...rungLines("doc rungs", doc),
       ...rungLines("video rungs", video),
+      ...browserLines,
       "",
       "  Everything optional degrades to a note — nothing above is required, and none of it needs a key.",
     ];

@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -777,6 +777,24 @@ describe("doctor", () => {
     expect(j.rungs.pdf).toContainEqual({ id: "native", enabled: true, state: "built-in" });
     expect(j.rungs.pdf).toContainEqual({ id: "pdf-inspector", enabled: false, state: `off (${envName("PDF_ENGINE")}=native)` });
     expect(j.rungs.doc.map((r: { id: string }) => r.id)).toEqual(["anydoc", "firecrawl", "builtin"]);
+  });
+
+  it("reports the browser layer without creating the browser home", async () => {
+    const home = join(mkdtempSync(join(tmpdir(), "wi-doc-browser-")), "home");
+    process.env[envName("BROWSER_DIR")] = home;
+    try {
+      expect(await run(["doctor", "--json"])).toBe(0);
+      const j = JSON.parse(stdout());
+      expect(j.browser.home).toBe(home);
+      expect(j.browser.session).toEqual({ state: "none" });
+      expect(j.browser.fetch.concurrency).toBeGreaterThanOrEqual(1);
+      expect(existsSync(home)).toBe(false);
+      expect(await run(["doctor"])).toBe(0);
+      expect(stdout()).toMatch(/browser {5}/);
+      expect(existsSync(home)).toBe(false);
+    } finally {
+      delete process.env[envName("BROWSER_DIR")];
+    }
   });
 
   describe("video rungs", () => {
