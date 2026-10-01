@@ -993,3 +993,165 @@ describe("edges", () => {
     expect(seen).toEqual([{ timeoutMs: 1234 }, {}]);
   });
 });
+
+// --- review fixes: guard gaps, dialogs, reachability ------------------------------
+
+describe("typeText only types into text fields", () => {
+  it("refuses a button: Space on it would click it past the guard", async () => {
+    w.add(101, { tag: "BUTTON", text: "Pay now" });
+    const err = await typeText(session, "e1", " ", { deps }).catch((e) => e);
+    expect(err).toBeInstanceOf(ActionError);
+    expect(err.message).toMatch(/e1 is a <button> "Pay now", not a text field/);
+    expect(w.page.calls.some((c) => c.method === "DOM.focus")).toBe(false);
+    expect(keys()).toEqual([]);
+  });
+});
+
+describe("keys that land on another control after a Tab", () => {
+  const PAY = { role: "button", label: "Pay 30 €", isSubmit: false, formHasPassword: false, submitLabel: "" };
+  const tabMovesFocusToPay = () =>
+    w.page.handle("Input.dispatchKeyEvent", (e) => {
+      if (e.key === "Tab" && e.type === "rawKeyDown") w.active = PAY;
+    });
+
+  it("guards an Enter typed after a Tab against the control that now has focus", async () => {
+    w.add(102, { tag: "INPUT", value: "" });
+    tabMovesFocusToPay();
+    await expect(typeText(session, "e2", "x\t\n", { deps })).rejects.toBeInstanceOf(RiskRefusedError);
+    expect(keys().some((k) => k.key === "Enter")).toBe(false);
+  });
+
+  it("guards a Space typed after a Tab, and a submit Enter after one", async () => {
+    w.add(102, { tag: "INPUT", value: "" });
+    tabMovesFocusToPay();
+    await expect(typeText(session, "e2", "x\t ", { deps })).rejects.toBeInstanceOf(RiskRefusedError);
+    expect(keys().some((k) => k.key === " ")).toBe(false);
+    w.active = { ...PAY, role: "textbox", label: "" };
+    await expect(typeText(session, "e2", "x\t", { deps, submit: true })).rejects.toBeInstanceOf(RiskRefusedError);
+    expect(keys().some((k) => k.key === "Enter")).toBe(false);
+  });
+
+  it("lets them through once confirmed", async () => {
+    w.add(102, { tag: "INPUT", value: "" });
+    tabMovesFocusToPay();
+    await typeText(session, "e2", "x\t\n", { deps, confirm: true });
+    expect(keys().some((k) => k.key === "Enter")).toBe(true);
+  });
+
+  it("guards press Space on a focused risky button", async () => {
+    w.active = PAY;
+    await expect(press(session, "Space", { deps })).rejects.toBeInstanceOf(RiskRefusedError);
+    await expect(press(session, " ", { deps })).rejects.toBeInstanceOf(RiskRefusedError);
+    expect(keys()).toEqual([]);
+  });
+});
+
+describe("an action outrun by a dialog stops", () => {
+  const flush = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+
+  it("types nothing more once the dialog is answered", async () => {
+    w.add(102, { tag: "INPUT", value: "" });
+    let unblock = () => {};
+    let first = true;
+    w.page.handle("Input.dispatchKeyEvent", () => {
+      if (!first) return;
+      first = false;
+      w.dialogOpen = true;
+      w.page.emit("Page.javascriptDialogOpening", { type: "alert", message: "typed a", url: w.url });
+      return new Promise<void>((r) => {
+        unblock = r;
+      });
+    });
+    const r = await typeText(session, "e2", "abc", { deps, submit: true, confirm: true });
+    expect(r.dialog).toEqual({ type: "alert", message: "typed a" });
+    await handleDialog(session, true, undefined, { deps });
+    unblock();
+    await flush();
+    expect(keys()).toHaveLength(1);
+  });
+
+  it("does not send the second click of a double click", async () => {
+    w.add(101, { tag: "BUTTON" });
+    w.hitFor = 101;
+    let unblock = () => {};
+    w.page.handle("Input.dispatchMouseEvent", (e) => {
+      if (e.type !== "mouseReleased" || e.clickCount !== 1) return;
+      w.page.emit("Page.javascriptDialogOpening", { type: "confirm", message: "Sure?" });
+      return new Promise<void>((r) => {
+        unblock = r;
+      });
+    });
+    await click(session, "e1", { deps, clickCount: 2 });
+    unblock();
+    await flush();
+    expect(mouse().map((m) => `${m.type} ${m.clickCount ?? ""}`)).toEqual(["mouseMoved ", "mousePressed 1", "mouseReleased 1"]);
+  });
+});
+
+describe("the result of an action that opened a dialog", () => {
+  const openDialogOnRelease = () =>
+    w.page.handle("Input.dispatchMouseEvent", (e) => {
+      if (e.type !== "mouseReleased") return;
+      w.page.emit("Page.javascriptDialogOpening", { type: "alert", message: "hi", url: "https://a.test/from-dialog" });
+      return new Promise(() => {});
+    });
+
+  it("reads url and title from the browser side, not from the frozen page", async () => {
+    w.add(101, { tag: "BUTTON" });
+    w.hitFor = 101;
+    openDialogOnRelease();
+    session.currentUrl = () => Promise.reject(new Error("the renderer is frozen"));
+    w.page.handle("Target.getTargetInfo", ({ targetId }) => ({ targetInfo: { targetId, url: "https://a.test/info", title: "Info title" } }));
+    const r = await click(session, "e1", { deps });
+    expect(w.page.calls.find((c) => c.method === "Target.getTargetInfo")?.params).toEqual({ targetId: "T1" });
+    expect(r).toMatchObject({ url: "https://a.test/info", title: "Info title", dialog: { type: "alert", message: "hi" } });
+    const afterAct = w.page.methods().slice(w.page.methods().lastIndexOf("Input.dispatchMouseEvent"));
+    expect(afterAct).not.toContain("Page.getFrameTree");
+  });
+
+  it("falls back to the dialog's url and the session title", async () => {
+    w.add(101, { tag: "BUTTON" });
+    w.hitFor = 101;
+    openDialogOnRelease();
+    session.currentUrl = () => Promise.reject(new Error("the renderer is frozen"));
+    w.page.handle("Target.getTargetInfo", () => {
+      throw new CdpError("Target.getTargetInfo", -32000, "Not allowed");
+    });
+    const r = await click(session, "e1", { deps });
+    expect(r).toMatchObject({ url: "https://a.test/from-dialog", title: "A page" });
+  });
+});
+
+describe("click guards the control it actually lands on", () => {
+  it("refuses a container whose centre is an irreversible button", async () => {
+    w.add(101, { tag: "DIV", label: "Mes annonces" });
+    w.add(150, { tag: "BUTTON", parent: 101, label: "Supprimer" });
+    w.hitFor = 150;
+    await expect(click(session, "e1", { deps })).rejects.toBeInstanceOf(RiskRefusedError);
+    expect(mouse()).toEqual([]);
+    await click(session, "e1", { deps, confirm: true });
+    expect(mouse()).toHaveLength(3);
+  });
+});
+
+describe("a click point that reaches nothing", () => {
+  it("is an action error, whatever the browser answers", async () => {
+    w.add(101, { tag: "BUTTON" });
+    w.page.handle("DOM.getNodeForLocation", () => {
+      throw new CdpError("DOM.getNodeForLocation", -32000, "No node found at given location");
+    });
+    await expect(click(session, "e1", { deps })).rejects.toThrow(/e1 is not reachable at its centre/);
+    w.page.handle("DOM.getNodeForLocation", () => ({}));
+    await expect(click(session, "e1", { deps })).rejects.toThrow(/e1 is not reachable at its centre/);
+    w.page.handle("DOM.getNodeForLocation", () => ({ backendNodeId: 4242 }));
+    await expect(click(session, "e1", { deps })).rejects.toThrow(/e1 is not reachable at its centre/);
+    w.add(4242, { tag: "DIV" });
+    const resolve = w.page.calls.length;
+    w.page.handle("DOM.resolveNode", ({ backendNodeId }) => (backendNodeId === 4242 ? { object: {} } : { object: { objectId: `o${backendNodeId}` } }));
+    await expect(click(session, "e1", { deps })).rejects.toThrow(/e1 is not reachable at its centre/);
+    expect(w.page.calls.length).toBeGreaterThan(resolve);
+    expect(mouse()).toEqual([]);
+  });
+});

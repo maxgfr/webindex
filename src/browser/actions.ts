@@ -300,23 +300,30 @@ const an = (what: string): string => (/^<[aeiou]/i.test(what) ? "an" : "a");
 interface Performed {
   navigated: boolean;
   dialog?: DialogInfo;
+  /** The url of the frame that opened the dialog, from the event: known without asking the frozen page. */
+  dialogUrl?: string;
   value?: unknown;
 }
 
 function watchDialogs(page: CdpSession) {
   let seen: DialogInfo | undefined;
+  let url: string | undefined;
   let wake: (v: null) => void = () => {};
   const opened = new Promise<null>((resolve) => {
     wake = resolve;
   });
   const handler: CdpHandler = (p) => {
-    seen ??= { type: String(p?.type ?? "alert"), message: String(p?.message ?? "") };
+    if (!seen) {
+      seen = { type: String(p?.type ?? "alert"), message: String(p?.message ?? "") };
+      if (typeof p?.url === "string") url = p.url;
+    }
     wake(null);
   };
   page.on("Page.javascriptDialogOpening", handler);
   return {
     opened,
     seen: () => seen,
+    url: () => url,
     stop: () => page.off("Page.javascriptDialogOpening", handler),
   };
 }
@@ -326,25 +333,48 @@ const settleOpts = (opts: ActionOptions): SettleOptions => ({
   ...(opts.settleTimeoutMs !== undefined ? { timeoutMs: opts.settleTimeoutMs } : {}),
 });
 
+/** What a send from an act that was cut short meets: nothing more of it reaches the page. */
+class CutShortError extends Error {}
+
+/** The page, as an act sees it: once `stopped`, every send is refused instead of sent. */
+function stoppable(page: CdpSession, stopped: () => boolean): CdpSession {
+  return {
+    sessionId: page.sessionId,
+    send: <T>(method: string, params?: object, o?: { timeoutMs?: number }): Promise<T> =>
+      stopped() ? Promise.reject(new CutShortError(`${method} not sent: the action was cut short`)) : page.send<T>(method, params, o),
+    on: (m, h) => page.on(m, h),
+    off: (m, h) => page.off(m, h),
+    once: (m, o) => page.once(m, o),
+  };
+}
+
 /**
  * Run the action between arming the settle and awaiting it. A dialog that opens
  * while the action runs ends the wait at once: the page is frozen, and the
  * command that opened it (a mouse release, an evaluate) only answers once the
- * dialog is closed.
+ * dialog is closed. The act is handed a page that refuses every send from then
+ * on, so the rest of it (the next keys, a second click) does not run once the
+ * dialog is answered, in the middle of whatever the agent does next.
  */
-async function perform(session: ActionSession, opts: ActionOptions, act: () => Promise<unknown>): Promise<Performed> {
+async function perform(session: ActionSession, opts: ActionOptions, act: (page: CdpSession) => Promise<unknown>): Promise<Performed> {
   const dialogs = watchDialogs(session.page);
+  let stopped = false;
   try {
     const armed = await armSettle(session, settleOpts(opts));
     try {
-      const running = act();
+      const running = act(stoppable(session.page, () => stopped));
       running.catch(() => {}); // outrun by a dialog, its failure no longer matters
       const first = await Promise.race([running.then((value) => ({ value })), dialogs.opened]);
-      if (!first) return { navigated: false, dialog: dialogs.seen() as DialogInfo };
+      if (!first) {
+        const url = dialogs.url();
+        return { navigated: false, dialog: dialogs.seen() as DialogInfo, ...(url !== undefined ? { dialogUrl: url } : {}) };
+      }
       const { navigated } = await armed.done();
       const dialog = dialogs.seen();
-      return { navigated, ...(dialog ? { dialog } : {}), value: first.value };
+      const url = dialogs.url();
+      return { navigated, ...(dialog ? { dialog } : {}), ...(url !== undefined ? { dialogUrl: url } : {}), value: first.value };
     } finally {
+      stopped = true;
       armed.cancel();
     }
   } finally {
@@ -352,9 +382,30 @@ async function perform(session: ActionSession, opts: ActionOptions, act: () => P
   }
 }
 
+const TARGET_INFO_TIMEOUT_MS = 2000;
+
+/**
+ * Where the tab is. Behind a dialog the renderer answers nothing (Page.getFrameTree
+ * would wait out its timeout), so the url and title come from the browser side:
+ * Target.getTargetInfo, else the dialog's own url and the session's title.
+ */
+async function whereIs(session: ActionSession, p: Performed): Promise<{ url: string; title: string }> {
+  if (!p.dialog) return { url: await session.currentUrl(), title: await session.title() };
+  try {
+    const { targetInfo } = await session.page.send<{ targetInfo?: { url?: string; title?: string } }>(
+      "Target.getTargetInfo",
+      { targetId: session.targetId },
+      { timeoutMs: TARGET_INFO_TIMEOUT_MS },
+    );
+    if (targetInfo?.url !== undefined) return { url: targetInfo.url, title: targetInfo.title ?? "" };
+  } catch {
+    /* not answered on this session: fall back */
+  }
+  return { url: p.dialogUrl ?? "", title: await session.title().catch(() => "") };
+}
+
 async function finish(session: ActionSession, action: string, ref: string | undefined, p: Performed): Promise<ActionResult> {
-  const url = await session.currentUrl();
-  const title = await session.title();
+  const { url, title } = await whereIs(session, p);
   // A dialog freezes the page: a probe would hang until it is answered.
   const challenge = p.dialog ? null : await detectChallenge(session);
   return {
@@ -403,17 +454,35 @@ async function centreOf(page: CdpSession, node: ResolvedRef): Promise<{ x: numbe
   };
 }
 
-/** Throw if something other than the element (or its content) is what a click at x,y would land on. */
-async function assertHittable(page: CdpSession, node: ResolvedRef, x: number, y: number): Promise<void> {
-  const hit = await page.send<{ backendNodeId?: number }>("DOM.getNodeForLocation", { x, y, includeUserAgentShadowDOM: true });
-  if (hit.backendNodeId === node.backendNodeId) return;
-  const { object } = await page.send<{ object: { objectId?: string } }>("DOM.resolveNode", { backendNodeId: hit.backendNodeId });
+/**
+ * Throw unless a click at x,y lands on the element or inside it. Returns the
+ * node it lands on when that is a descendant (a button inside a card): the
+ * control the click really activates, for the guard to look at.
+ */
+async function hitTarget(page: CdpSession, node: ResolvedRef, x: number, y: number): Promise<number | undefined> {
+  const at = `(${Math.round(x)}, ${Math.round(y)})`;
+  const unreachable = () =>
+    new ActionError(`${node.ref} is not reachable at its centre ${at}: the browser finds nothing there to click; scroll, or take a new snapshot`);
+  /** A CDP error answer here means "no node there" or "that node is gone": unreachable. Transport errors go through. */
+  const ask = async <T>(method: string, params: object): Promise<T> => {
+    try {
+      return await page.send<T>(method, params);
+    } catch (e) {
+      throw e instanceof CdpError ? unreachable() : e;
+    }
+  };
+  const hit = (await ask<{ backendNodeId?: number }>("DOM.getNodeForLocation", { x, y, includeUserAgentShadowDOM: true })).backendNodeId;
+  if (hit === undefined) throw unreachable();
+  if (hit === node.backendNodeId) return undefined;
+  const objectId = (await ask<{ object?: { objectId?: string } }>("DOM.resolveNode", { backendNodeId: hit })).object?.objectId;
+  if (!objectId) throw unreachable();
   try {
-    const cover = await callOn<string | null>(page, node.objectId, PAGE_FUNCTIONS.hitTest, [object.objectId ? { objectId: object.objectId } : { value: null }]);
-    if (cover) throw new ActionError(`${node.ref} is covered by ${cover} at (${Math.round(x)}, ${Math.round(y)}): close or move it out of the way, then retry`);
+    const cover = await callOn<string | null>(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
+    if (cover) throw new ActionError(`${node.ref} is covered by ${cover} at ${at}: close or move it out of the way, then retry`);
   } finally {
-    if (object.objectId) release(page, object.objectId);
+    release(page, objectId);
   }
+  return hit;
 }
 
 // --- actions -----------------------------------------------------------------
@@ -434,12 +503,14 @@ export async function click(session: ActionSession, ref: string, opts: ClickOpti
   return withRef(session, ref, async (node) => {
     await guardAction(page, { backendNodeId: node.backendNodeId, action: "click", ...(opts.confirm ? { confirm: true } : {}) });
     const { x, y } = await centreOf(page, node);
-    await assertHittable(page, node, x, y);
-    const p = await perform(session, opts, async () => {
-      await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0 });
+    // The ref may name a container (a card, a row) whose centre is a "Delete" button: that button is what acts.
+    const inner = await hitTarget(page, node, x, y);
+    if (inner !== undefined && !opts.confirm) await guardAction(page, { backendNodeId: inner, action: "click" });
+    const p = await perform(session, opts, async (pg) => {
+      await pg.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0 });
       for (let n = 1; n <= count; n++) {
-        await page.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, buttons: BUTTONS[button], clickCount: n });
-        await page.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, buttons: 0, clickCount: n });
+        await pg.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, buttons: BUTTONS[button], clickCount: n });
+        await pg.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, buttons: 0, clickCount: n });
       }
     });
     return finish(session, "click", ref, p);
@@ -451,7 +522,7 @@ export async function hover(session: ActionSession, ref: string, opts: ActionOpt
   const page = session.page;
   return withRef(session, ref, async (node) => {
     const { x, y } = await centreOf(page, node);
-    const p = await perform(session, opts, () => page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0 }));
+    const p = await perform(session, opts, (pg) => pg.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0 }));
     return finish(session, "hover", ref, p);
   });
 }
@@ -460,20 +531,42 @@ async function dispatchKeys(page: CdpSession, spec: KeySpec): Promise<void> {
   for (const e of keyEventsFor(spec)) await page.send("Input.dispatchKeyEvent", e);
 }
 
+type FieldKind = { kind: "field" | "editable" | "other"; what?: string; hint?: string; secret?: boolean };
+
+/** The element as a text field, or an ActionError pointing at the action that fits it. */
+async function textField(page: CdpSession, node: ResolvedRef): Promise<FieldKind & { kind: "field" | "editable" }> {
+  const field = await callOn<FieldKind>(page, node.objectId, PAGE_FUNCTIONS.fieldKind);
+  if (field.kind === "other") {
+    const what = field.what ?? "element";
+    throw new ActionError(`${node.ref} is ${an(what)} ${what}, not a text field${field.hint ? `: ${field.hint}` : ""}`);
+  }
+  return field as FieldKind & { kind: "field" | "editable" };
+}
+
 /**
- * Focus the element and type the text key by key, for fields that react to each
- * keystroke (autocomplete, masks). A newline is Enter, and so is `submit` after
- * the text: either goes through the guard first, before anything is typed.
+ * Focus a text field and type the text key by key, for fields that react to each
+ * keystroke (autocomplete, masks). Only text fields: Space on a focused button
+ * would click it. A newline is Enter, and so is `submit` after the text: the
+ * guard sees it before anything is typed, and again right before each Enter —
+ * and each Space after a Tab — since a Tab moves focus to another control.
  */
 export async function typeText(session: ActionSession, ref: string, text: string, opts: TypeOptions = {}): Promise<ActionResult> {
   const chars = [...text.replace(/\r\n?/g, "\n")];
   const page = session.page;
+  const confirm = opts.confirm ? { confirm: true } : {};
   return withRef(session, ref, async (node) => {
+    await textField(page, node);
     await page.send("DOM.focus", { backendNodeId: node.backendNodeId });
-    if (opts.submit || chars.includes("\n")) await guardAction(page, { action: "press", key: "Enter", ...(opts.confirm ? { confirm: true } : {}) });
-    const p = await perform(session, opts, async () => {
-      for (const c of chars) await dispatchKeys(page, parseKey(c));
-      if (opts.submit) await dispatchKeys(page, parseKey("Enter"));
+    if (opts.submit || chars.includes("\n")) await guardAction(page, { action: "press", key: "Enter", ...confirm });
+    const p = await perform(session, opts, async (pg) => {
+      let tabbed = false;
+      const type = async (spec: KeySpec) => {
+        if (spec.key === "Enter" || (tabbed && spec.key === " ")) await guardAction(pg, { action: "press", key: keyName(spec), ...confirm });
+        if (spec.key === "Tab") tabbed = true;
+        await dispatchKeys(pg, spec);
+      };
+      for (const c of chars) await type(parseKey(c));
+      if (opts.submit) await type(parseKey("Enter"));
     });
     return finish(session, "type", ref, p);
   });
@@ -503,24 +596,16 @@ function holds(actual: unknown, want: string): boolean {
 export async function fill(session: ActionSession, ref: string, text: string, opts: ActionOptions = {}): Promise<ActionResult> {
   const page = session.page;
   return withRef(session, ref, async (node) => {
-    const field = await callOn<{ kind: "field" | "editable" | "other"; what?: string; hint?: string; secret?: boolean }>(
-      page,
-      node.objectId,
-      PAGE_FUNCTIONS.fieldKind,
-    );
-    if (field.kind === "other") {
-      const what = field.what ?? "element";
-      throw new ActionError(`${ref} is ${an(what)} ${what}, not a text field${field.hint ? `: ${field.hint}` : ""}`);
-    }
+    const field = await textField(page, node);
     const kind = { value: field.kind };
-    const read = () => callOn<unknown>(page, node.objectId, PAGE_FUNCTIONS.readValue, [kind]);
-    const p = await perform(session, opts, async () => {
-      await page.send("DOM.focus", { backendNodeId: node.backendNodeId });
-      await callOn(page, node.objectId, PAGE_FUNCTIONS.selectAll, [kind]);
-      if (text === "") await dispatchKeys(page, parseKey("Delete"));
-      else await page.send("Input.insertText", { text });
+    const p = await perform(session, opts, async (pg) => {
+      const read = () => callOn<unknown>(pg, node.objectId, PAGE_FUNCTIONS.readValue, [kind]);
+      await pg.send("DOM.focus", { backendNodeId: node.backendNodeId });
+      await callOn(pg, node.objectId, PAGE_FUNCTIONS.selectAll, [kind]);
+      if (text === "") await dispatchKeys(pg, parseKey("Delete"));
+      else await pg.send("Input.insertText", { text });
       if (holds(await read(), text)) return;
-      await callOn(page, node.objectId, PAGE_FUNCTIONS.setValue, [{ value: text }, kind]);
+      await callOn(pg, node.objectId, PAGE_FUNCTIONS.setValue, [{ value: text }, kind]);
       const now = await read();
       if (holds(now, text)) return;
       const shown = field.secret ? "something else" : JSON.stringify(typeof now === "string" && now.length > 80 ? `${now.slice(0, 77)}...` : now);
@@ -559,7 +644,7 @@ export async function select(session: ActionSession, ref: string, values: string
       throw new ActionError(`no option ${missing} in ${ref}; options: ${listed.join(", ")}${more > 0 ? `, … and ${more} more` : ""}`);
     }
     if (m.error === "single") throw new ActionError(`${ref} takes one value, not ${values.length}`);
-    const p = await perform(session, opts, () => callOn<string[]>(page, node.objectId, PAGE_FUNCTIONS.applyOptions, [{ value: m.picked ?? [] }]));
+    const p = await perform(session, opts, (pg) => callOn<string[]>(pg, node.objectId, PAGE_FUNCTIONS.applyOptions, [{ value: m.picked ?? [] }]));
     return finish(session, "select", ref, p);
   });
 }
@@ -572,7 +657,7 @@ export async function press(session: ActionSession, key: string, opts: PressOpti
   const spec = parseKey(key);
   const page = session.page;
   await guardAction(page, { action: "press", key: keyName(spec), ...(opts.confirm ? { confirm: true } : {}) });
-  const p = await perform(session, opts, () => dispatchKeys(page, spec));
+  const p = await perform(session, opts, (pg) => dispatchKeys(pg, spec));
   return finish(session, "press", undefined, p);
 }
 
@@ -603,7 +688,7 @@ export async function upload(session: ActionSession, ref: string, files: string[
       );
     }
     if (files.length > 1 && !input.multiple) throw new ActionError(`${ref} takes one file, not ${files.length}`);
-    const p = await perform(session, opts, () => page.send("DOM.setFileInputFiles", { files, backendNodeId: node.backendNodeId }));
+    const p = await perform(session, opts, (pg) => pg.send("DOM.setFileInputFiles", { files, backendNodeId: node.backendNodeId }));
     return finish(session, "upload", ref, { ...p, value: { files: files.length } });
   });
 }
@@ -624,17 +709,16 @@ async function evalValue(page: CdpSession, expression: string): Promise<unknown>
 
 /** Scroll the window ("up"/"down" by most of a screen, "top", "bottom") or a ref into view. The value is the window's scroll position. */
 export async function scroll(session: ActionSession, target: string, opts: ActionOptions = {}): Promise<ActionResult> {
-  const page = session.page;
   const how = SCROLLS[target];
   if (how) {
-    const p = await perform(session, opts, () => evalValue(page, `(() => { ${how}; return ${POSITION}; })()`));
+    const p = await perform(session, opts, (pg) => evalValue(pg, `(() => { ${how}; return ${POSITION}; })()`));
     return finish(session, "scroll", undefined, p);
   }
   if (!/^e\d+$/.test(target)) throw new UsageError(`scroll takes a ref (e12) or one of up, down, top, bottom — not ${JSON.stringify(target)}`);
   return withRef(session, target, async (node) => {
-    const p = await perform(session, opts, async () => {
-      await page.send("DOM.scrollIntoViewIfNeeded", { backendNodeId: node.backendNodeId });
-      return evalValue(page, POSITION);
+    const p = await perform(session, opts, async (pg) => {
+      await pg.send("DOM.scrollIntoViewIfNeeded", { backendNodeId: node.backendNodeId });
+      return evalValue(pg, POSITION);
     });
     return finish(session, "scroll", target, p);
   });
@@ -695,11 +779,10 @@ function remoteValue(r: RemoteObject | undefined): unknown {
  * return its value. A page exception is an error carrying its message.
  */
 export async function evaluate(session: ActionSession, expression: string, opts: ActionOptions = {}): Promise<ActionResult> {
-  const page = session.page;
-  const p = await perform(session, opts, async () => {
+  const p = await perform(session, opts, async (pg) => {
     let r: { result?: RemoteObject; exceptionDetails?: ExceptionDetails };
     try {
-      r = await page.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+      r = await pg.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     } catch (e) {
       if (e instanceof CdpError && /reference chain|serializ|by value/i.test(e.message))
         throw new ActionError(`the result cannot be returned as JSON (${e.message}): return plain data, e.g. only the fields you need`);
@@ -713,10 +796,9 @@ export async function evaluate(session: ActionSession, expression: string, opts:
 
 /** Accept or dismiss the JavaScript dialog the page shows (`promptText` answers a prompt). */
 export async function handleDialog(session: ActionSession, accept: boolean, promptText?: string, opts: ActionOptions = {}): Promise<ActionResult> {
-  const page = session.page;
-  const p = await perform(session, opts, async () => {
+  const p = await perform(session, opts, async (pg) => {
     try {
-      await page.send("Page.handleJavaScriptDialog", { accept, ...(promptText !== undefined ? { promptText } : {}) });
+      await pg.send("Page.handleJavaScriptDialog", { accept, ...(promptText !== undefined ? { promptText } : {}) });
     } catch (e) {
       if (e instanceof CdpError && /no dialog/i.test(e.message)) throw new ActionError("no dialog is open");
       throw e;

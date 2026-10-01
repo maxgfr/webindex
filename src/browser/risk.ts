@@ -100,19 +100,31 @@ function matchLabel(label: string | undefined): string | undefined {
 }
 
 const ENTER = new Set(["enter", "numpadenter", "return"]);
-/** "Control+Enter", "enter" and "Return" are all Enter: the last `+` segment, case-insensitive. */
-const isEnter = (key: string | undefined): boolean => ENTER.has((key ?? "").split("+").pop()?.toLowerCase() ?? "");
+const SPACE = new Set([" ", "space", "spacebar"]);
+/** The key a chord ends with, lowercased: "Control+Enter" → "enter". */
+const lastKey = (key: string | undefined): string => {
+  const k = key ?? "";
+  return k.endsWith("+ ") || k === " " ? " " : (k.split("+").pop()?.toLowerCase() ?? "");
+};
+/** "Control+Enter", "enter" and "Return" are all Enter. */
+const isEnter = (key: string | undefined): boolean => ENTER.has(lastKey(key));
+/** " ", "Space" and "Shift+Space" are all Space. */
+const isSpace = (key: string | undefined): boolean => SPACE.has(lastKey(key));
 /** Roles where Enter activates the focused control itself, as a click would. */
 const ACTIVATES = new Set(["button", "link", "menuitem"]);
+/** Roles Space activates (or toggles) as a click would. Never a text field: there it types a space. */
+const SPACE_ACTIVATES = new Set([...ACTIVATES, "checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio", "option", "tab", "treeitem"]);
 
 const shown = (label: string) => (label.length > 60 ? `${label.slice(0, 57)}...` : label);
 
 /** Would this action do something that cannot be taken back? Pure: the page is read by riskContext. */
 export function assessRisk(ctx: RiskContext): Risk {
-  if (ctx.action === "press" && !isEnter(ctx.key)) return { risky: false };
+  // Space on a control is a click on it; anywhere else it is harmless.
+  const spaceClick = ctx.action === "press" && isSpace(ctx.key) && SPACE_ACTIVATES.has(ctx.role ?? "");
+  if (ctx.action === "press" && !isEnter(ctx.key) && !spaceClick) return { risky: false };
   if (ctx.isSubmit && ctx.formHasPassword) return { risky: true, reason: PASSWORD_REASON };
   // A click acts on its target; Enter acts on it only if it is a button or link, else on the form's submit control.
-  const acts = ctx.action === "click" || ACTIVATES.has(ctx.role ?? "");
+  const acts = ctx.action === "click" || spaceClick || ACTIVATES.has(ctx.role ?? "");
   const label = acts ? ctx.label : ctx.isSubmit ? (ctx.submitLabel ?? "") : "";
   const word = matchLabel(label);
   if (word) return { risky: true, reason: `the control "${shown(label)}" looks irreversible (matches "${word}")` };
@@ -254,7 +266,7 @@ export interface GuardOptions {
 /** Resolve if the action may go ahead; throw RiskRefusedError if it looks irreversible and was not confirmed. */
 export async function guardAction(page: CdpSession, opts: GuardOptions): Promise<void> {
   if (opts.confirm) return;
-  if (opts.action === "press" && !isEnter(opts.key)) return;
+  if (opts.action === "press" && !isEnter(opts.key) && !isSpace(opts.key)) return;
   let el: ElementRisk;
   try {
     el = await riskContext(page, opts.backendNodeId, opts.action, opts.key);
@@ -265,6 +277,9 @@ export async function guardAction(page: CdpSession, opts: GuardOptions): Promise
     throw new RiskRefusedError(opts.action, e.message, "", opts.key);
   }
   const risk = assessRisk({ action: opts.action, ...(opts.key !== undefined ? { key: opts.key } : {}), ...el });
-  if (risk.risky)
-    throw new RiskRefusedError(opts.action, risk.reason ?? "looks irreversible", opts.action === "press" ? el.submitLabel || el.label : el.label, opts.key);
+  if (risk.risky) {
+    // Name the control that would act: the target itself, unless the key submits the form it sits in.
+    const onTarget = opts.action === "click" || (isSpace(opts.key) ? SPACE_ACTIVATES : ACTIVATES).has(el.role);
+    throw new RiskRefusedError(opts.action, risk.reason ?? "looks irreversible", onTarget ? el.label : el.submitLabel || el.label, opts.key);
+  }
 }

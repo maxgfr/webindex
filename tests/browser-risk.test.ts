@@ -327,3 +327,33 @@ describe("guardAction", () => {
     await expect(guardAction(p, { backendNodeId: 3, action: "click", confirm: true })).resolves.toBeUndefined();
   });
 });
+
+describe("Space activates what it is pressed on", () => {
+  const space = (key: string, over: object) => assessRisk({ action: "press", key, label: "", isSubmit: false, formHasPassword: false, ...over });
+
+  it("guards Space on a button, link, checkbox-like control as a click would be", () => {
+    for (const key of [" ", "Space", "space", "Shift+Space"]) expect(space(key, { role: "button", label: "Pay now" }).risky, key).toBe(true);
+    expect(space("Space", { role: "link", label: "Delete this ad" }).risky).toBe(true);
+    expect(space("Space", { role: "checkbox", label: "Publish my listing" }).risky).toBe(true);
+    expect(space("Space", { role: "menuitem", label: "Supprimer" }).risky).toBe(true);
+    expect(space("Space", { role: "button", label: "Log in", isSubmit: true, formHasPassword: true })).toEqual({
+      risky: true,
+      reason: "form contains a password field — let the human log in",
+    });
+  });
+
+  it("lets Space through on harmless controls and in text fields", () => {
+    expect(space("Space", { role: "button", label: "Next" }).risky).toBe(false);
+    expect(space("Space", { role: "textbox", label: "Send a message", isSubmit: true, submitLabel: "Send" }).risky).toBe(false);
+    expect(space(" ", { role: "textbox", isSubmit: true, formHasPassword: true }).risky).toBe(false);
+  });
+
+  it("makes guardAction look at the focused element for Space", async () => {
+    const p = new FakePage();
+    p.handle("Runtime.evaluate", () => ({
+      result: { value: { role: "button", label: "Payer 12 €", isSubmit: false, formHasPassword: false, submitLabel: "" } },
+    }));
+    await expect(guardAction(p, { action: "press", key: "Space" })).rejects.toBeInstanceOf(RiskRefusedError);
+    await expect(guardAction(p, { action: "press", key: " " })).rejects.toBeInstanceOf(RiskRefusedError);
+  });
+});
