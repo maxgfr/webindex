@@ -375,4 +375,27 @@ describe("armSettle", () => {
     await expect(armed.done()).rejects.toThrow(/already/);
     expect(p.listenerCount()).toBe(0);
   });
+
+  it("does not take the old document's readyState for the new one's load", async () => {
+    const p = treePage();
+    p.handle("Runtime.evaluate", () => ({ result: { value: "complete" } })); // the old document, until the commit
+    const clock = fakeClock((t) => {
+      if (t === 1050) p.emit("Page.frameStartedLoading", { frameId: "main" });
+      if (t === 3000) p.emit("Page.lifecycleEvent", { frameId: "main", name: "load" });
+    });
+    const r = await settle({ page: p }, { deps: clock });
+    expect(r.navigated).toBe(true);
+    expect(r.waitedMs).toBeGreaterThanOrEqual(2000 + 300);
+  });
+
+  it("cancel() releases the listeners and the network watch without done()", async () => {
+    const p = treePage();
+    const armed = await armSettle({ page: p }, { deps: fakeClock() });
+    expect(p.listenerCount()).toBeGreaterThan(0);
+    armed.cancel();
+    expect(p.listenerCount()).toBe(0);
+    armed.cancel(); // idempotent
+    expect(await armed.done()).toEqual({ navigated: false, waitedMs: 0 });
+    expect(p.listenerCount()).toBe(0);
+  });
 });

@@ -197,6 +197,8 @@ export interface SettleResult {
 export interface ArmedSettle {
   /** Wait for what the action set off: its navigation to load, then a quiet network. */
   done(): Promise<SettleResult>;
+  /** Release the listeners and the network watch without waiting: for when the action between arm and done failed. Idempotent. */
+  cancel(): void;
 }
 
 /**
@@ -240,7 +242,10 @@ export async function armSettle(session: WaitSession, opts: SettleOptions = {}):
   ];
   for (const [m, h] of handlers) page.on(m, h);
   const net = await watchNetwork(page);
+  let stopped = false;
   const stop = () => {
+    if (stopped) return;
+    stopped = true;
     for (const [m, h] of handlers) page.off(m, h);
     net.stop();
   };
@@ -259,6 +264,7 @@ export async function armSettle(session: WaitSession, opts: SettleOptions = {}):
   let used = false;
   return {
     async done(): Promise<SettleResult> {
+      if (stopped && !used) return { navigated: false, waitedMs: 0 }; // cancelled
       if (used) throw new Error("this settle was already awaited");
       used = true;
       const start = now();
@@ -268,13 +274,19 @@ export async function armSettle(session: WaitSession, opts: SettleOptions = {}):
       try {
         // Already under way: a document that is not the one we armed on, or one still loading.
         let navigated = sawNavigation();
+        // Only a navigation inferred from the page's state can be confirmed by that state: while the events
+        // show one under way, the OLD document is still live and says "complete".
+        let inferred = false;
         if (!navigated) {
           const t = await tree();
           const readyState = await evaluate(page, "document.readyState");
           navigated =
             (armedLoader !== undefined && t.loaderId !== undefined && t.loaderId !== armedLoader) ||
             (typeof readyState === "string" && readyState !== "complete");
-          if (navigated) mainId ??= t.id;
+          if (navigated) {
+            inferred = true;
+            mainId ??= t.id;
+          }
         }
         // Or about to start (within the window).
         while (!navigated && now() - start < SETTLE_NAV_WINDOW_MS && now() < deadline) {
@@ -282,7 +294,8 @@ export async function armSettle(session: WaitSession, opts: SettleOptions = {}):
           navigated = sawNavigation();
         }
         // Let it load.
-        const loaded = async () => (mainId !== undefined && finished.has(mainId)) || (await evaluate(page, "document.readyState")) === "complete";
+        const loaded = async () =>
+          (mainId !== undefined && finished.has(mainId)) || (inferred && !sawNavigation() && (await evaluate(page, "document.readyState")) === "complete");
         while (navigated && now() < deadline && !(await loaded())) await step();
         // Quiet network: counted from the load (or from the start, if nothing navigated).
         let quietSince = navigated ? undefined : start;
@@ -297,6 +310,7 @@ export async function armSettle(session: WaitSession, opts: SettleOptions = {}):
         stop();
       }
     },
+    cancel: stop,
   };
 }
 

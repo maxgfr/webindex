@@ -293,6 +293,23 @@ describe("guardAction", () => {
     await expect(guardAction(p, { backendNodeId: 9, action: "click" })).rejects.toThrow(/No node/);
   });
 
+  it("refuses an element the collector could not read, but lets transport and DOM errors through unchanged", async () => {
+    const exc = new FakePage();
+    exc.handle("DOM.resolveNode", () => ({ object: { objectId: "o" } }));
+    exc.handle("Runtime.callFunctionOn", () => ({ exceptionDetails: { text: "Uncaught" } }));
+    expect(await guardAction(exc, { backendNodeId: 1, action: "click" }).catch((e) => e)).toBeInstanceOf(RiskRefusedError);
+
+    for (const message of ["No node with given id found", "CDP command Runtime.callFunctionOn timed out"]) {
+      const p = new FakePage();
+      p.handle("DOM.resolveNode", () => {
+        throw new Error(message);
+      });
+      const err = await guardAction(p, { backendNodeId: 1, action: "click" }).catch((e) => e);
+      expect(err).not.toBeInstanceOf(RiskRefusedError);
+      expect(err.message).toBe(message);
+    }
+  });
+
   it("guards Enter however the key is spelled", async () => {
     const p = scripted({ role: "textbox", label: "", isSubmit: true, formHasPassword: true, submitLabel: "Log in" });
     for (const key of ["Control+Enter", "enter", "Return"])

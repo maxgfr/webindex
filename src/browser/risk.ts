@@ -186,12 +186,15 @@ export const COLLECT_SOURCE = `function (action) {
 
 type PageResult = { result?: { value?: unknown }; exceptionDetails?: { text?: string; exception?: { description?: string } } };
 
+/** The collector could not tell what the element is: the one inspection failure that is a refusal. */
+class UninspectableError extends Error {}
+
 /** The collector's answer, or an error: a page that cannot be read must not look harmless. */
 function collected(r: PageResult): ElementRisk {
   if (r.exceptionDetails)
-    throw new Error(`could not inspect the target: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text ?? "page error"}`);
+    throw new UninspectableError(`could not inspect the target: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text ?? "page error"}`);
   const v = r.result?.value;
-  if (typeof v !== "object" || v === null) throw new Error("could not inspect the target: it is not an element");
+  if (typeof v !== "object" || v === null) throw new UninspectableError("could not inspect the target: it is not an element");
   return { role: "", label: "", isSubmit: false, formHasPassword: false, submitLabel: "", ...(v as Partial<ElementRisk>) };
 }
 
@@ -256,8 +259,10 @@ export async function guardAction(page: CdpSession, opts: GuardOptions): Promise
   try {
     el = await riskContext(page, opts.backendNodeId, opts.action, opts.key);
   } catch (e) {
-    // Fail closed: what cannot be inspected cannot be called harmless.
-    throw new RiskRefusedError(opts.action, `could not inspect the target (${(e as Error).message})`, "", opts.key);
+    // Fail closed: an element that cannot be read cannot be called harmless. A transport or DOM error (a timeout,
+    // a stale node) is not about the element: it propagates unchanged, and the action does not run either.
+    if (!(e instanceof UninspectableError)) throw e;
+    throw new RiskRefusedError(opts.action, e.message, "", opts.key);
   }
   const risk = assessRisk({ action: opts.action, ...(opts.key !== undefined ? { key: opts.key } : {}), ...el });
   if (risk.risky)
