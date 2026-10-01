@@ -55,12 +55,16 @@ interface Evidence {
   interstitial?: boolean;
   /** Present on ordinary pages of a protected site too (a cookie, a tag): counts only on a page that looks blocked. */
   weak?: boolean;
+  /** A widget meant to sit inside a normal page (a checkbox, a Turnstile): an empty page does not make it a block, only a blocked status does. */
+  widget?: boolean;
 }
 
 interface Haystack {
   title: string;
   text: string;
   urls: string[];
+  frames: string[];
+  scripts: string[];
   cookies: string[];
   selectors: string[];
 }
@@ -69,6 +73,8 @@ interface Haystack {
 const norm = (s: string): string => s.normalize("NFD").replace(/\p{M}/gu, "").replace(/[‘’]/g, "'").toLowerCase();
 
 const urlHas = (h: Haystack, needle: string): string | undefined => h.urls.find((u) => u.includes(needle));
+const frameHas = (h: Haystack, needle: string): string | undefined => h.frames.find((u) => u.includes(needle));
+const scriptHas = (h: Haystack, needle: string): string | undefined => h.scripts.find((u) => u.includes(needle));
 const selHas = (h: Haystack, needle: string): boolean => h.selectors.some((s) => s.includes(needle));
 
 function add(out: Evidence[], cond: unknown, e: Evidence): void {
@@ -79,8 +85,9 @@ type Rule = (h: Haystack) => Evidence[];
 
 const datadome: Rule = (h) => {
   const out: Evidence[] = [];
-  const frame = urlHas(h, "captcha-delivery.com");
+  const frame = frameHas(h, "captcha-delivery.com");
   add(out, frame, { signal: "captcha-delivery.com", interstitial: true });
+  add(out, scriptHas(h, "captcha-delivery.com"), { signal: "captcha-delivery.com script", weak: true });
   add(out, selHas(h, "datadome"), { signal: "datadome frame" });
   add(out, h.cookies.includes("datadome"), { signal: "datadome cookie", weak: true });
   add(out, urlHas(h, "datadome.co"), { signal: "datadome.co script", weak: true });
@@ -102,8 +109,9 @@ const cloudflare: Rule = (h) => {
     h.cookies.some((c) => c.startsWith("cf-chl") || c.startsWith("__cf_chl")),
     { signal: "cf-chl cookie", weak: true },
   );
-  add(out, selHas(h, ".cf-turnstile"), { signal: ".cf-turnstile" });
-  add(out, urlHas(h, "challenges.cloudflare.com"), { signal: "challenges.cloudflare.com" });
+  add(out, selHas(h, ".cf-turnstile"), { signal: ".cf-turnstile", widget: true });
+  add(out, frameHas(h, "challenges.cloudflare.com"), { signal: "challenges.cloudflare.com frame", widget: true });
+  add(out, scriptHas(h, "challenges.cloudflare.com"), { signal: "challenges.cloudflare.com script", weak: true });
   return out;
 };
 
@@ -111,7 +119,7 @@ const perimeterx: Rule = (h) => {
   const out: Evidence[] = [];
   add(out, selHas(h, "px-captcha"), { signal: "#px-captcha", interstitial: true });
   add(out, h.text.includes("press & hold") || h.text.includes("appuyez et maintenez"), { signal: "Press & Hold", interstitial: true });
-  add(out, urlHas(h, "captcha.px-cdn.net"), { signal: "captcha.px-cdn.net" });
+  add(out, urlHas(h, "captcha.px-cdn.net"), { signal: "captcha.px-cdn.net", widget: true });
   const tag = urlHas(h, "px-cdn.net") ?? urlHas(h, "px-cloud.net");
   add(out, tag, { signal: "px script", weak: true });
   add(
@@ -134,7 +142,7 @@ const akamai: Rule = (h) => {
 const imperva: Rule = (h) => {
   const out: Evidence[] = [];
   add(out, h.text.includes("incapsula incident id"), { signal: "Incapsula incident ID", interstitial: true });
-  add(out, urlHas(h, "_incapsula_resource") || h.text.includes("_incapsula_resource"), { signal: "_Incapsula_Resource" });
+  add(out, urlHas(h, "_incapsula_resource") || h.text.includes("_incapsula_resource"), { signal: "_Incapsula_Resource", weak: true });
   add(
     out,
     h.cookies.some((c) => c.startsWith("incap_ses")),
@@ -145,22 +153,25 @@ const imperva: Rule = (h) => {
 
 const arkose: Rule = (h) => {
   const out: Evidence[] = [];
-  const u = urlHas(h, "arkoselabs.com") ?? urlHas(h, "funcaptcha");
-  add(out, u, { signal: u?.includes("funcaptcha") ? "funcaptcha" : "arkoselabs.com" });
+  const f = frameHas(h, "arkoselabs.com") ?? frameHas(h, "funcaptcha");
+  add(out, f, { signal: f?.includes("funcaptcha") ? "funcaptcha" : "arkoselabs.com", widget: true });
+  add(out, scriptHas(h, "arkoselabs.com") ?? scriptHas(h, "funcaptcha"), { signal: "arkose script", weak: true });
   return out;
 };
 
 const hcaptcha: Rule = (h) => {
   const out: Evidence[] = [];
-  add(out, urlHas(h, "hcaptcha.com"), { signal: "hcaptcha.com" });
-  add(out, selHas(h, ".h-captcha"), { signal: ".h-captcha" });
+  add(out, frameHas(h, "hcaptcha.com"), { signal: "hcaptcha.com frame", widget: true });
+  add(out, scriptHas(h, "hcaptcha.com"), { signal: "hcaptcha.com script", weak: true });
+  add(out, selHas(h, ".h-captcha"), { signal: ".h-captcha", widget: true });
   return out;
 };
 
 const recaptcha: Rule = (h) => {
   const out: Evidence[] = [];
-  add(out, urlHas(h, "google.com/recaptcha") || urlHas(h, "recaptcha.net"), { signal: "recaptcha frame" });
-  add(out, selHas(h, ".g-recaptcha"), { signal: ".g-recaptcha" });
+  add(out, frameHas(h, "google.com/recaptcha") || frameHas(h, "recaptcha.net"), { signal: "recaptcha frame", widget: true });
+  add(out, scriptHas(h, "google.com/recaptcha") || scriptHas(h, "recaptcha.net"), { signal: "recaptcha script", weak: true });
+  add(out, selHas(h, ".g-recaptcha"), { signal: ".g-recaptcha", widget: true });
   return out;
 };
 
@@ -201,9 +212,10 @@ function genericEvidence(h: Haystack, sig: ChallengeSignature): Evidence[] {
     const inText = GENERIC_PHRASES.find((p) => h.text.includes(p));
     add(out, inText, { signal: `text mentions "${inText}"` });
   }
-  add(out, urlHas(h, "captcha"), { signal: "captcha frame" });
+  add(out, frameHas(h, "captcha"), { signal: "captcha frame", widget: true });
   add(out, sig.status !== undefined && BLOCKED_STATUS.has(sig.status) && sig.status !== 503 && h.text.trim().length < LITTLE_TEXT, {
     signal: `status ${sig.status} with almost no text`,
+    interstitial: true,
   });
   return out;
 }
@@ -220,23 +232,25 @@ export function classifyChallenge(sig: ChallengeSignature): Challenge | null {
     title: norm(sig.title),
     text,
     urls: [...(sig.frameUrls ?? []), ...(sig.scriptUrls ?? [])].map(norm),
+    frames: (sig.frameUrls ?? []).map(norm),
+    scripts: (sig.scriptUrls ?? []).map(norm),
     cookies: (sig.cookieNames ?? []).map(norm),
     selectors: (sig.selectors ?? []).map(norm),
   };
   const statusBlocked = sig.status !== undefined && BLOCKED_STATUS.has(sig.status);
   const littleText = sig.text !== undefined && sig.text.trim().length < LITTLE_TEXT;
-  const blockedish = statusBlocked || littleText;
 
   const finish = (kind: ChallengeKind, ev: Evidence[]): Challenge => ({
     kind,
-    blocking: ev.some((e) => e.interstitial) || blockedish,
+    // An empty page makes a block of what is not a widget or a tag; a widget or a tag needs a blocked status.
+    blocking: statusBlocked || ev.some((e) => e.interstitial || (littleText && !e.weak && !e.widget)),
     signals: ev.map((e) => e.signal),
   });
 
   for (const [kind, rule] of VENDORS) {
     const ev = rule(h);
-    // Weak evidence alone is just the vendor's tag on an ordinary page.
-    if (ev.some((e) => !e.weak) || (ev.length > 0 && blockedish)) return finish(kind, ev);
+    // Weak evidence alone is just the vendor's tag or cookie on an ordinary page.
+    if (ev.some((e) => !e.weak) || (ev.length > 0 && statusBlocked)) return finish(kind, ev);
   }
   const ev = genericEvidence(h, sig);
   return ev.length > 0 ? finish("generic", ev) : null;

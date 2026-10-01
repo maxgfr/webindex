@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assessRisk, guardAction, RiskRefusedError, riskContext } from "../src/browser/risk.js";
+import { assessRisk, COLLECT_SOURCE, guardAction, RiskRefusedError, riskContext } from "../src/browser/risk.js";
 import { FakePage } from "./helpers/fake-page.js";
 
 const click = (label: string, over: object = {}) => assessRisk({ action: "click", label, isSubmit: false, formHasPassword: false, ...over });
@@ -50,6 +50,25 @@ describe("assessRisk: click", () => {
     "Fermer le compte",
     "Déposer une annonce",
     "Deposit",
+    "Je valide ma commande",
+    "Validez votre commande",
+    "Passer la commande",
+    "Payez",
+    "Je paie",
+    "Commandez",
+    "Achetez maintenant",
+    "Confirmez",
+    "Supprimez",
+    "Réservez",
+    "Me désabonner",
+    "Abonnez-vous",
+    "Je m'abonne",
+    "Check out",
+    "Checkout",
+    "Envoyez",
+    "Publiez votre annonce",
+    "Résiliez",
+    "Pay attention",
   ])("refuses %s", (label) => {
     const r = click(label);
     expect(r.risky).toBe(true);
@@ -79,6 +98,10 @@ describe("assessRisk: click", () => {
       "Menu",
       "Add to cart",
       "Ajouter au panier",
+      "Rechercher",
+      "Publicité",
+      "Passport",
+      "Achievements",
       "Voir plus",
     ]) {
       expect(click(label).risky, label).toBe(false);
@@ -108,6 +131,13 @@ describe("assessRisk: click", () => {
 
 describe("assessRisk: press", () => {
   const press = (key: string, over: object = {}) => assessRisk({ action: "press", key, label: "", isSubmit: false, formHasPassword: false, ...over });
+
+  it("normalises the key: modifiers, case, Return", () => {
+    for (const key of ["Control+Enter", "Meta+Enter", "Shift+NumpadEnter", "enter", "ENTER", "Return", "Alt+Return"]) {
+      expect(press(key, { isSubmit: true, submitLabel: "Pay" }).risky, key).toBe(true);
+    }
+    for (const key of ["Control+a", "Meta+Tab", "", "+"]) expect(press(key, { isSubmit: true, submitLabel: "Pay" }).risky, key).toBe(false);
+  });
 
   it("only cares about Enter and NumpadEnter", () => {
     expect(press("Tab", { isSubmit: true, formHasPassword: true, submitLabel: "Pay" }).risky).toBe(false);
@@ -177,14 +207,35 @@ describe("riskContext", () => {
     await expect(riskContext(p, undefined, "click")).rejects.toThrow(/backendNodeId/);
   });
 
-  it("falls back to a blank context when the page returns nothing usable", async () => {
+  it("fails, instead of returning a blank context, when the page returns nothing usable", async () => {
     const p = new FakePage();
     p.handle("DOM.resolveNode", () => ({ object: { objectId: "o" } }));
     p.handle("Runtime.callFunctionOn", () => ({ result: {} }));
     p.handle("Runtime.releaseObject", () => {
       throw new Error("gone");
     });
-    expect(await riskContext(p, 1, "click")).toEqual({ role: "", label: "", isSubmit: false, formHasPassword: false, submitLabel: "" });
+    await expect(riskContext(p, 1, "click")).rejects.toThrow(/inspect/);
+    const nul = new FakePage();
+    nul.handle("Runtime.evaluate", () => ({ result: { value: null } }));
+    await expect(riskContext(nul, undefined, "press", "Enter")).rejects.toThrow(/inspect/);
+  });
+
+  it("fails on an in-page exception", async () => {
+    const p = new FakePage();
+    p.handle("DOM.resolveNode", () => ({ object: { objectId: "o" } }));
+    p.handle("Runtime.callFunctionOn", () => ({ exceptionDetails: { text: "Uncaught", exception: { description: "TypeError: boom" } } }));
+    await expect(riskContext(p, 1, "click")).rejects.toThrow(/boom|Uncaught/);
+    const e = new FakePage();
+    e.handle("Runtime.evaluate", () => ({ exceptionDetails: { text: "Uncaught" } }));
+    await expect(riskContext(e, undefined, "press", "Enter")).rejects.toThrow(/Uncaught/);
+  });
+
+  it("collects from the parent element of a text node and from the control around the target", () => {
+    // The in-page collector is checked in a real browser; here, that the script says what the fixes need.
+    expect(COLLECT_SOURCE).toContain("parentElement");
+    expect(COLLECT_SOURCE).toContain("closest(");
+    expect(COLLECT_SOURCE).toContain("form.elements");
+    expect(COLLECT_SOURCE).toContain("alt");
   });
 });
 
@@ -240,5 +291,22 @@ describe("guardAction", () => {
       throw new Error("No node with given id found");
     });
     await expect(guardAction(p, { backendNodeId: 9, action: "click" })).rejects.toThrow(/No node/);
+  });
+
+  it("guards Enter however the key is spelled", async () => {
+    const p = scripted({ role: "textbox", label: "", isSubmit: true, formHasPassword: true, submitLabel: "Log in" });
+    for (const key of ["Control+Enter", "enter", "Return"])
+      await expect(guardAction(p, { action: "press", key }), key).rejects.toBeInstanceOf(RiskRefusedError);
+  });
+
+  it("fails closed: a target that cannot be inspected is refused, unless confirmed", async () => {
+    const p = new FakePage();
+    p.handle("DOM.resolveNode", () => ({ object: { objectId: "o" } }));
+    p.handle("Runtime.callFunctionOn", () => ({ result: { value: null } }));
+    const err = await guardAction(p, { backendNodeId: 3, action: "click" }).catch((e) => e);
+    expect(err).toBeInstanceOf(RiskRefusedError);
+    expect(err.message).toMatch(/inspect/);
+    expect(err.message).toMatch(/--confirm/);
+    await expect(guardAction(p, { backendNodeId: 3, action: "click", confirm: true })).resolves.toBeUndefined();
   });
 });

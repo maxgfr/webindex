@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { settle, WaitTimeoutError, waitFor } from "../src/browser/wait.js";
+import { armSettle, settle, WaitTimeoutError, waitFor } from "../src/browser/wait.js";
 import { fakeClock, FakePage } from "./helpers/fake-page.js";
 
 /** A page whose Runtime.evaluate answers from a mutable state, by what the expression asks. */
@@ -26,6 +26,23 @@ describe("waitFor", () => {
     const p = scriptedPage({ text: "Order shipped" });
     const r = await waitFor({ page: p }, { text: "shipped" }, { deps: clock });
     expect(r.waitedMs).toBe(0);
+  });
+
+  it("reports which condition matched", async () => {
+    const conds = [
+      [{ text: "a" }, "text"],
+      [{ gone: "zzz" }, "gone"],
+      [{ selector: "a" }, "selector"],
+      [{ url: "a.test" }, "url"],
+      [{ load: true }, "load"],
+      [{ ms: 10 }, "ms"],
+    ] as const;
+    for (const [cond, name] of conds) {
+      const p = scriptedPage({ text: "a", selector: true, ready: "complete" });
+      expect((await waitFor({ page: p }, cond, { deps: fakeClock() })).matched, name).toBe(name);
+    }
+    expect((await waitFor({ page: scriptedPage() }, { clear: true }, { deps: fakeClock() })).matched).toBe("clear");
+    expect((await waitFor({ page: new FakePage() }, { idle: true }, { deps: fakeClock() })).matched).toBe("idle");
   });
 
   it("polls every 250 ms until the text appears", async () => {
@@ -280,5 +297,82 @@ describe("settle", () => {
     });
     const r = await settle({ page: p }, { deps: fakeClock() });
     expect(r.navigated).toBe(false);
+  });
+});
+
+describe("armSettle", () => {
+  const treePage = (loaderId = () => "L1") => {
+    const p = new FakePage();
+    p.handle("Page.getFrameTree", () => ({ frameTree: { frame: { id: "main", loaderId: loaderId(), url: "https://a.test/" } } }));
+    return p;
+  };
+
+  it("registers its listeners before it resolves, so the action's own events are seen", async () => {
+    const p = treePage();
+    const armed = await armSettle({ page: p }, { deps: fakeClock((t) => t === 1100 && p.emit("Page.lifecycleEvent", { frameId: "main", name: "load" })) });
+    expect(p.listenerCount()).toBeGreaterThan(0);
+    expect(p.methods()).toContain("Network.enable");
+    // the action: its navigation starts and a request goes out, all before done() is called
+    p.emit("Page.frameStartedLoading", { frameId: "main" });
+    p.emit("Network.requestWillBeSent", { requestId: "r" });
+    p.emit("Network.loadingFinished", { requestId: "r" });
+    const r = await armed.done();
+    expect(r.navigated).toBe(true);
+    expect(p.listenerCount()).toBe(0);
+  });
+
+  it("keeps events that arrive before the main frame id is known", async () => {
+    const p = new FakePage();
+    let release!: () => void;
+    p.handle("Page.getFrameTree", () => new Promise((r) => (release = () => r({ frameTree: { frame: { id: "main", loaderId: "L1" } } }))));
+    const arming = armSettle({ page: p }, { deps: fakeClock((t) => t === 1100 && p.emit("Page.lifecycleEvent", { frameId: "main", name: "load" })) });
+    await new Promise((r) => setTimeout(r, 0));
+    p.emit("Page.frameStartedLoading", { frameId: "main" });
+    release();
+    expect((await (await arming).done()).navigated).toBe(true);
+  });
+
+  it("sees a navigation already under way: another loader, or a document still loading", async () => {
+    let loader = "L1";
+    const p = treePage(() => loader);
+    p.handle("Runtime.evaluate", () => ({ result: { value: "complete" } }));
+    const armed = await armSettle({ page: p }, { deps: fakeClock() });
+    loader = "L2"; // the new document committed, its events went unheard
+    expect((await armed.done()).navigated).toBe(true);
+
+    let state = "loading";
+    const q = treePage();
+    q.handle("Runtime.evaluate", () => ({ result: { value: state } }));
+    const clock = fakeClock((t) => {
+      if (t >= 1400) state = "complete";
+    });
+    const r = await (await armSettle({ page: q }, { deps: clock })).done();
+    expect(r.navigated).toBe(true);
+    expect(r.waitedMs).toBeGreaterThanOrEqual(400 + 300);
+  });
+
+  it("is not fooled by a settled document", async () => {
+    const p = treePage();
+    p.handle("Runtime.evaluate", () => ({ result: { value: "complete" } }));
+    expect((await (await armSettle({ page: p }, { deps: fakeClock() })).done()).navigated).toBe(false);
+  });
+
+  it("stops waiting for a navigation that stops loading without a load event (download, 204)", async () => {
+    const p = treePage();
+    const clock = fakeClock((t) => {
+      if (t === 1050) p.emit("Page.frameStartedLoading", { frameId: "main" });
+      if (t === 1500) p.emit("Page.frameStoppedLoading", { frameId: "main" });
+    });
+    const r = await settle({ page: p }, { deps: clock, timeoutMs: 20_000 });
+    expect(r.navigated).toBe(true);
+    expect(r.waitedMs).toBeLessThan(1000);
+  });
+
+  it("can be awaited once, and still releases its listeners if never awaited again", async () => {
+    const p = treePage();
+    const armed = await armSettle({ page: p }, { deps: fakeClock() });
+    await armed.done();
+    await expect(armed.done()).rejects.toThrow(/already/);
+    expect(p.listenerCount()).toBe(0);
   });
 });

@@ -38,6 +38,34 @@ describe("classifyChallenge", () => {
     expect(classifyChallenge(page({ cookieNames: ["cf-chl-bypass"], text: "", status: 503 }))).toMatchObject({ kind: "cloudflare" });
   });
 
+  it("does not turn short, realistic pages into blocks: login forms with a widget, a tag or a cookie", () => {
+    const login = "Connexion\nEmail\nMot de passe\nSe connecter\nMot de passe oublié ?";
+    const short = (over: object) => classifyChallenge({ url: "https://shop.test/login", title: "Connexion", text: login, ...over });
+    expect(short({ cookieNames: ["datadome"] })).toBeNull();
+    expect(short({ cookieNames: ["datadome"], status: 200 })).toBeNull();
+    expect(short({ scriptUrls: ["https://www.google.com/recaptcha/api.js?render=KEY"] })).toBeNull();
+    expect(short({ scriptUrls: ["https://js.hcaptcha.com/1/api.js"] })).toBeNull();
+    expect(short({ scriptUrls: ["https://challenges.cloudflare.com/turnstile/v0/api.js"] })).toBeNull();
+    expect(short({ frameUrls: ["https://www.google.com/recaptcha/api2/anchor?k=1"], selectors: [".g-recaptcha"] })).toMatchObject({
+      kind: "recaptcha",
+      blocking: false,
+    });
+    expect(short({ frameUrls: ["https://newassets.hcaptcha.com/captcha/v1/x/hcaptcha.html"] })).toMatchObject({ kind: "hcaptcha", blocking: false });
+    expect(short({ selectors: [".cf-turnstile"] })).toMatchObject({ kind: "cloudflare", blocking: false });
+    // the same widgets on a blocked response are the block
+    expect(short({ frameUrls: ["https://www.google.com/recaptcha/api2/anchor?k=1"], status: 429 })).toMatchObject({ kind: "recaptcha", blocking: true });
+    // a tag with a blocked status counts too
+    expect(short({ scriptUrls: ["https://www.google.com/recaptcha/api.js"], status: 403 })).toMatchObject({ kind: "recaptcha", blocking: true });
+  });
+
+  it("still makes a block of a short page whose evidence is not a widget or a tag", () => {
+    expect(classifyChallenge({ url: "u", title: "", text: "Please verify you are human", scriptUrls: [] })).toMatchObject({ kind: "generic", blocking: true });
+    expect(classifyChallenge({ url: "u", title: "", text: "Reference # 1", frameUrls: ["https://errors.edgesuite.net/1"] })).toMatchObject({
+      kind: "akamai",
+      blocking: true,
+    });
+  });
+
   it("treats a Turnstile widget on a normal page as non blocking", () => {
     const c = classifyChallenge(
       page({ frameUrls: ["https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/if/x"], selectors: [".cf-turnstile"] }),
@@ -48,7 +76,7 @@ describe("classifyChallenge", () => {
   it("treats a reCAPTCHA checkbox on a login form as non blocking, and a bare one as blocking", () => {
     const widget = classifyChallenge(page({ frameUrls: ["https://www.google.com/recaptcha/api2/anchor?k=1"], selectors: [".g-recaptcha"] }));
     expect(widget).toMatchObject({ kind: "recaptcha", blocking: false });
-    expect(classifyChallenge(page({ frameUrls: ["https://www.recaptcha.net/recaptcha/api2/anchor"], text: "Verify" }))).toMatchObject({
+    expect(classifyChallenge(page({ frameUrls: ["https://www.recaptcha.net/recaptcha/api2/anchor"], text: "Verify", status: 403 }))).toMatchObject({
       kind: "recaptcha",
       blocking: true,
     });
@@ -61,7 +89,10 @@ describe("classifyChallenge", () => {
       blocking: false,
     });
     expect(classifyChallenge(page({ selectors: [".h-captcha"] }))).toMatchObject({ kind: "hcaptcha" });
-    expect(classifyChallenge(page({ scriptUrls: ["https://client-api.arkoselabs.com/v2/x/api.js"] }))).toMatchObject({ kind: "arkose" });
+    expect(classifyChallenge(page({ frameUrls: ["https://client-api.arkoselabs.com/v2/x/enforcement.html"] }))).toMatchObject({
+      kind: "arkose",
+      blocking: false,
+    });
     expect(classifyChallenge(page({ frameUrls: ["https://x.test/funcaptcha/frame"] }))).toMatchObject({ kind: "arkose" });
   });
 

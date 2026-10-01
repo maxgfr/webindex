@@ -30,72 +30,78 @@ export interface Risk {
 
 const PASSWORD_REASON = "form contains a password field — let the human log in";
 
-/** Accent-free lowercase phrases, matched as whole words. */
+/**
+ * Accent-free lowercase patterns, matched as whole words. French verbs are
+ * matched by stem (infinitive, imperative, first person: "payer", "payez",
+ * "je paie"), English ones by word.
+ */
 const IRREVERSIBLE = [
-  "pay",
-  "payer",
-  "paiement",
-  "payment",
+  // pay
+  "pay(?:er|ez|ment)?",
+  "paie(?:ment)?",
   "purchase",
   "buy",
-  "acheter",
+  "achet(?:er|ez|e)",
+  "achat",
+  // order
   "order",
-  "commander",
-  "checkout",
-  "place order",
-  "confirm",
-  "confirmer",
+  "command(?:er|ez|e)",
+  "check\\s*out",
+  "place\\s+order",
+  // confirm, validate
+  "confirm(?:er|ez|e)?",
   "validate",
-  "valider",
+  "valid(?:er|ez|e)",
+  // delete, remove
   "delete",
-  "supprimer",
   "remove",
+  "supprim(?:er|ez|e)",
+  "suppression",
+  // publish, post, send, submit
   "publish",
-  "publier",
+  "publi(?:er|ez|e|cation)",
   "post",
-  "poster",
+  "post(?:er|ez)",
   "send",
-  "envoyer",
+  "envo(?:y\\w*|i)",
   "submit",
+  "soumett\\w*",
   "soumettre",
   "transfer",
   "virement",
+  // subscriptions
   "subscribe",
-  "s'abonner",
   "unsubscribe",
-  "se desabonner",
-  "resilier",
-  "cancel subscription",
-  "signer",
+  "(?:des)?abonn(?:er|ez|e)",
+  "resili(?:er|ez|e|ation)",
+  "cancel\\s+subscription",
+  // signing, booking, giving, depositing
+  "sign(?:er|ez)",
   "book",
-  "reserver",
+  "reserv(?:er|ez|e|ation)",
   "donate",
-  "faire un don",
-  "close account",
-  "fermer le compte",
-  "deposer",
+  "faire\\s+un\\s+don",
+  "close\\s+account",
+  "fermer\\s+le\\s+compte",
+  "depos(?:er|ez|e)",
   "deposit",
 ];
 
 // "sign" is a signature, not "sign in" / "sign out".
 const SIGN = "sign(?!\\s*-?\\s*(?:in|out)(?![a-z0-9]))";
 
-const phrase = (p: string) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
-const IRREVERSIBLE_RE = new RegExp(`(?<![a-z0-9])(${[...IRREVERSIBLE.map(phrase), SIGN].sort((a, b) => b.length - a.length).join("|")})(?![a-z0-9])`);
+const IRREVERSIBLE_RE = new RegExp(`(?<![a-z0-9])(${[...IRREVERSIBLE, SIGN].join("|")})(?![a-z0-9])`);
 
-const norm = (s: string): string =>
-  s
-    .normalize("NFD")
-    .replace(/\p{M}/gu, "")
-    .replace(/[\u2018\u2019]/g, "'")
-    .toLowerCase();
+const norm = (s: string): string => s.normalize("NFD").replace(/\p{M}/gu, "").replace(/[‘’]/g, "'").toLowerCase();
 
 /** The irreversible word a label contains, if any. */
 function matchLabel(label: string | undefined): string | undefined {
   return label ? IRREVERSIBLE_RE.exec(norm(label))?.[1]?.replace(/\s+/g, " ") : undefined;
 }
 
-const ENTER = new Set(["Enter", "NumpadEnter"]);
+const ENTER = new Set(["enter", "numpadenter", "return"]);
+/** "Control+Enter", "enter" and "Return" are all Enter: the last `+` segment, case-insensitive. */
+const isEnter = (key: string | undefined): boolean => ENTER.has((key ?? "").split("+").pop()?.toLowerCase() ?? "");
 /** Roles where Enter activates the focused control itself, as a click would. */
 const ACTIVATES = new Set(["button", "link", "menuitem"]);
 
@@ -103,7 +109,7 @@ const shown = (label: string) => (label.length > 60 ? `${label.slice(0, 57)}...`
 
 /** Would this action do something that cannot be taken back? Pure: the page is read by riskContext. */
 export function assessRisk(ctx: RiskContext): Risk {
-  if (ctx.action === "press" && !ENTER.has(ctx.key ?? "")) return { risky: false };
+  if (ctx.action === "press" && !isEnter(ctx.key)) return { risky: false };
   if (ctx.isSubmit && ctx.formHasPassword) return { risky: true, reason: PASSWORD_REASON };
   // A click acts on its target; Enter acts on it only if it is a button or link, else on the form's submit control.
   const acts = ctx.action === "click" || ACTIVATES.has(ctx.role ?? "");
@@ -124,69 +130,99 @@ export interface ElementRisk {
   submitLabel: string;
 }
 
-const BLANK: ElementRisk = { role: "", label: "", isSubmit: false, formHasPassword: false, submitLabel: "" };
-
-/** Runs in the page with `this` the target element and the action as its argument. */
-const COLLECT = `function (action) {
-  const el = this;
+/** Runs in the page with `this` the target (or the focused element) and the action as its argument. Returns null if there is no element. */
+export const COLLECT_SOURCE = `function (action) {
+  let el = this;
+  if (el && el.nodeType === 3) el = el.parentElement;
   if (!el || el.nodeType !== 1) return null;
+  const BTN = "button,[role=button],input[type=submit],input[type=image],input[type=button]";
+  const PW = "input[type=password]";
   const norm = (s) => (s || "").replace(/\\s+/g, " ").trim().slice(0, 200);
-  const tag = el.tagName.toLowerCase();
-  const type = (el.getAttribute("type") || "").toLowerCase();
+  // The control the user means: a click on a span inside a button is a click on the button.
+  const ctl = el.closest(BTN) || el;
+  const tag = ctl.tagName.toLowerCase();
+  const type = (ctl.getAttribute("type") || "").toLowerCase();
   const buttonInput = tag === "input" && ["button", "submit", "reset", "image"].includes(type);
+  const buttonish = tag === "button" || buttonInput || (ctl.getAttribute("role") || "").toLowerCase() === "button";
   const labelOf = (e) => {
     const t = e.tagName.toLowerCase();
     const ty = (e.getAttribute("type") || "").toLowerCase();
+    const isBtn = t === "button" || (t === "input" && ["button", "submit", "reset", "image"].includes(ty)) || (e.getAttribute("role") || "") === "button";
     const by = (e.getAttribute("aria-labelledby") || "").split(/\\s+/).map((id) => (document.getElementById(id) || {}).textContent).filter(Boolean).join(" ");
+    const alts = Array.from(e.querySelectorAll("img[alt],svg title"), (n) => n.getAttribute("alt") || n.textContent);
+    const labels = isBtn && e.labels ? Array.from(e.labels, (l) => l.textContent) : [];
     const value = t === "input" && ["button", "submit", "reset", "image"].includes(ty) ? e.value : "";
-    return norm([e.getAttribute("aria-label"), by, e.getAttribute("title"), value, t === "input" ? "" : e.innerText || e.textContent].filter(Boolean).join(" "));
+    return norm([e.getAttribute("aria-label"), by, e.getAttribute("title"), e.getAttribute("alt"), value, t === "input" ? "" : e.innerText || e.textContent, ...alts, ...labels].filter(Boolean).join(" "));
   };
-  const explicit = (el.getAttribute("role") || "").toLowerCase();
+  const explicit = (ctl.getAttribute("role") || "").toLowerCase();
   let role = explicit;
   if (!role) {
     if (tag === "button" || buttonInput) role = "button";
-    else if (tag === "a" && el.hasAttribute("href")) role = "link";
+    else if (tag === "a" && ctl.hasAttribute("href")) role = "link";
     else if (tag === "textarea" || (tag === "input" && !["checkbox", "radio"].includes(type))) role = "textbox";
     else if (tag === "input") role = type;
     else if (tag === "select") role = "combobox";
     else role = tag;
   }
-  const form = el.form || el.closest("form");
-  const formHasPassword = !!(form && form.querySelector("input[type=password]"));
-  const submitter = form ? form.querySelector("button[type=submit], input[type=submit], input[type=image], button:not([type])") : null;
-  const isSubmitControl = !!form && (el === submitter || (tag === "button" && (type === "" || type === "submit")) || (tag === "input" && (type === "submit" || type === "image")));
-  const isSubmit = action === "press" ? !!form && tag !== "textarea" && (role === "button" || buttonInput ? isSubmitControl : true) : isSubmitControl;
-  return { role, label: labelOf(el), isSubmit, formHasPassword, submitLabel: submitter ? labelOf(submitter) : "" };
+  // The form, or with none (a single-page login) the nearest few ancestors holding a password field.
+  const form = ctl.form || ctl.closest("form");
+  let scope = form;
+  if (!scope) {
+    let a = ctl.parentElement;
+    for (let i = 0; a && i < 5 && a !== document.body && a !== document.documentElement; i++, a = a.parentElement) {
+      if (a.querySelector(PW)) { scope = a; break; }
+    }
+  }
+  const formHasPassword = !!scope && (form ? Array.from(form.elements).some((x) => x.type === "password") || !!form.querySelector(PW) : true);
+  const submitter = form ? form.querySelector("button[type=submit], input[type=submit], input[type=image], button:not([type])") : scope ? scope.querySelector(BTN) : null;
+  const label = labelOf(ctl);
+  const toggle = /show|hide|reveal|afficher|masquer|visib/i.test(label);
+  const nativeSubmit = !!form && ((tag === "button" && (type === "" || type === "submit")) || (tag === "input" && (type === "submit" || type === "image")));
+  let isSubmit;
+  if (buttonish) isSubmit = !toggle && (nativeSubmit || formHasPassword);
+  else isSubmit = action === "press" && tag !== "textarea" && (!!form || formHasPassword);
+  return { role, label, isSubmit, formHasPassword, submitLabel: submitter ? labelOf(submitter) : "" };
 }`;
+
+type PageResult = { result?: { value?: unknown }; exceptionDetails?: { text?: string; exception?: { description?: string } } };
+
+/** The collector's answer, or an error: a page that cannot be read must not look harmless. */
+function collected(r: PageResult): ElementRisk {
+  if (r.exceptionDetails)
+    throw new Error(`could not inspect the target: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text ?? "page error"}`);
+  const v = r.result?.value;
+  if (typeof v !== "object" || v === null) throw new Error("could not inspect the target: it is not an element");
+  return { role: "", label: "", isSubmit: false, formHasPassword: false, submitLabel: "", ...(v as Partial<ElementRisk>) };
+}
 
 /**
  * Read what assessRisk needs from the page. For a click that is the node named
- * by `backendNodeId`; for a key press, the focused element.
+ * by `backendNodeId`; for a key press, the focused element. Throws when the
+ * target cannot be inspected.
  */
 export async function riskContext(page: CdpSession, backendNodeId: number | undefined, action: RiskAction, _key?: string): Promise<ElementRisk> {
-  let value: unknown;
   if (action === "press") {
-    const r = await page.send<{ result?: { value?: unknown } }>("Runtime.evaluate", {
-      expression: `(${COLLECT}).call(document.activeElement, ${JSON.stringify(action)})`,
-      returnByValue: true,
-    });
-    value = r.result?.value;
-  } else {
-    if (backendNodeId === undefined) throw new Error("a click needs a backendNodeId to inspect");
-    const { object } = await page.send<{ object: { objectId?: string } }>("DOM.resolveNode", { backendNodeId });
-    try {
-      const r = await page.send<{ result?: { value?: unknown } }>("Runtime.callFunctionOn", {
+    return collected(
+      await page.send<PageResult>("Runtime.evaluate", {
+        expression: `(${COLLECT_SOURCE}).call(document.activeElement, ${JSON.stringify(action)})`,
+        returnByValue: true,
+      }),
+    );
+  }
+  if (backendNodeId === undefined) throw new Error("a click needs a backendNodeId to inspect");
+  const { object } = await page.send<{ object: { objectId?: string } }>("DOM.resolveNode", { backendNodeId });
+  try {
+    return collected(
+      await page.send<PageResult>("Runtime.callFunctionOn", {
         objectId: object.objectId,
-        functionDeclaration: COLLECT,
+        functionDeclaration: COLLECT_SOURCE,
         arguments: [{ value: action }],
         returnByValue: true,
-      });
-      value = r.result?.value;
-    } finally {
-      if (object.objectId) await page.send("Runtime.releaseObject", { objectId: object.objectId }).catch(() => {});
-    }
+      }),
+    );
+  } finally {
+    if (object.objectId) await page.send("Runtime.releaseObject", { objectId: object.objectId }).catch(() => {});
   }
-  return typeof value === "object" && value !== null ? { ...BLANK, ...(value as Partial<ElementRisk>) } : BLANK;
 }
 
 // --- guard -------------------------------------------------------------------
@@ -215,8 +251,14 @@ export interface GuardOptions {
 /** Resolve if the action may go ahead; throw RiskRefusedError if it looks irreversible and was not confirmed. */
 export async function guardAction(page: CdpSession, opts: GuardOptions): Promise<void> {
   if (opts.confirm) return;
-  if (opts.action === "press" && !ENTER.has(opts.key ?? "")) return;
-  const el = await riskContext(page, opts.backendNodeId, opts.action, opts.key);
+  if (opts.action === "press" && !isEnter(opts.key)) return;
+  let el: ElementRisk;
+  try {
+    el = await riskContext(page, opts.backendNodeId, opts.action, opts.key);
+  } catch (e) {
+    // Fail closed: what cannot be inspected cannot be called harmless.
+    throw new RiskRefusedError(opts.action, `could not inspect the target (${(e as Error).message})`, "", opts.key);
+  }
   const risk = assessRisk({ action: opts.action, ...(opts.key !== undefined ? { key: opts.key } : {}), ...el });
   if (risk.risky)
     throw new RiskRefusedError(opts.action, risk.reason ?? "looks irreversible", opts.action === "press" ? el.submitLabel || el.label : el.label, opts.key);

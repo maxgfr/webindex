@@ -24,6 +24,8 @@ export interface WaitOptions {
 
 export interface WaitResult {
   waitedMs: number;
+  /** Which condition held: "text", "gone", "selector", "url", "load", "idle", "ms" or "clear". */
+  matched: string;
 }
 
 export class WaitTimeoutError extends Error {
@@ -162,14 +164,14 @@ export async function waitFor(session: WaitSession, cond: WaitCondition, opts: W
   const start = now();
   if ("ms" in cond) {
     await sleep(cond.ms);
-    return { waitedMs: now() - start };
+    return { waitedMs: now() - start, matched: "ms" };
   }
   const timeoutMs = opts.timeoutMs ?? ("clear" in cond ? CLEAR_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
   const net = "idle" in cond ? await watchNetwork(session.page) : undefined;
   try {
     const check = checker(session.page, cond, now, net);
     for (;;) {
-      if (await check()) return { waitedMs: now() - start };
+      if (await check()) return { waitedMs: now() - start, matched: present[0] as string };
       const elapsed = now() - start;
       if (elapsed >= timeoutMs) throw new WaitTimeoutError(cond, elapsed);
       await sleep(Math.min(POLL_MS, timeoutMs - elapsed));
@@ -187,77 +189,122 @@ export interface SettleOptions {
 }
 
 export interface SettleResult {
-  /** The main frame started loading another document right after the action. */
+  /** The main frame loaded (or was loading) another document around the action. */
   navigated: boolean;
   waitedMs: number;
 }
 
+export interface ArmedSettle {
+  /** Wait for what the action set off: its navigation to load, then a quiet network. */
+  done(): Promise<SettleResult>;
+}
+
 /**
- * After an action: if it started a navigation (within ~150 ms), wait for that
- * document's `load`; then wait for the network to be quiet (at most 2 requests in
- * flight for 300 ms). Bounded by the timeout, and never throws on it: a page that
- * keeps polling is as settled as it will get.
+ * Start watching BEFORE the action: the events of a navigation the action
+ * starts (and the requests it makes) are gone by the time anyone asks for them
+ * afterwards. Everything is registered, and the main frame known, before this
+ * resolves. `done()` then waits.
  */
-export async function settle(session: WaitSession, opts: SettleOptions = {}): Promise<SettleResult> {
+export async function armSettle(session: WaitSession, opts: SettleOptions = {}): Promise<ArmedSettle> {
   const { page } = session;
   const { now, sleep } = browserDeps(opts.deps);
   const timeoutMs = opts.timeoutMs ?? SETTLE_TIMEOUT_MS;
-  const start = now();
-  const deadline = start + timeoutMs;
 
   let mainId: string | undefined;
-  try {
-    mainId = (await page.send<{ frameTree: { frame: { id: string } } }>("Page.getFrameTree")).frameTree.frame.id;
-  } catch {
-    /* a main frame announced by frameNavigated will do */
-  }
-  let navigating = false;
-  let loaded = false;
+  let armedLoader: string | undefined;
+  // Per frame id, so events that arrive while the main frame id is still unknown are not lost.
+  const started = new Set<string>();
+  const finished = new Set<string>();
+  const begin = (id: string) => {
+    started.add(id);
+    finished.delete(id);
+  };
   const handlers: [string, CdpHandler][] = [
-    [
-      "Page.frameStartedLoading",
-      (p) => {
-        if (p.frameId !== mainId) return;
-        navigating = true;
-        loaded = false;
-      },
-    ],
+    ["Page.frameStartedLoading", (p) => begin(String(p.frameId))],
     [
       "Page.frameNavigated",
       (p) => {
         if (p.frame?.parentId) return;
         mainId ??= p.frame?.id;
-        navigating = true;
-        loaded = false;
+        begin(String(p.frame?.id));
       },
     ],
     [
       "Page.lifecycleEvent",
       (p) => {
-        if (p.name === "load" && p.frameId === mainId) loaded = true;
+        if (p.name === "load") finished.add(String(p.frameId));
       },
     ],
+    // A download or a 204 stops loading without ever firing load.
+    ["Page.frameStoppedLoading", (p) => finished.add(String(p.frameId))],
   ];
   for (const [m, h] of handlers) page.on(m, h);
   const net = await watchNetwork(page);
-  const done = (navigated: boolean): SettleResult => ({ navigated, waitedMs: now() - start });
-  try {
-    // Did the action start a navigation?
-    while (!navigating && now() - start < SETTLE_NAV_WINDOW_MS && now() < deadline) await sleep(Math.min(SETTLE_STEP_MS, deadline - now()));
-    const navigated = navigating;
-    // Let it load.
-    while (navigated && !loaded && now() < deadline) await sleep(Math.min(SETTLE_STEP_MS, deadline - now()));
-    // Quiet network: counted from the load (or from the start, if nothing navigated).
-    let quietSince = navigated ? undefined : start;
-    while (now() < deadline) {
-      if (net.count() > SETTLE_MAX_INFLIGHT) quietSince = undefined;
-      else quietSince ??= now();
-      if (quietSince !== undefined && now() - quietSince >= SETTLE_QUIET_MS) break;
-      await sleep(Math.min(SETTLE_STEP_MS, deadline - now()));
-    }
-    return done(navigated);
-  } finally {
+  const stop = () => {
     for (const [m, h] of handlers) page.off(m, h);
     net.stop();
-  }
+  };
+  const tree = async (): Promise<{ id?: string; loaderId?: string }> => {
+    try {
+      const f = (await page.send<{ frameTree: { frame: { id: string; loaderId?: string } } }>("Page.getFrameTree")).frameTree.frame;
+      return { id: f.id, loaderId: f.loaderId };
+    } catch {
+      return {};
+    }
+  };
+  const t = await tree();
+  mainId ??= t.id;
+  armedLoader = t.loaderId;
+
+  let used = false;
+  return {
+    async done(): Promise<SettleResult> {
+      if (used) throw new Error("this settle was already awaited");
+      used = true;
+      const start = now();
+      const deadline = start + timeoutMs;
+      const step = () => sleep(Math.min(SETTLE_STEP_MS, Math.max(deadline - now(), 0)));
+      const sawNavigation = () => mainId !== undefined && started.has(mainId);
+      try {
+        // Already under way: a document that is not the one we armed on, or one still loading.
+        let navigated = sawNavigation();
+        if (!navigated) {
+          const t = await tree();
+          const readyState = await evaluate(page, "document.readyState");
+          navigated =
+            (armedLoader !== undefined && t.loaderId !== undefined && t.loaderId !== armedLoader) ||
+            (typeof readyState === "string" && readyState !== "complete");
+          if (navigated) mainId ??= t.id;
+        }
+        // Or about to start (within the window).
+        while (!navigated && now() - start < SETTLE_NAV_WINDOW_MS && now() < deadline) {
+          await step();
+          navigated = sawNavigation();
+        }
+        // Let it load.
+        const loaded = async () => (mainId !== undefined && finished.has(mainId)) || (await evaluate(page, "document.readyState")) === "complete";
+        while (navigated && now() < deadline && !(await loaded())) await step();
+        // Quiet network: counted from the load (or from the start, if nothing navigated).
+        let quietSince = navigated ? undefined : start;
+        while (now() < deadline) {
+          if (net.count() > SETTLE_MAX_INFLIGHT) quietSince = undefined;
+          else quietSince ??= now();
+          if (quietSince !== undefined && now() - quietSince >= SETTLE_QUIET_MS) break;
+          await step();
+        }
+        return { navigated, waitedMs: now() - start };
+      } finally {
+        stop();
+      }
+    },
+  };
+}
+
+/**
+ * Settle after an action already done: arm and wait in one go. Navigations that
+ * began before the call are only seen through the document's state; to catch
+ * the events of the action itself, armSettle first and call done() after it.
+ */
+export async function settle(session: WaitSession, opts: SettleOptions = {}): Promise<SettleResult> {
+  return (await armSettle(session, opts)).done();
 }
