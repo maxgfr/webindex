@@ -24,7 +24,9 @@ import { readRenderedPage } from "../src/index.js";
 
 const E2E = process.env.WEBINDEX_E2E_BROWSER;
 const live = !!E2E;
-const binary = E2E && E2E !== "1" && existsSync(E2E) ? E2E : undefined;
+const binary = E2E && E2E !== "1" ? E2E : undefined;
+// A binary named that does not exist is a typo, not a request for whichever browser is found.
+if (binary && !existsSync(binary)) throw new Error(`WEBINDEX_E2E_BROWSER names no file: ${binary} (set it to 1, or to a browser binary)`);
 
 const PREFIX = "WEBINDEX_TEST";
 const STEP_MS = 60_000;
@@ -71,6 +73,19 @@ async function go() {
 <h2>Frame heading</h2>
 <button type="button" onclick="this.textContent = 'Clicked inside'">Inside frame</button>
 </body></html>`,
+  "/onload.html": `<!doctype html><html><head><title>Loaded</title></head><body onload="alert('loaded')"><h1>Alert on load</h1></body></html>`,
+  "/leave.html": `<!doctype html><html><head><title>Leave</title></head><body>
+<label>Note <input id="note"></label>
+<script>
+addEventListener("beforeunload", (e) => {
+  if (document.getElementById("note").value) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+});
+</script></body></html>`,
+  "/later.html": `<!doctype html><html><head><title>Later</title></head><body><h1>An alert after the command</h1>
+<script>setTimeout(() => alert("later"), 800);</script></body></html>`,
   "/second.html": `<!doctype html><html><head><title>Second page</title></head><body><h1>The second page</h1></body></html>`,
   "/js.html": `<!doctype html><html><head><title>Rendered later</title></head><body><main id="root"></main>
 <script>
@@ -337,9 +352,10 @@ describe.runIf(live)("a real browser, driven command by command", () => {
       expect(r.text).toMatch(/dialog alert: "hello from the page" — dismissed: a dialog cannot outlive a command/);
       // The next command finds a page that answers, and no dialog left.
       expect((await ok("eval", ["document.title"])).json).toMatchObject({ value: "E2E form" });
+      // Answering one is the MCP tools' job: the CLI command refuses at once.
       const none = await run("dialog", ["dismiss"]);
       expect(none.exitCode).toBe(1);
-      expect(none.text).toBe("no dialog is open");
+      expect(none.text).toMatch(/^the CLI dismisses dialogs before each command ends/);
     },
     STEP_MS,
   );
@@ -439,13 +455,63 @@ describe.runIf(live)("a real browser, driven command by command", () => {
   );
 
   it(
-    "close shuts the launched browser down, and also one a fetch read launched",
+    "dismisses an alert the page shows on load, so open returns at once and the next command works",
     async () => {
+      const started = Date.now();
+      const r = await ok("open", [`${base}/onload.html`]);
+      expect(Date.now() - started).toBeLessThan(15_000);
+      expect(r.json).toMatchObject({ url: `${base}/onload.html`, title: "Loaded", dialogs: [{ type: "alert", message: "loaded", dismissed: true }] });
+      expect(r.text).toMatch(/dialog alert: "loaded" — dismissed/);
+      expect((await ok("eval", ["document.title"])).json).toMatchObject({ value: "Loaded" });
+    },
+    STEP_MS,
+  );
+
+  it(
+    "dismisses the beforeunload dialog a reload meets after typing: the reload is cancelled, fast, and the page keeps the text",
+    async () => {
+      await ok("open", [`${base}/leave.html`]);
+      await snapshot();
+      await ok("type", [refOf(snap, "textbox", "Note"), "unsaved"]);
+      const started = Date.now();
+      const r = await run("reload");
+      expect(Date.now() - started).toBeLessThan(15_000);
+      expect(r.exitCode).toBe(1);
+      expect(r.text).toMatch(/^reloading was cancelled: the page asked to confirm leaving it \(beforeunload\), and that was declined/);
+      expect(r.json).toMatchObject({ dialogs: [{ type: "beforeunload", dismissed: true }] });
+      expect((await ok("eval", ["document.getElementById('note').value"])).json).toMatchObject({ value: "unsaved" });
+      // Leaving it some other way meets the same question, answered the same way.
+      const away = await run("open", [`${base}/second.html`]);
+      expect(away.exitCode).toBe(1);
+      expect(away.json).toMatchObject({ dialogs: [{ type: "beforeunload", dismissed: true }] });
+      await ok("eval", ["document.getElementById('note').value = ''"]);
+    },
+    STEP_MS,
+  );
+
+  it(
+    "names the dialog a page opened between commands when the next one cannot reach the tab, and close is the way out",
+    async () => {
+      await ok("open", [`${base}/later.html`]);
+      await new Promise((r) => setTimeout(r, 1500)); // the alert opens with no command connected
+      const started = Date.now();
+      const stuck = await run("snapshot");
+      expect(Date.now() - started).toBeLessThan(15_000);
+      expect(stuck.exitCode).toBe(1);
+      expect(stuck.text).toBe(
+        "the tab does not answer; most likely a JavaScript dialog the page opened between commands — answer it in the window, or `webindex-tests browser close`",
+      );
       const r = await ok("close");
       expect(r.json).toMatchObject({ closed: true, launchedByUs: true });
       expect(await waitGone(pid as number, 10_000)).toBe(true);
       expect((await ok("status")).json).toMatchObject({ alive: false });
+    },
+    STEP_MS,
+  );
 
+  it(
+    "close also shuts down a browser a fetch read launched",
+    async () => {
       // No browser: a read launches one on the dedicated profile, saves no session, and close finds it all the same.
       const page = await readRenderedPage(`${base}/second.html`, { headless: true });
       expect(page.text).toContain("The second page");
