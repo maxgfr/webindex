@@ -21,6 +21,7 @@ import * as actions from "./actions.js";
 import type { ActionOptions, ActionResult, DialogInfo } from "./actions.js";
 import type { Challenge } from "./challenge.js";
 import { detectChallenge } from "./challenge.js";
+import { CdpError } from "./cdp.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
 import { parseKey } from "./keys.js";
 import { isSameBrowser, readActivePort } from "./launch.js";
@@ -151,6 +152,8 @@ interface Ctx {
   args: string[];
   flags: BrowserCliFlags;
   deps: BrowserCliDeps;
+  /** In the CLI: the dialogs the command's pages opened, each dismissed as it opened. */
+  dialogs?: DialogWatch;
 }
 
 type Out = Omit<BrowserCliResult, "exitCode">;
@@ -168,15 +171,104 @@ function arity(ctx: Ctx, min: number, max = min): void {
  * exit 2, any failure exit 1, each with its message in `text`.
  */
 export async function runBrowserCommand(action: string, args: string[], flags: BrowserCliFlags = {}, deps: BrowserCliDeps = {}): Promise<BrowserCliResult> {
+  const ctx: Ctx = { action: action as Action, args, flags, deps };
   try {
     if (!Object.hasOwn(HANDLERS, action)) throw new UsageError(`usage: ${cliName()} browser ${BROWSER_ACTIONS.join("|")}`);
-    const out = await HANDLERS[action as Action]({ action: action as Action, args, flags, deps });
+    const out = await HANDLERS[action as Action](ctx);
+    const dialogs = unreported(ctx);
     // Every success says so in its JSON, as every failure does with `ok: false`.
-    return { ...out, json: { ok: true, ...(out.json as object) }, exitCode: 0 };
+    return {
+      ...out,
+      text: withLines(
+        out.text,
+        dialogs.map((d) => dialogLine(d)),
+      ),
+      json: { ok: true, ...(out.json as object), ...dialogsJson(dialogs) },
+      exitCode: 0,
+    };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
-    return { json: { ok: false, error }, text: error, exitCode: e instanceof UsageError ? 2 : 1 };
+    // A dialog dismissed on the way is said even when the command failed: it may be why (a declined beforeunload).
+    const dialogs = unreported(ctx);
+    return {
+      json: { ok: false, error, ...dialogsJson(dialogs) },
+      text: withLines(
+        error,
+        dialogs.map((d) => dialogLine(d)),
+      ),
+      exitCode: e instanceof UsageError ? 2 : 1,
+    };
   }
+}
+
+const dialogsJson = (dialogs: DialogInfo[]) => (dialogs.length ? { dialogs } : {});
+
+/** Put `lines` after the first line of a text, before a snapshot that may follow it. */
+function withLines(text: string, lines: string[]): string {
+  if (lines.length === 0) return text;
+  const cut = text.indexOf("\n");
+  return cut < 0 ? [text, ...lines].join("\n") : [text.slice(0, cut), ...lines, text.slice(cut + 1)].join("\n");
+}
+
+// --- dialogs in the CLI --------------------------------------------------------
+//
+// The browser hands a JavaScript dialog only to the connection that saw it open:
+// the next command could not answer it, and every command after would wait on
+// the page frozen behind it. So in the CLI each dialog is dismissed (never
+// accepted) as soon as it opens — an onload alert does not hold `open` until its
+// timeout — and the result says so. The MCP server keeps its connection
+// (`deps.page`): there a dialog stays open for the agent to answer.
+
+interface DialogWatch {
+  /** Each dialog heard: dismissed, or closed in the window first. */
+  handled: DialogInfo[];
+  /** Those an action's own result already shows. */
+  reported: Set<DialogInfo>;
+  /** Wait for the dismissals sent so far; throws if one failed. */
+  settle(): Promise<void>;
+  stop(): void;
+}
+
+function dismissDialogs(s: BrowserSession): DialogWatch {
+  const handled: DialogInfo[] = [];
+  const pending: Promise<void>[] = [];
+  let failure: Error | undefined;
+  const stop = s.onDialog((d, page) => {
+    const info = { type: d.type, message: d.message };
+    pending.push(
+      page.send("Page.handleJavaScriptDialog", { accept: false }).then(
+        () => void handled.push({ ...info, dismissed: true }),
+        (e: Error) => {
+          // Answered in the window first: nothing left to dismiss. Anything else leaves it open: the command fails.
+          if (e instanceof CdpError && /no dialog/i.test(e.message)) handled.push({ ...info, closed: true });
+          else failure ??= new Error(`could not dismiss the dialog the page opened (${info.type}: ${JSON.stringify(info.message)}): ${e.message}`);
+        },
+      ),
+    );
+  });
+  return {
+    handled,
+    reported: new Set(),
+    stop,
+    async settle() {
+      await Promise.all(pending);
+      if (failure) throw failure;
+    },
+  };
+}
+
+/** The dialogs handled during the command that no result has shown yet. */
+const unreported = (ctx: Ctx): DialogInfo[] => (ctx.dialogs ? ctx.dialogs.handled.filter((d) => !ctx.dialogs?.reported.has(d)) : []);
+
+/** In the CLI, the dialog an action reports, as it was handled: dismissed, or closed in the window. */
+async function handled<R extends { dialog?: DialogInfo }>(ctx: Ctx, r: R): Promise<R> {
+  const w = ctx.dialogs;
+  if (!r.dialog || !w) return r;
+  await w.settle();
+  const d = w.handled.find((h) => !w.reported.has(h) && h.type === r.dialog?.type && h.message === r.dialog?.message);
+  if (!d) return r;
+  w.reported.add(d);
+  return { ...r, dialog: d };
 }
 
 // --- shared pieces -----------------------------------------------------------
@@ -191,7 +283,19 @@ function onPage<T>(ctx: Ctx, fn: (s: BrowserSession) => Promise<T>, extra: { new
     ...(ctx.deps.browser ? { deps: ctx.deps.browser } : {}),
     ...extra,
   };
-  return withPage(opts, fn);
+  return withPage(opts, async (s) => {
+    const w = (ctx.dialogs = dismissDialogs(s));
+    try {
+      const out = await fn(s);
+      await w.settle();
+      return out;
+    } catch (e) {
+      await w.settle().catch(() => {}); // the dismissals still land, and are said with the error
+      throw e;
+    } finally {
+      w.stop();
+    }
+  });
 }
 
 const actOpts = (ctx: Ctx): ActionOptions => (ctx.deps.browser ? { deps: ctx.deps.browser } : {});
@@ -225,24 +329,16 @@ const where = (url: string, title: string): string => `${url}${title ? ` — ${t
 
 const follow = (ctx: Ctx): BrowserFollowUps => ctx.deps.followUps ?? cliFollowUps();
 
-/** The line saying a JavaScript dialog is open, and how to answer it — or that the CLI dismissed it. */
-export const dialogLine = (d: DialogInfo, f: BrowserFollowUps = cliFollowUps()): string =>
-  d.dismissed
-    ? `dialog ${d.type}: ${JSON.stringify(d.message)} — dismissed: a dialog cannot outlive a command; \`${cliName()} mcp --browser\` keeps it open for an answer`
-    : `dialog ${d.type}: ${JSON.stringify(d.message)} — it is still open: ${f.dialog}`;
+/** The line saying a JavaScript dialog is open, and how to answer it — or how the CLI handled it. */
+export const dialogLine = (d: DialogInfo, f: BrowserFollowUps = cliFollowUps()): string => {
+  const head = `dialog ${d.type}: ${JSON.stringify(d.message)}`;
+  if (d.dismissed) return `${head} — dismissed: a dialog cannot outlive a command; \`${cliName()} mcp --browser\` keeps it open for an answer`;
+  if (d.closed) return `${head} — closed in the window before the command could dismiss it`;
+  return `${head} — it is still open: ${f.dialog}`;
+};
 
-/**
- * The CLI's answer to a dialog its command opened: dismiss it (never accept)
- * before letting go. The browser hands a dialog only to the connection that saw
- * it open, so the next command could not answer it, and every command after
- * would wait on the page frozen behind it. The MCP server keeps its connection
- * (`deps.page`): there the dialog stays open for the agent to answer.
- */
-async function dismissLeftover<R extends { dialog?: DialogInfo }>(ctx: Ctx, s: BrowserSession, r: R): Promise<R> {
-  if (!r.dialog || ctx.deps.page) return r;
-  await s.page.send("Page.handleJavaScriptDialog", { accept: false }).catch(() => {}); // already closed by hand: nothing to do
-  return { ...r, dialog: { ...r.dialog, dismissed: true } };
-}
+/** A dialog the page cannot get past until it is answered. */
+const frozen = (d: DialogInfo | undefined): boolean => d !== undefined && !d.dismissed && !d.closed;
 
 const challengeLine = (ctx: Ctx, c: Challenge): string =>
   `challenge: ${c.kind}${c.blocking ? " (blocking)" : ""} — let the human solve it, then ${follow(ctx).waitClear}`;
@@ -263,12 +359,12 @@ function actionText(ctx: Ctx, r: ActionResult, captured: number | undefined, sna
 /**
  * An action that can change the page: run it (recording the network with
  * --capture), then take the snapshot --snapshot asks for — unless a dialog is
- * open, which freezes the page until it is answered (in the CLI, dismissed first).
+ * open, which freezes the page until it is answered (in the CLI it was dismissed already).
  */
 function mutate(ctx: Ctx, run: (s: BrowserSession, o: ActionOptions) => Promise<ActionResult>): Promise<Out> {
   return onPage(ctx, async (s) => {
-    const { value: r, captured } = await capturing(ctx, s, async () => dismissLeftover(ctx, s, await run(s, actOpts(ctx))));
-    const snap = ctx.flags.snapshot && !(r.dialog && !r.dialog.dismissed) ? await takeSnapshot(s, snapOpts(ctx)) : undefined;
+    const { value: r, captured } = await capturing(ctx, s, async () => handled(ctx, await run(s, actOpts(ctx))));
+    const snap = ctx.flags.snapshot && !frozen(r.dialog) ? await takeSnapshot(s, snapOpts(ctx)) : undefined;
     return {
       json: { ...r, ...(captured !== undefined ? { captured } : {}), ...(snap ? { snapshot: snap } : {}) },
       text: actionText(ctx, r, captured, snap),
@@ -462,6 +558,12 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     const answer = ctx.args[0];
     if (answer !== "accept" && answer !== "dismiss") throw usageError(ctx.action);
     if (answer === "dismiss") arity(ctx, 1);
+    // Only a connection that saw the dialog open can answer it, and the CLI's ends with its command.
+    if (!ctx.deps.page) {
+      throw new Error(
+        `the CLI dismisses dialogs before each command ends; a dialog the page opened between commands can only be answered in the window or with \`${cliName()} browser close\`; \`${cliName()} mcp --browser\` answers dialogs`,
+      );
+    }
     const prompt = ctx.args.length > 1 ? ctx.args.slice(1).join(" ") : undefined;
     return mutate(ctx, (s, o) => actions.handleDialog(s, answer === "accept", prompt, o));
   },
@@ -499,7 +601,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     }
     expression = expression.trim();
     if (!expression) throw usageError(ctx.action);
-    const r = await onPage(ctx, async (s) => dismissLeftover(ctx, s, await actions.evaluate(s, expression, actOpts(ctx))));
+    const r = await onPage(ctx, async (s) => handled(ctx, await actions.evaluate(s, expression, actOpts(ctx))));
     const lines = [pretty(r.value)];
     if (r.dialog) lines.push(dialogLine(r.dialog, follow(ctx)));
     return { json: r, text: lines.join("\n") };

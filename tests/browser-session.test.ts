@@ -163,6 +163,88 @@ describe("openBrowserSession", () => {
   });
 });
 
+describe("a tab frozen by a dialog", () => {
+  it("names the likely dialog when the tab does not answer the attach, after 5 s instead of 30", async () => {
+    fake.addTarget();
+    fake.handle("Page.enable", () => new Promise(() => {}));
+    const t = Date.now();
+    const err = await attach().catch((e) => e);
+    expect(Date.now() - t).toBeLessThan(9000);
+    expect(err.message).toBe(
+      "the tab does not answer; most likely a JavaScript dialog the page opened between commands — answer it in the window, or `webindex-tests browser close`",
+    );
+  }, 15_000);
+
+  it("lets a CDP error of the attach through as it is", async () => {
+    fake.addTarget();
+    fake.handle("Page.enable", () => {
+      throw { code: -32000, message: "Page domain refused" };
+    });
+    await expect(attach()).rejects.toThrow(/Page domain refused/);
+  });
+});
+
+describe("dialogs", () => {
+  it("hears the dialogs of whichever tab is current, with the page that heard each", async () => {
+    fake.addTarget();
+    const s = await attach();
+    const heard: [string, string][] = [];
+    const off = s.onDialog((d, page) => heard.push([String(d.message), page.sessionId]));
+    fake.emit("Page.javascriptDialogOpening", { type: "alert", message: "one" }, "S1");
+    await s.newTab();
+    fake.emit("Page.javascriptDialogOpening", { type: "alert", message: "old tab" }, "S1");
+    fake.emit("Page.javascriptDialogOpening", { type: "alert", message: "two" }, s.sessionId);
+    await s.listTabs(); // a round trip: the events above have arrived
+    off();
+    fake.emit("Page.javascriptDialogOpening", { type: "alert", message: "after" }, s.sessionId);
+    await s.listTabs();
+    expect(heard).toEqual([
+      ["one", "S1"],
+      ["two", s.sessionId],
+    ]);
+  });
+
+  it("stops waiting for a navigation the page's beforeunload dialog cancelled", async () => {
+    fake.addTarget();
+    script.options.lifecycle = "never";
+    const s = await attach();
+    const declined = (sessionId: string) => {
+      fake.emit("Page.javascriptDialogOpening", { type: "beforeunload", message: "" }, sessionId);
+      fake.emit("Page.javascriptDialogClosed", { result: false, userInput: "" }, sessionId);
+    };
+    const nav = fake.handlerOf("Page.navigate");
+    fake.handle("Page.navigate", (p, sessionId) => {
+      declined(sessionId as string);
+      return nav?.(p, sessionId);
+    });
+    const t = Date.now();
+    await expect(s.navigate("https://away.test/")).rejects.toThrow(
+      "navigation to https://away.test/ was cancelled: the page asked to confirm leaving it (beforeunload), and that was declined",
+    );
+    fake.handle("Page.reload", (_p, sessionId) => {
+      declined(sessionId as string);
+      return {};
+    });
+    await expect(s.reload()).rejects.toThrow(/reloading was cancelled: the page asked to confirm leaving it \(beforeunload\)/);
+    expect(Date.now() - t).toBeLessThan(5000);
+  });
+
+  it("keeps waiting when the beforeunload dialog was accepted, or another dialog closed", async () => {
+    fake.addTarget();
+    script.options.lifecycle = "after";
+    const s = await attach();
+    const nav = fake.handlerOf("Page.navigate");
+    fake.handle("Page.navigate", (p, sessionId) => {
+      fake.emit("Page.javascriptDialogOpening", { type: "beforeunload", message: "" }, sessionId);
+      fake.emit("Page.javascriptDialogClosed", { result: true, userInput: "" }, sessionId);
+      fake.emit("Page.javascriptDialogOpening", { type: "confirm", message: "?" }, sessionId);
+      fake.emit("Page.javascriptDialogClosed", { result: false, userInput: "" }, sessionId);
+      return nav?.(p, sessionId);
+    });
+    await expect(s.navigate("https://away.test/")).resolves.toMatchObject({ url: "https://away.test/" });
+  });
+});
+
 describe("navigation", () => {
   it("waits for the load of the new document, clears the tab's refs and reports the status", async () => {
     fake.addTarget();

@@ -164,8 +164,9 @@ USAGE
                      | --ms <n> [--timeout <ms>]
   webindex browser   eval <expr|-> | screenshot [<ref>] [--full] [--out <file>]
   webindex browser   network [list|get <n>|clear] | tabs [list|new|select <tN>|close <tN>]
-  webindex browser   back|forward|reload | dialog accept|dismiss
-  webindex browser   profile import <chrome|brave|path> [--force] | reset | path
+  webindex browser   back|forward|reload | dialog accept|dismiss (MCP only)
+  webindex browser   profile import <chrome|brave|chromium|edge|path> [--force]
+                     | reset | path
   webindex doctor [--json]
   webindex version
 
@@ -354,8 +355,10 @@ COMMANDS
              send, publish…) or submits a password is refused unless --confirm:
              ask the user first. A challenge (captcha, anti-bot wall) is named,
              never bypassed: the human solves it, then wait --clear. --capture
-             records the JSON the page fetches (network list|get). Exit 1 is a
-             stale ref, a timeout or a refusal; --json on every action.
+             records the JSON the page fetches (network list|get). A dialog
+             the page opens is dismissed before the command ends; only the
+             MCP tools (mcp --browser) can answer one. Exit 1 is a stale ref,
+             a timeout or a refusal; --json on every action.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which

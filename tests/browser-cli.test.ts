@@ -381,18 +381,81 @@ describe("page actions", () => {
     expect(r.text).toMatch(/refused/);
   });
 
-  it("answers a dialog, and says when none is open", async () => {
-    await ready();
-    const none = await cli("dialog", ["accept"]);
-    expect(none.exitCode).toBe(1);
-    expect(none.text).toBe("no dialog is open");
+  it("refuses dialog accept|dismiss at once, without reaching for the browser: only the MCP tools can answer one", async () => {
+    const before = fake.calls.length;
+    for (const args of [["accept"], ["accept", "my", "answer"], ["dismiss"]]) {
+      const r = await cli("dialog", args);
+      expect(r.exitCode).toBe(1);
+      expect(r.text).toBe(
+        "the CLI dismisses dialogs before each command ends; a dialog the page opened between commands can only be answered in the window or with `webindex-tests browser close`; `webindex-tests mcp --browser` answers dialogs",
+      );
+    }
+    expect(fake.calls.length).toBe(before);
+    expect((await cli("dialog", ["dismiss", "extra"])).exitCode).toBe(2);
+  });
+
+  it("dismisses a dialog that opens while the page loads, so open does not wait out its timeout", async () => {
+    await cli("attach", [String(fake.port)]);
     fake.handle("Page.handleJavaScriptDialog", () => ({}));
-    const r = await cli("dialog", ["accept", "my", "answer"], { json: true });
+    const nav = fake.handlerOf("Page.navigate");
+    fake.handle("Page.navigate", (p, sessionId) => {
+      fake.emit("Page.javascriptDialogOpening", { type: "alert", message: "loaded", url: p.url }, sessionId);
+      return nav?.(p, sessionId);
+    });
+    const r = await cli("open", ["https://b.test/"], { json: true });
     expect(r.exitCode).toBe(0);
-    expect(r.json).toMatchObject({ action: "dialog" });
-    expect(sent("Page.handleJavaScriptDialog").at(-1)?.params).toEqual({ accept: true, promptText: "my answer" });
-    await cli("dialog", ["dismiss"]);
+    expect(r.json).toMatchObject({ url: "https://b.test/", dialogs: [{ type: "alert", message: "loaded", dismissed: true }] });
     expect(sent("Page.handleJavaScriptDialog").at(-1)?.params).toEqual({ accept: false });
+    const t = await cli("open", ["https://c.test/"]);
+    expect(t.text.split("\n")).toEqual([
+      "https://c.test/ — Title of https://c.test/ (HTTP 200)",
+      'dialog alert: "loaded" — dismissed: a dialog cannot outlive a command; `webindex-tests mcp --browser` keeps it open for an answer',
+    ]);
+  });
+
+  it("says when a dismissed beforeunload dialog cancelled the reload, and fails fast", async () => {
+    await cli("attach", [String(fake.port)]);
+    fake.handle("Page.reload", (_p, sessionId) => {
+      fake.emit("Page.javascriptDialogOpening", { type: "beforeunload", message: "" }, sessionId);
+      return {};
+    });
+    fake.handle("Page.handleJavaScriptDialog", (p, sessionId) => {
+      fake.emit("Page.javascriptDialogClosed", { result: p.accept, userInput: "" }, sessionId);
+      return {};
+    });
+    const r = await cli("reload", [], { json: true });
+    expect(r.exitCode).toBe(1);
+    expect(r.text.split("\n")).toEqual([
+      "reloading was cancelled: the page asked to confirm leaving it (beforeunload), and that was declined",
+      'dialog beforeunload: "" — dismissed: a dialog cannot outlive a command; `webindex-tests mcp --browser` keeps it open for an answer',
+    ]);
+    expect(r.json).toMatchObject({ ok: false, dialogs: [{ type: "beforeunload", dismissed: true }] });
+    expect((await cli("eval", ["document.title"])).exitCode).toBe(0);
+  });
+
+  it("does not claim a dismissal a dialog closed in the window made needless", async () => {
+    await ready();
+    fake.handle("Page.handleJavaScriptDialog", () => {
+      throw { code: -32602, message: "No dialog is showing" };
+    });
+    world.dialogOnClick = { type: "alert", message: "Hi" };
+    const r = await cli("click", ["e1"], { json: true });
+    expect(r.exitCode).toBe(0);
+    expect(r.json).toMatchObject({ dialog: { type: "alert", message: "Hi", closed: true } });
+    expect((r.json as { dialog: { dismissed?: boolean } }).dialog.dismissed).toBeUndefined();
+    expect((await cli("click", ["e1"], {})).text).not.toContain("dismissed");
+  });
+
+  it("fails the command when a dialog cannot be dismissed, rather than say it was", async () => {
+    await ready();
+    fake.handle("Page.handleJavaScriptDialog", () => {
+      throw { code: -32000, message: "Internal error" };
+    });
+    world.dialogOnClick = { type: "alert", message: "Hi" };
+    const r = await cli("click", ["e1"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.text).toMatch(/^could not dismiss the dialog the page opened \(alert: "Hi"\): .*Internal error/);
+    expect(r.text).not.toContain("— dismissed");
   });
 
   it("goes back, forward and reloads", async () => {

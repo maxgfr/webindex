@@ -15,7 +15,8 @@
 // we only attached to (the user's, through --cdp) never is — we only forget it.
 
 import { join } from "node:path";
-import type { CdpClient, CdpHandler, CdpSession } from "./cdp.js";
+import { brand } from "../brand.js";
+import { CdpError, type CdpClient, type CdpHandler, type CdpSession } from "./cdp.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
 import type { TargetInfo } from "./discovery.js";
 import { type Endpoint, isSameBrowser, type LaunchOptions, readActivePort, resolveEndpoint } from "./launch.js";
@@ -26,6 +27,12 @@ const NAVIGATION_TIMEOUT_MS = 30_000;
 const BROWSER_CLOSE_TIMEOUT_MS = 5000;
 /** A page showing a dialog on load never answers Runtime.evaluate; the status is not worth waiting for. */
 const STATUS_TIMEOUT_MS = 2000;
+/**
+ * A tab answers the attach at once, unless a JavaScript dialog froze it: the
+ * browser hands a dialog only to the connection that saw it open, so the page
+ * behind one opened between two commands answers nothing until it is closed.
+ */
+const ATTACH_TIMEOUT_MS = 5000;
 const TAB_ID = /^t([1-9]\d*)$/;
 
 export interface OpenOptions extends LaunchOptions {
@@ -164,14 +171,32 @@ async function createTarget(cdp: CdpClient): Promise<string> {
 async function attachPage(cdp: CdpClient, targetId: string): Promise<string> {
   const { sessionId } = await cdp.send<{ sessionId: string }>("Target.attachToTarget", { targetId, flatten: true });
   const page = cdp.session(sessionId);
-  await Promise.all([
-    page.send("Page.enable"),
-    page.send("Runtime.enable"),
-    page.send("DOM.enable"),
-    page.send("Page.setLifecycleEventsEnabled", { enabled: true }),
-  ]);
+  const o = { timeoutMs: ATTACH_TIMEOUT_MS };
+  try {
+    await Promise.all([
+      page.send("Page.enable", undefined, o),
+      page.send("Runtime.enable", undefined, o),
+      page.send("DOM.enable", undefined, o),
+      page.send("Page.setLifecycleEventsEnabled", { enabled: true }, o),
+    ]);
+  } catch (e) {
+    if (e instanceof CdpError || cdp.closed) throw e;
+    throw new Error(
+      `the tab does not answer; most likely a JavaScript dialog the page opened between commands — answer it in the window, or \`${brand().cli} browser close\``,
+    );
+  }
   return sessionId;
 }
+
+/** A JavaScript dialog as the page announces it (Page.javascriptDialogOpening). */
+export interface DialogEvent {
+  type: string;
+  message: string;
+  url?: string;
+}
+
+/** Hears a dialog, with the page session that heard it: the one that can answer it. */
+export type DialogListener = (d: DialogEvent, page: CdpSession) => void;
 
 /** Ask a browser we launched to quit; kill its pid only if it refused while still connected. */
 async function closeLaunched(cdp: CdpClient, pid: number | undefined, deps: BrowserDeps): Promise<void> {
@@ -209,6 +234,8 @@ export class BrowserSession {
   private current: { targetId: string; sessionId: string; page: CdpSession };
   /** Targets closed by this session that /json/list may still report for a moment. */
   private readonly closed = new Set<string>();
+  /** Dialog listeners, each bound to the current tab's session and moved with it. */
+  private readonly dialogListeners = new Map<DialogListener, CdpHandler>();
   private ended = false;
 
   /** @internal use openBrowserSession */
@@ -328,6 +355,9 @@ export class BrowserSession {
     const seen: NavEvent[] = [];
     let wake: (() => void) | undefined;
     let closed = false;
+    /** A beforeunload dialog is up: if it is declined, the navigation will not happen. */
+    let leaving = false;
+    let cancelled = false;
     const push = (e: NavEvent) => {
       seen.push(e);
       wake?.();
@@ -337,6 +367,17 @@ export class BrowserSession {
       ["Page.navigatedWithinDocument", (p) => push({ kind: "same-document", frameId: p.frameId })],
       // A page restored from the back/forward cache fires no lifecycle event.
       ["Page.frameNavigated", (p) => p.type === "BackForwardCacheRestore" && push({ kind: "bfcache", frameId: p.frame?.id, loaderId: p.frame?.loaderId })],
+      ["Page.javascriptDialogOpening", (p) => (leaving = p?.type === "beforeunload")],
+      [
+        "Page.javascriptDialogClosed",
+        (p) => {
+          if (leaving && p?.result === false) {
+            cancelled = true;
+            wake?.();
+          }
+          leaving = false;
+        },
+      ],
     ];
     for (const [method, h] of handlers) page.on(method, h);
     const offClose = this.cdp.onClose(() => {
@@ -348,7 +389,7 @@ export class BrowserSession {
         for (const [method, h] of handlers) page.off(method, h);
         offClose();
       },
-      until: (match: (e: NavEvent) => boolean, timeoutMs: number, what: string) =>
+      until: (match: (e: NavEvent) => boolean, timeoutMs: number, what: string, cancelledWhat: string) =>
         new Promise<NavEvent>((resolve, reject) => {
           const timer = setTimeout(() => {
             wake = undefined;
@@ -357,6 +398,7 @@ export class BrowserSession {
           wake = () => {
             const hit = seen.find(match);
             if (hit) resolve(hit);
+            else if (cancelled) reject(new Error(`${cancelledWhat} was cancelled: the page asked to confirm leaving it (beforeunload), and that was declined`));
             else if (closed) reject(new Error("the browser connection closed while waiting for the page to load"));
             else return;
             clearTimeout(timer);
@@ -388,7 +430,12 @@ export class BrowserSession {
       clearRefs(this.targetId);
       if (waitUntil === "none") return { url, loaderId: r.loaderId };
       const name = LIFECYCLE[waitUntil];
-      await nav.until((e) => e.kind === "lifecycle" && e.name === name && e.loaderId === r.loaderId, timeoutMs, `navigation to ${url} did not reach ${name}`);
+      await nav.until(
+        (e) => e.kind === "lifecycle" && e.name === name && e.loaderId === r.loaderId,
+        timeoutMs,
+        `navigation to ${url} did not reach ${name}`,
+        `navigation to ${url}`,
+      );
       return await this.loaded();
     } finally {
       nav.stop();
@@ -405,6 +452,7 @@ export class BrowserSession {
         (e) => e.frameId === before.id && (e.kind !== "lifecycle" || (e.name === "load" && e.loaderId !== before.loaderId)),
         timeoutMs,
         `${what} did not reach load`,
+        what,
       );
       if (hit.kind !== "same-document") clearRefs(this.targetId);
       return await this.loaded();
@@ -442,11 +490,36 @@ export class BrowserSession {
     return tabList(this.tabs, pages, this.targetId);
   }
 
+  /**
+   * Hear the JavaScript dialogs of whichever tab is current, across tab
+   * switches, each with the page session that can answer it. Returns its unsubscribe.
+   */
+  onDialog(listener: DialogListener): () => void {
+    this.hookDialogs(listener, this.page);
+    return () => {
+      const h = this.dialogListeners.get(listener);
+      if (h) this.page.off("Page.javascriptDialogOpening", h);
+      this.dialogListeners.delete(listener);
+    };
+  }
+
+  private hookDialogs(listener: DialogListener, page: CdpSession): void {
+    const h: CdpHandler = (p) =>
+      listener({ type: String(p?.type ?? "alert"), message: String(p?.message ?? ""), ...(typeof p?.url === "string" ? { url: p.url } : {}) }, page);
+    page.on("Page.javascriptDialogOpening", h);
+    this.dialogListeners.set(listener, h);
+  }
+
   /** Move this session onto another tab: attach to it, let go of the old one, bring it to the front. */
   private async switchTo(targetId: string): Promise<void> {
     const old = this.current.sessionId;
     const sessionId = await attachPage(this.cdp, targetId);
+    const oldPage = this.current.page;
     this.current = { targetId, sessionId, page: this.cdp.session(sessionId) };
+    for (const [listener, h] of [...this.dialogListeners]) {
+      oldPage.off("Page.javascriptDialogOpening", h);
+      this.hookDialogs(listener, this.current.page);
+    }
     await this.cdp.send("Target.detachFromTarget", { sessionId: old }).catch(() => {});
     await this.deps.discovery.activateTarget(this.port, targetId, this.host);
     this.save();

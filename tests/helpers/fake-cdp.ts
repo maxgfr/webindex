@@ -77,6 +77,11 @@ export class FakeCdp {
     this.handlers.set(method, handler);
   }
 
+  /** The handler scripted for a command, to wrap it. */
+  handlerOf(method: string): FakeHandler | undefined {
+    return this.handlers.get(method);
+  }
+
   /** Push an event to every connected client. */
   emit(method: string, params: unknown = {}, sessionId?: string): void {
     this.broadcast({ method, params, ...(sessionId ? { sessionId } : {}) });

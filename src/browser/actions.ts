@@ -53,6 +53,8 @@ export interface DialogInfo {
   message: string;
   /** The CLI dismissed it before its command ended: it is no longer open. */
   dismissed?: boolean;
+  /** Someone closed it in the window before the CLI could dismiss it. */
+  closed?: boolean;
 }
 
 export interface ActionResult {
