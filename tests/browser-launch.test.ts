@@ -120,6 +120,30 @@ describe("launch policy order", () => {
     expect(ep).toMatchObject({ port: fake.port, launchedByUs: true, pid: 4242, profile: "other" });
   });
 
+  it("never takes an attached browser for a named profile, even default: it launches ours and keeps the attached session", async () => {
+    const attached = await FakeCdp.start();
+    const session = saved({ port: attached.port, launchedByUs: false, pid: undefined, wsBrowserUrl: undefined });
+    writeSession(session);
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    const ep = await resolveEndpoint({ profile: "default", deps: launchDeps(spawn) });
+    expect(calls).toHaveLength(1);
+    expect(ep).toMatchObject({ port: fake.port, launchedByUs: true, profile: "default" });
+    expect(readSession()).toEqual(session);
+    await attached.close();
+  });
+
+  it("skips an attached browser when asked for our own only, and still reuses one of ours", async () => {
+    const attached = await FakeCdp.start();
+    writeSession(saved({ port: attached.port, launchedByUs: false, pid: undefined, wsBrowserUrl: undefined }));
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    expect(await resolveEndpoint({ ownOnly: true, deps: launchDeps(spawn) })).toMatchObject({ port: fake.port, launchedByUs: true });
+    expect(calls).toHaveLength(1);
+    await attached.close();
+    writeSession(saved());
+    expect(await resolveEndpoint({ ownOnly: true, deps: launchDeps(spawn) })).toMatchObject({ port: fake.port, launchedByUs: true, pid: 777 });
+    expect(calls).toHaveLength(1);
+  });
+
   it("spawns when the saved port is dead, and forgets the dead session", async () => {
     writeSession(saved({ port: await deadPort() }));
     const { spawn, calls } = fakeSpawn({ port: fake.port });

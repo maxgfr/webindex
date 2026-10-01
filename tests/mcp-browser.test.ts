@@ -477,10 +477,10 @@ describe("the other tools", () => {
 
   it("answers a stale ref, a wrong choice or a launch option with what to do", async () => {
     const h = await host();
-    // Launch options only matter to the call that opens the session: here, the saved browser's profile.
-    expect((await h.call("webindex_browser_open", { url: "https://b.test/", profile: "default", headless: true, interactive: true })).text).toMatch(
-      /^https:\/\/b\.test\//,
-    );
+    // A profile named, `default` included, asks for a browser of ours, never the attached one (and none can be launched here).
+    await expect(h.call("webindex_browser_open", { url: "https://b.test/", profile: "default" })).rejects.toThrow(/no Chrome, Brave/);
+    // Launch options only matter to the call that opens the session: here, the attached browser keeps its window.
+    expect((await h.call("webindex_browser_open", { url: "https://b.test/", headless: true, interactive: true })).text).toMatch(/^https:\/\/b\.test\//);
     await expect(h.call("webindex_browser_click", { ref: "e99" })).rejects.toThrow(/take a new snapshot/);
     await expect(h.call("webindex_browser_history", { action: "sideways" })).rejects.toThrow(/`action` must be one of back, forward, reload/);
     await expect(h.call("webindex_browser_snapshot", { mode: "full", ref: "e99" })).rejects.toThrow(ToolError);

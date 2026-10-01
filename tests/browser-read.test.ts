@@ -245,6 +245,25 @@ describe("readRenderedPage", () => {
     expect(fake.calls.map((c) => c.method)).toContain("Browser.close");
   });
 
+  it("never reads in a browser it was only attached to: it launches the dedicated one, and the attached session stays", async () => {
+    const attached = await FakeCdp.start();
+    try {
+      const session = { ...agentSession(), port: attached.port };
+      writeSession(session);
+      pages["https://spa.test/"] = { html: ARTICLE };
+      fake.addTarget();
+      const spawned = fakeSpawn({ port: fake.port });
+      const r = await readRenderedPage("https://spa.test/", { waitUntil: "load", deps: deps({ spawn: spawned.spawn }) });
+      expect(r.extractor).toBe("browser");
+      expect(spawned.calls).toHaveLength(1);
+      expect(attached.calls).toEqual([]);
+      expect(attached.requests.filter((q) => !q.startsWith("GET /json/version"))).toEqual([]);
+      expect(readSession()).toEqual(session);
+    } finally {
+      await attached.close();
+    }
+  });
+
   it("never reaches the browser once it has given up waiting for the lock", async () => {
     writeFileSync(join(home, "lock"), JSON.stringify({ pid: process.pid, at: Date.now() }));
     await expect(readRenderedPage("https://spa.test/", { cdp: fake.port, timeoutMs: 100, deps: deps() })).rejects.toThrow(/did not finish within 100 ms/);

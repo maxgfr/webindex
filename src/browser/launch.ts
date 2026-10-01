@@ -2,7 +2,8 @@
 //
 //   1. an explicit port or URL (`--cdp`): loopback only, and it must answer;
 //   2. the port saved in session.json, while it still answers (and, when a
-//      profile was asked for, only if it is that profile's browser);
+//      profile was asked for, only if it is that profile's browser — never a
+//      browser we were only attached to, which has no profile of ours);
 //   3. otherwise a SEPARATE browser of our own, on a dedicated profile.
 //
 // The browser we launch never touches the user's own profile: Chrome 136+
@@ -34,6 +35,12 @@ export interface LaunchOptions {
   headless?: boolean;
   /** The browser binary; detected when unset. */
   binary?: string;
+  /**
+   * Never a saved browser this library did not launch (one `attach` or `--cdp`
+   * named): the user lent it for the agent's session, not for reads in the
+   * background. Ours is used, or launched, instead. An explicit `cdp` still wins.
+   */
+  ownOnly?: boolean;
   deps?: Partial<BrowserDeps>;
 }
 
@@ -69,7 +76,9 @@ export async function resolveEndpoint(opts: LaunchOptions = {}): Promise<Endpoin
   }
 
   const saved = readSession();
-  if (saved && (opts.profile === undefined || saved.profile === opts.profile)) {
+  // An attached browser is whatever the user runs: it matches no profile asked for by name, `default` included.
+  const usable = saved && (saved.launchedByUs ? opts.profile === undefined || saved.profile === opts.profile : opts.profile === undefined && !opts.ownOnly);
+  if (saved && usable) {
     const host = saved.host ?? "127.0.0.1";
     // A live port is not enough: ours may have died and the port gone to another
     // browser, which `close` would then shut down. The browser socket path (a

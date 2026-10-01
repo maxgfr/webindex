@@ -2,7 +2,8 @@
 // fetchAndExtract (see src/fetch.ts).
 //
 // Each read renders the URL in a scratch tab of the dedicated browser (the
-// launch policy applies: the saved one, else a fresh launch), waits for load
+// launch policy applies: the saved one if we launched it, else a fresh launch;
+// never a browser we were only attached to, unless `cdp` names it), waits for load
 // and a short quiet spell on the network, takes the DOM as rendered and runs it
 // through the same extraction as a fetched page. The tab is closed and the
 // socket let go afterwards, whatever happened; the browser keeps running. The
@@ -110,7 +111,8 @@ async function render(url: string, opts: ReadPageOptions, deps: BrowserDeps, tim
     async () => {
       // Given up on while waiting for the lock: launching a browser now would be for nobody.
       if (run.stopped) throw new Error("stopped");
-      return openBrowserSession({ cdp, profile, headless, binary, deps, scratch: true });
+      // A browser the user only attached is theirs: a background read never borrows it, nor their cookies.
+      return openBrowserSession({ cdp, profile, headless, binary, deps, scratch: true, ownOnly: true });
     },
     { deps },
   );
