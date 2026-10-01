@@ -159,9 +159,14 @@ export class CdpClient {
     };
   }
 
-  onClose(handler: () => void): void {
-    if (this.isClosed) handler();
-    else this.closeHandlers.add(handler);
+  /** Run `handler` once the connection is closed (at once if it already is). Returns its unsubscribe. */
+  onClose(handler: () => void): () => void {
+    if (this.isClosed) {
+      handler();
+      return () => {};
+    }
+    this.closeHandlers.add(handler);
+    return () => void this.closeHandlers.delete(handler);
   }
 
   /** Close the connection (the browser keeps running). */

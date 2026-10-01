@@ -77,16 +77,19 @@ describe("CdpClient.send", () => {
     fake.handle("hang", () => new Promise(() => {}));
     const c = await connect();
     let closed = 0;
+    let unsubscribed = 0;
     c.onClose(() => closed++);
+    c.onClose(() => unsubscribed++)();
     const p = c.send("hang");
     await delay(20);
     fake.dropClients();
     await expect(p).rejects.toThrow(/closed.*hang/);
     expect(c.closed).toBe(true);
     expect(closed).toBe(1);
+    expect(unsubscribed).toBe(0);
     await expect(c.send("again")).rejects.toThrow(/closed/);
     const late: string[] = [];
-    c.onClose(() => late.push("now"));
+    c.onClose(() => late.push("now"))();
     expect(late).toEqual(["now"]);
   });
 

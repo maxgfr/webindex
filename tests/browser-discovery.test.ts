@@ -118,6 +118,18 @@ describe("misbehaving servers", () => {
     await s.stop();
   });
 
+  it("connects to 127.0.0.1 when asked for localhost, which may resolve to ::1 first", async () => {
+    let host: string | undefined;
+    const s = await serve((req, res) => {
+      host = req.headers.host;
+      res.end(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1/devtools/browser/x" }));
+    });
+    await getVersion(s.port, "localhost");
+    expect(host).toBe(`127.0.0.1:${s.port}`);
+    expect(await isPortAlive(s.port, "LOCALHOST")).toBe(true);
+    await s.stop();
+  });
+
   it("times out on a server that never answers", async () => {
     const s = await serve(() => {});
     expect(await isPortAlive(s.port)).toBe(false);

@@ -65,10 +65,20 @@ interface HttpResult {
   body: string;
 }
 
+/**
+ * The address to dial for a loopback host. `localhost` is dialled as 127.0.0.1:
+ * Node >= 17 keeps the resolver's order, which often puts ::1 first, while
+ * Chrome's DevTools server listens on 127.0.0.1 only — so `localhost:9222`
+ * would be refused against a browser that is plainly running.
+ */
+export function dialHost(host: string): string {
+  const bare = assertLoopback(host);
+  return bare === "localhost" ? "127.0.0.1" : bare;
+}
+
 function http(method: string, port: number, host: string, path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<HttpResult> {
   return new Promise((resolve, reject) => {
-    const bare = assertLoopback(host);
-    const req = request({ host: bare, port, path, method, timeout: timeoutMs }, (res) => {
+    const req = request({ host: dialHost(host), port, path, method, timeout: timeoutMs }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (c: Buffer) => chunks.push(c));
       res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));

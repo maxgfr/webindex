@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { defaultBrowserDeps } from "../src/browser/deps.js";
+import { browserDeps, defaultBrowserDeps } from "../src/browser/deps.js";
 import {
   appendNetwork,
   clearNetwork,
@@ -138,6 +138,15 @@ describe("network log", () => {
     clearNetwork("T1", { home });
     expect(readNetwork("T1", { home })).toEqual([]);
     clearNetwork("T1", { home });
+  });
+
+  it("clears every tab's log when no target is given", () => {
+    appendNetwork("T1", [{ n: 1 }], { home });
+    appendNetwork("T2", [{ n: 2 }], { home });
+    clearNetwork(undefined, { home });
+    expect(readNetwork("T1", { home })).toEqual([]);
+    expect(readNetwork("T2", { home })).toEqual([]);
+    clearNetwork(undefined, { home });
   });
 
   it("skips corrupt lines", () => {
@@ -323,5 +332,17 @@ describe("defaultBrowserDeps", () => {
     await fh.close();
     await expect(d.fs.open(join(home, "z"), "wx")).rejects.toThrow();
     await d.fs.rm(join(home, "y"), { force: true });
+  });
+
+  it("kills by pid, detects a browser, and lets a caller replace any seam", async () => {
+    const d = browserDeps({ platform: "aix" });
+    expect(d.platform).toBe("aix");
+    expect(typeof d.connectCdp).toBe("function");
+    const found = d.detectBrowser();
+    expect(found === null || typeof found.path === "string").toBe(true);
+    const child = d.spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], { stdio: "ignore" });
+    const exited = new Promise<NodeJS.Signals | null>((r) => child.on("exit", (_code, sig) => r(sig)));
+    d.kill(child.pid as number, "SIGTERM");
+    expect(await exited).toBe("SIGTERM");
   });
 });

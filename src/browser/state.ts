@@ -21,6 +21,8 @@ import { browserHome, ensurePrivateDir } from "./profile.js";
 
 export interface Session {
   version: 1;
+  /** Loopback address the DevTools port listens on; 127.0.0.1 when absent. */
+  host?: string;
   port: number;
   wsBrowserUrl?: string;
   pid?: number;
@@ -28,6 +30,8 @@ export interface Session {
   profile: string;
   headless: boolean;
   targetId: string;
+  /** Short tab ids (`t1`) handed to the agent, so they mean the same tab on the next call. */
+  tabs?: Record<string, string>;
   updatedAt: number;
 }
 
@@ -150,10 +154,11 @@ export function appendNetwork(targetId: string, entries: unknown[], o?: StateOpt
   writeFileAtomic(file, `${kept.join("\n")}\n`, FILE_MODE);
 }
 
-export function clearNetwork(targetId: string, o?: StateOptions): void {
-  const file = networkFile(targetId, o);
+/** One tab's network log, or all of them when no target is given. */
+export function clearNetwork(targetId?: string, o?: StateOptions): void {
+  const path = targetId === undefined ? join(homeOf(o), "network") : networkFile(targetId, o);
   if (isNoWrite()) return;
-  rmSync(file, { force: true });
+  rmSync(path, { recursive: true, force: true });
 }
 
 // --- cross-process lock ----------------------------------------------------
