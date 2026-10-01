@@ -602,9 +602,9 @@ function argTimeout(args: CommandArgs): number | undefined {
  * local file (unless --extract-root names the one directory it may). Keyed on
  * the flag rather than on the bind address, because "others can reach this" is
  * what the flag says — a loopback server behind a reverse proxy is reachable
- * too, and its operator can say so.
+ * too, and its operator can say so. Exported for the suite.
  */
-function mcpPolicy(args: CommandArgs, allowRemote: boolean): WebindexToolPolicy {
+export function mcpPolicy(args: CommandArgs, allowRemote: boolean): WebindexToolPolicy {
   const allowPrivate = argBool(args, "allow-private");
   if (allowPrivate && argBool(args, "public-only")) usage("--public-only and --allow-private contradict each other");
   const publicOnly = !allowPrivate && (argBool(args, "public-only") || envFlag("PUBLIC_ONLY") || allowRemote);
@@ -630,7 +630,12 @@ function mcpPolicy(args: CommandArgs, allowRemote: boolean): WebindexToolPolicy 
     }
     if (!isDir) usage(`--extract-root ${rootArg} is not a directory`);
   }
-  return { publicOnly, ...(extractRoot !== undefined ? { extractRoot } : allowRemote ? { noLocalFiles: true } : {}), ...(browser ? { browser } : {}) };
+  return {
+    publicOnly,
+    ...(extractRoot !== undefined ? { extractRoot } : allowRemote ? { noLocalFiles: true } : {}),
+    ...(browser ? { browser } : {}),
+    ...(allowRemote ? { remote: true } : {}),
+  };
 }
 
 /** What the policy is, said once at startup — nothing when there is none. */
@@ -1080,6 +1085,12 @@ export interface WebindexToolPolicy {
   noLocalFiles?: boolean;
   /** Offer the webindex_browser_* tools (`mcp --browser`), over one browser session kept for the adapter's life. */
   browser?: boolean;
+  /**
+   * Reachable beyond this machine (`mcp --allow-remote`). webindex_fetch then
+   * never renders in the browser, whatever `<PREFIX>_BROWSER_FETCH` says: that
+   * browser is this machine's, logins included, and not for others to drive.
+   */
+  remote?: boolean;
 }
 
 // The host name a public-only check had to resolve, or undefined when it
@@ -1608,6 +1619,9 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & {
           format: args.format === "markdown" ? ("markdown" as const) : ("text" as const),
           timeoutMs: toolTimeoutMs(args.timeoutMs),
           signal,
+          // The same wall that refuses --browser: a browser follows any address
+          // a page leads it to, in a profile that may be logged in.
+          ...(policy.remote || policy.publicOnly ? { browser: "off" as const } : {}),
         };
         // Guarded, every hop is checked (which also keeps Firecrawl — a fetcher
         // no hook reaches — out of it), and the cache is not read: it holds what

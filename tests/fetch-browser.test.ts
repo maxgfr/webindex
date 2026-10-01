@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
 import { readRenderedPage } from "../src/browser/read.js";
 import { cachedFetchAndExtract, resetCacheMode, setCacheMode } from "../src/cache.js";
+import { mcpPolicy, webindexAdapter } from "../src/cli.js";
 import { type ExtractResult, fetchAndExtract } from "../src/fetch.js";
 import { installFetchMock, routes } from "./fetchmock.js";
 
@@ -284,5 +285,27 @@ describe("cachedFetchAndExtract and the browser rung", () => {
     await cachedFetchAndExtract("https://x.test/a", { browser: "always" }, true, 1000);
     setCacheMode({ offline: true });
     expect(await cachedFetchAndExtract("https://x.test/a", {}, false, 2000)).toMatchObject({ text: RENDERED, cached: true });
+  });
+});
+
+describe("the browser rung on an MCP server others can reach", () => {
+  const bools = (...flags: string[]) => ({ command: "mcp", positional: [], values: {}, bools: new Set(flags) });
+
+  it("is never taken by webindex_fetch, whatever BROWSER_FETCH says", async () => {
+    installFetchMock(routes([["x.test", { body: LONG }]]));
+    process.env[envName("BROWSER_FETCH")] = "always";
+    // --allow-remote --allow-private: no public-only wall, so nothing else turns the rung off.
+    const policy = mcpPolicy(bools("allow-remote", "allow-private"), true);
+    expect(policy.publicOnly).toBe(false);
+    const out = await webindexAdapter(policy).callTool("webindex_fetch", { url: "https://x.test/a" });
+    expect(out.text).toContain("Good page");
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("is still taken on this machine's own server", async () => {
+    installFetchMock(routes([["x.test", { body: LONG }]]));
+    process.env[envName("BROWSER_FETCH")] = "always";
+    await webindexAdapter(mcpPolicy(bools(), false)).callTool("webindex_fetch", { url: "https://x.test/a" });
+    expect(read).toHaveBeenCalledTimes(1);
   });
 });
