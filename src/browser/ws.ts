@@ -181,14 +181,36 @@ export class WsClient extends EventEmitter {
   }
 
   private feed(chunk: Buffer): void {
+    const messages: string[] = [];
+    let failure: unknown;
     try {
-      for (const frame of this.parser.push(chunk)) this.onFrame(frame);
+      for (const frame of this.parser.push(chunk)) {
+        const text = this.onFrame(frame);
+        if (text !== undefined) messages.push(text);
+      }
     } catch (e) {
-      this.fail(e as Error, e instanceof WsProtocolError ? e.code : 1002);
+      failure = e;
+    }
+    // Listeners run outside the try: a throwing one is the consumer's bug, not a protocol violation.
+    for (const text of messages) this.deliver(text);
+    if (failure) this.fail(failure as Error, failure instanceof WsProtocolError ? failure.code : 1002);
+  }
+
+  private deliver(text: string): void {
+    try {
+      this.emit("message", text);
+    } catch (e) {
+      // Keep the connection and the remaining messages; never swallow the error.
+      if (this.listenerCount("error") > 0) this.emit("error", e);
+      else
+        process.nextTick(() => {
+          throw e;
+        });
     }
   }
 
-  private onFrame(f: Frame): void {
+  /** Handle one frame; returns the text of a message it completed. */
+  private onFrame(f: Frame): string | undefined {
     if (this.done) return;
     switch (f.opcode) {
       case 0x9:
@@ -223,7 +245,7 @@ export class WsClient extends EventEmitter {
     this.fragments = [];
     this.fragmentBytes = 0;
     this.started = false;
-    this.emit("message", text);
+    return text;
   }
 
   /** Protocol or socket failure: tell the peer why (when we can), surface the error, close. */

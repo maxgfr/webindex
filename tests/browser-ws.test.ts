@@ -263,6 +263,42 @@ describe("WsClient", () => {
     expect((await nextEvent<{ code: number }>(c, "close")).code).toBe(1002);
   });
 
+  it("keeps the connection open when a message listener throws, and reports the original error", async () => {
+    const s = await serve((_sock, send) => {
+      send(0x1, Buffer.from("bad"));
+      send(0x1, Buffer.from("good"));
+    });
+    const c = await connect(s.url);
+    const errors: Error[] = [];
+    const got: string[] = [];
+    let closed = false;
+    c.on("error", (e) => errors.push(e));
+    c.on("close", () => {
+      closed = true;
+    });
+    c.on("message", (m: string) => {
+      if (m === "bad") throw new SyntaxError("not json");
+      got.push(m);
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(got).toEqual(["good"]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(SyntaxError);
+    expect(errors[0]).not.toBeInstanceOf(WsProtocolError);
+    expect(closed).toBe(false);
+    c.send("still open");
+  });
+
+  it("rethrows a listener error asynchronously when nobody listens for 'error'", async () => {
+    const s = await serve((_sock, send) => send(0x1, Buffer.from("x")));
+    const c = await connect(s.url);
+    const thrown = new Promise<Error>((r) => process.once("uncaughtException", r));
+    c.on("message", () => {
+      throw new Error("boom");
+    });
+    expect((await thrown).message).toBe("boom");
+  });
+
   it("rejects a bad Sec-WebSocket-Accept", async () => {
     const s = await serve(() => {}, { badAccept: true });
     await expect(connectWebSocket(s.url)).rejects.toThrow(/bad Accept/);
