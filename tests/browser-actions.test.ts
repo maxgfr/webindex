@@ -306,8 +306,21 @@ describe("click", () => {
       { type: "mousePressed", x: 60, y: 40, button: "left", buttons: 1, clickCount: 1 },
       { type: "mouseReleased", x: 60, y: 40, button: "left", buttons: 0, clickCount: 1 },
     ]);
-    expect(w.page.calls.find((c) => c.method === "DOM.getNodeForLocation")?.params).toEqual({ x: 60, y: 40, includeUserAgentShadowDOM: true });
+    // The hit test takes document coordinates: the box's, plus the scroll (pageY 500 here); the mouse takes the viewport's.
+    expect(w.page.calls.find((c) => c.method === "DOM.getNodeForLocation")?.params).toEqual({ x: 60, y: 540, includeUserAgentShadowDOM: true });
     expect(r).toEqual({ ok: true, action: "click", ref: "e1", navigated: false, url: "https://a.test/", title: "A page", challenge: null });
+  });
+
+  it("aims at whole pixels: Chrome refuses a fractional point to DOM.getNodeForLocation", async () => {
+    w.add(101, { tag: "BUTTON", text: "Next", quads: [[58, 58, 86.59375, 58, 86.59375, 79, 58, 79]] });
+    w.hitFor = 101;
+    await click(session, "e1", { deps });
+    expect(w.page.calls.find((c) => c.method === "DOM.getNodeForLocation")?.params).toEqual({ x: 72, y: 569, includeUserAgentShadowDOM: true });
+    expect(mouse().map(({ x, y }) => [x, y])).toEqual([
+      [72, 69],
+      [72, 69],
+      [72, 69],
+    ]);
   });
 
   it("arms the settle before the mouse goes down, and releases the handles it took", async () => {
@@ -836,6 +849,13 @@ describe("handleDialog", () => {
     w.dialogOpen = true;
     await handleDialog(session, false, undefined, { deps });
     expect(w.page.calls.filter((c) => c.method === "Page.handleJavaScriptDialog")[1]?.params).toEqual({ accept: false });
+  });
+
+  it("answers before it asks the page anything: behind a dialog the page answers nothing", async () => {
+    w.dialogOpen = true;
+    const from = w.page.calls.length;
+    await handleDialog(session, false, undefined, { deps });
+    expect(w.page.calls[from]?.method).toBe("Page.handleJavaScriptDialog");
   });
 
   it("says so clearly when no dialog is open", async () => {

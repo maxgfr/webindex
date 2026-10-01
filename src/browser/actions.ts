@@ -51,6 +51,8 @@ export interface DialogInfo {
   /** "alert", "confirm", "prompt" or "beforeunload". */
   type: string;
   message: string;
+  /** The CLI dismissed it before its command ended: it is no longer open. */
+  dismissed?: boolean;
 }
 
 export interface ActionResult {
@@ -446,11 +448,12 @@ async function visibleQuads(page: CdpSession, node: ResolvedRef): Promise<Quad[]
   return shown;
 }
 
+/** In whole pixels: DOM.getNodeForLocation refuses a fractional point, and the mouse must land where the hit test looked. */
 async function centreOf(page: CdpSession, node: ResolvedRef): Promise<{ x: number; y: number }> {
   const q = (await visibleQuads(page, node))[0] as Quad;
   return {
-    x: ((q[0] as number) + (q[2] as number) + (q[4] as number) + (q[6] as number)) / 4,
-    y: ((q[1] as number) + (q[3] as number) + (q[5] as number) + (q[7] as number)) / 4,
+    x: Math.round(((q[0] as number) + (q[2] as number) + (q[4] as number) + (q[6] as number)) / 4),
+    y: Math.round(((q[1] as number) + (q[3] as number) + (q[5] as number) + (q[7] as number)) / 4),
   };
 }
 
@@ -471,7 +474,11 @@ async function hitTarget(page: CdpSession, node: ResolvedRef, x: number, y: numb
       throw e instanceof CdpError ? unreachable() : e;
     }
   };
-  const hit = (await ask<{ backendNodeId?: number }>("DOM.getNodeForLocation", { x, y, includeUserAgentShadowDOM: true })).backendNodeId;
+  // The box (and the mouse) are in viewport coordinates; DOM.getNodeForLocation takes the document's.
+  const m = await page.send<LayoutMetrics>("Page.getLayoutMetrics");
+  const vp = m.cssLayoutViewport ?? m.layoutViewport ?? { pageX: 0, pageY: 0 };
+  const point = { x: Math.round(x + vp.pageX), y: Math.round(y + vp.pageY), includeUserAgentShadowDOM: true };
+  const hit = (await ask<{ backendNodeId?: number }>("DOM.getNodeForLocation", point)).backendNodeId;
   if (hit === undefined) throw unreachable();
   if (hit === node.backendNodeId) return undefined;
   const objectId = (await ask<{ object?: { objectId?: string } }>("DOM.resolveNode", { backendNodeId: hit })).object?.objectId;
@@ -794,16 +801,19 @@ export async function evaluate(session: ActionSession, expression: string, opts:
   return finish(session, "evaluate", undefined, p);
 }
 
-/** Accept or dismiss the JavaScript dialog the page shows (`promptText` answers a prompt). */
+/**
+ * Accept or dismiss the JavaScript dialog the page shows (`promptText` answers a
+ * prompt). The answer goes first, before the settle is armed: until the dialog
+ * is closed the page answers nothing, and arming would wait out its timeouts.
+ */
 export async function handleDialog(session: ActionSession, accept: boolean, promptText?: string, opts: ActionOptions = {}): Promise<ActionResult> {
-  const p = await perform(session, opts, async (pg) => {
-    try {
-      await pg.send("Page.handleJavaScriptDialog", { accept, ...(promptText !== undefined ? { promptText } : {}) });
-    } catch (e) {
-      if (e instanceof CdpError && /no dialog/i.test(e.message)) throw new ActionError("no dialog is open");
-      throw e;
-    }
-  });
+  try {
+    await session.page.send("Page.handleJavaScriptDialog", { accept, ...(promptText !== undefined ? { promptText } : {}) });
+  } catch (e) {
+    if (e instanceof CdpError && /no dialog/i.test(e.message)) throw new ActionError("no dialog is open");
+    throw e;
+  }
+  const p = await perform(session, opts, async () => {});
   return finish(session, "dialog", undefined, p);
 }
 

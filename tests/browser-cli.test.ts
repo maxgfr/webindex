@@ -338,14 +338,33 @@ describe("page actions", () => {
     expect(j.json).toMatchObject({ action: "click", snapshot: { refCount: 5 } });
   });
 
-  it("reports a dialog the action opened, and skips the snapshot behind it", async () => {
+  it("dismisses a dialog the action opened before the command ends, says so, then takes the snapshot", async () => {
+    // The browser hands a dialog only to the connection that saw it open: the next command could not answer it.
     await ready();
+    fake.handle("Page.handleJavaScriptDialog", () => ({}));
     world.dialogOnClick = { type: "confirm", message: "Leave?" };
     const r = await cli("click", ["e1"], { snapshot: true });
     expect(r.exitCode).toBe(0);
-    expect(r.text).toContain('dialog confirm: "Leave?"');
-    expect(r.text).toContain("`webindex-tests browser dialog accept|dismiss`");
-    expect(r.text).not.toContain("[ref=e1]");
+    expect(r.text).toContain(
+      'dialog confirm: "Leave?" — dismissed: a dialog cannot outlive a command; `webindex-tests mcp --browser` keeps it open for an answer',
+    );
+    expect(sent("Page.handleJavaScriptDialog").at(-1)?.params).toEqual({ accept: false });
+    expect(r.text).toContain("[ref=e1]");
+    world.dialogOnClick = { type: "alert", message: "Hi" };
+    const j = await cli("click", ["e1"], { json: true });
+    expect(j.json).toMatchObject({ dialog: { type: "alert", message: "Hi", dismissed: true } });
+  });
+
+  it("dismisses a dialog an eval opened", async () => {
+    await ready();
+    fake.handle("Page.handleJavaScriptDialog", () => ({}));
+    fake.handle("Runtime.evaluate", (p, sessionId) => {
+      if (p.expression === "alert(1)") fake.emit("Page.javascriptDialogOpening", { type: "alert", message: "1", url: "https://a.test/" }, sessionId);
+      return { result: { type: "string", value: "A page" } };
+    });
+    const r = await cli("eval", ["alert(1)"]);
+    expect(r.text).toContain('dialog alert: "1" — dismissed');
+    expect(sent("Page.handleJavaScriptDialog").at(-1)?.params).toEqual({ accept: false });
   });
 
   it("captures what an action fetched with --capture", async () => {

@@ -225,9 +225,24 @@ const where = (url: string, title: string): string => `${url}${title ? ` — ${t
 
 const follow = (ctx: Ctx): BrowserFollowUps => ctx.deps.followUps ?? cliFollowUps();
 
-/** The line saying a JavaScript dialog is open, and how to answer it. */
+/** The line saying a JavaScript dialog is open, and how to answer it — or that the CLI dismissed it. */
 export const dialogLine = (d: DialogInfo, f: BrowserFollowUps = cliFollowUps()): string =>
-  `dialog ${d.type}: ${JSON.stringify(d.message)} — it is still open: ${f.dialog}`;
+  d.dismissed
+    ? `dialog ${d.type}: ${JSON.stringify(d.message)} — dismissed: a dialog cannot outlive a command; \`${cliName()} mcp --browser\` keeps it open for an answer`
+    : `dialog ${d.type}: ${JSON.stringify(d.message)} — it is still open: ${f.dialog}`;
+
+/**
+ * The CLI's answer to a dialog its command opened: dismiss it (never accept)
+ * before letting go. The browser hands a dialog only to the connection that saw
+ * it open, so the next command could not answer it, and every command after
+ * would wait on the page frozen behind it. The MCP server keeps its connection
+ * (`deps.page`): there the dialog stays open for the agent to answer.
+ */
+async function dismissLeftover<R extends { dialog?: DialogInfo }>(ctx: Ctx, s: BrowserSession, r: R): Promise<R> {
+  if (!r.dialog || ctx.deps.page) return r;
+  await s.page.send("Page.handleJavaScriptDialog", { accept: false }).catch(() => {}); // already closed by hand: nothing to do
+  return { ...r, dialog: { ...r.dialog, dismissed: true } };
+}
 
 const challengeLine = (ctx: Ctx, c: Challenge): string =>
   `challenge: ${c.kind}${c.blocking ? " (blocking)" : ""} — let the human solve it, then ${follow(ctx).waitClear}`;
@@ -248,12 +263,12 @@ function actionText(ctx: Ctx, r: ActionResult, captured: number | undefined, sna
 /**
  * An action that can change the page: run it (recording the network with
  * --capture), then take the snapshot --snapshot asks for — unless a dialog is
- * open, which freezes the page until it is answered.
+ * open, which freezes the page until it is answered (in the CLI, dismissed first).
  */
 function mutate(ctx: Ctx, run: (s: BrowserSession, o: ActionOptions) => Promise<ActionResult>): Promise<Out> {
   return onPage(ctx, async (s) => {
-    const { value: r, captured } = await capturing(ctx, s, () => run(s, actOpts(ctx)));
-    const snap = ctx.flags.snapshot && !r.dialog ? await takeSnapshot(s, snapOpts(ctx)) : undefined;
+    const { value: r, captured } = await capturing(ctx, s, async () => dismissLeftover(ctx, s, await run(s, actOpts(ctx))));
+    const snap = ctx.flags.snapshot && !(r.dialog && !r.dialog.dismissed) ? await takeSnapshot(s, snapOpts(ctx)) : undefined;
     return {
       json: { ...r, ...(captured !== undefined ? { captured } : {}), ...(snap ? { snapshot: snap } : {}) },
       text: actionText(ctx, r, captured, snap),
@@ -484,7 +499,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     }
     expression = expression.trim();
     if (!expression) throw usageError(ctx.action);
-    const r = await onPage(ctx, (s) => actions.evaluate(s, expression, actOpts(ctx)));
+    const r = await onPage(ctx, async (s) => dismissLeftover(ctx, s, await actions.evaluate(s, expression, actOpts(ctx))));
     const lines = [pretty(r.value)];
     if (r.dialog) lines.push(dialogLine(r.dialog, follow(ctx)));
     return { json: r, text: lines.join("\n") };
