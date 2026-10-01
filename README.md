@@ -454,11 +454,12 @@ and volatile fields are explicit consumer policy. Changed prose and unsupported
 snapshot formats require review instead of being approved by line counts. A changed
 baseline is committed deliberately after its semantic difference is validated.
 
-The reusable workflow reference is pinned separately from the development CLI.
-GitHub's default automation token cannot modify workflow definitions, so `skill repin`
-updates runtime engines and the maintenance dependency without editing `.github/workflows`.
-A maintainer can advance the immutable workflow reference after reviewing a workflow change.
-The stable shell continues to execute the consumer's prepare/gate scripts and the current CLI.
+Consumers call the reusable workflow as `skill-repin.yml@v1`. GitHub's default
+automation token cannot modify workflow definitions, so `skill repin` updates runtime
+engines and the maintenance dependency without editing `.github/workflows`; instead the
+release workflow moves the `v1` major tag onto every stable release, and every consumer
+runs the current shell with no edit. A breaking change to the workflow contract ships as
+a new major, which consumers adopt deliberately.
 
 ## Manual skill invocation
 
