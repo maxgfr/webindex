@@ -8,7 +8,8 @@
 // Every command that touches a page runs inside withPage: under the browser
 // lock, reconnected to the tab the last call left, detached at the end — the
 // browser stays up for the next call. `status`, `close`, `network` and
-// `profile` never launch a browser.
+// `profile` never launch a browser. The MCP server (mcp.ts) runs the same
+// handlers on the one session it keeps, through `BrowserCliDeps.page`.
 
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -71,7 +72,34 @@ export interface BrowserCliDeps {
   stdin?: () => string;
   /** Where relative paths (upload, --out) are resolved; process.cwd() by default. */
   cwd?: string;
+  /**
+   * Runs a page command on a session. By default the CLI's: reconnect under
+   * the browser lock (withPage), detach at the end. The MCP server hands the
+   * one live session it keeps instead.
+   */
+  page?: <T>(fn: (s: BrowserSession) => Promise<T>, opts: { newTab?: boolean }) => Promise<T>;
+  /** How a result names the next step to take; the CLI's own commands by default. */
+  followUps?: BrowserFollowUps;
 }
+
+/** The next step a result points the agent to, in the words of the interface it uses. */
+export interface BrowserFollowUps {
+  /** Answer the open dialog. */
+  dialog: string;
+  /** Wait until a challenge is cleared. */
+  waitClear: string;
+  /** Read what was captured. */
+  networkList: string;
+  /** How to record what pages fetch. */
+  capture: string;
+}
+
+const cliFollowUps = (): BrowserFollowUps => ({
+  dialog: `\`${cliName()} browser dialog accept|dismiss\``,
+  waitClear: `\`${cliName()} browser wait --clear\``,
+  networkList: `\`${cliName()} browser network list\``,
+  capture: `\`${cliName()} browser open <url> --capture\`, or --capture on an action`,
+});
 
 export interface BrowserCliResult {
   /** What `--json` prints: one document. */
@@ -151,7 +179,8 @@ export async function runBrowserCommand(action: string, args: string[], flags: B
 
 // --- shared pieces -----------------------------------------------------------
 
-function onPage<T>(ctx: Ctx, fn: (s: BrowserSession) => Promise<T>, extra: Partial<OpenOptions> = {}): Promise<T> {
+function onPage<T>(ctx: Ctx, fn: (s: BrowserSession) => Promise<T>, extra: { newTab?: boolean } = {}): Promise<T> {
+  if (ctx.deps.page) return ctx.deps.page(fn, extra);
   const { cdp, profile, headless } = ctx.flags;
   const opts: OpenOptions = {
     ...(cdp !== undefined ? { cdp } : {}),
@@ -192,21 +221,24 @@ const pretty = (v: unknown): string => (typeof v === "string" ? v : v === undefi
 
 const where = (url: string, title: string): string => `${url}${title ? ` — ${title}` : ""}`;
 
-const dialogLine = (d: DialogInfo): string =>
-  `dialog ${d.type}: ${JSON.stringify(d.message)} — it is still open: \`${cliName()} browser dialog accept|dismiss\``;
+const follow = (ctx: Ctx): BrowserFollowUps => ctx.deps.followUps ?? cliFollowUps();
 
-const challengeLine = (c: Challenge): string =>
-  `challenge: ${c.kind}${c.blocking ? " (blocking)" : ""} — let the human solve it, then \`${cliName()} browser wait --clear\``;
+/** The line saying a JavaScript dialog is open, and how to answer it. */
+export const dialogLine = (d: DialogInfo, f: BrowserFollowUps = cliFollowUps()): string =>
+  `dialog ${d.type}: ${JSON.stringify(d.message)} — it is still open: ${f.dialog}`;
 
-const capturedLine = (n: number): string => `captured ${n} JSON response${n === 1 ? "" : "s"} — \`${cliName()} browser network list\``;
+const challengeLine = (ctx: Ctx, c: Challenge): string =>
+  `challenge: ${c.kind}${c.blocking ? " (blocking)" : ""} — let the human solve it, then ${follow(ctx).waitClear}`;
 
-function actionText(r: ActionResult, captured: number | undefined, snap: SnapshotResult | undefined): string {
+const capturedLine = (ctx: Ctx, n: number): string => `captured ${n} JSON response${n === 1 ? "" : "s"} — ${follow(ctx).networkList}`;
+
+function actionText(ctx: Ctx, r: ActionResult, captured: number | undefined, snap: SnapshotResult | undefined): string {
   const lines = [`${r.action}${r.ref !== undefined ? ` ${r.ref}` : ""}: ${r.navigated ? "navigated to " : ""}${where(r.url, r.title)}`];
   // What the action yields (the options chosen, the scroll position); an empty protocol answer says nothing.
   if (r.value !== undefined && !(typeof r.value === "object" && r.value !== null && Object.keys(r.value).length === 0)) lines.push(`  value: ${show(r.value)}`);
-  if (r.dialog) lines.push(dialogLine(r.dialog));
-  if (r.challenge) lines.push(challengeLine(r.challenge));
-  if (captured !== undefined) lines.push(capturedLine(captured));
+  if (r.dialog) lines.push(dialogLine(r.dialog, follow(ctx)));
+  if (r.challenge) lines.push(challengeLine(ctx, r.challenge));
+  if (captured !== undefined) lines.push(capturedLine(ctx, captured));
   if (snap) lines.push("", snap.text);
   return lines.join("\n");
 }
@@ -222,7 +254,7 @@ function mutate(ctx: Ctx, run: (s: BrowserSession, o: ActionOptions) => Promise<
     const snap = ctx.flags.snapshot && !r.dialog ? await takeSnapshot(s, snapOpts(ctx)) : undefined;
     return {
       json: { ...r, ...(captured !== undefined ? { captured } : {}), ...(snap ? { snapshot: snap } : {}) },
-      text: actionText(r, captured, snap),
+      text: actionText(ctx, r, captured, snap),
     };
   });
 }
@@ -236,11 +268,12 @@ function refAndText(ctx: Ctx): [string, string] {
 const confirm = (ctx: Ctx) => (ctx.flags.confirm ? { confirm: true } : {});
 const historyOpts = (ctx: Ctx) => (ctx.flags.timeout !== undefined ? { timeoutMs: ctx.flags.timeout } : {});
 
-function tabLines(tabs: BrowserTab[]): string {
+export function tabLines(tabs: BrowserTab[]): string {
   return tabs.map((t) => `${t.active ? "*" : " "} ${t.id}  ${where(t.url, t.title)}`).join("\n");
 }
 
-function statusText(st: BrowserStatus): string {
+/** `status` as text: where the browser runs and whose it is, then its tabs (`*` the current one). */
+export function statusText(st: BrowserStatus): string {
   if (!st.alive) return st.port === undefined ? "no browser session" : `no browser answers on port ${st.port} any more`;
   const owner = st.launchedByUs ? `launched by ${brand().name}` : "attached, not ours: close only forgets it";
   const head = `browser on port ${st.port} (${owner}), profile ${st.profile}${st.headless ? ", headless" : ""}`;
@@ -263,9 +296,9 @@ async function assertProfileIdle(ctx: Ctx, name: string | undefined): Promise<vo
 }
 
 /** The current tab of the saved session, for the commands that read its files only. */
-function currentTarget(): string {
+function currentTarget(ctx: Ctx): string {
   const saved = readSession();
-  if (!saved) throw new Error(`no browser session: \`${cliName()} browser open <url> --capture\` records what a page fetches`);
+  if (!saved) throw new Error(`no browser session: record what a page fetches with ${follow(ctx).capture}`);
   return saved.targetId;
 }
 
@@ -287,8 +320,8 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
         const challenge = await detectChallenge(s);
         const snap = ctx.flags.snapshot ? await takeSnapshot(s, snapOpts(ctx)) : undefined;
         const lines = [`${where(nav.url, title)}${nav.status !== undefined ? ` (HTTP ${nav.status})` : ""}`];
-        if (challenge) lines.push(challengeLine(challenge));
-        if (captured !== undefined) lines.push(capturedLine(captured));
+        if (challenge) lines.push(challengeLine(ctx, challenge));
+        if (captured !== undefined) lines.push(capturedLine(ctx, captured));
         if (snap) lines.push("", snap.text);
         return {
           json: {
@@ -447,7 +480,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     if (!expression) throw usageError(ctx.action);
     const r = await onPage(ctx, (s) => actions.evaluate(s, expression, actOpts(ctx)));
     const lines = [pretty(r.value)];
-    if (r.dialog) lines.push(dialogLine(r.dialog));
+    if (r.dialog) lines.push(dialogLine(r.dialog, follow(ctx)));
     return { json: r, text: lines.join("\n") };
   },
 
@@ -472,18 +505,18 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     const sub = ctx.args[0] ?? "list";
     if (sub === "list") {
       arity(ctx, 0, 1);
-      const entries = listNetwork(currentTarget());
+      const entries = listNetwork(currentTarget(ctx));
       const text = entries.length
         ? entries.map((e) => `${e.n}  ${e.method} ${e.status} ${e.url} (${e.mime}, ${e.size} B)`).join("\n")
-        : `nothing recorded for this tab — \`${cliName()} browser open <url> --capture\`, or --capture on an action`;
+        : `nothing recorded for this tab — record it with ${follow(ctx).capture}`;
       return { json: { entries }, text };
     }
     if (sub === "get") {
       arity(ctx, 2);
       const n = Number(ctx.args[1]);
       if (!Number.isInteger(n) || n < 1) throw usageError(ctx.action);
-      const e = getNetworkEntry(currentTarget(), n);
-      if (!e) throw new Error(`no network entry ${n} in this tab's log — \`${cliName()} browser network list\``);
+      const e = getNetworkEntry(currentTarget(ctx), n);
+      if (!e) throw new Error(`no network entry ${n} in this tab's log — ${follow(ctx).networkList}`);
       const text =
         e.json !== undefined
           ? pretty(e.json)
@@ -494,7 +527,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     }
     if (sub === "clear") {
       arity(ctx, 1);
-      clearNetworkLog(currentTarget());
+      clearNetworkLog(currentTarget(ctx));
       return { json: { ok: true }, text: "cleared this tab's network log" };
     }
     throw usageError(ctx.action);

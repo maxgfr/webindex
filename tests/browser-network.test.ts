@@ -251,6 +251,45 @@ describe("NetworkRecorder", () => {
     expect(listNetwork(T, { home })).toEqual([]);
   });
 
+  it("persists only what is new when restarted after a stop", async () => {
+    const { page, rec } = setup();
+    page.handle("Network.getResponseBody", () => ({ body: "{}", base64Encoded: false }));
+    await rec.start();
+    request(page, "a");
+    await rec.stop();
+    await rec.start();
+    request(page, "b");
+    await rec.stop();
+    expect((readNetwork(T, { home }) as { url: string }[]).map((e) => e.url.slice(-1))).toEqual(["a", "b"]);
+  });
+
+  it("flushes what it recorded to the log and keeps recording", async () => {
+    const { page, rec } = setup();
+    page.handle("Network.getResponseBody", () => ({ body: "{}", base64Encoded: false }));
+    await rec.start();
+    request(page, "a");
+    await flush();
+    expect(rec.flush().map((e) => e.n)).toEqual([1]);
+    expect(listNetwork(T, { home }).map((e) => e.n)).toEqual([1]);
+    expect(rec.flush()).toEqual([]);
+    request(page, "b");
+    await flush();
+    await rec.stop();
+    expect(listNetwork(T, { home }).map((e) => e.n)).toEqual([1, 2]);
+  });
+
+  it("forgets the oldest of the requests that never finish, past a bound", async () => {
+    const { page, rec } = setup();
+    await rec.start();
+    for (let i = 0; i < 1500; i++) request(page, `open${i}`, { finish: false });
+    const held = rec as unknown as { requests: Map<string, unknown>; pending: Map<string, unknown> };
+    expect(held.requests.size).toBeLessThanOrEqual(1000);
+    expect(held.pending.size).toBeLessThanOrEqual(1000);
+    expect(held.pending.has("open1499")).toBe(true);
+    expect(held.pending.has("open0")).toBe(false);
+    await rec.stop();
+  });
+
   it("never records headers", async () => {
     const { page, rec } = setup();
     page.handle("Network.getResponseBody", () => ({ body: "{}", base64Encoded: false }));

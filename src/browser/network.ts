@@ -63,6 +63,12 @@ export interface NetworkTarget {
 }
 
 const REQUEST_BODY_CAP = 4096;
+/**
+ * Requests seen but not finished, kept to pair with their response. One that
+ * never finishes (a long poll, a stream) would stay forever in a recorder an
+ * MCP server keeps running for hours: past this many, the oldest is dropped.
+ */
+const TRACKED_CAP = 1000;
 const DEFAULT_RESOURCE_TYPES = new Set(["XHR", "Fetch", "Document", "Other"]);
 const JSON_MIME = /^(application\/(.+\+)?json|text\/json|application\/x-ndjson)\s*(;|$)/i;
 
@@ -88,6 +94,8 @@ export class NetworkRecorder {
   private readonly pending = new Map<string, Pending>();
   private readonly inflight = new Set<Promise<void>>();
   private log: NetworkEntry[] = [];
+  /** Entries not yet appended to the log file: a restart or a flush never writes one twice. */
+  private unsaved: NetworkEntry[] = [];
   private next = 1;
   private active = false;
   private handlers: [string, CdpHandler][] = [];
@@ -127,6 +135,18 @@ export class NetworkRecorder {
   }
 
   /**
+   * Append to the log file what was recorded since the last flush (or stop),
+   * and keep recording; returns those entries. For a recorder left running
+   * across calls (the MCP server's). Under `withBrowserLock`, as stop().
+   */
+  flush(): NetworkEntry[] {
+    const out = this.unsaved;
+    this.unsaved = [];
+    if (this.persist && out.length > 0) appendNetwork(this.targetId, out, this.state);
+    return out;
+  }
+
+  /**
    * Waits (bounded) for in-flight body fetches, detaches, persists and returns the entries.
    * appendNetwork is a read-modify-write: run this under `withBrowserLock` (the CLI's `withPage` does).
    */
@@ -144,13 +164,13 @@ export class NetworkRecorder {
     this.handlers = [];
     this.requests.clear();
     this.pending.clear();
-    if (this.persist && this.log.length > 0) appendNetwork(this.targetId, this.log, this.state);
+    this.flush();
     return this.entries();
   }
 
   private onRequest(p: any): void {
     if (!this.active || typeof p?.requestId !== "string") return;
-    this.requests.set(p.requestId, {
+    track(this.requests, p.requestId, {
       method: String(p.request?.method ?? "GET"),
       url: String(p.request?.url ?? ""),
       resourceType: p.type,
@@ -170,7 +190,7 @@ export class NetworkRecorder {
       resourceType: String(p.type ?? req?.resourceType ?? "Other"),
       requestBody: typeof req?.postData === "string" ? req.postData.slice(0, REQUEST_BODY_CAP) : undefined,
     };
-    if (this.keep(rec)) this.pending.set(p.requestId, rec);
+    if (this.keep(rec)) track(this.pending, p.requestId, rec);
   }
 
   private onFailed(p: any): void {
@@ -235,6 +255,20 @@ export class NetworkRecorder {
     entry.n = this.next++;
     this.log.push(entry);
     if (this.log.length > this.maxEntries) this.log.splice(0, this.log.length - this.maxEntries);
+    if (this.persist) {
+      this.unsaved.push(entry);
+      if (this.unsaved.length > this.maxEntries) this.unsaved.splice(0, this.unsaved.length - this.maxEntries);
+    }
+  }
+}
+
+/** Set `key` in a map that drops its oldest entries past TRACKED_CAP (a Map iterates in insertion order). */
+function track<V>(map: Map<string, V>, key: string, value: V): void {
+  map.delete(key);
+  map.set(key, value);
+  for (const old of map.keys()) {
+    if (map.size <= TRACKED_CAP) break;
+    map.delete(old);
   }
 }
 

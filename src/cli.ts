@@ -97,6 +97,7 @@ import type { JsonSchemaProp } from "./mcp/protocol.js";
 import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
+import { BROWSER_CAP_ADVICE, browserToolDecls, createBrowserToolHost } from "./browser/mcp.js";
 import { confinePath, publicUrlRefusal, publicUrlsOnly } from "./mcp/policy.js";
 
 configure({ name: "webindex", envPrefix: "WEBINDEX", cli: "webindex", contactUrl: "https://github.com/maxgfr/webindex" });
@@ -127,7 +128,7 @@ USAGE
   webindex sitemap <url> [--max <n>] [--json]
   webindex feed <url> [--json]
   webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>] [--allow-remote]
-               [--public-only] [--allow-private] [--extract-root <dir>]
+               [--public-only] [--allow-private] [--extract-root <dir>] [--browser]
   webindex searxng   up|down|status
   webindex firecrawl up|down|status
   webindex semantic  up|down|status
@@ -266,6 +267,8 @@ COMMANDS
              walls on: no local file at all without --extract-root, and
              --allow-private lifts the address one. With WEBINDEX_MCP_TOKEN
              set, HTTP answers only requests carrying it as a bearer token.
+             --browser adds the webindex_browser_* tools (see browser), for
+             this machine only: never with --allow-remote or --public-only.
   searxng    Bring the keyless SearXNG container up or down, or show it.
   firecrawl  Same for Firecrawl, which cleans a page with a real browser. It
              delegates its own search to SearXNG, so this starts both.
@@ -601,6 +604,16 @@ function mcpPolicy(args: CommandArgs, allowRemote: boolean): WebindexToolPolicy 
   const allowPrivate = argBool(args, "allow-private");
   if (allowPrivate && argBool(args, "public-only")) usage("--public-only and --allow-private contradict each other");
   const publicOnly = !allowPrivate && (argBool(args, "public-only") || envFlag("PUBLIC_ONLY") || allowRemote);
+  // The browser tools drive a real browser, logins included, that goes wherever
+  // a page sends it: no address wall holds it, and it is not for others to use.
+  const browser = argBool(args, "browser");
+  if (browser && allowRemote)
+    usage("--browser and --allow-remote contradict each other: the browser tools drive a logged-in browser on this machine, for it alone");
+  if (browser && publicOnly) {
+    usage(
+      `--browser and --public-only (or ${envName("PUBLIC_ONLY")}) contradict each other: a browser follows any address a page leads it to, private ones included`,
+    );
+  }
   const rootArg = argValue(args, "extract-root") ?? env("EXTRACT_ROOT");
   let extractRoot: string | undefined;
   if (rootArg !== undefined) {
@@ -613,7 +626,7 @@ function mcpPolicy(args: CommandArgs, allowRemote: boolean): WebindexToolPolicy 
     }
     if (!isDir) usage(`--extract-root ${rootArg} is not a directory`);
   }
-  return { publicOnly, ...(extractRoot !== undefined ? { extractRoot } : allowRemote ? { noLocalFiles: true } : {}) };
+  return { publicOnly, ...(extractRoot !== undefined ? { extractRoot } : allowRemote ? { noLocalFiles: true } : {}), ...(browser ? { browser } : {}) };
 }
 
 /** What the policy is, said once at startup — nothing when there is none. */
@@ -623,6 +636,7 @@ function mcpPolicyNotice(policy: WebindexToolPolicy, allowRemote: boolean, allow
   else if (allowRemote && allowPrivate) lines.push("fetches: any address, this machine's own network included (--allow-private).");
   if (policy.extractRoot !== undefined) lines.push(`local files: only under ${policy.extractRoot}.`);
   else if (policy.noLocalFiles) lines.push("local files: none, and webindex_extract is off (--extract-root <dir> offers one directory).");
+  if (policy.browser) lines.push("browser: the webindex_browser_* tools drive a separate browser on this machine; irreversible actions need confirm: true.");
   return lines;
 }
 
@@ -1011,7 +1025,8 @@ const REPLACING_TOOLS = new Set(["webindex_video_frames", "webindex_video_list"]
 function withHints(tools: ToolDecl[]): ToolDecl[] {
   return tools.map((t) => ({
     ...t,
-    annotations: {
+    // A tool that brings its own hints keeps them: the browser tools act on a page, and say how.
+    annotations: t.annotations ?? {
       // The video tools write their run directory. A transcript is only ever
       // added; frames replace the video's earlier frames, and a corpus the
       // directory's earlier CORPUS.md — so those two say they may destroy.
@@ -1069,6 +1084,8 @@ export interface WebindexToolPolicy {
   extractRoot?: string;
   /** Read no local file at all: webindex_extract is not offered. `extractRoot` wins over it. */
   noLocalFiles?: boolean;
+  /** Offer the webindex_browser_* tools (`mcp --browser`), over one browser session kept for the adapter's life. */
+  browser?: boolean;
 }
 
 // The host name a public-only check had to resolve, or undefined when it
@@ -1092,7 +1109,9 @@ function resolvedHost(url: string): string | undefined {
  * without a subprocess, and a host embedding several engines can mount these
  * tools inside its own server rather than spawning `webindex mcp`.
  */
-export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
+export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & { close(): Promise<void> } {
+  // Nothing starts until a browser tool is called.
+  const browserHost = policy.browser ? createBrowserToolHost({ policy }) : undefined;
   // One authorizer for the adapter's life: fetchRobots keys its cache by it.
   const guard = policy.publicOnly ? publicUrlsOnly() : undefined;
   const refuseUrl = async (url: string): Promise<void> => {
@@ -1552,6 +1571,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
             required: ["url"],
           },
         },
+        ...(policy.browser ? browserToolDecls() : []),
       ]),
     capAdvice: {
       webindex_search: "lower `limit`",
@@ -1574,12 +1594,14 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
       webindex_video_search: "lower `limit`",
       webindex_video_frames: "lower `effort`",
       webindex_video_list: "lower `limit`",
+      ...(policy.browser ? BROWSER_CAP_ADVICE : {}),
     },
     async callTool(name, args, ctx) {
       // What the server hands every call: the client's cancel, and a way to
       // report progress. Passed on to whatever takes it — a cancelled call must
       // stop fetching, not only have its answer dropped.
       const signal = ctx?.signal;
+      if (browserHost && name.startsWith("webindex_browser_")) return browserHost.call(name, args, ctx);
       if (name === "webindex_fetch") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
@@ -1850,6 +1872,8 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
       }
       throw new ToolError(`unknown tool: ${name}`);
     },
+    /** Let go of the browser session, if one was opened; the browser keeps running. */
+    close: async () => browserHost?.close(),
   };
 }
 
@@ -2118,7 +2142,10 @@ async function dispatch(argv: string[]): Promise<void> {
     const notice = mcpPolicyNotice(policy, allowRemote, argBool(args, "allow-private"));
     if (transport === "stdio") {
       for (const line of notice) process.stderr.write(`webindex: ${line}\n`);
-      await runStdioServer(webindexAdapter(policy));
+      const adapter = webindexAdapter(policy);
+      await runStdioServer(adapter);
+      // A browser session's socket would keep the process alive once stdin has closed.
+      await adapter.close();
       return;
     }
     if (transport !== "http") usage(`unknown transport "${transport}" — expected stdio or http`);
