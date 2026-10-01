@@ -1263,12 +1263,14 @@ export async function fetchAndExtract(
   const wantsDoc = wantsPdf ? undefined : docFormatForUrl(url);
   // A public-only caller vets every address the fetch goes to; a browser
   // follows redirects and loads subresources nobody vets, so it never runs.
-  const browser = opts.authorizeUrl || wantsPdf || wantsDoc ? "off" : browserFetchMode(opts.browser);
+  // Nor for a revalidation: conditional headers are the cache's question to
+  // the origin, which only the fetch can ask.
+  const browser = opts.authorizeUrl || opts.headers || wantsPdf || wantsDoc ? "off" : browserFetchMode(opts.browser);
   if (browser === "always") {
     const got = await renderInBrowser(url, opts);
     if (got.result) return got.result;
     const res = await readWithoutBrowser(url, opts, wantsPdf, wantsDoc, { page: false });
-    return { ...res, note: [`${got.note}; read without it.`, res.note].filter(Boolean).join(" ") };
+    return { ...res, note: [`${got.note}; read without it.`, got.detail, res.note].filter(Boolean).join(" ") };
   }
   const seen = { page: false };
   const res = await readWithoutBrowser(url, opts, wantsPdf, wantsDoc, seen);
@@ -1278,7 +1280,7 @@ export async function fetchAndExtract(
   // The browser's read, unless it is no better: empty, or a challenge it was not let through.
   if (got.result?.text.trim())
     return { ...got.result, note: [`Read ${url} in the browser: the built-in fetch ${why}.`, got.result.note].filter(Boolean).join(" ") };
-  return { ...res, note: [res.note, got.result ? got.result.note : `${got.note}.`].filter(Boolean).join(" ") || undefined };
+  return { ...res, note: [res.note, got.result ? got.result.note : `${got.note}.`, got.detail].filter(Boolean).join(" ") || undefined };
 }
 
 type FetchOptions = NonNullable<Parameters<typeof fetchAndExtract>[1]>;
@@ -1296,12 +1298,22 @@ function worthRendering(res: ExtractResult): string | undefined {
   return res.text.trim().length < 200 ? "found almost no text" : undefined;
 }
 
-/** The browser rung: its read, or why there is none. Loaded on first use. */
-async function renderInBrowser(url: string, opts: FetchOptions): Promise<{ result: ExtractResult; note?: undefined } | { result?: undefined; note: string }> {
+/**
+ * The browser rung: its read, or why there is none (with the browser's own
+ * note in `detail`). Loaded on first use. An error page is no read: the fetch
+ * returns no text with a failed status, and a rendered 404 or 503 must not
+ * pass for the page — nor be cached over a good copy of it.
+ */
+async function renderInBrowser(
+  url: string,
+  opts: FetchOptions,
+): Promise<{ result: ExtractResult; note?: undefined; detail?: undefined } | { result?: undefined; note: string; detail?: string }> {
   try {
     const { readRenderedPage } = await import("./browser/read.js");
-    const { format, fullPage, stripConsent, keepHtml, signal } = opts;
-    return { result: await readRenderedPage(url, { format, fullPage, stripConsent, keepHtml, signal }) };
+    const { format, fullPage, stripConsent, keepHtml, signal, timeoutMs } = opts;
+    const result = await readRenderedPage(url, { format, fullPage, stripConsent, keepHtml, signal, timeoutMs });
+    if (result.status >= 400) return { note: `The browser got HTTP ${result.status} for ${url}`, detail: result.note };
+    return { result };
   } catch (e) {
     return { note: `The browser could not read ${url} (${e instanceof Error ? e.message : String(e)})` };
   }

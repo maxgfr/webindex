@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import { envName } from "../src/brand.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
 import { type BrowserSession, browserStatus, closeBrowser, openBrowserSession, withPage } from "../src/browser/session.js";
 import { appendNetwork, readNetwork, readRefs, readSession, type Session, writeRefs, writeSession } from "../src/browser/state.js";
+import { profileDir } from "../src/browser/profile.js";
 import { FakeCdp } from "./helpers/fake-cdp.js";
 import { scriptBrowser } from "./helpers/fake-browser.js";
 import { fakeSpawn } from "./helpers/fake-spawn.js";
@@ -534,6 +535,34 @@ describe("browserStatus and closeBrowser (no session to open)", () => {
     expect(await closeBrowser({ deps: deps() })).toEqual({ closed: false, launchedByUs: false });
     expect(methods()).not.toContain("Browser.close");
     expect(readSession()).toBeNull();
+  });
+
+  it("closeBrowser closes the browser running on our profile that no session names (one a fetch read launched)", async () => {
+    fake.addTarget();
+    mkdirSync(profileDir(), { recursive: true });
+    writeFileSync(join(profileDir(), "DevToolsActivePort"), `${fake.port}\n/devtools/browser/fake\n`);
+    expect(await closeBrowser({ deps: deps() })).toEqual({ closed: true, launchedByUs: true });
+    expect(methods()).toContain("Browser.close");
+    expect(kills).toEqual([]); // no pid known: never a kill
+  });
+
+  it("closeBrowser leaves alone a foreign browser on the port our profile's file names", async () => {
+    fake.addTarget();
+    mkdirSync(profileDir(), { recursive: true });
+    writeFileSync(join(profileDir(), "DevToolsActivePort"), `${fake.port}\n/devtools/browser/a-crashed-run-guid\n`);
+    expect(await closeBrowser({ deps: deps() })).toEqual({ closed: false, launchedByUs: false });
+    expect(methods()).not.toContain("Browser.close");
+  });
+
+  it("closeBrowser leaves the profile's browser alone while a live attached session is saved", async () => {
+    mkdirSync(profileDir(), { recursive: true });
+    writeFileSync(join(profileDir(), "DevToolsActivePort"), `${fake.port}\n/devtools/browser/fake\n`);
+    writeSession(ours({ launchedByUs: false }));
+    expect(await closeBrowser({ deps: deps() })).toEqual({ closed: false, launchedByUs: false });
+    // An attached browser whose socket path was not recorded is live while its port answers.
+    writeSession(ours({ launchedByUs: false, wsBrowserUrl: undefined }));
+    expect(await closeBrowser({ deps: deps() })).toEqual({ closed: false, launchedByUs: false });
+    expect(methods()).not.toContain("Browser.close");
   });
 
   it("closeBrowser with nothing running only clears state", async () => {

@@ -43,10 +43,24 @@ afterEach(() => {
 describe("fetchAndExtract with browser: always", () => {
   it("reads the page in the browser, before Firecrawl and without fetching it", async () => {
     const spy = installFetchMock(routes([["x.test", { body: LONG }]]));
-    const r = await fetchAndExtract("https://x.test/a", { browser: "always", firecrawl: "http://fc.test", format: "markdown", fullPage: true, keepHtml: true });
+    const r = await fetchAndExtract("https://x.test/a", {
+      browser: "always",
+      firecrawl: "http://fc.test",
+      format: "markdown",
+      fullPage: true,
+      keepHtml: true,
+      timeoutMs: 5000,
+    });
     expect(r).toMatchObject({ text: RENDERED, extractor: "browser" });
     expect(spy).not.toHaveBeenCalled();
-    expect(read).toHaveBeenCalledWith("https://x.test/a", { format: "markdown", fullPage: true, stripConsent: undefined, keepHtml: true, signal: undefined });
+    expect(read).toHaveBeenCalledWith("https://x.test/a", {
+      format: "markdown",
+      fullPage: true,
+      stripConsent: undefined,
+      keepHtml: true,
+      signal: undefined,
+      timeoutMs: 5000,
+    });
   });
 
   it("falls through to the usual ladder with a note when the browser cannot be had", async () => {
@@ -56,6 +70,21 @@ describe("fetchAndExtract with browser: always", () => {
     expect(r.extractor).toBeUndefined();
     expect(r.text).toContain("Good page");
     expect(r.note).toBe("The browser could not read https://x.test/a (no Chrome, Brave, Chromium or Edge found); read without it.");
+  });
+
+  it("does not take an error page the browser rendered for the page", async () => {
+    installFetchMock(routes([["x.test", { body: LONG }]]));
+    read.mockResolvedValue(rendered("https://x.test/a", { status: 404, text: `Page not found. ${"Try the search box. ".repeat(20)}` }));
+    const r = await fetchAndExtract("https://x.test/a", { browser: "always" });
+    expect(r.extractor).toBeUndefined();
+    expect(r.text).toContain("Good page");
+    expect(r.note).toBe("The browser got HTTP 404 for https://x.test/a; read without it.");
+  });
+
+  it("leaves a revalidation (a conditional GET) to the fetch", async () => {
+    installFetchMock(routes([["x.test", { body: LONG }]]));
+    await fetchAndExtract("https://x.test/a", { browser: "always", headers: { "if-none-match": '"v1"' } });
+    expect(read).not.toHaveBeenCalled();
   });
 
   it("takes its mode from BROWSER_FETCH, which an explicit option overrides", async () => {
@@ -132,13 +161,22 @@ describe("fetchAndExtract with browser: fallback", () => {
     expect((await fetchAndExtract("https://x.test/a", { browser: "fallback" })).note).toBe("The browser could not read https://x.test/a (not an Error).");
   });
 
+  it("keeps the built-in refusal over an error page the browser rendered", async () => {
+    installFetchMock(routes([["x.test", { status: 403, body: "Forbidden" }]]));
+    read.mockResolvedValue(rendered("https://x.test/a", { status: 403, text: `Access denied. ${"You do not have permission. ".repeat(10)}` }));
+    const r = await fetchAndExtract("https://x.test/a", { browser: "fallback" });
+    expect(r).toMatchObject({ text: "", status: 403 });
+    expect(r.extractor).toBeUndefined();
+    expect(r.note).toBe("Could not fetch https://x.test/a (status 403). The browser got HTTP 403 for https://x.test/a.");
+  });
+
   it("keeps the built-in result, notes merged, when the browser does no better", async () => {
     installFetchMock(routes([["x.test", { status: 403, body: "Forbidden" }]]));
     read.mockResolvedValue(rendered("https://x.test/a", { text: "", status: 403, note: "cloudflare challenge — solve it" }));
     const blocked = await fetchAndExtract("https://x.test/a", { browser: "fallback" });
     expect(blocked).toMatchObject({ text: "", status: 403 });
     expect(blocked.extractor).toBeUndefined();
-    expect(blocked.note).toBe("Could not fetch https://x.test/a (status 403). cloudflare challenge — solve it");
+    expect(blocked.note).toBe("Could not fetch https://x.test/a (status 403). The browser got HTTP 403 for https://x.test/a. cloudflare challenge — solve it");
 
     read.mockRejectedValue(new Error("launch failed"));
     const failed = await fetchAndExtract("https://x.test/a", { browser: "fallback" });
@@ -215,6 +253,19 @@ describe("cachedFetchAndExtract and the browser rung", () => {
     const again = await cachedFetchAndExtract("https://x.test/a", { browser: "fallback" }, true, 3000);
     expect(again).toMatchObject({ text: "Loading…", cached: true });
     expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("never lets an error page the browser rendered replace a good cached read", async () => {
+    process.env[envName("CACHE_TTL_MS")] = "1000";
+    installFetchMock(routes([["x.test", { status: 503, body: "Down" }]]));
+    await cachedFetchAndExtract("https://x.test/a", { browser: "always" }, true, 1000);
+    read.mockResolvedValue(rendered("https://x.test/a", { status: 503, text: `Service unavailable. ${"Come back later. ".repeat(20)}` }));
+    const stale = await cachedFetchAndExtract("https://x.test/a", { browser: "always" }, true, 5000);
+    expect(stale).toMatchObject({ text: RENDERED, cached: true });
+    expect(stale.note).toMatch(/served the cached copy/);
+    read.mockImplementation(async (url) => rendered(url));
+    const later = await cachedFetchAndExtract("https://x.test/a", { browser: "always" }, true, 5500);
+    expect(later.text).toBe(RENDERED);
   });
 
   it("keeps a browser read per shape, like the built-in one", async () => {

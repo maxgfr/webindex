@@ -14,10 +14,12 @@
 // Closing is asymmetric on purpose: a browser we launched may be shut down, one
 // we only attached to (the user's, through --cdp) never is — we only forget it.
 
+import { join } from "node:path";
 import type { CdpClient, CdpHandler, CdpSession } from "./cdp.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
 import type { TargetInfo } from "./discovery.js";
-import { type Endpoint, isSameBrowser, type LaunchOptions, resolveEndpoint } from "./launch.js";
+import { type Endpoint, isSameBrowser, type LaunchOptions, readActivePort, resolveEndpoint } from "./launch.js";
+import { profileDir } from "./profile.js";
 import { clearNetwork, clearRefs, clearSession, readSession, withBrowserLock, writeSession } from "./state.js";
 
 const NAVIGATION_TIMEOUT_MS = 30_000;
@@ -600,29 +602,51 @@ export async function browserStatus(opts: { deps?: Partial<BrowserDeps> } = {}):
   return { alive: true, ...base, url: cur?.url ?? "", title: cur?.title ?? "", tabs };
 }
 
+/** Connect to the browser-level socket on `port` and ask it to quit (SIGTERM to `pid` if it refuses). */
+async function closeAt(deps: BrowserDeps, port: number, host: string, pid: number | undefined): Promise<void> {
+  const cdp = await deps.connectCdp((await deps.discovery.getVersion(port, host)).webSocketDebuggerUrl);
+  try {
+    await closeLaunched(cdp, pid, deps);
+  } finally {
+    await cdp.close();
+  }
+}
+
 /**
  * `browser close` from a fresh process: shut the saved browser down if we
  * launched it, without launching or attaching to anything first, then forget it.
+ *
+ * With no live session, the browser running on our dedicated profile is closed
+ * instead: it is ours whatever started it — a fetch read launches one without
+ * saving a session. Only if the port its DevToolsActivePort names still serves
+ * the socket that file names: a crashed run's port may be another browser's now.
  */
-export async function closeBrowser(opts: CloseOptions & { deps?: Partial<BrowserDeps> } = {}): Promise<{ closed: boolean; launchedByUs: boolean }> {
+export async function closeBrowser(
+  opts: CloseOptions & { profile?: string; deps?: Partial<BrowserDeps> } = {},
+): Promise<{ closed: boolean; launchedByUs: boolean }> {
   const deps = browserDeps(opts.deps);
   const saved = readSession();
+  const host = saved?.host ?? "127.0.0.1";
+  // Whether the saved session still names a running browser, by the rule resolveEndpoint applies.
+  const live = !saved
+    ? false
+    : saved.wsBrowserUrl
+      ? await isSameBrowser(deps, saved.port, host, saved.wsBrowserUrl)
+      : !saved.launchedByUs && (await deps.discovery.isPortAlive(saved.port, host));
   let closed = false;
-  if (saved?.launchedByUs) {
-    const host = saved.host ?? "127.0.0.1";
-    // Only the very browser we started: another one may answer on its port by now.
-    if (saved.wsBrowserUrl && (await isSameBrowser(deps, saved.port, host, saved.wsBrowserUrl))) {
-      const cdp = await deps.connectCdp((await deps.discovery.getVersion(saved.port, host)).webSocketDebuggerUrl);
-      try {
-        await closeLaunched(cdp, saved.pid, deps);
-      } finally {
-        await cdp.close();
-      }
-      closed = true;
+  let launchedByUs = saved?.launchedByUs ?? false;
+  if (saved?.launchedByUs && live) {
+    await closeAt(deps, saved.port, host, saved.pid);
+    closed = true;
+  } else if (!live) {
+    const own = await readActivePort(deps, join(profileDir(opts.profile ?? saved?.profile), "DevToolsActivePort"));
+    if (own && (await isSameBrowser(deps, own.port, "127.0.0.1", own.path))) {
+      await closeAt(deps, own.port, "127.0.0.1", undefined); // its pid is unknown: never a kill
+      closed = launchedByUs = true;
     }
   }
   forget(saved ? [saved.targetId, ...Object.values(cleanTabs(saved.tabs))] : [], opts.all);
-  return { closed, launchedByUs: saved?.launchedByUs ?? false };
+  return { closed, launchedByUs };
 }
 
 /**

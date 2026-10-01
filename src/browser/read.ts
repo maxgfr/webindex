@@ -106,7 +106,14 @@ async function render(url: string, opts: ReadPageOptions, deps: BrowserDeps, tim
   const { cdp, profile, headless, binary } = opts;
   // The lock covers the launch and attach only: two processes launching on one
   // profile at once would trip over each other. The read itself is in our own tab.
-  const session = await withBrowserLock(() => openBrowserSession({ cdp, profile, headless, binary, deps, scratch: true }), { deps });
+  const session = await withBrowserLock(
+    async () => {
+      // Given up on while waiting for the lock: launching a browser now would be for nobody.
+      if (run.stopped) throw new Error("stopped");
+      return openBrowserSession({ cdp, profile, headless, binary, deps, scratch: true });
+    },
+    { deps },
+  );
   run.session = session;
   const page = session.page;
   let status: number | undefined;
@@ -123,6 +130,12 @@ async function render(url: string, opts: ReadPageOptions, deps: BrowserDeps, tim
     mainFrame = (await page.send<{ frameTree: { frame: { id: string } } }>("Page.getFrameTree")).frameTree.frame.id;
     page.on("Network.responseReceived", onResponse);
     await page.send("Network.enable");
+    // A link to a file would land in the user's own Downloads. Refused in this
+    // tab only — the agent's tab may legitimately download — and the page is
+    // not loaded at all when the browser will not say so.
+    await page.send("Page.setDownloadBehavior", { behavior: "deny" }).catch((e: Error) => {
+      throw new Error(`could not refuse downloads in the reading tab (${e.message}), so ${url} was not loaded`);
+    });
     const nav = await session.navigate(url, { waitUntil: "load", timeoutMs });
     if (mime && !WEB_PAGE.test(mime)) throw new Error(`${url} is not a web page but ${mime}`);
     if (opts.waitUntil !== "load") {
@@ -169,6 +182,10 @@ export async function readRenderedPage(url: string, opts: ReadPageOptions = {}):
   const deps = browserDeps(opts.deps);
   const timeoutMs = opts.timeoutMs ?? envInt("BROWSER_TIMEOUT_MS", 30_000, 5000, 300_000);
   const release = await acquire(envInt("BROWSER_CONCURRENCY", 1, 1, 4), signal, cancelled);
+  if (signal?.aborted) {
+    release();
+    throw cancelled();
+  }
   const run: Run = { stopped: false };
   const work = render(url, opts, deps, timeoutMs, run);
   // The slot is given back once the tab is closed, not when the caller stops waiting.

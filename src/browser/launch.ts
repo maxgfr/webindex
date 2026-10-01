@@ -153,7 +153,7 @@ async function launch(deps: BrowserDeps, binary: string | undefined, profile: st
 }
 
 /** Line 1 (the port) and line 2 (the browser socket path) of DevToolsActivePort, or undefined while it is absent or half-written. */
-async function readActivePort(deps: BrowserDeps, file: string): Promise<{ port: number; path: string } | undefined> {
+export async function readActivePort(deps: BrowserDeps, file: string): Promise<{ port: number; path: string } | undefined> {
   let text: string;
   try {
     text = await deps.fs.readFile(file, "utf8");

@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
 import { readRenderedPage } from "../src/browser/read.js";
+import { closeBrowser } from "../src/browser/session.js";
 import { readSession, type Session, writeSession } from "../src/browser/state.js";
 import { FakeCdp, type FakeHandler } from "./helpers/fake-cdp.js";
 import { scriptBrowser } from "./helpers/fake-browser.js";
@@ -112,6 +113,22 @@ describe("readRenderedPage", () => {
     // Network is on before the navigation, so the document's response is heard.
     const order = fake.calls.filter((c) => c.sessionId === "S1").map((c) => c.method);
     expect(order.indexOf("Network.enable")).toBeLessThan(order.indexOf("Page.navigate"));
+    // ...and downloads are refused in this tab alone, before anything loads: never browser-wide.
+    const deny = fake.calls.find((c) => c.method === "Page.setDownloadBehavior");
+    expect(deny).toEqual({ method: "Page.setDownloadBehavior", params: { behavior: "deny" }, sessionId: "S1" });
+    expect(order.indexOf("Page.setDownloadBehavior")).toBeLessThan(order.indexOf("Page.navigate"));
+    expect(fake.calls.map((c) => c.method)).not.toContain("Browser.setDownloadBehavior");
+  });
+
+  it("does not read at all when downloads cannot be refused in its tab", async () => {
+    pages["https://spa.test/"] = { html: ARTICLE };
+    fake.addTarget();
+    fake.handle("Page.setDownloadBehavior", () => {
+      throw { message: "'Page.setDownloadBehavior' wasn't found" };
+    });
+    await expect(readRenderedPage("https://spa.test/", { cdp: fake.port, waitUntil: "load", deps: deps() })).rejects.toThrow(/downloads/);
+    expect(fake.calls.map((c) => c.method)).not.toContain("Page.navigate");
+    expect(ids()).toEqual(["T1"]);
   });
 
   it("passes the shape options through to the extraction", async () => {
@@ -223,6 +240,34 @@ describe("readRenderedPage", () => {
     expect(r.extractor).toBe("browser");
     expect(spawned.calls).toHaveLength(1);
     expect(readSession()).toBeNull();
+    // No session names it, but it is the browser on our own profile: a fresh `browser close` shuts it.
+    expect(await closeBrowser({ deps: deps() })).toEqual({ closed: true, launchedByUs: true });
+    expect(fake.calls.map((c) => c.method)).toContain("Browser.close");
+  });
+
+  it("never reaches the browser once it has given up waiting for the lock", async () => {
+    writeFileSync(join(home, "lock"), JSON.stringify({ pid: process.pid, at: Date.now() }));
+    await expect(readRenderedPage("https://spa.test/", { cdp: fake.port, timeoutMs: 100, deps: deps() })).rejects.toThrow(/did not finish within 100 ms/);
+    rmSync(join(home, "lock"));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(fake.requests).toEqual([]);
+    pages["https://spa.test/"] = { html: ARTICLE };
+    expect((await readRenderedPage("https://spa.test/", { cdp: fake.port, waitUntil: "load", deps: deps() })).extractor).toBe("browser");
+  });
+
+  it("gives its slot back when cancelled the moment it got one", async () => {
+    let checks = 0;
+    const signal = {
+      get aborted() {
+        return ++checks > 1;
+      },
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as AbortSignal;
+    await expect(readRenderedPage("https://spa.test/", { cdp: fake.port, signal, deps: deps() })).rejects.toThrow(/cancelled/);
+    expect(fake.requests).toEqual([]);
+    pages["https://spa.test/"] = { html: ARTICLE };
+    expect((await readRenderedPage("https://spa.test/", { cdp: fake.port, waitUntil: "load", deps: deps() })).extractor).toBe("browser");
   });
 
   it("reads one page at a time by default: a second read waits for the first's tab to close", async () => {
