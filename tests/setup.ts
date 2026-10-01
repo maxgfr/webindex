@@ -63,6 +63,11 @@ beforeEach(() => {
   process.env[`${TEST_PREFIX}_FIRECRAWL`] = "off";
   process.env[`${TEST_PREFIX}_SEARXNG`] = "off";
 
+  // The browser rung of fetchAndExtract would launch a real browser on a thin
+  // page. Off for the whole suite; tests/fetch-browser.test.ts turns it on with
+  // the browser read stubbed.
+  process.env[`${TEST_PREFIX}_BROWSER_FETCH`] = "off";
+
   // The keyless engines are the one discovery rung that talks to the PUBLIC
   // internet rather than to localhost — so with the two above turned off, a
   // bare `search()` would go and scrape duckduckgo.com. Off by default here;

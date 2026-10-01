@@ -1,5 +1,3 @@
-import { request } from "node:http";
-
 // The HTTP side of the DevTools endpoint (/json/*). Loopback only, short timeouts.
 
 const REQUEST_TIMEOUT_MS = 3000;
@@ -76,7 +74,11 @@ export function dialHost(host: string): string {
   return bare === "localhost" ? "127.0.0.1" : bare;
 }
 
-function http(method: string, port: number, host: string, path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<HttpResult> {
+async function http(method: string, port: number, host: string, path: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<HttpResult> {
+  // Imported here, not at module scope (as in src/mcp/http.ts): node:http is
+  // the costliest builtin to load, and the CLI bundle reaches this module
+  // through fetch's lazy browser rung, so every command would pay for it.
+  const { request } = await import("node:http");
   return new Promise((resolve, reject) => {
     const req = request({ host: dialHost(host), port, path, method, timeout: timeoutMs }, (res) => {
       const chunks: Buffer[] = [];

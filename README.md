@@ -118,6 +118,9 @@ default, and one out of range is clamped to it.
 | `WEBINDEX_REPO_DIR` | where `ensureClone` keeps working trees (library; default `<tmp>/webindex/repos`) |
 | `WEBINDEX_BROWSER_DIR` | where the dedicated browser keeps its profiles and session (default `~/.webindex/browser`, under the consumer's own name when vendored; private to you, and under the home dir on purpose so a tmp sweeper never logs you out) |
 | `WEBINDEX_BROWSER_BIN` | the Chrome, Brave, Chromium or Edge binary to drive, instead of the first one found |
+| `WEBINDEX_BROWSER_FETCH` | `fetch` renders pages in the dedicated browser: `always`, `fallback` (only when the plain fetch is refused, walled or nearly empty) or `off` (default); never for PDFs, office documents, videos or a public-only MCP server |
+| `WEBINDEX_BROWSER_CONCURRENCY` | pages the fetch rung renders at once, one tab each (default 1, at most 4) |
+| `WEBINDEX_BROWSER_TIMEOUT_MS` | how long the fetch rung gives one page to render (default 30000) |
 | `WEBINDEX_GIT_CLONE_TIMEOUT_MS`, `WEBINDEX_GIT_FETCH_TIMEOUT_MS`, `WEBINDEX_GIT_HISTORY_TIMEOUT_MS` | budgets for a clone (300000), a fetch (120000) and deepening history (300000) |
 | `WEBINDEX_SH_TIMEOUT_MS` | the default budget of a local command run through `sh` (60000) |
 | `WEBINDEX_OLLAMA`, `WEBINDEX_QDRANT` | embedding server and vector store base URLs, or `off` (defaults `http://localhost:11434`, `http://localhost:6333`) |

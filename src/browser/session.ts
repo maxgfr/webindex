@@ -31,6 +31,12 @@ export interface OpenOptions extends LaunchOptions {
   newTab?: boolean;
   /** Navigate there once attached. */
   url?: string;
+  /**
+   * Work in a fresh tab that is nobody's: session.json is never written, so
+   * the agent's current tab and tab ids stay as they were. The caller closes
+   * the tab when done (a page read for `fetch`, see read.ts).
+   */
+  scratch?: boolean;
 }
 
 export type WaitUntil = "load" | "domcontentloaded" | "none";
@@ -213,6 +219,8 @@ export class BrowserSession {
     targetId: string,
     sessionId: string,
     tabs: Record<string, string>,
+    /** A scratch tab's session: it saves nothing. */
+    private readonly scratch = false,
   ) {
     this.current = { targetId, sessionId, page: cdp.session(sessionId) };
     this.tabs = tabs;
@@ -247,9 +255,9 @@ export class BrowserSession {
     return this.current.page;
   }
 
-  /** Write session.json (port, ownership, current tab, tab ids). A no-op once shut down. */
+  /** Write session.json (port, ownership, current tab, tab ids). A no-op once shut down, and for a scratch tab. */
   save(): void {
-    if (this.ended) return;
+    if (this.ended || this.scratch) return;
     const { host, port, pid, launchedByUs, profile, headless } = this.endpoint;
     writeSession({
       version: 1,
@@ -519,8 +527,8 @@ export class BrowserSession {
 
 /**
  * Connect to the browser (attaching to, reusing or launching one by the launch
- * policy) and attach to a tab: the saved one if it still exists, else a new one
- * when asked, else the first page, else a fresh one.
+ * policy) and attach to a tab: a new one when asked (or a scratch one), else
+ * the saved one if it still exists, else the first page, else a fresh one.
  */
 export async function openBrowserSession(opts: OpenOptions = {}): Promise<BrowserSession> {
   const deps = browserDeps(opts.deps);
@@ -535,12 +543,12 @@ export async function openBrowserSession(opts: OpenOptions = {}): Promise<Browse
   try {
     const pages = await deps.discovery.listPages(endpoint.port, endpoint.host);
     let targetId: string;
-    if (opts.newTab) targetId = created = await createTarget(cdp);
+    if (opts.newTab || opts.scratch) targetId = created = await createTarget(cdp);
     else if (same && pages.some((p) => p.id === same.targetId)) targetId = same.targetId;
     else targetId = pages[0]?.id ?? (await createTarget(cdp));
     const sessionId = await attachPage(cdp, targetId);
-    const session = new BrowserSession(cdp, endpoint, webSocketDebuggerUrl, deps, targetId, sessionId, cleanTabs(same?.tabs));
-    await session.listTabs(); // numbers the tabs and saves the session
+    const session = new BrowserSession(cdp, endpoint, webSocketDebuggerUrl, deps, targetId, sessionId, cleanTabs(same?.tabs), opts.scratch);
+    if (!opts.scratch) await session.listTabs(); // numbers the tabs and saves the session
     if (opts.url !== undefined) await session.navigate(opts.url);
     return session;
   } catch (e) {

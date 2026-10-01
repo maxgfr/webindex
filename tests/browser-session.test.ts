@@ -141,6 +141,25 @@ describe("openBrowserSession", () => {
     expect(s.launchedByUs).toBe(true);
     expect(readSession()).toMatchObject({ launchedByUs: true, pid: 4242 });
   });
+
+  it("works in a scratch tab of its own without saving anything: the agent's tab stays current", async () => {
+    fake.addTarget("https://agent.test/");
+    writeSession(ours({ launchedByUs: false, wsBrowserUrl: undefined, targetId: "T1", tabs: { t1: "T1" } }));
+    const before = readSession();
+    const s = await attach({ scratch: true });
+    expect(s.targetId).toBe("T2");
+    expect(fake.calls.find((c) => c.method === "Target.attachToTarget")?.params).toEqual({ targetId: "T2", flatten: true });
+    await s.navigate("https://read.test/");
+    await s.listTabs();
+    s.save();
+    expect(readSession()).toEqual(before);
+  });
+
+  it("does not create session.json for a scratch tab either", async () => {
+    fake.addTarget();
+    await attach({ scratch: true });
+    expect(readSession()).toBeNull();
+  });
 });
 
 describe("navigation", () => {

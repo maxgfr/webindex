@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { request } from "node:http";
 import type { Socket } from "node:net";
 
 // A minimal RFC 6455 client, just enough for the DevTools endpoint on loopback.
@@ -276,7 +275,11 @@ export class WsClient extends EventEmitter {
 }
 
 /** Open a `ws://` connection (loopback is the only intended use; `wss://` is refused). */
-export function connectWebSocket(url: string, opts: WsOptions = {}): Promise<WsClient> {
+export async function connectWebSocket(url: string, opts: WsOptions = {}): Promise<WsClient> {
+  // Imported here, not at module scope (as in src/mcp/http.ts): node:http is
+  // the costliest builtin to load, and the CLI bundle reaches this module
+  // through fetch's lazy browser rung, so every command would pay for it.
+  const { request } = await import("node:http");
   return new Promise((resolve, reject) => {
     let u: URL;
     try {
