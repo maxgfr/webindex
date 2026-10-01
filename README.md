@@ -13,7 +13,7 @@ brew install maxgfr/tap/webindex
 
 ## Everything it does
 
-Three surfaces over one engine: **365 library exports**, **28 CLI commands**, **20 MCP
+Three surfaces over one engine: **371 library exports**, **28 CLI commands**, **20 MCP
 tools**. Nothing below needs an API key, and every optional helper degrades to a note
 rather than an error.
 
