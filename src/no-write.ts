@@ -88,14 +88,17 @@ let tmpCounter = 0;
  * the temp file is a SIBLING so it always is one — a temp in os.tmpdir() would
  * cross a mount point and silently degrade to a copy.
  *
+ * `mode` sets the permission bits of the new file (e.g. 0o600 for state that
+ * holds a login); omitted, the file gets the usual umask-derived default.
+ *
  * Bypasses the no-write gate on purpose: this is the durability primitive, and
  * `writeArtifact` above is the gated caller. A caller holding a path of its own
  * that must not be written under `--stdout` calls `writeArtifact`, not this.
  */
-export function writeFileAtomic(path: string, content: string | Uint8Array): void {
+export function writeFileAtomic(path: string, content: string | Uint8Array, mode?: number): void {
   const tmp = `${path}.${process.pid}.${tmpCounter++}.tmp`;
   try {
-    writeFileSync(tmp, content);
+    writeFileSync(tmp, content, mode === undefined ? undefined : { mode });
     renameSync(tmp, path);
   } catch (e) {
     try {
