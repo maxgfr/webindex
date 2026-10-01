@@ -29,7 +29,7 @@ Use plain `fetch` everywhere else: it is faster and needs no browser.
    then take a new snapshot before the next act.
 
 `snapshot --interactive` lists only the controls and is much shorter.
-`snapshot e40` shows one subtree. A same-origin iframe is expanded in place.
+`snapshot e40` shows one subtree. Same-origin iframes are expanded.
 
 ## Refs
 
@@ -58,8 +58,8 @@ Use plain `fetch` everywhere else: it is faster and needs no browser.
   no fingerprint spoofing. A challenge is named and left to the human.
 - **`eval` runs in the logged-in page.** Read with it. Never use it to do what
   the guard would refuse, such as `el.click()` on a pay button.
-- **Uploads** over MCP are limited to the `--extract-root` directory. Without
-  one, they need `confirm: true` after the user approves the exact files.
+- **MCP uploads** stay under `--extract-root`; with none, they need
+  `confirm: true` after the user approves the exact files.
 
 ## Profiles and the launch policy
 
@@ -108,7 +108,7 @@ and `WEBINDEX_BROWSER_CONCURRENCY` limits how many pages render at once.
 `open <url> --capture` (or `--capture` on any action) records the JSON
 responses the page fetches (XHR and fetch) while that command runs.
 `network list` numbers them, `network get <n>` prints one body as JSON, and
-`network clear` empties the tab's log. Headers are never stored. URLs keep their
+`network clear` empties the log. Headers are never stored. URLs keep their
 query strings, and request bodies (`postData`, up to 4 KiB) are stored raw, so a
 recorded login POST can hold the password. Clear the log after a session where
 that matters.
@@ -116,12 +116,16 @@ that matters.
 ## Accepted limits
 
 - **Cross-origin iframes** (out-of-process) are not expanded in the snapshot.
-- **In the CLI, capture and dialogs last only one command.** A JavaScript
-  dialog an action opens is dismissed, never accepted, before that command
-  ends, and the result says so: the browser hands a dialog only to the
-  connection that saw it open. To answer one yourself, use the MCP tools. A
-  dialog the page opens between commands freezes the tab until someone answers
-  it in the window, or until `close`.
+- **In the CLI, capture and dialogs last only one command.** The browser hands
+  a dialog only to the connection that saw it open. So a dialog a page opens
+  while a command runs (on a click, on load, a "Leave site?" on reload) is
+  dismissed as it opens, never accepted, and the result says so. A dismissed
+  beforeunload cancels the reload or navigation, which then fails at once.
+  `dialog accept|dismiss` is for the MCP tools; the CLI refuses it. A dialog the
+  page opens between commands freezes the tab, and the next command fails after
+  5 s with "the tab does not answer; most likely a JavaScript dialog the page
+  opened between commands". Answer it in the window, or run `close`; headless,
+  `close` is the only way out.
 - **`snapshot` reads the whole accessibility tree**: slow on huge pages.
 - **The debug port is open to every local process** for as long as the browser
   runs. `close` ends it.
@@ -130,22 +134,20 @@ that matters.
 
 | Variable | What it sets |
 |---|---|
-| `WEBINDEX_BROWSER_DIR` | the browser home: profiles, session, refs, network logs (default `~/.webindex/browser`) |
-| `WEBINDEX_BROWSER_BIN` | the browser binary, instead of the first Chrome, Brave, Chromium or Edge found |
+| `WEBINDEX_BROWSER_DIR` | the browser home (default `~/.webindex/browser`) |
+| `WEBINDEX_BROWSER_BIN` | the browser binary, instead of the first one found |
 | `WEBINDEX_BROWSER_FETCH` | `always`, `fallback` or `off` (default): whether `fetch` renders pages in the browser |
 | `WEBINDEX_BROWSER_CONCURRENCY` | pages the fetch rung renders at once (default 1, at most 4) |
 | `WEBINDEX_BROWSER_TIMEOUT_MS` | how long the fetch rung gives one page (default 30000) |
-
-`doctor` shows the browser found, the home, the profiles, the session and the fetch mode.
 
 ## Over MCP
 
 `webindex mcp --browser` adds 19 tools over one session that lives as long as
 the server, so captures and dialogs persist across calls: a dialog stays open,
-and the page tools are refused, until `webindex_browser_dialog` answers it. The tools are refused with `--allow-remote` or
-`--public-only`, since a logged-in browser on this machine is for this machine
-alone. Waits are capped at 300 s and stop when the call is cancelled. Tools that
-change the page return the snapshot taken after them.
+and the page tools are refused, until `webindex_browser_dialog` answers it.
+They are refused with `--allow-remote` or `--public-only`: a logged-in browser
+here is for this machine alone. Waits are capped at 300 s and stop on cancel.
+Tools that change the page return the snapshot taken after them.
 
 | CLI | MCP tool |
 |---|---|
@@ -158,6 +160,6 @@ change the page return the snapshot taken after them.
 | `network list\|get <n>\|clear` | `webindex_browser_network` (destructive: `clear` deletes the log) |
 | `tabs list\|new\|select\|close` | `webindex_browser_tabs` |
 | `back`, `forward`, `reload` | `webindex_browser_history` |
-| `dialog accept\|dismiss` | `webindex_browser_dialog` |
+| (MCP only) | `webindex_browser_dialog` |
 | `status` | `webindex_browser_status` (`show` required) |
 | `close` (`--all`) | `webindex_browser_close` (`forget` required) |

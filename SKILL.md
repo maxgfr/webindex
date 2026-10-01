@@ -85,7 +85,8 @@ webindex skill check|bundle|vendor|copy|doctor|init|repin|finish|recall
 webindex mcp [--transport http]       # the webindex_* tools over MCP; --public-only, --extract-root <dir> wall it in; --browser adds the browser tools
 webindex doctor [--json]
 webindex browser open <url> --snapshot  # a separate browser on a dedicated profile; the page as a tree with refs (e12)
-webindex browser click|fill|select|type|press|upload|scroll <ref> …  # act on a ref; --snapshot returns the new tree
+webindex browser click|fill|select|type|upload|scroll <ref> …  # act on a ref; --snapshot returns the new tree
+webindex browser press <key>         # Enter, Escape, Control+A… on the focused element
 webindex browser wait --text <s>|--url <p>|--clear  # check the result; --clear waits for the human to solve a challenge
 webindex browser network list|get <n>  # the JSON the page fetched, recorded with --capture
 webindex browser screenshot|eval|tabs|back|status|close  # close shuts down only a browser webindex launched
