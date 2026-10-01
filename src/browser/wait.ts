@@ -216,36 +216,50 @@ export async function armSettle(session: WaitSession, opts: SettleOptions = {}):
   let armedLoader: string | undefined;
   // Per frame id, so events that arrive while the main frame id is still unknown are not lost.
   const started = new Set<string>();
-  const finished = new Set<string>();
-  const begin = (id: string) => {
-    started.add(id);
-    finished.delete(id);
-  };
+  const stopped = new Set<string>();
+  /** The loaderId each frame committed ("" when the event did not say). */
+  const committed = new Map<string, string>();
+  /** The loaderId of every `load` event since the frame started loading ("" when absent). */
+  const loads = new Map<string, string[]>();
   const handlers: [string, CdpHandler][] = [
-    ["Page.frameStartedLoading", (p) => begin(String(p.frameId))],
+    [
+      "Page.frameStartedLoading",
+      (p) => {
+        const id = String(p.frameId);
+        started.add(id);
+        stopped.delete(id);
+        committed.delete(id);
+        loads.delete(id);
+      },
+    ],
     [
       "Page.frameNavigated",
       (p) => {
         if (p.frame?.parentId) return;
+        const id = String(p.frame?.id);
         mainId ??= p.frame?.id;
-        begin(String(p.frame?.id));
+        started.add(id);
+        stopped.delete(id);
+        committed.set(id, p.frame?.loaderId ?? "");
       },
     ],
     [
       "Page.lifecycleEvent",
       (p) => {
-        if (p.name === "load") finished.add(String(p.frameId));
+        if (p.name !== "load") return;
+        const id = String(p.frameId);
+        loads.set(id, [...(loads.get(id) ?? []), p.loaderId ?? ""]);
       },
     ],
-    // A download or a 204 stops loading without ever firing load.
-    ["Page.frameStoppedLoading", (p) => finished.add(String(p.frameId))],
+    // A download or a 204 stops loading without ever firing load. Only a stop after a start is the navigation's.
+    ["Page.frameStoppedLoading", (p) => started.has(String(p.frameId)) && stopped.add(String(p.frameId))],
   ];
   for (const [m, h] of handlers) page.on(m, h);
   const net = await watchNetwork(page);
-  let stopped = false;
+  let released = false;
   const stop = () => {
-    if (stopped) return;
-    stopped = true;
+    if (released) return;
+    released = true;
     for (const [m, h] of handlers) page.off(m, h);
     net.stop();
   };
@@ -264,41 +278,44 @@ export async function armSettle(session: WaitSession, opts: SettleOptions = {}):
   let used = false;
   return {
     async done(): Promise<SettleResult> {
-      if (stopped && !used) return { navigated: false, waitedMs: 0 }; // cancelled
+      if (released && !used) return { navigated: false, waitedMs: 0 }; // cancelled
       if (used) throw new Error("this settle was already awaited");
       used = true;
       const start = now();
       const deadline = start + timeoutMs;
       const step = () => sleep(Math.min(SETTLE_STEP_MS, Math.max(deadline - now(), 0)));
       const sawNavigation = () => mainId !== undefined && started.has(mainId);
+      /** The navigation's own end: a stop, or the load of the document that is loading (not the old one's). */
+      const navigationFinished = () => {
+        if (mainId === undefined) return false;
+        if (stopped.has(mainId)) return true;
+        const commit = committed.get(mainId);
+        return (loads.get(mainId) ?? []).some((l) => l === "" || (commit !== undefined ? commit === "" || l === commit : l !== armedLoader));
+      };
       try {
-        // Already under way: a document that is not the one we armed on, or one still loading.
-        let navigated = sawNavigation();
-        // Only a navigation inferred from the page's state can be confirmed by that state: while the events
-        // show one under way, the OLD document is still live and says "complete".
-        let inferred = false;
-        if (!navigated) {
+        // A document that is not the one we armed on: its navigation went unheard, and it has committed.
+        let committedElsewhere = false;
+        // The document is still loading: not a navigation, but it is waited for.
+        let docLoading = false;
+        if (!sawNavigation()) {
           const t = await tree();
           const readyState = await evaluate(page, "document.readyState");
-          navigated =
-            (armedLoader !== undefined && t.loaderId !== undefined && t.loaderId !== armedLoader) ||
-            (typeof readyState === "string" && readyState !== "complete");
-          if (navigated) {
-            inferred = true;
-            mainId ??= t.id;
-          }
+          committedElsewhere = armedLoader !== undefined && t.loaderId !== undefined && t.loaderId !== armedLoader;
+          docLoading = typeof readyState === "string" && readyState !== "complete";
+          if (committedElsewhere) mainId ??= t.id;
         }
-        // Or about to start (within the window).
-        while (!navigated && now() - start < SETTLE_NAV_WINDOW_MS && now() < deadline) {
-          await step();
-          navigated = sawNavigation();
-        }
-        // Let it load.
-        const loaded = async () =>
-          (mainId !== undefined && finished.has(mainId)) || (inferred && !sawNavigation() && (await evaluate(page, "document.readyState")) === "complete");
-        while (navigated && now() < deadline && !(await loaded())) await step();
+        // The action's own navigation may be about to start: watch for it either way.
+        while (!sawNavigation() && now() - start < SETTLE_NAV_WINDOW_MS && now() < deadline) await step();
+        // Let it load. Once events show a navigation, the OLD document's readyState says nothing: only its events do.
+        const loaded = async () => {
+          if (sawNavigation()) return navigationFinished();
+          if (committedElsewhere || docLoading) return (await evaluate(page, "document.readyState")) === "complete";
+          return true;
+        };
+        while (now() < deadline && !(await loaded())) await step();
+        const navigated = sawNavigation() || committedElsewhere;
         // Quiet network: counted from the load (or from the start, if nothing navigated).
-        let quietSince = navigated ? undefined : start;
+        let quietSince = navigated || docLoading ? undefined : start;
         while (now() < deadline) {
           if (net.count() > SETTLE_MAX_INFLIGHT) quietSince = undefined;
           else quietSince ??= now();

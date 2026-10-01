@@ -347,7 +347,8 @@ describe("armSettle", () => {
       if (t >= 1400) state = "complete";
     });
     const r = await (await armSettle({ page: q }, { deps: clock })).done();
-    expect(r.navigated).toBe(true);
+    // not a navigation, but the document is waited for, and the network must then be quiet
+    expect(r.navigated).toBe(false);
     expect(r.waitedMs).toBeGreaterThanOrEqual(400 + 300);
   });
 
@@ -397,5 +398,50 @@ describe("armSettle", () => {
     armed.cancel(); // idempotent
     expect(await armed.done()).toEqual({ navigated: false, waitedMs: 0 });
     expect(p.listenerCount()).toBe(0);
+  });
+
+  it("keeps watching for the action's navigation while the old document is still loading", async () => {
+    let state = "interactive";
+    const p = treePage();
+    p.handle("Runtime.evaluate", () => ({ result: { value: state } }));
+    const clock = fakeClock((t) => {
+      if (t === 1050) state = "complete"; // the old document finishes
+      if (t === 1100) p.emit("Page.frameStartedLoading", { frameId: "main" }); // the click's navigation
+      if (t === 3000) {
+        p.emit("Page.frameNavigated", { frame: { id: "main", loaderId: "L2" } });
+        p.emit("Page.lifecycleEvent", { frameId: "main", loaderId: "L2", name: "load" });
+      }
+    });
+    const r = await settle({ page: p }, { deps: clock });
+    expect(r.navigated).toBe(true);
+    expect(r.waitedMs).toBeGreaterThanOrEqual(2000 + 300);
+  });
+
+  it("ignores the old document's own load event after the navigation started", async () => {
+    const p = treePage();
+    const clock = fakeClock((t) => {
+      if (t === 1100) p.emit("Page.frameStartedLoading", { frameId: "main" });
+      if (t === 1200) p.emit("Page.lifecycleEvent", { frameId: "main", loaderId: "L1", name: "load" }); // the old one
+      if (t === 3000) {
+        p.emit("Page.frameNavigated", { frame: { id: "main", loaderId: "L2" } });
+        p.emit("Page.lifecycleEvent", { frameId: "main", loaderId: "L2", name: "load" });
+      }
+    });
+    const r = await settle({ page: p }, { deps: clock });
+    expect(r.navigated).toBe(true);
+    expect(r.waitedMs).toBeGreaterThanOrEqual(2000 + 300);
+  });
+
+  it("after the commit, only the committed document's load counts", async () => {
+    const p = treePage();
+    const clock = fakeClock((t) => {
+      if (t === 1050) {
+        p.emit("Page.frameStartedLoading", { frameId: "main" });
+        p.emit("Page.frameNavigated", { frame: { id: "main", loaderId: "L2" } });
+      }
+      if (t === 1200) p.emit("Page.lifecycleEvent", { frameId: "main", loaderId: "L1", name: "load" });
+      if (t === 2500) p.emit("Page.lifecycleEvent", { frameId: "main", loaderId: "L2", name: "load" });
+    });
+    expect((await settle({ page: p }, { deps: clock })).waitedMs).toBeGreaterThanOrEqual(1500 + 300);
   });
 });
