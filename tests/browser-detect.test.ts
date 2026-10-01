@@ -116,6 +116,16 @@ describe("detectBrowserBinary: explicit override", () => {
     expect(r?.kind).toBe(kind);
   });
 
+  it.each([
+    ["/opt/knowledge/google-chrome", "chrome"],
+    ["/home/me/chromium/src/out/chrome", "chrome"],
+    ["/home/me/brave-src/bin/chrome", "chrome"],
+    ["C:\\edge\\Chrome\\chrome.exe", "chrome"],
+    ["/opt/knowledge/msedge", "edge"],
+  ] as const)("classes %s by its file name only (%s)", (path, kind) => {
+    expect(detectBrowserBinary({ ...base, env: () => path, exists: only(path) })?.kind).toBe(kind);
+  });
+
   it("resolves a bare command name on PATH", () => {
     const r = detectBrowserBinary({ ...base, env: () => "brave-browser", exists: only("/usr/bin/brave-browser") });
     expect(r).toEqual({ kind: "brave", path: "/usr/bin/brave-browser" });

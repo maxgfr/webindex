@@ -9,7 +9,7 @@
 
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import { brand, env } from "../brand.js";
 import { UsageError } from "../cli-kit.js";
 
@@ -64,7 +64,7 @@ function realish(path: string): string {
     return realpathSync(p);
   } catch {
     const parent = resolve(p, "..");
-    return parent === p ? p : join(realish(parent), p.slice(parent.length + 1));
+    return parent === p ? p : join(realish(parent), basename(p));
   }
 }
 
@@ -148,7 +148,7 @@ function userDataDir(source: string, opts: ImportOptions): string {
   const platform = opts.platform ?? process.platform;
   const table = USER_DATA[platform];
   if (!table) throw new Error(`unsupported platform "${platform}" for importing a browser profile`);
-  const parts = table[source];
+  const parts = Object.hasOwn(table, source) ? table[source] : undefined;
   if (!parts) return resolve(source);
   if (platform === "win32") {
     const local = opts.localAppData ?? process.env.LOCALAPPDATA;
@@ -195,17 +195,29 @@ export function importProfile(source: ImportSource, opts: ImportOptions = {}): I
   const hasState = existsSync(join(from, "Local State"));
   const hasDefault = existsSync(join(from, "Default"));
   if (!hasState && !hasDefault) throw new Error(`${from} has no Local State or Default profile to import`);
-  try {
-    lstatSync(join(from, "SingletonLock")); // a dangling link, so existsSync would miss it
-    if (!opts.force) {
-      throw new Error(`the browser using ${from} appears to be running: close it, or pass force to import anyway`);
+  // Chrome leaves a SingletonLock link (dangling, so existsSync would miss it); on Windows it holds `lockfile`.
+  const lockNames = (opts.platform ?? process.platform) === "win32" ? ["SingletonLock", "lockfile"] : ["SingletonLock"];
+  const locked = lockNames.some((n) => {
+    try {
+      lstatSync(join(from, n));
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      return false;
     }
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  });
+  if (locked && !opts.force) {
+    throw new Error(`the browser using ${from} appears to be running: close it, or pass force to import anyway`);
   }
 
   if (existsSync(to) && readdirSync(to).length > 0) {
     if (!opts.force) throw new Error(`${to} already holds a profile: pass force to replace it`);
+    // Replacing deletes the target first: were the source in it, it would go too.
+    const a = realish(from);
+    const b = realish(to);
+    if (a === b || a.startsWith(b + sep) || b.startsWith(a + sep)) {
+      throw new Error(`${from} and ${to} overlap: refusing to replace the profile with itself`);
+    }
     assertInsideHome(to);
     rmSync(to, { recursive: true, force: true });
   }

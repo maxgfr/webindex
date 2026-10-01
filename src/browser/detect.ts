@@ -78,9 +78,9 @@ function candidates(kind: BrowserKind, platform: NodeJS.Platform, sys: Record<st
   return LINUX_NAMES[kind].flatMap((name) => dirs.map((dir) => posix.join(dir, name)));
 }
 
-/** Which family a binary belongs to, by its file name (an unrecognised one is driven as Chrome). */
+/** Which family a binary belongs to, by its file name alone (a directory called "knowledge" is not Edge). */
 function kindOf(path: string): BrowserKind {
-  const name = path.toLowerCase();
+  const name = (path.split(/[\\/]/).pop() ?? "").toLowerCase();
   if (name.includes("brave")) return "brave";
   if (name.includes("edge")) return "edge";
   if (name.includes("chromium")) return "chromium";

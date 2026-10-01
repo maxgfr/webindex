@@ -184,6 +184,36 @@ describe("importProfile", () => {
     expect(existsSync(join(profileDir("t"), "Default", "Cookies"))).toBe(true);
   });
 
+  it("refuses to force over an overlapping source and target, and leaves the source intact", () => {
+    const to = profileDir("t");
+    put(to, "Local State", "mine");
+    put(to, "Default/Cookies", "mine");
+    put(to, "Default/Local State", "inner");
+    // source IS the target
+    expect(() => importProfile(to, { name: "t", force: true })).toThrow(/overlap/);
+    // source lies inside the target
+    expect(() => importProfile(join(to, "Default"), { name: "t", force: true })).toThrow(/overlap/);
+    expect(readFileSync(join(to, "Default", "Cookies"), "utf8")).toBe("mine");
+    // target lies inside the source
+    const outer = browserHome();
+    put(outer, "Local State", "outer");
+    expect(() => importProfile(outer, { name: "t", force: true })).toThrow(/overlap/);
+    expect(readFileSync(join(to, "Local State"), "utf8")).toBe("mine");
+  });
+
+  it("treats a Windows `lockfile` as a running browser, unless forced", () => {
+    put(src, "lockfile", "");
+    expect(() => importProfile(src, { name: "w", platform: "win32", localAppData: "" })).toThrow(/appears to be running/);
+    expect(importProfile(src, { name: "w", platform: "win32", force: true }).files).toBeGreaterThan(0);
+    // on other platforms a lockfile alone means nothing
+    expect(importProfile(src, { name: "x", platform: "linux" }).files).toBeGreaterThan(0);
+  });
+
+  it("treats a source named like an Object prototype member as a path", () => {
+    expect(() => importProfile("constructor", { name: "t", platform: "linux", homeDir: work })).toThrow(/not found/);
+    expect(() => importProfile("__proto__", { name: "t", platform: "linux", homeDir: work })).toThrow(/not found/);
+  });
+
   it("accepts an existing but empty target", () => {
     ensurePrivateDir(profileDir("t"));
     expect(importProfile(src, { name: "t" }).files).toBeGreaterThan(0);
@@ -282,6 +312,10 @@ describe("resetProfile", () => {
 });
 
 describe("assertInsideHome", () => {
+  it("keeps the whole name of a missing top-level path", () => {
+    expect(() => assertInsideHome("/zz-missing-top-level")).toThrow(/zz-missing-top-level/);
+  });
+
   it("accepts paths under the home and refuses everything else", () => {
     mkdirSync(browserHome(), { recursive: true });
     expect(() => assertInsideHome(join(browserHome(), "profiles", "x"))).not.toThrow();
