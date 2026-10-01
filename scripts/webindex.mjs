@@ -7028,12 +7028,20 @@ async function createTarget(cdp) {
 async function attachPage(cdp, targetId) {
   const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
   const page = cdp.session(sessionId);
-  await Promise.all([
-    page.send("Page.enable"),
-    page.send("Runtime.enable"),
-    page.send("DOM.enable"),
-    page.send("Page.setLifecycleEventsEnabled", { enabled: true })
-  ]);
+  const o = { timeoutMs: ATTACH_TIMEOUT_MS };
+  try {
+    await Promise.all([
+      page.send("Page.enable", void 0, o),
+      page.send("Runtime.enable", void 0, o),
+      page.send("DOM.enable", void 0, o),
+      page.send("Page.setLifecycleEventsEnabled", { enabled: true }, o)
+    ]);
+  } catch (e) {
+    if (e instanceof CdpError || cdp.closed) throw e;
+    throw new Error(
+      `the tab does not answer; most likely a JavaScript dialog the page opened between commands \u2014 answer it in the window, or \`${brand().cli} browser close\``
+    );
+  }
   return sessionId;
 }
 async function closeLaunched(cdp, pid, deps) {
@@ -7161,10 +7169,12 @@ async function withPage(opts, fn) {
     { deps }
   );
 }
-var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, STATUS_TIMEOUT_MS, TAB_ID, LIFECYCLE, sameTabs, tabNumber, BrowserSession;
+var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, STATUS_TIMEOUT_MS, ATTACH_TIMEOUT_MS, TAB_ID, LIFECYCLE, sameTabs, tabNumber, BrowserSession;
 var init_session = __esm({
   "src/browser/session.ts"() {
     "use strict";
+    init_brand();
+    init_cdp();
     init_deps();
     init_launch();
     init_profile();
@@ -7172,6 +7182,7 @@ var init_session = __esm({
     NAVIGATION_TIMEOUT_MS = 3e4;
     BROWSER_CLOSE_TIMEOUT_MS = 5e3;
     STATUS_TIMEOUT_MS = 2e3;
+    ATTACH_TIMEOUT_MS = 5e3;
     TAB_ID = /^t([1-9]\d*)$/;
     LIFECYCLE = { load: "load", domcontentloaded: "DOMContentLoaded" };
     sameTabs = (a, b) => Object.keys(a).length === Object.keys(b).length && Object.entries(a).every(([k, v]) => b[k] === v);
@@ -7196,6 +7207,8 @@ var init_session = __esm({
       current;
       /** Targets closed by this session that /json/list may still report for a moment. */
       closed = /* @__PURE__ */ new Set();
+      /** Dialog listeners, each bound to the current tab's session and moved with it. */
+      dialogListeners = /* @__PURE__ */ new Map();
       ended = false;
       get port() {
         return this.endpoint.port;
@@ -7288,6 +7301,8 @@ var init_session = __esm({
         const seen = [];
         let wake;
         let closed = false;
+        let leaving = false;
+        let cancelled = false;
         const push = (e) => {
           seen.push(e);
           wake?.();
@@ -7296,7 +7311,18 @@ var init_session = __esm({
           ["Page.lifecycleEvent", (p) => push({ kind: "lifecycle", frameId: p.frameId, loaderId: p.loaderId, name: p.name })],
           ["Page.navigatedWithinDocument", (p) => push({ kind: "same-document", frameId: p.frameId })],
           // A page restored from the back/forward cache fires no lifecycle event.
-          ["Page.frameNavigated", (p) => p.type === "BackForwardCacheRestore" && push({ kind: "bfcache", frameId: p.frame?.id, loaderId: p.frame?.loaderId })]
+          ["Page.frameNavigated", (p) => p.type === "BackForwardCacheRestore" && push({ kind: "bfcache", frameId: p.frame?.id, loaderId: p.frame?.loaderId })],
+          ["Page.javascriptDialogOpening", (p) => leaving = p?.type === "beforeunload"],
+          [
+            "Page.javascriptDialogClosed",
+            (p) => {
+              if (leaving && p?.result === false) {
+                cancelled = true;
+                wake?.();
+              }
+              leaving = false;
+            }
+          ]
         ];
         for (const [method, h] of handlers) page.on(method, h);
         const offClose = this.cdp.onClose(() => {
@@ -7308,7 +7334,7 @@ var init_session = __esm({
             for (const [method, h] of handlers) page.off(method, h);
             offClose();
           },
-          until: (match, timeoutMs, what) => new Promise((resolve12, reject) => {
+          until: (match, timeoutMs, what, cancelledWhat) => new Promise((resolve12, reject) => {
             const timer = setTimeout(() => {
               wake = void 0;
               reject(new Error(`${what} within ${timeoutMs} ms`));
@@ -7316,6 +7342,7 @@ var init_session = __esm({
             wake = () => {
               const hit = seen.find(match);
               if (hit) resolve12(hit);
+              else if (cancelled) reject(new Error(`${cancelledWhat} was cancelled: the page asked to confirm leaving it (beforeunload), and that was declined`));
               else if (closed) reject(new Error("the browser connection closed while waiting for the page to load"));
               else return;
               clearTimeout(timer);
@@ -7345,7 +7372,12 @@ var init_session = __esm({
           clearRefs(this.targetId);
           if (waitUntil === "none") return { url, loaderId: r.loaderId };
           const name2 = LIFECYCLE[waitUntil];
-          await nav.until((e) => e.kind === "lifecycle" && e.name === name2 && e.loaderId === r.loaderId, timeoutMs, `navigation to ${url} did not reach ${name2}`);
+          await nav.until(
+            (e) => e.kind === "lifecycle" && e.name === name2 && e.loaderId === r.loaderId,
+            timeoutMs,
+            `navigation to ${url} did not reach ${name2}`,
+            `navigation to ${url}`
+          );
           return await this.loaded();
         } finally {
           nav.stop();
@@ -7360,7 +7392,8 @@ var init_session = __esm({
           const hit = await nav.until(
             (e) => e.frameId === before.id && (e.kind !== "lifecycle" || e.name === "load" && e.loaderId !== before.loaderId),
             timeoutMs,
-            `${what} did not reach load`
+            `${what} did not reach load`,
+            what
           );
           if (hit.kind !== "same-document") clearRefs(this.targetId);
           return await this.loaded();
@@ -7391,11 +7424,33 @@ var init_session = __esm({
         this.save();
         return tabList(this.tabs, pages, this.targetId);
       }
+      /**
+       * Hear the JavaScript dialogs of whichever tab is current, across tab
+       * switches, each with the page session that can answer it. Returns its unsubscribe.
+       */
+      onDialog(listener) {
+        this.hookDialogs(listener, this.page);
+        return () => {
+          const h = this.dialogListeners.get(listener);
+          if (h) this.page.off("Page.javascriptDialogOpening", h);
+          this.dialogListeners.delete(listener);
+        };
+      }
+      hookDialogs(listener, page) {
+        const h = (p) => listener({ type: String(p?.type ?? "alert"), message: String(p?.message ?? ""), ...typeof p?.url === "string" ? { url: p.url } : {} }, page);
+        page.on("Page.javascriptDialogOpening", h);
+        this.dialogListeners.set(listener, h);
+      }
       /** Move this session onto another tab: attach to it, let go of the old one, bring it to the front. */
       async switchTo(targetId) {
         const old = this.current.sessionId;
         const sessionId = await attachPage(this.cdp, targetId);
+        const oldPage = this.current.page;
         this.current = { targetId, sessionId, page: this.cdp.session(sessionId) };
+        for (const [listener, h] of [...this.dialogListeners]) {
+          oldPage.off("Page.javascriptDialogOpening", h);
+          this.hookDialogs(listener, this.current.page);
+        }
         await this.cdp.send("Target.detachFromTarget", { sessionId: old }).catch(() => {
         });
         await this.deps.discovery.activateTarget(this.port, targetId, this.host);
@@ -10157,14 +10212,72 @@ function arity(ctx, min, max = min) {
   if (ctx.args.length < min || ctx.args.length > max) throw usageError(ctx.action);
 }
 async function runBrowserCommand(action, args, flags = {}, deps = {}) {
+  const ctx = { action, args, flags, deps };
   try {
     if (!Object.hasOwn(HANDLERS, action)) throw new UsageError(`usage: ${cliName()} browser ${BROWSER_ACTIONS.join("|")}`);
-    const out = await HANDLERS[action]({ action, args, flags, deps });
-    return { ...out, json: { ok: true, ...out.json }, exitCode: 0 };
+    const out = await HANDLERS[action](ctx);
+    const dialogs = unreported(ctx);
+    return {
+      ...out,
+      text: withLines(
+        out.text,
+        dialogs.map((d) => dialogLine(d))
+      ),
+      json: { ok: true, ...out.json, ...dialogsJson(dialogs) },
+      exitCode: 0
+    };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
-    return { json: { ok: false, error }, text: error, exitCode: e instanceof UsageError ? 2 : 1 };
+    const dialogs = unreported(ctx);
+    return {
+      json: { ok: false, error, ...dialogsJson(dialogs) },
+      text: withLines(
+        error,
+        dialogs.map((d) => dialogLine(d))
+      ),
+      exitCode: e instanceof UsageError ? 2 : 1
+    };
   }
+}
+function withLines(text, lines) {
+  if (lines.length === 0) return text;
+  const cut = text.indexOf("\n");
+  return cut < 0 ? [text, ...lines].join("\n") : [text.slice(0, cut), ...lines, text.slice(cut + 1)].join("\n");
+}
+function dismissDialogs(s) {
+  const handled2 = [];
+  const pending = [];
+  let failure2;
+  const stop = s.onDialog((d, page) => {
+    const info = { type: d.type, message: d.message };
+    pending.push(
+      page.send("Page.handleJavaScriptDialog", { accept: false }).then(
+        () => void handled2.push({ ...info, dismissed: true }),
+        (e) => {
+          if (e instanceof CdpError && /no dialog/i.test(e.message)) handled2.push({ ...info, closed: true });
+          else failure2 ??= new Error(`could not dismiss the dialog the page opened (${info.type}: ${JSON.stringify(info.message)}): ${e.message}`);
+        }
+      )
+    );
+  });
+  return {
+    handled: handled2,
+    reported: /* @__PURE__ */ new Set(),
+    stop,
+    async settle() {
+      await Promise.all(pending);
+      if (failure2) throw failure2;
+    }
+  };
+}
+async function handled(ctx, r) {
+  const w = ctx.dialogs;
+  if (!r.dialog || !w) return r;
+  await w.settle();
+  const d = w.handled.find((h) => !w.reported.has(h) && h.type === r.dialog?.type && h.message === r.dialog?.message);
+  if (!d) return r;
+  w.reported.add(d);
+  return { ...r, dialog: d };
 }
 function onPage(ctx, fn, extra = {}) {
   if (ctx.deps.page) return ctx.deps.page(fn, extra);
@@ -10176,7 +10289,20 @@ function onPage(ctx, fn, extra = {}) {
     ...ctx.deps.browser ? { deps: ctx.deps.browser } : {},
     ...extra
   };
-  return withPage(opts, fn);
+  return withPage(opts, async (s) => {
+    const w = ctx.dialogs = dismissDialogs(s);
+    try {
+      const out = await fn(s);
+      await w.settle();
+      return out;
+    } catch (e) {
+      await w.settle().catch(() => {
+      });
+      throw e;
+    } finally {
+      w.stop();
+    }
+  });
 }
 async function capturing(ctx, s, fn) {
   if (!ctx.flags.capture) return { value: await fn() };
@@ -10192,12 +10318,6 @@ async function capturing(ctx, s, fn) {
     });
   }
 }
-async function dismissLeftover(ctx, s, r) {
-  if (!r.dialog || ctx.deps.page) return r;
-  await s.page.send("Page.handleJavaScriptDialog", { accept: false }).catch(() => {
-  });
-  return { ...r, dialog: { ...r.dialog, dismissed: true } };
-}
 function actionText(ctx, r, captured, snap) {
   const lines = [`${r.action}${r.ref !== void 0 ? ` ${r.ref}` : ""}: ${r.navigated ? "navigated to " : ""}${where(r.url, r.title)}`];
   if (r.value !== void 0 && !(typeof r.value === "object" && r.value !== null && Object.keys(r.value).length === 0)) lines.push(`  value: ${show(r.value)}`);
@@ -10209,8 +10329,8 @@ function actionText(ctx, r, captured, snap) {
 }
 function mutate(ctx, run) {
   return onPage(ctx, async (s) => {
-    const { value: r, captured } = await capturing(ctx, s, async () => dismissLeftover(ctx, s, await run(s, actOpts(ctx))));
-    const snap = ctx.flags.snapshot && !(r.dialog && !r.dialog.dismissed) ? await takeSnapshot(s, snapOpts(ctx)) : void 0;
+    const { value: r, captured } = await capturing(ctx, s, async () => handled(ctx, await run(s, actOpts(ctx))));
+    const snap = ctx.flags.snapshot && !frozen(r.dialog) ? await takeSnapshot(s, snapOpts(ctx)) : void 0;
     return {
       json: { ...r, ...captured !== void 0 ? { captured } : {}, ...snap ? { snapshot: snap } : {} },
       text: actionText(ctx, r, captured, snap)
@@ -10242,7 +10362,7 @@ function currentTarget(ctx) {
   if (!saved) throw new Error(`no browser session: record what a page fetches with ${follow(ctx).capture}`);
   return saved.targetId;
 }
-var cliFollowUps, USAGE, BROWSER_ACTIONS, SNAPSHOT_MAX_CHARS, cliName, usageError, actOpts, snapOpts, show, pretty, where, follow, dialogLine, challengeLine, capturedLine, confirm, historyOpts, HANDLERS;
+var cliFollowUps, USAGE, BROWSER_ACTIONS, SNAPSHOT_MAX_CHARS, cliName, usageError, dialogsJson, unreported, actOpts, snapOpts, show, pretty, where, follow, dialogLine, frozen, challengeLine, capturedLine, confirm, historyOpts, HANDLERS;
 var init_cli = __esm({
   "src/browser/cli.ts"() {
     "use strict";
@@ -10251,6 +10371,7 @@ var init_cli = __esm({
     init_no_write();
     init_actions();
     init_challenge();
+    init_cdp();
     init_deps();
     init_keys();
     init_launch();
@@ -10295,6 +10416,8 @@ var init_cli = __esm({
     SNAPSHOT_MAX_CHARS = 2e4;
     cliName = () => brand().cli;
     usageError = (action) => new UsageError(`usage: ${cliName()} browser ${USAGE[action]}`);
+    dialogsJson = (dialogs) => dialogs.length ? { dialogs } : {};
+    unreported = (ctx) => ctx.dialogs ? ctx.dialogs.handled.filter((d) => !ctx.dialogs?.reported.has(d)) : [];
     actOpts = (ctx) => ctx.deps.browser ? { deps: ctx.deps.browser } : {};
     snapOpts = (ctx, ref2) => ({
       maxChars: ctx.flags.maxChars ?? SNAPSHOT_MAX_CHARS,
@@ -10305,7 +10428,13 @@ var init_cli = __esm({
     pretty = (v) => typeof v === "string" ? v : v === void 0 ? "undefined" : JSON.stringify(v, null, 2);
     where = (url, title) => `${url}${title ? ` \u2014 ${title}` : ""}`;
     follow = (ctx) => ctx.deps.followUps ?? cliFollowUps();
-    dialogLine = (d, f = cliFollowUps()) => d.dismissed ? `dialog ${d.type}: ${JSON.stringify(d.message)} \u2014 dismissed: a dialog cannot outlive a command; \`${cliName()} mcp --browser\` keeps it open for an answer` : `dialog ${d.type}: ${JSON.stringify(d.message)} \u2014 it is still open: ${f.dialog}`;
+    dialogLine = (d, f = cliFollowUps()) => {
+      const head = `dialog ${d.type}: ${JSON.stringify(d.message)}`;
+      if (d.dismissed) return `${head} \u2014 dismissed: a dialog cannot outlive a command; \`${cliName()} mcp --browser\` keeps it open for an answer`;
+      if (d.closed) return `${head} \u2014 closed in the window before the command could dismiss it`;
+      return `${head} \u2014 it is still open: ${f.dialog}`;
+    };
+    frozen = (d) => d !== void 0 && !d.dismissed && !d.closed;
     challengeLine = (ctx, c) => `challenge: ${c.kind}${c.blocking ? " (blocking)" : ""} \u2014 let the human solve it, then ${follow(ctx).waitClear}`;
     capturedLine = (ctx, n) => `captured ${n} JSON response${n === 1 ? "" : "s"} \u2014 ${follow(ctx).networkList}`;
     confirm = (ctx) => ctx.flags.confirm ? { confirm: true } : {};
@@ -10428,6 +10557,11 @@ var init_cli = __esm({
         const answer = ctx.args[0];
         if (answer !== "accept" && answer !== "dismiss") throw usageError(ctx.action);
         if (answer === "dismiss") arity(ctx, 1);
+        if (!ctx.deps.page) {
+          throw new Error(
+            `the CLI dismisses dialogs before each command ends; a dialog the page opened between commands can only be answered in the window or with \`${cliName()} browser close\`; \`${cliName()} mcp --browser\` answers dialogs`
+          );
+        }
         const prompt = ctx.args.length > 1 ? ctx.args.slice(1).join(" ") : void 0;
         return mutate(ctx, (s, o) => handleDialog(s, answer === "accept", prompt, o));
       },
@@ -10464,7 +10598,7 @@ var init_cli = __esm({
         }
         expression = expression.trim();
         if (!expression) throw usageError(ctx.action);
-        const r = await onPage(ctx, async (s) => dismissLeftover(ctx, s, await evaluate2(s, expression, actOpts(ctx))));
+        const r = await onPage(ctx, async (s) => handled(ctx, await evaluate2(s, expression, actOpts(ctx))));
         const lines = [pretty(r.value)];
         if (r.dialog) lines.push(dialogLine(r.dialog, follow(ctx)));
         return { json: r, text: lines.join("\n") };
@@ -16267,8 +16401,9 @@ USAGE
                      | --ms <n> [--timeout <ms>]
   webindex browser   eval <expr|-> | screenshot [<ref>] [--full] [--out <file>]
   webindex browser   network [list|get <n>|clear] | tabs [list|new|select <tN>|close <tN>]
-  webindex browser   back|forward|reload | dialog accept|dismiss
-  webindex browser   profile import <chrome|brave|path> [--force] | reset | path
+  webindex browser   back|forward|reload | dialog accept|dismiss (MCP only)
+  webindex browser   profile import <chrome|brave|chromium|edge|path> [--force]
+                     | reset | path
   webindex doctor [--json]
   webindex version
 
@@ -16457,8 +16592,10 @@ COMMANDS
              send, publish\u2026) or submits a password is refused unless --confirm:
              ask the user first. A challenge (captcha, anti-bot wall) is named,
              never bypassed: the human solves it, then wait --clear. --capture
-             records the JSON the page fetches (network list|get). Exit 1 is a
-             stale ref, a timeout or a refusal; --json on every action.
+             records the JSON the page fetches (network list|get). A dialog
+             the page opens is dismissed before the command ends; only the
+             MCP tools (mcp --browser) can answer one. Exit 1 is a stale ref,
+             a timeout or a refusal; --json on every action.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which

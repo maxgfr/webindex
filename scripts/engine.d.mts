@@ -1099,6 +1099,14 @@ interface CloseOptions {
     /** Also wipe the refs and network logs of every tab, not only ours. */
     all?: boolean;
 }
+/** A JavaScript dialog as the page announces it (Page.javascriptDialogOpening). */
+interface DialogEvent {
+    type: string;
+    message: string;
+    url?: string;
+}
+/** Hears a dialog, with the page session that heard it: the one that can answer it. */
+type DialogListener = (d: DialogEvent, page: CdpSession) => void;
 declare class BrowserSession {
     /** The browser-level connection. */
     readonly cdp: CdpClient;
@@ -1111,6 +1119,8 @@ declare class BrowserSession {
     private current;
     /** Targets closed by this session that /json/list may still report for a moment. */
     private readonly closed;
+    /** Dialog listeners, each bound to the current tab's session and moved with it. */
+    private readonly dialogListeners;
     private ended;
     /** @internal use openBrowserSession */
     constructor(
@@ -1164,6 +1174,12 @@ declare class BrowserSession {
     }): Promise<NavigationResult>;
     /** The browser's tabs with their stable short ids; the map is refreshed and saved. */
     listTabs(): Promise<BrowserTab[]>;
+    /**
+     * Hear the JavaScript dialogs of whichever tab is current, across tab
+     * switches, each with the page session that can answer it. Returns its unsubscribe.
+     */
+    onDialog(listener: DialogListener): () => void;
+    private hookDialogs;
     /** Move this session onto another tab: attach to it, let go of the old one, bring it to the front. */
     private switchTo;
     selectTab(id: string): Promise<BrowserTab>;
@@ -1722,6 +1738,8 @@ interface DialogInfo {
     message: string;
     /** The CLI dismissed it before its command ended: it is no longer open. */
     dismissed?: boolean;
+    /** Someone closed it in the window before the CLI could dismiss it. */
+    closed?: boolean;
 }
 interface ActionResult {
     ok: true;

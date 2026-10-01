@@ -5483,12 +5483,20 @@ async function createTarget(cdp) {
 async function attachPage(cdp, targetId) {
   const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
   const page = cdp.session(sessionId);
-  await Promise.all([
-    page.send("Page.enable"),
-    page.send("Runtime.enable"),
-    page.send("DOM.enable"),
-    page.send("Page.setLifecycleEventsEnabled", { enabled: true })
-  ]);
+  const o = { timeoutMs: ATTACH_TIMEOUT_MS };
+  try {
+    await Promise.all([
+      page.send("Page.enable", void 0, o),
+      page.send("Runtime.enable", void 0, o),
+      page.send("DOM.enable", void 0, o),
+      page.send("Page.setLifecycleEventsEnabled", { enabled: true }, o)
+    ]);
+  } catch (e) {
+    if (e instanceof CdpError || cdp.closed) throw e;
+    throw new Error(
+      `the tab does not answer; most likely a JavaScript dialog the page opened between commands \u2014 answer it in the window, or \`${brand().cli} browser close\``
+    );
+  }
   return sessionId;
 }
 async function closeLaunched(cdp, pid, deps) {
@@ -5540,10 +5548,12 @@ async function openBrowserSession(opts = {}) {
     throw e;
   }
 }
-var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, STATUS_TIMEOUT_MS, TAB_ID, LIFECYCLE, tabNumber, BrowserSession;
+var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, STATUS_TIMEOUT_MS, ATTACH_TIMEOUT_MS, TAB_ID, LIFECYCLE, tabNumber, BrowserSession;
 var init_session = __esm({
   "src/browser/session.ts"() {
     "use strict";
+    init_brand();
+    init_cdp();
     init_deps();
     init_launch();
     init_profile();
@@ -5551,6 +5561,7 @@ var init_session = __esm({
     NAVIGATION_TIMEOUT_MS = 3e4;
     BROWSER_CLOSE_TIMEOUT_MS = 5e3;
     STATUS_TIMEOUT_MS = 2e3;
+    ATTACH_TIMEOUT_MS = 5e3;
     TAB_ID = /^t([1-9]\d*)$/;
     LIFECYCLE = { load: "load", domcontentloaded: "DOMContentLoaded" };
     tabNumber = (id) => Number(TAB_ID.exec(id)?.[1] ?? 0);
@@ -5574,6 +5585,8 @@ var init_session = __esm({
       current;
       /** Targets closed by this session that /json/list may still report for a moment. */
       closed = /* @__PURE__ */ new Set();
+      /** Dialog listeners, each bound to the current tab's session and moved with it. */
+      dialogListeners = /* @__PURE__ */ new Map();
       ended = false;
       get port() {
         return this.endpoint.port;
@@ -5666,6 +5679,8 @@ var init_session = __esm({
         const seen = [];
         let wake;
         let closed = false;
+        let leaving = false;
+        let cancelled = false;
         const push = (e) => {
           seen.push(e);
           wake?.();
@@ -5674,7 +5689,18 @@ var init_session = __esm({
           ["Page.lifecycleEvent", (p) => push({ kind: "lifecycle", frameId: p.frameId, loaderId: p.loaderId, name: p.name })],
           ["Page.navigatedWithinDocument", (p) => push({ kind: "same-document", frameId: p.frameId })],
           // A page restored from the back/forward cache fires no lifecycle event.
-          ["Page.frameNavigated", (p) => p.type === "BackForwardCacheRestore" && push({ kind: "bfcache", frameId: p.frame?.id, loaderId: p.frame?.loaderId })]
+          ["Page.frameNavigated", (p) => p.type === "BackForwardCacheRestore" && push({ kind: "bfcache", frameId: p.frame?.id, loaderId: p.frame?.loaderId })],
+          ["Page.javascriptDialogOpening", (p) => leaving = p?.type === "beforeunload"],
+          [
+            "Page.javascriptDialogClosed",
+            (p) => {
+              if (leaving && p?.result === false) {
+                cancelled = true;
+                wake?.();
+              }
+              leaving = false;
+            }
+          ]
         ];
         for (const [method, h] of handlers) page.on(method, h);
         const offClose = this.cdp.onClose(() => {
@@ -5686,7 +5712,7 @@ var init_session = __esm({
             for (const [method, h] of handlers) page.off(method, h);
             offClose();
           },
-          until: (match, timeoutMs, what) => new Promise((resolve8, reject) => {
+          until: (match, timeoutMs, what, cancelledWhat) => new Promise((resolve8, reject) => {
             const timer = setTimeout(() => {
               wake = void 0;
               reject(new Error(`${what} within ${timeoutMs} ms`));
@@ -5694,6 +5720,7 @@ var init_session = __esm({
             wake = () => {
               const hit = seen.find(match);
               if (hit) resolve8(hit);
+              else if (cancelled) reject(new Error(`${cancelledWhat} was cancelled: the page asked to confirm leaving it (beforeunload), and that was declined`));
               else if (closed) reject(new Error("the browser connection closed while waiting for the page to load"));
               else return;
               clearTimeout(timer);
@@ -5723,7 +5750,12 @@ var init_session = __esm({
           clearRefs(this.targetId);
           if (waitUntil === "none") return { url, loaderId: r.loaderId };
           const name = LIFECYCLE[waitUntil];
-          await nav.until((e) => e.kind === "lifecycle" && e.name === name && e.loaderId === r.loaderId, timeoutMs, `navigation to ${url} did not reach ${name}`);
+          await nav.until(
+            (e) => e.kind === "lifecycle" && e.name === name && e.loaderId === r.loaderId,
+            timeoutMs,
+            `navigation to ${url} did not reach ${name}`,
+            `navigation to ${url}`
+          );
           return await this.loaded();
         } finally {
           nav.stop();
@@ -5738,7 +5770,8 @@ var init_session = __esm({
           const hit = await nav.until(
             (e) => e.frameId === before.id && (e.kind !== "lifecycle" || e.name === "load" && e.loaderId !== before.loaderId),
             timeoutMs,
-            `${what} did not reach load`
+            `${what} did not reach load`,
+            what
           );
           if (hit.kind !== "same-document") clearRefs(this.targetId);
           return await this.loaded();
@@ -5769,11 +5802,33 @@ var init_session = __esm({
         this.save();
         return tabList(this.tabs, pages, this.targetId);
       }
+      /**
+       * Hear the JavaScript dialogs of whichever tab is current, across tab
+       * switches, each with the page session that can answer it. Returns its unsubscribe.
+       */
+      onDialog(listener) {
+        this.hookDialogs(listener, this.page);
+        return () => {
+          const h = this.dialogListeners.get(listener);
+          if (h) this.page.off("Page.javascriptDialogOpening", h);
+          this.dialogListeners.delete(listener);
+        };
+      }
+      hookDialogs(listener, page) {
+        const h = (p) => listener({ type: String(p?.type ?? "alert"), message: String(p?.message ?? ""), ...typeof p?.url === "string" ? { url: p.url } : {} }, page);
+        page.on("Page.javascriptDialogOpening", h);
+        this.dialogListeners.set(listener, h);
+      }
       /** Move this session onto another tab: attach to it, let go of the old one, bring it to the front. */
       async switchTo(targetId) {
         const old = this.current.sessionId;
         const sessionId = await attachPage(this.cdp, targetId);
+        const oldPage = this.current.page;
         this.current = { targetId, sessionId, page: this.cdp.session(sessionId) };
+        for (const [listener, h] of [...this.dialogListeners]) {
+          oldPage.off("Page.javascriptDialogOpening", h);
+          this.hookDialogs(listener, this.current.page);
+        }
         await this.cdp.send("Target.detachFromTarget", { sessionId: old }).catch(() => {
         });
         await this.deps.discovery.activateTarget(this.port, targetId, this.host);
