@@ -127,6 +127,8 @@ const ALLOWED_FOREIGN = new Set([
   // yt-dlp's own option, quoted in references/video.md as the value of
   // WEBINDEX_YTDLP_ARGS — the one way past YouTube's sign-in wall.
   "cookies-from-browser",
+  "remote-debugging-port", // Chrome's own switch, quoted in references/browser.md
+  "user-data-dir", // Chrome's own switch, quoted in references/browser.md
 ]);
 // `--help` and `--version` are answered by the parser rather than declared as
 // flags, so they are legitimately documented and legitimately absent from the

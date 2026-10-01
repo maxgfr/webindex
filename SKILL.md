@@ -67,6 +67,7 @@ webindex fetch <url> --format markdown # CommonMark: absolute links, fenced code
 webindex fetch <url> --cache          # reuse a fresh copy for the TTL, revalidate a stale one (a 304 when unchanged); --refresh, --offline
 webindex fetch <url> <url> …         # several at once, each under a ==> <url> <== header (--json: an array); fails only if all did
 webindex fetch <video-url>           # YouTube, Vimeo, Dailymotion…: a timestamped, chaptered transcript: manual subs → own auto-captions → local whisper
+webindex fetch <url> --browser       # render the page in the dedicated browser first (a page only JavaScript fills)
 webindex video fetch|search|frames|list …  # keep a video on disk, search it, its frames aligned with speech, a playlist as V1…Vn
 webindex extract <file|-> [--full-page] # the same on disk (- reads stdin); --full-page keeps navigation and consent banners too; --format markdown
 webindex rank --query <q> --docs <f> # BM25F + near-dup collapse + MMR; --dense adds the embedding lane
@@ -81,8 +82,13 @@ webindex changed <url> [--etag <v>] [--last-modified <d>]  # a 304 costs one rou
 webindex cache status|clean [--all]
 webindex searxng|firecrawl|semantic|stack up|down|status
 webindex skill check|bundle|vendor|copy|doctor|init|repin|finish|recall
-webindex mcp [--transport http]       # the webindex_* tools over MCP; --public-only, --extract-root <dir> wall it in
+webindex mcp [--transport http]       # the webindex_* tools over MCP; --public-only, --extract-root <dir> wall it in; --browser adds the browser tools
 webindex doctor [--json]
+webindex browser open <url> --snapshot  # a separate browser on a dedicated profile; the page as a tree with refs (e12)
+webindex browser click|fill|select|type|press|upload|scroll <ref> …  # act on a ref; --snapshot returns the new tree
+webindex browser wait --text <s>|--url <p>|--clear  # check the result; --clear waits for the human to solve a challenge
+webindex browser network list|get <n>  # the JSON the page fetched, recorded with --capture
+webindex browser screenshot|eval|tabs|back|status|close  # close shuts down only a browser webindex launched
 ```
 
 Every command that answers with data takes `--json` — all but the container
@@ -130,6 +136,19 @@ The same line runs through orchestration. The engine owns the emission, the
 batching and the harness constraints; the skill owns the phase table, the
 contract prose and the schemas its subagents must satisfy.
 
+## The browser
+
+`webindex browser` drives a **separate** Chrome, Brave, Chromium or Edge over
+the DevTools Protocol, on a dedicated profile under `~/.webindex/browser`, with
+no automation flags. It never touches the user's own browser or profile. You see
+each page as an accessibility snapshot with refs, act on a ref, and look again.
+It does not solve captchas, does not bypass anti-bot systems and does not log in
+for the user: the human does those in its window, then `wait --clear` or
+`wait --url` takes over. A click or Enter that looks irreversible (pay, order,
+delete, publish, send, validate) is refused until `--confirm`, which you pass
+only after the user said yes to that very action. Read
+`references/browser.md` before driving it.
+
 ## Three rules that constrain every change
 
 - **No runtime dependencies, ever.** Consumers vendor `scripts/engine.mjs` and
@@ -169,3 +188,4 @@ without `--allow-remote` too.
 - `references/orchestration.md` — declaring phases, and the two constraints the emitted workflow must obey.
 - `references/skill-kit.md` — `skill.json`, the packaging gates, and the two ways a vendored engine goes wrong.
 - `references/video.md` — the transcript ladder, runs, frames and corpora, and what each yt-dlp failure means.
+- `references/browser.md` — the snapshot-and-ref loop, the safety rules, profiles, network capture, and the MCP browser tools.
