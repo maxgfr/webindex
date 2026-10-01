@@ -74,7 +74,7 @@ export class BrowserWorld {
         this.dialogOnClick = undefined;
       }
     });
-    fake.handle("Runtime.callFunctionOn", ({ objectId, functionDeclaration }) => {
+    fake.handle("Runtime.callFunctionOn", ({ objectId, functionDeclaration, arguments: args }) => {
       const el = this.els.get(Number(String(objectId).slice(1))) as El;
       if (functionDeclaration === COLLECT_SOURCE) return { result: { value: { role: "button", label: el.label, isSubmit: false, formHasPassword: false } } };
       const name = /^function (\w+)/.exec(functionDeclaration)?.[1];
@@ -83,6 +83,7 @@ export class BrowserWorld {
       if (name === "readValue") return { result: { value: el.value ?? "" } };
       if (name === "matchOptions") return { result: { value: { picked: [1] } } };
       if (name === "applyOptions") return { result: { value: ["m"] } };
+      if (name === "setValue") el.value = String(args?.[0]?.value ?? "");
       if (name === "fileInput") return { result: { value: { ok: true, multiple: true, what: "<input>" } } };
       return { result: {} };
     });

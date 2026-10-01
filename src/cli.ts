@@ -98,7 +98,7 @@ import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from ".
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
 import { BROWSER_CAP_ADVICE, browserToolDecls, createBrowserToolHost } from "./browser/mcp.js";
-import { confinePath, publicUrlRefusal, publicUrlsOnly } from "./mcp/policy.js";
+import { confinePath, publicUrlRefusal, publicUrlsOnly, toolTimeoutMs } from "./mcp/policy.js";
 
 configure({ name: "webindex", envPrefix: "WEBINDEX", cli: "webindex", contactUrl: "https://github.com/maxgfr/webindex" });
 
@@ -638,16 +638,6 @@ function mcpPolicyNotice(policy: WebindexToolPolicy, allowRemote: boolean, allow
   else if (policy.noLocalFiles) lines.push("local files: none, and webindex_extract is off (--extract-root <dir> offers one directory).");
   if (policy.browser) lines.push("browser: the webindex_browser_* tools drive a separate browser on this machine; irreversible actions need confirm: true.");
   return lines;
-}
-
-/**
- * The MCP fetch tool's `timeoutMs`. Clamped rather than refused: an agent's
- * odd value should cost it a default, not the call — but never an unbounded
- * wait on a server other clients share.
- */
-function toolTimeoutMs(value: unknown): number | undefined {
-  const n = typeof value === "string" ? Number(value) : value;
-  return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(300_000, Math.max(1, Math.round(n))) : undefined;
 }
 
 // The whole webindex_search cascade's budget: every rung and page within it.

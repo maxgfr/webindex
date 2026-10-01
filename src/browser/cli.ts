@@ -80,6 +80,8 @@ export interface BrowserCliDeps {
   page?: <T>(fn: (s: BrowserSession) => Promise<T>, opts: { newTab?: boolean }) => Promise<T>;
   /** How a result names the next step to take; the CLI's own commands by default. */
   followUps?: BrowserFollowUps;
+  /** Stops a `wait` between two polls: an MCP client's cancel. */
+  signal?: AbortSignal;
 }
 
 /** The next step a result points the agent to, in the words of the interface it uses. */
@@ -464,7 +466,11 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     if (conds.length !== 1) throw new UsageError(`wait takes exactly one condition — usage: ${cliName()} browser ${USAGE.wait}`);
     const cond = conds[0] as WaitCondition;
     const r = await onPage(ctx, (s) =>
-      waitFor(s, cond, { ...(f.timeout !== undefined ? { timeoutMs: f.timeout } : {}), ...(ctx.deps.browser ? { deps: ctx.deps.browser } : {}) }),
+      waitFor(s, cond, {
+        ...(f.timeout !== undefined ? { timeoutMs: f.timeout } : {}),
+        ...(ctx.deps.browser ? { deps: ctx.deps.browser } : {}),
+        ...(ctx.deps.signal ? { signal: ctx.deps.signal } : {}),
+      }),
     );
     return { json: { ok: true, ...r }, text: `${r.matched} held after ${r.waitedMs} ms` };
   },

@@ -20,6 +20,8 @@ export interface WaitOptions {
   /** 30 s, or 300 s for `clear` (a human solving a captcha). */
   timeoutMs?: number;
   deps?: Partial<BrowserDeps>;
+  /** Stops the wait between two polls (an MCP client's cancel): it rejects with WaitCancelledError. */
+  signal?: AbortSignal;
 }
 
 export interface WaitResult {
@@ -35,6 +37,14 @@ export class WaitTimeoutError extends Error {
   ) {
     super(`timed out waiting for ${JSON.stringify(condition)} after ${elapsedMs} ms`);
     this.name = "WaitTimeoutError";
+  }
+}
+
+/** A wait stopped by its signal before its condition held. */
+export class WaitCancelledError extends Error {
+  constructor() {
+    super("the wait was cancelled");
+    this.name = "WaitCancelledError";
   }
 }
 
@@ -162,8 +172,16 @@ export async function waitFor(session: WaitSession, cond: WaitCondition, opts: W
   if (present.length !== 1) throw new TypeError(`invalid wait condition ${JSON.stringify(cond)}: give exactly one of ${KEYS.join(", ")}`);
   const { now, sleep } = browserDeps(opts.deps);
   const start = now();
+  const live = () => {
+    if (opts.signal?.aborted) throw new WaitCancelledError();
+  };
   if ("ms" in cond) {
-    await sleep(cond.ms);
+    // In poll-sized steps, so that a cancel is heard.
+    for (let left = cond.ms; ; left = cond.ms - (now() - start)) {
+      live();
+      if (left <= 0) break;
+      await sleep(Math.min(POLL_MS, left));
+    }
     return { waitedMs: now() - start, matched: "ms" };
   }
   const timeoutMs = opts.timeoutMs ?? ("clear" in cond ? CLEAR_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
@@ -171,6 +189,7 @@ export async function waitFor(session: WaitSession, cond: WaitCondition, opts: W
   try {
     const check = checker(session.page, cond, now, net);
     for (;;) {
+      live();
       if (await check()) return { waitedMs: now() - start, matched: present[0] as string };
       const elapsed = now() - start;
       if (elapsed >= timeoutMs) throw new WaitTimeoutError(cond, elapsed);

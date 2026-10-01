@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { armSettle, settle, WaitTimeoutError, waitFor } from "../src/browser/wait.js";
+import { armSettle, settle, WaitCancelledError, WaitTimeoutError, waitFor } from "../src/browser/wait.js";
 import { fakeClock, FakePage } from "./helpers/fake-page.js";
 
 /** A page whose Runtime.evaluate answers from a mutable state, by what the expression asks. */
@@ -149,6 +149,25 @@ describe("waitFor", () => {
   it("rejects a malformed condition", async () => {
     await expect(waitFor({ page: scriptedPage() }, {} as never, { deps: fakeClock() })).rejects.toThrow(/condition/);
     await expect(waitFor({ page: scriptedPage() }, { text: "a", gone: "b" } as never, { deps: fakeClock() })).rejects.toThrow(/condition/);
+  });
+});
+
+describe("waitFor, cancelled", () => {
+  it("stops a poll and a long ms wait at the next step once its signal aborts", async () => {
+    const ac = new AbortController();
+    const clock = fakeClock((t) => {
+      if (t >= 1500) ac.abort();
+    });
+    const page = new FakePage();
+    page.handle("Runtime.evaluate", () => ({ result: { value: false } }));
+    await expect(waitFor({ page }, { text: "never" }, { deps: clock, signal: ac.signal })).rejects.toThrow(WaitCancelledError);
+    expect(clock.at()).toBeLessThan(1500 + 300);
+    const ms = new AbortController();
+    const c2 = fakeClock((t) => {
+      if (t >= 2000) ms.abort();
+    });
+    await expect(waitFor({ page }, { ms: 86_400_000 }, { deps: c2, signal: ms.signal })).rejects.toThrow(/cancelled/);
+    expect(c2.at()).toBeLessThan(2000 + 300);
   });
 });
 

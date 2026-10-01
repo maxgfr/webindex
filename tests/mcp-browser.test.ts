@@ -97,8 +97,9 @@ describe("tools/list", () => {
   it("offers every browser tool with --browser, each annotated for what it does", async () => {
     const tools = (await list({ browser: true })).filter((t) => t.name.startsWith("webindex_browser_"));
     expect(tools.map((t) => t.name).sort()).toEqual([...NAMES].sort());
-    const readOnly = ["snapshot", "screenshot", "status", "wait", "network"];
-    const destructive = ["click", "press", "type", "fill", "select", "upload", "eval", "dialog", "close"];
+    const readOnly = ["snapshot", "screenshot", "status", "wait"];
+    // network: its clear deletes the log.
+    const destructive = ["click", "press", "type", "fill", "select", "upload", "eval", "dialog", "close", "network"];
     for (const t of tools) {
       const action = t.name.replace("webindex_browser_", "");
       const ro = readOnly.includes(action);
@@ -282,12 +283,21 @@ describe("the guard and the policy", () => {
     await expect(h.call("webindex_browser_upload", { ref: "e5", files: ["a.pdf"] })).rejects.toThrow(/reads no local files/);
   });
 
-  it("resolves an upload against its working directory with no root", async () => {
+  it("with no root, uploads only with confirm, resolved against its working directory", async () => {
+    // A page can talk the agent into uploading ~/.ssh/id_rsa: with no root to confine it, the user says yes.
     writeFileSync(join(scratch, "a.pdf"), "%PDF");
     const h = await host();
     await h.call("webindex_browser_snapshot", { mode: "full" });
-    await h.call("webindex_browser_upload", { ref: "e5", files: ["a.pdf"] });
+    await expect(h.call("webindex_browser_upload", { ref: "e5", files: ["a.pdf"] })).rejects.toThrow(/confirm: true.*ask the user/);
+    expect(sent("DOM.setFileInputFiles")).toEqual([]);
+    await h.call("webindex_browser_upload", { ref: "e5", files: ["a.pdf"], confirm: true });
     expect(sent("DOM.setFileInputFiles")[0]?.params.files).toEqual([join(scratch, "a.pdf")]);
+  });
+
+  it("says so in the upload tool's description", () => {
+    const upload = browserToolDecls().find((t) => t.name === "webindex_browser_upload")!;
+    expect(upload.description).toMatch(/confirm: true/);
+    expect(upload.inputSchema.properties.confirm).toBeDefined();
   });
 });
 
@@ -309,6 +319,17 @@ describe("dialogs", () => {
     expect((await h.call("webindex_browser_status", { show: "tabs" })).text).not.toContain("dialog");
   });
 
+  it("forgets a dialog the browser says is not showing", async () => {
+    const h = await host();
+    await h.call("webindex_browser_snapshot", { mode: "full" });
+    fake.emit("Page.javascriptDialogOpening", { type: "alert", message: "Gone" }, `S${sent("Target.attachToTarget").length}`);
+    await new Promise((r) => setTimeout(r, 20));
+    // The fake answers handleJavaScriptDialog with "No dialog is showing".
+    await expect(h.call("webindex_browser_dialog", { action: "dismiss" })).rejects.toThrow(/no dialog is open/);
+    expect((await h.call("webindex_browser_status", { show: "browser" })).text).not.toContain("dialog");
+    expect((await h.call("webindex_browser_snapshot", { mode: "full" })).text).toContain("[ref=e1]");
+  });
+
   it("hears a dialog the page opens between calls, and its closing", async () => {
     const h = await host();
     await h.call("webindex_browser_snapshot", { mode: "full" });
@@ -319,6 +340,40 @@ describe("dialogs", () => {
     fake.emit("Page.javascriptDialogClosed", { result: true }, `S${session}`);
     await new Promise((r) => setTimeout(r, 20));
     expect((await h.call("webindex_browser_status", { show: "browser" })).text).not.toContain("dialog");
+  });
+});
+
+describe("bounds on a shared server", () => {
+  it("clamps a wait's ms and timeout to 300 s", async () => {
+    const h = await host();
+    expect((await h.call("webindex_browser_wait", { condition: "ms", value: "86400000" })).text).toBe("ms held after 300000 ms");
+    await expect(h.call("webindex_browser_wait", { condition: "text", value: "Never", timeoutMs: 1e9 })).rejects.toThrow(/after 300000 ms/);
+  });
+
+  it("stops a cancelled wait and frees the browser for the next call", async () => {
+    expect((await runBrowserCommand("attach", [String(fake.port)], {}, { browser: browserDeps() })).exitCode).toBe(0);
+    // A real clock: this wait would last its full 300 s.
+    const h = createBrowserToolHost({ deps: { browser: { detectBrowser: () => null }, cwd: scratch } });
+    hosts.push(h);
+    const ac = new AbortController();
+    const waiting = h.call("webindex_browser_wait", { condition: "text", value: "Never" }, { signal: ac.signal, progress: () => {} });
+    await new Promise((r) => setTimeout(r, 50));
+    const started = Date.now();
+    ac.abort();
+    await expect(waiting).rejects.toThrow(/cancelled/);
+    expect(Date.now() - started).toBeLessThan(2000);
+    const next = await h.call("webindex_browser_status", { show: "browser" });
+    expect(next.text).toMatch(/^browser on port/);
+    // The cross-process lock is free too: a CLI command gets it.
+    expect((await runBrowserCommand("tabs", ["list"], {}, { browser: browserDeps() })).exitCode).toBe(0);
+  });
+
+  it("does not start a call cancelled while it queued", async () => {
+    const h = await host();
+    const ac = new AbortController();
+    ac.abort();
+    await expect(h.call("webindex_browser_snapshot", { mode: "full" }, { signal: ac.signal, progress: () => {} })).rejects.toThrow(/cancelled/);
+    expect(sent("Accessibility.getFullAXTree")).toEqual([]);
   });
 });
 
@@ -349,6 +404,10 @@ describe("the other tools", () => {
     expect((await h.call("webindex_browser_type", { ref: "e3", text: "hello world" })).text).toMatch(/^type e3:/);
     expect((await h.call("webindex_browser_fill", { ref: "e3", text: "new text" })).text).toMatch(/^fill e3:/);
     expect(world.els.get(12)?.value).toBe("new text");
+    // No text, or an empty one, clears the field.
+    expect(browserToolDecls().find((t) => t.name === "webindex_browser_fill")?.inputSchema.required).toEqual(["ref"]);
+    expect((await h.call("webindex_browser_fill", { ref: "e3", text: "" })).text).toMatch(/^fill e3:/);
+    expect(world.els.get(12)?.value).toBe("");
     expect((await h.call("webindex_browser_select", { ref: "e4", values: ["Medium"] })).text).toContain('value: ["m"]');
     expect((await h.call("webindex_browser_press", { key: "Escape" })).text).toMatch(/^press:/);
     expect((await h.call("webindex_browser_scroll", { target: "down" })).text).toContain('value: {"x":0,"y":640}');
@@ -425,6 +484,28 @@ describe("the other tools", () => {
     await expect(h.call("webindex_browser_click", { ref: "e99" })).rejects.toThrow(/take a new snapshot/);
     await expect(h.call("webindex_browser_history", { action: "sideways" })).rejects.toThrow(/`action` must be one of back, forward, reload/);
     await expect(h.call("webindex_browser_snapshot", { mode: "full", ref: "e99" })).rejects.toThrow(ToolError);
+  });
+
+  it("records only once an open with capture has succeeded", async () => {
+    const h = await host();
+    await expect(h.call("webindex_browser_open", { url: "https://unreachable.test/", capture: true })).rejects.toThrow(/ERR_NAME_NOT_RESOLVED/);
+    expect((await h.call("webindex_browser_status", { show: "browser" })).text).not.toMatch(/recording/);
+    await h.call("webindex_browser_open", { url: "https://b.test/", capture: true });
+    expect((await h.call("webindex_browser_status", { show: "browser" })).text).toMatch(/recording/);
+  });
+
+  it("says a launch option is moot once the browser runs", async () => {
+    const h = await host();
+    await h.call("webindex_browser_snapshot", { mode: "full" });
+    const r = await h.call("webindex_browser_open", { url: "https://b.test/", profile: "work", headless: true });
+    expect(r.text).toMatch(/profile.*headless.*only when this call launches the browser.*profile default/);
+    expect((await h.call("webindex_browser_open", { url: "https://b.test/", profile: "default" })).text).not.toMatch(/launches the browser/);
+  });
+
+  it("says what eval must not be used for", () => {
+    const desc = browserToolDecls().find((t) => t.name === "webindex_browser_eval")!.description;
+    expect(desc).toMatch(/form\.submit\(\)/);
+    expect(desc).toMatch(/logged-in/);
   });
 
   it("refuses an unknown tool", async () => {
