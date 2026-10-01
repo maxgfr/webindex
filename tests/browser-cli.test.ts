@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -217,6 +217,17 @@ describe("usage errors exit 2", () => {
     expect((await cli("nope")).text).toMatch(/open\|attach\|status/);
   });
 
+  it.each([
+    ["scroll", ["sideways"]],
+    ["press", ["NotAKey"]],
+    ["press", ["Control+"]],
+  ])("checks %s %s before reaching for the browser", async (action, args) => {
+    const r = await cli(action, args);
+    expect(r.exitCode).toBe(2);
+    expect(fake.calls).toEqual([]);
+    expect(fake.requests).toEqual([]);
+  });
+
   it("checks an upload's files before reaching for the browser", async () => {
     const r = await cli("upload", ["e5", "missing.pdf"]);
     expect(r.exitCode).toBe(2);
@@ -229,7 +240,7 @@ describe("attach, status, close", () => {
   it("attaches to a loopback port, records it as not ours, and reports the tabs", async () => {
     const r = await cli("attach", [`http://localhost:${fake.port}`], { json: true });
     expect(r.exitCode).toBe(0);
-    expect(r.json).toMatchObject({ alive: true, port: fake.port, launchedByUs: false, tabs: [{ id: "t1", url: "https://a.test/" }] });
+    expect(r.json).toMatchObject({ ok: true, alive: true, port: fake.port, launchedByUs: false, tabs: [{ id: "t1", url: "https://a.test/" }] });
     expect(readSession()).toMatchObject({ port: fake.port, launchedByUs: false, targetId: "T1" });
     expect(r.text).toContain(`browser on port ${fake.port}`);
     expect(r.text).toContain("attached");
@@ -244,7 +255,7 @@ describe("attach, status, close", () => {
   it("says no browser is running without launching one", async () => {
     const r = await cli("status");
     expect(r.exitCode).toBe(0);
-    expect(r.json).toEqual({ alive: false });
+    expect(r.json).toEqual({ ok: true, alive: false });
     expect(r.text).toMatch(/no browser/);
   });
 
@@ -261,7 +272,7 @@ describe("attach, status, close", () => {
     await ready();
     const r = await cli("close", [], { json: true });
     expect(r.exitCode).toBe(0);
-    expect(r.json).toEqual({ closed: false, launchedByUs: false });
+    expect(r.json).toEqual({ ok: true, closed: false, launchedByUs: false });
     expect(r.text).toMatch(/left running/);
     expect(sent("Browser.close")).toEqual([]);
     expect(readSession()).toBeNull();
@@ -351,7 +362,7 @@ describe("snapshot", () => {
     expect(r.text).toContain("url: https://a.test/");
     expect(r.text).toContain('- button "Pay now" [ref=e2]');
     const cut = await cli("snapshot", [], { maxChars: 30, json: true });
-    expect(cut.json).toMatchObject({ truncated: true });
+    expect(cut.json).toMatchObject({ ok: true, truncated: true });
   });
 
   it("scopes to a ref, and refuses one it does not know", async () => {
@@ -570,12 +581,19 @@ describe("screenshot", () => {
     expect(sent("Page.captureScreenshot").at(-1)?.params).toMatchObject({ format: "jpeg", clip: { width: 100, height: 40 } });
   });
 
-  it("defaults to a file under the temp dir", async () => {
+  it("defaults to a private file under the temp dir", async () => {
     await cli("attach", [String(fake.port)]);
+    // A dir left readable by an earlier run is made private.
+    mkdirSync(join(tmpdir(), "webindex-tests", "browser"), { recursive: true });
+    chmodSync(join(tmpdir(), "webindex-tests", "browser"), 0o755);
     const r = await cli("screenshot");
     expect(r.exitCode).toBe(0);
     expect(r.text.startsWith(join(tmpdir(), "webindex-tests", "browser", "shot-"))).toBe(true);
     expect(existsSync(r.text)).toBe(true);
+    if (process.platform !== "win32") {
+      expect(statSync(r.text).mode & 0o777).toBe(0o600);
+      expect(statSync(join(tmpdir(), "webindex-tests", "browser")).mode & 0o777).toBe(0o700);
+    }
     rmSync(r.text);
   });
 
@@ -611,12 +629,12 @@ describe("network", () => {
     ]);
     const list = await cli("network");
     expect(list.text.split("\n")[0]).toBe("1  GET 200 https://a.test/api/1 (application/json, 12 B)");
-    expect((await cli("network", ["list"], { json: true })).json).toMatchObject({ entries: [{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }] });
+    expect((await cli("network", ["list"], { json: true })).json).toMatchObject({ ok: true, entries: [{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }] });
     expect((await cli("network", ["get", "1"])).text).toBe('{\n  "ok": true\n}');
     expect((await cli("network", ["get", "2"])).text).toBe("plain body");
     expect((await cli("network", ["get", "3"])).text).toMatch(/body not kept \(999999 B, over the size cap\)/);
     expect((await cli("network", ["get", "4"])).text).toMatch(/body not kept \(No resource/);
-    expect((await cli("network", ["get", "2"], { json: true })).json).toMatchObject({ n: 2, method: "POST" });
+    expect((await cli("network", ["get", "2"], { json: true })).json).toMatchObject({ ok: true, n: 2, method: "POST" });
     const missing = await cli("network", ["get", "9"]);
     expect(missing.exitCode).toBe(1);
     expect(missing.text).toMatch(/no network entry 9/);
@@ -636,11 +654,12 @@ describe("tabs", () => {
     await cli("attach", [String(fake.port)]);
     expect((await cli("tabs")).text).toBe("* t1  https://a.test/ — A page");
     const opened = await cli("tabs", ["new", "https://b.test/"], { json: true });
-    expect(opened.json).toMatchObject({ id: "t2", url: "https://b.test/", active: true });
+    expect(opened.json).toMatchObject({ ok: true, id: "t2", url: "https://b.test/", active: true });
+    expect((await cli("tabs", [], { json: true })).json).toMatchObject({ ok: true, tabs: [{ id: "t1" }, { id: "t2" }] });
     const picked = await cli("tabs", ["select", "t1"]);
     expect(picked.text).toBe("* t1  https://a.test/ — A page");
     const closed = await cli("tabs", ["close", "t2"], { json: true });
-    expect(closed.json).toMatchObject({ closed: "t2", tabs: [{ id: "t1" }] });
+    expect(closed.json).toMatchObject({ ok: true, closed: "t2", tabs: [{ id: "t1" }] });
     const gone = await cli("tabs", ["select", "t9"]);
     expect(gone.exitCode).toBe(1);
     expect(gone.text).toMatch(/no tab t9/);
@@ -650,7 +669,7 @@ describe("tabs", () => {
 describe("profile", () => {
   it("prints the profile path", async () => {
     expect((await cli("profile", ["path"])).text).toBe(profileDir("default"));
-    expect((await cli("profile", ["path"], { profile: "work", json: true })).json).toEqual({ path: profileDir("work") });
+    expect((await cli("profile", ["path"], { profile: "work", json: true })).json).toEqual({ ok: true, path: profileDir("work") });
   });
 
   it("imports a user-data directory, and resets the profile", async () => {
@@ -660,12 +679,41 @@ describe("profile", () => {
     writeFileSync(join(from, "Default", "Cookies"), "c");
     const r = await cli("profile", ["import", from], { json: true });
     expect(r.exitCode).toBe(0);
-    expect(r.json).toMatchObject({ from, to: profileDir("default"), files: 2 });
+    expect(r.json).toMatchObject({ ok: true, from, to: profileDir("default"), files: 2 });
     expect((await cli("profile", ["import", from])).exitCode).toBe(1);
     expect((await cli("profile", ["import", from], { force: true })).text).toMatch(/imported 2 files/);
     expect((await cli("profile", ["reset"])).text).toMatch(/removed/);
     expect(existsSync(profileDir("default"))).toBe(false);
     expect((await cli("profile", ["reset"])).text).toMatch(/no profile/);
+  });
+
+  it("refuses to reset or replace a profile our browser is running on", async () => {
+    const dir = profileDir("default");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "Cookies"), "c");
+    // What a browser of ours running on the profile leaves: its live DevTools port and socket.
+    writeFileSync(join(dir, "DevToolsActivePort"), `${fake.port}\n/devtools/browser/fake\n`);
+    const reset = await cli("profile", ["reset"]);
+    expect(reset.exitCode).toBe(1);
+    expect(reset.text).toContain("close it first: `webindex-tests browser close`");
+    expect(existsSync(join(dir, "Cookies"))).toBe(true);
+    const from = join(scratch, "ud");
+    mkdirSync(join(from, "Default"), { recursive: true });
+    const imported = await cli("profile", ["import", from], { force: true });
+    expect(imported.exitCode).toBe(1);
+    expect(imported.text).toMatch(/close it first/);
+    expect(existsSync(join(dir, "Cookies"))).toBe(true);
+    // Another profile is not that browser's.
+    expect((await cli("profile", ["reset"], { profile: "work" })).exitCode).toBe(0);
+  });
+
+  it("resets a profile whose DevToolsActivePort is a crashed run's", async () => {
+    const dir = profileDir("default");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "DevToolsActivePort"), "1\n/devtools/browser/gone\n");
+    const r = await cli("profile", ["reset"]);
+    expect(r.exitCode).toBe(0);
+    expect(existsSync(dir)).toBe(false);
   });
 });
 
@@ -710,7 +758,7 @@ describe("through main", () => {
     const text = await run(["browser", "profile", "path"]);
     expect(text).toMatchObject({ code: 0, out: `${profileDir("default")}\n` });
     const json = await run(["browser", "profile", "path", "--profile", "work", "--json"]);
-    expect(JSON.parse(json.out)).toEqual({ path: profileDir("work") });
+    expect(JSON.parse(json.out)).toEqual({ ok: true, path: profileDir("work") });
   });
 
   it("prints a failure on stderr with exit 1, after its JSON", async () => {
@@ -718,6 +766,19 @@ describe("through main", () => {
     expect(r.code).toBe(1);
     expect(JSON.parse(r.out)).toMatchObject({ ok: false });
     expect(r.err).toMatch(/no browser session/);
+  });
+
+  it("answers `eval -` on a terminal with a usage error, JSON included", async () => {
+    const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+    try {
+      const r = await run(["browser", "eval", "-", "--json"]);
+      expect(r.code).toBe(2);
+      expect(JSON.parse(r.out)).toMatchObject({ ok: false, error: expect.stringMatching(/usage: .* browser eval/) });
+    } finally {
+      if (tty) Object.defineProperty(process.stdin, "isTTY", tty);
+      else delete (process.stdin as { isTTY?: boolean }).isTTY;
+    }
   });
 
   it("takes any number of words after the action", async () => {

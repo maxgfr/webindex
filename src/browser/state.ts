@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, openSync, readFileSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { isNoWrite, writeFileAtomic } from "../no-write.js";
@@ -164,7 +165,11 @@ export function clearNetwork(targetId?: string, o?: StateOptions): void {
 // --- cross-process lock ----------------------------------------------------
 
 export interface LockOptions extends StateOptions {
-  /** A lock older than this is taken over. */
+  /**
+   * A lock whose holder has not refreshed it for this long is taken over. A
+   * live holder refreshes it every third of this (at least every second), so
+   * only a hung or vanished one goes stale, however long its command runs.
+   */
   staleMs?: number;
   /** How long to wait for a live holder before giving up. */
   waitMs?: number;
@@ -210,12 +215,25 @@ function staleReason(path: string, staleMs: number, now: number): string | null 
   return null;
 }
 
+/** Whether the lock file is still the one this holder wrote (`token` tells two holders in one process apart). */
+function holds(path: string, token: string): boolean {
+  try {
+    const held = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown; token?: unknown };
+    return held.pid === process.pid && held.token === token;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Run `fn` while holding the browser lock, so two webindex processes do not
  * drive the same tab at once. (src/run-lock.ts only serialises inside ONE
- * process.) The lock is a file created exclusively (`wx`) holding `{pid, at}`;
- * one older than `staleMs`, or whose owner is dead, is taken over. A live
- * holder is waited for up to `waitMs`, then it is a "browser busy" error.
+ * process.) The lock is a file created exclusively (`wx`) holding
+ * `{pid, at, token}`, and its holder rewrites `at` on a heartbeat while `fn`
+ * runs: a `wait --clear` of five minutes keeps it. One whose `at` is older than
+ * `staleMs` (a hung holder, or a pid reused by another process), or whose
+ * owner is dead, is taken over. A live holder is waited for up to `waitMs`,
+ * then it is a "browser busy" error.
  */
 export async function withBrowserLock<T>(fn: () => Promise<T>, opts: LockOptions = {}): Promise<T> {
   if (isNoWrite()) return fn(); // nothing is written, so there is nothing to protect
@@ -224,12 +242,14 @@ export async function withBrowserLock<T>(fn: () => Promise<T>, opts: LockOptions
   const dir = homeOf(opts);
   ensurePrivateDir(dir);
   const path = join(dir, "lock");
+  const token = randomUUID();
+  const stamp = () => JSON.stringify({ pid: process.pid, at: now(), token });
   const deadline = now() + waitMs;
   for (;;) {
     try {
       const fd = openSync(path, "wx", FILE_MODE);
       try {
-        writeSync(fd, JSON.stringify({ pid: process.pid, at: now() }));
+        writeSync(fd, stamp());
       } finally {
         closeSync(fd);
       }
@@ -248,13 +268,27 @@ export async function withBrowserLock<T>(fn: () => Promise<T>, opts: LockOptions
     if (now() >= deadline) throw new Error(`browser busy: another webindex command holds ${path} (waited ${waitMs} ms)`);
     await sleep(pollMs);
   }
+  // Unreferenced: a heartbeat never keeps the process alive on its own.
+  const beat = setInterval(
+    () => {
+      // Only refresh what is still ours: a lock taken over is someone else's now.
+      if (!holds(path, token)) return;
+      try {
+        writeFileAtomic(path, stamp(), FILE_MODE);
+      } catch {
+        /* the next beat retries */
+      }
+    },
+    Math.max(1000, staleMs / 3),
+  );
+  beat.unref?.();
   try {
     return await fn();
   } finally {
+    clearInterval(beat);
     // Only remove what is still ours: after a takeover the file is someone else's.
     try {
-      const held = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown };
-      if (held.pid === process.pid) unlinkSync(path);
+      if (holds(path, token)) unlinkSync(path);
     } catch {
       /* already gone */
     }

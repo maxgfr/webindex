@@ -10,19 +10,21 @@
 // browser stays up for the next call. `status`, `close`, `network` and
 // `profile` never launch a browser.
 
-import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { brand, envName } from "../brand.js";
 import { UsageError } from "../cli-kit.js";
-import { isNoWrite } from "../no-write.js";
+import { isNoWrite, writeFileAtomic } from "../no-write.js";
 import * as actions from "./actions.js";
 import type { ActionOptions, ActionResult, DialogInfo } from "./actions.js";
 import type { Challenge } from "./challenge.js";
 import { detectChallenge } from "./challenge.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
+import { parseKey } from "./keys.js";
+import { isSameBrowser, readActivePort } from "./launch.js";
 import { clearNetworkLog, getNetworkEntry, listNetwork, NetworkRecorder } from "./network.js";
-import { importProfile, profileDir, resetProfile } from "./profile.js";
+import { ensurePrivateDir, importProfile, profileDir, resetProfile } from "./profile.js";
 import { type BrowserSession, type BrowserStatus, type BrowserTab, browserStatus, closeBrowser, type OpenOptions, withPage } from "./session.js";
 import { type SnapshotOptions, type SnapshotResult, takeSnapshot } from "./snapshot.js";
 import { readSession } from "./state.js";
@@ -139,7 +141,8 @@ export async function runBrowserCommand(action: string, args: string[], flags: B
   try {
     if (!Object.hasOwn(HANDLERS, action)) throw new UsageError(`usage: ${cliName()} browser ${BROWSER_ACTIONS.join("|")}`);
     const out = await HANDLERS[action as Action]({ action: action as Action, args, flags, deps });
-    return { ...out, exitCode: 0 };
+    // Every success says so in its JSON, as every failure does with `ok: false`.
+    return { ...out, json: { ok: true, ...(out.json as object) }, exitCode: 0 };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
     return { json: { ok: false, error }, text: error, exitCode: e instanceof UsageError ? 2 : 1 };
@@ -242,6 +245,21 @@ function statusText(st: BrowserStatus): string {
   const owner = st.launchedByUs ? `launched by ${brand().name}` : "attached, not ours: close only forgets it";
   const head = `browser on port ${st.port} (${owner}), profile ${st.profile}${st.headless ? ", headless" : ""}`;
   return [head, tabLines(st.tabs ?? [])].filter(Boolean).join("\n");
+}
+
+/**
+ * Refuse to delete or replace a profile a browser of ours is running on: the
+ * live browser would write it back, or (on Windows) hold its files open. Our
+ * browser — whether a session or a fetch read started it — is told by the
+ * DevToolsActivePort it keeps in the profile, still served by the socket it
+ * names: a crashed run's file does not block anything. Never launches.
+ */
+async function assertProfileIdle(ctx: Ctx, name: string | undefined): Promise<void> {
+  const deps = browserDeps(ctx.deps.browser);
+  const own = await readActivePort(deps, join(profileDir(name), "DevToolsActivePort"));
+  if (own && (await isSameBrowser(deps, own.port, "127.0.0.1", own.path))) {
+    throw new Error(`a browser is running on the profile ${name ?? "default"}: close it first: \`${cliName()} browser close\``);
+  }
 }
 
 /** The current tab of the saved session, for the commands that read its files only. */
@@ -353,6 +371,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
 
   async press(ctx) {
     arity(ctx, 1);
+    parseKey(ctx.args[0] as string); // an unknown key is a usage error, before any browser is reached for
     return mutate(ctx, (s, o) => actions.press(s, ctx.args[0] as string, { ...o, ...confirm(ctx) }));
   },
 
@@ -370,6 +389,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
 
   async scroll(ctx) {
     arity(ctx, 1);
+    if (!/^(up|down|top|bottom|e\d+)$/.test(ctx.args[0] as string)) throw usageError(ctx.action);
     return mutate(ctx, (s, o) => actions.scroll(s, ctx.args[0] as string, o));
   },
 
@@ -435,13 +455,16 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     arity(ctx, 0, 1);
     if (isNoWrite()) throw new Error(`nothing may be written (${envName("NO_WRITE")}), and a screenshot is a file`);
     const stamp = new Date(browserDeps(ctx.deps.browser).now()).toISOString().replace(/[:.]/g, "-");
-    const path =
-      ctx.flags.out !== undefined ? resolve(ctx.deps.cwd ?? process.cwd(), ctx.flags.out) : join(tmpdir(), brand().name, "browser", `shot-${stamp}.png`);
+    // A screenshot shows whatever the page does, a logged-in account included: private, as the profile is.
+    const shots = join(tmpdir(), brand().name, "browser");
+    const path = ctx.flags.out !== undefined ? resolve(ctx.deps.cwd ?? process.cwd(), ctx.flags.out) : join(shots, `shot-${stamp}.png`);
     const format = /\.jpe?g$/i.test(path) ? "jpeg" : "png";
     const ref = ctx.args[0];
     const bytes = await onPage(ctx, (s) => actions.screenshot(s, { format, ...(ref !== undefined ? { ref } : {}), ...(ctx.flags.full ? { full: true } : {}) }));
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, bytes);
+    if (ctx.flags.out === undefined) ensurePrivateDir(shots);
+    else mkdirSync(dirname(path), { recursive: true });
+    // Atomic, through a fresh file: an existing one's looser mode is not kept.
+    writeFileAtomic(path, bytes, 0o600);
     return { json: { ok: true, path, bytes: bytes.length, format }, text: path, image: { path } };
   },
 
@@ -516,11 +539,13 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     }
     if (sub === "import") {
       arity(ctx, 2);
+      await assertProfileIdle(ctx, name);
       const r = importProfile(ctx.args[1] as string, { ...(name !== undefined ? { name } : {}), ...(ctx.flags.force ? { force: true } : {}) });
       return { json: r, text: `imported ${r.files} files (${r.bytes} B) from ${r.from} into ${r.to}` };
     }
     if (sub === "reset") {
       arity(ctx, 1);
+      await assertProfileIdle(ctx, name);
       const path = profileDir(name);
       const existed = existsSync(path);
       resetProfile(name);

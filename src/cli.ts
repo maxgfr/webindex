@@ -2679,7 +2679,13 @@ async function dispatch(argv: string[]): Promise<void> {
         all: argBool(args, "all"),
         force: argBool(args, "force"),
       },
-      { stdin: () => readStdin("usage: webindex browser eval <expr|->").toString("utf8") },
+      {
+        // A UsageError, not usage(): runBrowserCommand turns it into exit 2 with its JSON.
+        stdin: () => {
+          if (process.stdin.isTTY) throw new UsageError("usage: webindex browser eval <expr|-> — `-` reads the expression from a pipe, not a terminal");
+          return readFileSync(0, "utf8");
+        },
+      },
     );
     if (r.exitCode === 0) {
       process.stdout.write(asJson ? jsonLine(r.json) : `${r.text}\n`);

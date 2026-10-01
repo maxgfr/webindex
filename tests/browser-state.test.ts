@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { browserDeps, defaultBrowserDeps } from "../src/browser/deps.js";
 import {
   appendNetwork,
@@ -286,6 +286,52 @@ describe("withBrowserLock", () => {
       { home },
     );
     expect(JSON.parse(readFileSync(lockPath(), "utf8")).pid).toBe(1);
+  });
+
+  describe("heartbeat", () => {
+    afterEach(() => vi.useRealTimers());
+
+    it("keeps a live holder's lock fresh past staleMs, so it is never stolen", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      let t = 1000;
+      const deps = { now: () => t, sleep: async (ms: number) => void (t += ms) };
+      const outcome = await withBrowserLock(
+        async () => {
+          // A long command: two minutes pass, the heartbeat ticking meanwhile.
+          for (let i = 0; i < 12; i++) {
+            t += 10_000;
+            vi.advanceTimersByTime(10_000);
+          }
+          expect(JSON.parse(readFileSync(lockPath(), "utf8")).at).toBe(t);
+          return withBrowserLock(async () => "stolen", { home, staleMs: 30_000, waitMs: 500, pollMs: 100, deps }).catch((e: Error) => e.message);
+        },
+        { home, staleMs: 30_000, deps },
+      );
+      expect(outcome).toMatch(/browser busy/);
+      expect(existsSync(lockPath())).toBe(false);
+    });
+
+    it("stops beating once released, and never rewrites a lock taken over meanwhile", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      let t = 1000;
+      const deps = { now: () => t, sleep: async (ms: number) => void (t += ms) };
+      await withBrowserLock(
+        async () => {
+          writeFileSync(lockPath(), JSON.stringify({ pid: 1, at: 5 }));
+          t += 20_000;
+          vi.advanceTimersByTime(20_000);
+          expect(JSON.parse(readFileSync(lockPath(), "utf8"))).toEqual({ pid: 1, at: 5 });
+        },
+        { home, staleMs: 30_000, deps },
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("lets a holder that stopped beating (hung, or a reused pid) be taken over by age", async () => {
+      // Same pid as ours, so alive — but its `at` stopped moving long ago.
+      writeFileSync(lockPath(), JSON.stringify({ pid: process.pid, at: Date.now() - 60_000, token: "someone-else" }));
+      await expect(withBrowserLock(async () => "ok", { home, staleMs: 30_000 })).resolves.toBe("ok");
+    });
   });
 
   it("uses injected clock and sleep", async () => {
