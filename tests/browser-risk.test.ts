@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { assessRisk, COLLECT_SOURCE, guardAction, RiskRefusedError, riskContext } from "../src/browser/risk.js";
+import { assessRisk, COLLECT_SOURCE, FOCUS_SOURCE, guardAction, RiskRefusedError, riskContext } from "../src/browser/risk.js";
 import { FakePage } from "./helpers/fake-page.js";
 
+const run = (src: string, self: unknown, args: unknown[]): unknown => new Function(`return (${src});`)().apply(self, args);
 const click = (label: string, over: object = {}) => assessRisk({ action: "click", label, isSubmit: false, formHasPassword: false, ...over });
 
 describe("assessRisk: click", () => {
@@ -194,7 +195,7 @@ describe("riskContext", () => {
     p.handle("Runtime.evaluate", () => ({ result: { value } }));
     expect(await riskContext(p, undefined, "press", "Enter")).toEqual(value);
     expect(p.methods()).toEqual(["Runtime.evaluate"]);
-    expect(String(p.calls[0]?.params.expression)).toContain("document.activeElement");
+    expect(String(p.calls[0]?.params.expression)).toContain("activeElement");
     expect(p.calls[0]?.params.returnByValue).toBe(true);
   });
 
@@ -355,5 +356,69 @@ describe("Space activates what it is pressed on", () => {
     }));
     await expect(guardAction(p, { action: "press", key: "Space" })).rejects.toBeInstanceOf(RiskRefusedError);
     await expect(guardAction(p, { action: "press", key: " " })).rejects.toBeInstanceOf(RiskRefusedError);
+  });
+});
+
+describe("frames and shadow roots", () => {
+  // Plain objects standing in for the DOM: enough of it for the parts of the page scripts under test.
+  const el = (tagName: string, over: object = {}): any => ({ nodeType: 1, tagName, ...over });
+
+  it("follows the focus through shadow roots and same-origin frames to the element that has it", () => {
+    const field = el("INPUT");
+    const host = el("LOGIN-FORM", { shadowRoot: { activeElement: field } });
+    expect(run(FOCUS_SOURCE, null, [{ activeElement: host }])).toBe(field);
+    const inner = el("INPUT");
+    const frame = el("IFRAME", { contentDocument: { activeElement: el("CHECKOUT-WIDGET", { shadowRoot: { activeElement: inner } }) } });
+    expect(run(FOCUS_SOURCE, null, [{ activeElement: frame }])).toBe(inner);
+    // A closed or empty shadow root, and a plain element, are where the focus is.
+    const closed = el("X-WIDGET", { shadowRoot: null });
+    expect(run(FOCUS_SOURCE, null, [{ activeElement: closed }])).toBe(closed);
+  });
+
+  it("stops at a frame whose document it cannot read: the element is the frame", () => {
+    const crossOrigin = el("IFRAME", { contentDocument: null });
+    expect(run(FOCUS_SOURCE, null, [{ activeElement: crossOrigin }])).toBe(crossOrigin);
+    // Defined on the element itself: a spread would read the getter.
+    const throwing = Object.defineProperty(el("FRAME"), "contentDocument", {
+      get() {
+        throw new Error("SecurityError");
+      },
+    });
+    expect(run(FOCUS_SOURCE, null, [{ activeElement: throwing }])).toBe(throwing);
+  });
+
+  it("makes the press collector start from the deep focus, not the top document's", async () => {
+    const p = new FakePage();
+    p.handle("Runtime.evaluate", () => ({ result: { value: { role: "textbox", label: "", isSubmit: false, formHasPassword: false, submitLabel: "" } } }));
+    await riskContext(p, undefined, "press", "Enter");
+    const expression = String(p.calls[0]?.params.expression);
+    expect(expression).toContain(FOCUS_SOURCE);
+    expect(expression).not.toContain(".call(document.activeElement");
+  });
+
+  it("collects a frame as a frame, saying whether its content is readable", () => {
+    expect(run(COLLECT_SOURCE, el("IFRAME", { contentDocument: null }), ["click"])).toEqual({ frame: true, readable: false });
+    expect(run(COLLECT_SOURCE, el("IFRAME", { contentDocument: {} }), ["press"])).toEqual({ frame: true, readable: true });
+  });
+
+  it("refuses a click on a frame, and Enter or Space into one, unless confirmed", async () => {
+    const frame = new FakePage();
+    frame.handle("DOM.resolveNode", () => ({ object: { objectId: "o" } }));
+    frame.handle("Runtime.callFunctionOn", () => ({ result: { value: { frame: true, readable: false } } }));
+    frame.handle("Runtime.evaluate", () => ({ result: { value: { frame: true, readable: false } } }));
+    const err = await guardAction(frame, { backendNodeId: 3, action: "click" }).catch((e) => e);
+    expect(err).toBeInstanceOf(RiskRefusedError);
+    expect(err.message).toMatch(/cannot inspect the content of this frame \(e\.g\. a payment button\)/);
+    expect(err.message).toMatch(/ask the user, then retry with --confirm/);
+    for (const key of ["Enter", "Space"]) await expect(guardAction(frame, { action: "press", key }), key).rejects.toBeInstanceOf(RiskRefusedError);
+    await expect(guardAction(frame, { action: "press", key: "Tab" })).resolves.toBeUndefined();
+    await expect(guardAction(frame, { backendNodeId: 3, action: "click", confirm: true })).resolves.toBeUndefined();
+
+    const same = new FakePage();
+    same.handle("DOM.resolveNode", () => ({ object: { objectId: "o" } }));
+    same.handle("Runtime.callFunctionOn", () => ({ result: { value: { frame: true, readable: true } } }));
+    const inner = await guardAction(same, { backendNodeId: 3, action: "click" }).catch((e) => e);
+    expect(inner).toBeInstanceOf(RiskRefusedError);
+    expect(inner.message).toMatch(/click the element inside it/);
   });
 });

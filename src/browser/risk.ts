@@ -142,11 +142,46 @@ export interface ElementRisk {
   submitLabel: string;
 }
 
-/** Runs in the page with `this` the target (or the focused element) and the action as its argument. Returns null if there is no element. */
+/**
+ * Runs in the page with the top document as its argument: the element that has
+ * the focus. `document.activeElement` stops at a shadow host or a frame; this
+ * follows open shadow roots and same-origin frames down. A frame whose document
+ * cannot be read (another origin's) is where it stops, and the collector then
+ * refuses to call it harmless.
+ */
+export const FOCUS_SOURCE = `function (doc) {
+  let el = doc.activeElement;
+  for (let i = 0; el && i < 32; i++) {
+    if (el.shadowRoot && el.shadowRoot.activeElement) {
+      el = el.shadowRoot.activeElement;
+      continue;
+    }
+    if (!/^i?frame$/i.test(el.tagName || "")) break;
+    let inner = null;
+    try { inner = el.contentDocument; } catch (e) { inner = null; }
+    if (!inner || !inner.activeElement) break;
+    el = inner.activeElement;
+  }
+  return el;
+}`;
+
+/**
+ * Runs in the page with `this` the target (or the focused element) and the
+ * action as its argument. Returns null if there is no element, and
+ * `{ frame, readable }` for a frame: what a click or a key does in there is not
+ * this element's to say.
+ */
 export const COLLECT_SOURCE = `function (action) {
   let el = this;
   if (el && el.nodeType === 3) el = el.parentElement;
   if (!el || el.nodeType !== 1) return null;
+  if (/^i?frame$/i.test(el.tagName || "")) {
+    let inner = null;
+    try { inner = el.contentDocument; } catch (e) { inner = null; }
+    return { frame: true, readable: !!inner };
+  }
+  // The element's own document: it may sit in a same-origin frame, or a shadow root.
+  const doc = el.ownerDocument || document;
   const BTN = "button,[role=button],input[type=submit],input[type=image],input[type=button]";
   const PW = "input[type=password]";
   const norm = (s) => (s || "").replace(/\\s+/g, " ").trim().slice(0, 200);
@@ -160,7 +195,9 @@ export const COLLECT_SOURCE = `function (action) {
     const t = e.tagName.toLowerCase();
     const ty = (e.getAttribute("type") || "").toLowerCase();
     const isBtn = t === "button" || (t === "input" && ["button", "submit", "reset", "image"].includes(ty)) || (e.getAttribute("role") || "") === "button";
-    const by = (e.getAttribute("aria-labelledby") || "").split(/\\s+/).map((id) => (document.getElementById(id) || {}).textContent).filter(Boolean).join(" ");
+    const root = e.getRootNode ? e.getRootNode() : doc;
+    const byId = (id) => (root && root.getElementById ? root.getElementById(id) : null) || doc.getElementById(id);
+    const by = (e.getAttribute("aria-labelledby") || "").split(/\\s+/).map((id) => (byId(id) || {}).textContent).filter(Boolean).join(" ");
     const alts = Array.from(e.querySelectorAll("img[alt],svg title"), (n) => n.getAttribute("alt") || n.textContent);
     const labels = isBtn && e.labels ? Array.from(e.labels, (l) => l.textContent) : [];
     const value = t === "input" && ["button", "submit", "reset", "image"].includes(ty) ? e.value : "";
@@ -180,8 +217,10 @@ export const COLLECT_SOURCE = `function (action) {
   const form = ctl.form || ctl.closest("form");
   let scope = form;
   if (!scope) {
-    let a = ctl.parentElement;
-    for (let i = 0; a && i < 5 && a !== document.body && a !== document.documentElement; i++, a = a.parentElement) {
+    // Out of a shadow root to its host: a login widget's password may sit in its own root.
+    const up = (n) => n.parentElement || (n.getRootNode && n.getRootNode().host) || null;
+    let a = up(ctl);
+    for (let i = 0; a && i < 5 && a !== doc.body && a !== doc.documentElement; i++, a = up(a)) {
       if (a.querySelector(PW)) { scope = a; break; }
     }
   }
@@ -201,25 +240,33 @@ type PageResult = { result?: { value?: unknown }; exceptionDetails?: { text?: st
 /** The collector could not tell what the element is: the one inspection failure that is a refusal. */
 class UninspectableError extends Error {}
 
+const FRAME_REASON = "cannot inspect the content of this frame (e.g. a payment button)";
+
 /** The collector's answer, or an error: a page that cannot be read must not look harmless. */
 function collected(r: PageResult): ElementRisk {
   if (r.exceptionDetails)
     throw new UninspectableError(`could not inspect the target: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text ?? "page error"}`);
   const v = r.result?.value;
   if (typeof v !== "object" || v === null) throw new UninspectableError("could not inspect the target: it is not an element");
+  // Another origin's frame is a page of its own (a PayPal or Google Pay button is one); a same-origin one's elements have refs of their own.
+  if ((v as { frame?: unknown }).frame === true) {
+    const readable = (v as { readable?: unknown }).readable === true;
+    throw new UninspectableError(readable ? `${FRAME_REASON} — click the element inside it instead, from the snapshot` : FRAME_REASON);
+  }
   return { role: "", label: "", isSubmit: false, formHasPassword: false, submitLabel: "", ...(v as Partial<ElementRisk>) };
 }
 
 /**
  * Read what assessRisk needs from the page. For a click that is the node named
- * by `backendNodeId`; for a key press, the focused element. Throws when the
- * target cannot be inspected.
+ * by `backendNodeId`; for a key press, the focused element, down through shadow
+ * roots and same-origin frames. Throws when the target cannot be inspected: a
+ * frame of another origin cannot.
  */
 export async function riskContext(page: CdpSession, backendNodeId: number | undefined, action: RiskAction, _key?: string): Promise<ElementRisk> {
   if (action === "press") {
     return collected(
       await page.send<PageResult>("Runtime.evaluate", {
-        expression: `(${COLLECT_SOURCE}).call(document.activeElement, ${JSON.stringify(action)})`,
+        expression: `(${COLLECT_SOURCE}).call((${FOCUS_SOURCE})(document), ${JSON.stringify(action)})`,
         returnByValue: true,
       }),
     );

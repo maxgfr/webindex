@@ -73,6 +73,23 @@ async function go() {
 <h2>Frame heading</h2>
 <button type="button" onclick="this.textContent = 'Clicked inside'">Inside frame</button>
 </body></html>`,
+  // A login form in a same-origin frame and in a shadow root, and a frame of another origin (localhost is not 127.0.0.1).
+  "/frames.html": `<!doctype html><html><head><title>Frames</title></head><body>
+<h1>Frames</h1>
+<iframe id="inner" title="Login frame" width="400" height="120" srcdoc="<form onsubmit='event.preventDefault(); parent.document.getElementById(&quot;out&quot;).textContent = &quot;Frame logged in&quot;'><input id='pw' type='password'><button>Go</button></form>"></iframe>
+<login-box></login-box>
+<iframe title="Pay frame" src="__OTHER_ORIGIN__/frame.html" width="300" height="80"></iframe>
+<p id="out">Nothing yet</p>
+<script>
+customElements.define("login-box", class extends HTMLElement {
+  constructor() {
+    super();
+    const root = this.attachShadow({ mode: "open" });
+    root.innerHTML = '<form><input id="spw" type="password" aria-label="Shadow password"><button>Go</button></form>';
+    root.querySelector("form").addEventListener("submit", (e) => { e.preventDefault(); document.getElementById("out").textContent = "Shadow logged in"; });
+  }
+});
+</script></body></html>`,
   "/onload.html": `<!doctype html><html><head><title>Loaded</title></head><body onload="alert('loaded')"><h1>Alert on load</h1></body></html>`,
   "/leave.html": `<!doctype html><html><head><title>Leave</title></head><body>
 <label>Note <input id="note"></label>
@@ -105,7 +122,7 @@ function serve(): Promise<Server> {
       res.end(JSON.stringify({ items: ["alpha", "beta", "gamma"] }));
       return;
     }
-    const page = PAGES[path];
+    const page = PAGES[path]?.replace("__OTHER_ORIGIN__", `http://localhost:${(server.address() as AddressInfo).port}`);
     res.writeHead(page ? 200 : 404, { "content-type": "text/html; charset=utf-8" });
     res.end(page ?? "<!doctype html><title>Not found</title><h1>Not found</h1>");
   });
@@ -450,6 +467,28 @@ describe.runIf(live)("a real browser, driven command by command", () => {
       const after = (await ok("status")).json as { tabs: unknown[]; url: string };
       expect(after.tabs).toHaveLength(before.tabs.length);
       expect(after.url).toBe(`${base}/`);
+    },
+    STEP_MS,
+  );
+
+  it(
+    "guards Enter in a same-origin frame and in a shadow root, and a click on another origin's frame",
+    async () => {
+      await ok("open", [`${base}/frames.html`]);
+      await snapshot();
+      const out = async () => (await ok("eval", ["document.getElementById('out').textContent"])).json;
+      await ok("eval", ["document.getElementById('inner').contentDocument.getElementById('pw').focus()"]);
+      const framed = await run("press", ["Enter"]);
+      expect(framed.exitCode).toBe(1);
+      expect(framed.text).toMatch(/refused to press Enter.*password field/);
+      await ok("eval", ["document.querySelector('login-box').shadowRoot.getElementById('spw').focus()"]);
+      const shadowed = await run("press", ["Enter"]);
+      expect(shadowed.exitCode).toBe(1);
+      expect(shadowed.text).toMatch(/refused to press Enter.*password field/);
+      expect(await out()).toMatchObject({ value: "Nothing yet" });
+      const pay = await run("click", [refOf(snap, "iframe", "Pay frame")]);
+      expect(pay.exitCode).toBe(1);
+      expect(pay.text).toMatch(/cannot inspect the content of this frame \(e\.g\. a payment button\)/);
     },
     STEP_MS,
   );

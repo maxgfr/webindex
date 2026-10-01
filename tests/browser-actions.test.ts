@@ -165,6 +165,8 @@ class World {
     const id = Number(String(objectId).slice(1));
     const el = this.el(id);
     if (functionDeclaration === COLLECT_SOURCE) {
+      // A frame is told apart by the real collector (it has no contentDocument here: another origin's).
+      if (el.tag === "IFRAME") return { result: { value: run(COLLECT_SOURCE, this.node(id), ["click"]) } };
       return { result: { value: { role: el.role ?? "button", label: el.label ?? el.text ?? "", isSubmit: false, formHasPassword: false, submitLabel: "" } } };
     }
     const name = /^function (\w+)/.exec(functionDeclaration)?.[1];
@@ -1153,6 +1155,25 @@ describe("click guards the control it actually lands on", () => {
     expect(mouse()).toEqual([]);
     await click(session, "e1", { deps, confirm: true });
     expect(mouse()).toHaveLength(3);
+  });
+
+  it("refuses a click that lands on a frame it cannot look into (a payment button), unless confirmed", async () => {
+    w.add(101, { tag: "DIV", label: "Your basket" });
+    w.add(150, { tag: "IFRAME", parent: 101 });
+    w.hitFor = 150;
+    const err = await click(session, "e1", { deps }).catch((e) => e);
+    expect(err).toBeInstanceOf(RiskRefusedError);
+    expect(err.message).toMatch(/cannot inspect the content of this frame \(e\.g\. a payment button\)/);
+    expect(mouse()).toEqual([]);
+    await click(session, "e1", { deps, confirm: true });
+    expect(mouse()).toHaveLength(3);
+  });
+
+  it("refuses a click on a frame's own ref", async () => {
+    w.add(101, { tag: "IFRAME" });
+    w.hitFor = 101;
+    await expect(click(session, "e1", { deps })).rejects.toThrow(/cannot inspect the content of this frame/);
+    expect(mouse()).toEqual([]);
   });
 });
 
