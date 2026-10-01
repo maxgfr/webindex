@@ -57,6 +57,17 @@ export interface Brand {
    */
   repoDir?: string;
   /**
+   * Home of the dedicated browser: its profiles (logins live there), the saved
+   * session and the snapshots' refs. Defaults to `~/.<name>/browser`.
+   *
+   * Under the home directory rather than the temp dir on purpose: a tmp sweeper
+   * would silently log the user out of every site, and a login is the one thing
+   * the user cannot regenerate by re-running the command. A consumer that
+   * already keeps such state somewhere declares it here instead of having it
+   * orphaned.
+   */
+  browserDir?: string;
+  /**
    * How long a cached page stays fresh. Defaults to 24h.
    *
    * A per-consumer decision, not a universal one: a research tool that re-runs
