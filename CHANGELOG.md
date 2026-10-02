@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.32.0](https://github.com/maxgfr/webindex/compare/v1.31.0...v1.32.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **browser:** open only http(s) URLs; safer covered-link hint and link urls ([0207013](https://github.com/maxgfr/webindex/commit/020701380eade69cf7a1435c230ea14d23c29c1c))
+
+
+### Features
+
+* **browser:** link urls in interactive snapshots, covered-link hint, readable wait timeouts ([90defbe](https://github.com/maxgfr/webindex/commit/90defbeaf797dbccf7a5d08468939ead815a3042))
+
 # [1.31.0](https://github.com/maxgfr/webindex/compare/v1.30.0...v1.31.0) (2026-10-02)
 
 
