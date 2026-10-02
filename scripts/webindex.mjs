@@ -20077,7 +20077,7 @@ function isStartedFile() {
 if (isInvokedDirectly() || isStartedFile()) {
   for (const stream of [process.stdout, process.stderr]) {
     stream.on("error", (e) => {
-      if (e.code === "EPIPE") process.exit(EXIT_OK);
+      if (e.code === "EPIPE") process.exit(Number(process.exitCode ?? EXIT_OK));
       throw e;
     });
   }
