@@ -9006,6 +9006,9 @@ var init_overlay = __esm({
    * Nothing to answer in it: no control, itself or inside (open shadow roots
    * included), and under ${BARE_TEXT_MAX} characters of text. An ad slot holding
    * an image is one; a cookie wall, a login dialog, a notice to read are not.
+   * Never bare: a consent vendor's container (its buttons may be plain divs),
+   * nor anything holding a custom element with no open shadow root (a closed
+   * one hides its text and controls from here).
    */
   const bare = (el) => {
     let text = textLength(el);
@@ -9014,7 +9017,8 @@ var init_overlay = __esm({
       // Too big to look through: whatever it is, it is no empty layer.
       if (text >= ${BARE_TEXT_MAX} || seen > 5000) return false;
       const n = stack.pop();
-      if (n.nodeType === 1 && isControl(n)) return false;
+      if (n.nodeType === 1 && (isControl(n) || isConsent(n))) return false;
+      if (n.nodeType === 1 && String(n.tagName || "").indexOf("-") >= 0 && !n.shadowRoot) return false;
       for (const k of Array.from(n.children || [])) stack.push(k);
       if (n.shadowRoot) {
         for (const k of Array.from(n.shadowRoot.children || [])) {
@@ -9540,6 +9544,7 @@ init_read();
 
 // src/browser/snapshot.ts
 init_cli_kit();
+init_cdp();
 init_overlay();
 init_state();
 var NAME_MAX = 120;
@@ -9621,10 +9626,13 @@ var Renderer = class {
   constructor(table, frames) {
     this.frames = frames;
     this.refs = { ...table.refs };
+    this.containers = new Set(table.containers ?? []);
     this.next = table.next;
   }
   frames;
   refs;
+  /** The refs that name a container only, never a control. */
+  containers;
   next;
   seen = /* @__PURE__ */ new Set();
   trees = /* @__PURE__ */ new Map();
@@ -9682,7 +9690,12 @@ var Renderer = class {
     if (name) head += ` "${(name.length > NAME_MAX ? `${name.slice(0, NAME_MAX)}\u2026` : name).replace(/"/g, '\\"')}"`;
     const level = prop(n, "level");
     if (level !== void 0 && role === "heading") head += ` [level=${String(level)}]`;
-    if (wantsRef) head += ` [ref=${this.refFor(n.backendDOMNodeId)}]`;
+    if (wantsRef) {
+      const ref = this.refFor(n.backendDOMNodeId);
+      if (acts) this.containers.delete(ref);
+      else this.containers.add(ref);
+      head += ` [ref=${ref}]`;
+    }
     for (const s of states(n)) head += ` ${s}`;
     let kids;
     let note = "";
@@ -9771,7 +9784,13 @@ function renderSnapshot(nodes, opts) {
   const text = [...kept.map((l) => l.text), ...tail ? [tail] : []].join("\n");
   return {
     text,
-    refs: { loaderId: opts.refs.loaderId, url: opts.refs.url, next: r.next, refs: r.refs },
+    refs: {
+      loaderId: opts.refs.loaderId,
+      url: opts.refs.url,
+      next: r.next,
+      refs: r.refs,
+      ...r.containers.size ? { containers: [...r.containers].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))) } : {}
+    },
     truncated: tail !== "",
     refCount: kept.filter((l) => l.ref).length
   };

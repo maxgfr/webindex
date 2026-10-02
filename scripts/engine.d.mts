@@ -1675,6 +1675,8 @@ interface RefTable {
     /** The number the next new ref gets (`e<next>`). */
     next: number;
     refs: Record<string, number>;
+    /** The refs that name a container only (a table, a figure…): to scope a snapshot or a screenshot to, never to click. */
+    containers?: string[];
 }
 
 /** A CDP Accessibility.AXValue, reduced to what we read. */
@@ -1715,7 +1717,7 @@ interface RenderResult {
     text: string;
     refs: RefTable;
     truncated: boolean;
-    /** Refs visible in `text`. */
+    /** Refs visible in `text`: the controls', and in a full snapshot the containers' too. */
     refCount: number;
 }
 /**

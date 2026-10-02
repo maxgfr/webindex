@@ -7321,6 +7321,9 @@ var init_overlay = __esm({
    * Nothing to answer in it: no control, itself or inside (open shadow roots
    * included), and under ${BARE_TEXT_MAX} characters of text. An ad slot holding
    * an image is one; a cookie wall, a login dialog, a notice to read are not.
+   * Never bare: a consent vendor's container (its buttons may be plain divs),
+   * nor anything holding a custom element with no open shadow root (a closed
+   * one hides its text and controls from here).
    */
   const bare = (el) => {
     let text = textLength(el);
@@ -7329,7 +7332,8 @@ var init_overlay = __esm({
       // Too big to look through: whatever it is, it is no empty layer.
       if (text >= ${BARE_TEXT_MAX} || seen > 5000) return false;
       const n = stack.pop();
-      if (n.nodeType === 1 && isControl(n)) return false;
+      if (n.nodeType === 1 && (isControl(n) || isConsent(n))) return false;
+      if (n.nodeType === 1 && String(n.tagName || "").indexOf("-") >= 0 && !n.shadowRoot) return false;
       for (const k of Array.from(n.children || [])) stack.push(k);
       if (n.shadowRoot) {
         for (const k of Array.from(n.shadowRoot.children || [])) {
@@ -9917,22 +9921,18 @@ function checkRef(ref2) {
     throw new UsageError("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)");
 }
 async function elementBySelector(page, selector) {
+  const { root } = await page.send("DOM.getDocument", { depth: 0 });
+  let nodeId;
   try {
-    const r = await page.send("Runtime.evaluate", {
-      expression: `document.querySelector(${JSON.stringify(selector)})`,
-      returnByValue: false,
-      objectGroup: SELECTOR_GROUP
-    });
-    if (r.exceptionDetails) throw new UsageError(`${JSON.stringify(selector)} is not a valid CSS selector`);
-    const objectId = r.result?.objectId;
-    if (!objectId) throw new NoMatchError(selector);
-    const { node } = await page.send("DOM.describeNode", { objectId });
-    if (typeof node?.backendNodeId !== "number" || node.backendNodeId <= 0) throw new NoMatchError(selector);
-    return node.backendNodeId;
-  } finally {
-    page.send("Runtime.releaseObjectGroup", { objectGroup: SELECTOR_GROUP }).catch(() => {
-    });
+    ({ nodeId } = await page.send("DOM.querySelector", { nodeId: root.nodeId, selector }));
+  } catch (e) {
+    if (e instanceof CdpError) throw new UsageError(`${JSON.stringify(selector)} is not a valid CSS selector`);
+    throw e;
   }
+  if (!nodeId) throw new NoMatchError(selector);
+  const { node } = await page.send("DOM.describeNode", { nodeId });
+  if (typeof node?.backendNodeId !== "number" || node.backendNodeId <= 0) throw new NoMatchError(selector);
+  return node.backendNodeId;
 }
 function buildTree(nodes) {
   const byId = /* @__PURE__ */ new Map();
@@ -10044,7 +10044,13 @@ function renderSnapshot(nodes, opts) {
   const text = [...kept.map((l) => l.text), ...tail ? [tail] : []].join("\n");
   return {
     text,
-    refs: { loaderId: opts.refs.loaderId, url: opts.refs.url, next: r.next, refs: r.refs },
+    refs: {
+      loaderId: opts.refs.loaderId,
+      url: opts.refs.url,
+      next: r.next,
+      refs: r.refs,
+      ...r.containers.size ? { containers: [...r.containers].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))) } : {}
+    },
     truncated: tail !== "",
     refCount: kept.filter((l) => l.ref).length
   };
@@ -10082,7 +10088,7 @@ async function collectFrames(session, main2) {
   return out;
 }
 async function takeSnapshot(session, opts = {}) {
-  if (opts.ref !== void 0 && opts.selector !== void 0) throw new UsageError("a snapshot is scoped to a ref or to a --selector, not both");
+  if (opts.ref !== void 0 && opts.selector !== void 0) throw new UsageError("a snapshot is scoped to a ref or to a selector, not both");
   if (opts.ref !== void 0) checkRef(opts.ref);
   const loaderId = await session.loaderId();
   const url = await session.currentUrl();
@@ -10121,11 +10127,12 @@ async function takeSnapshot(session, opts = {}) {
 title: ${title}
 ${r.text}`, url, title, loaderId, refCount: r.refCount, truncated: r.truncated };
 }
-var StaleRefError, REF_SHAPE, NoMatchError, SELECTOR_GROUP, NAME_MAX, OVERLAY_HEADER, OVERLAY_RETRY_MS, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, CONTAINER_ROLES, NAMED_CONTAINER_ROLES, VALUE_ROLES, FIELD_ROLES, str4, squash, truthy, Renderer;
+var StaleRefError, REF_SHAPE, NoMatchError, NAME_MAX, OVERLAY_HEADER, OVERLAY_RETRY_MS, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, CONTAINER_ROLES, NAMED_CONTAINER_ROLES, VALUE_ROLES, FIELD_ROLES, str4, squash, truthy, Renderer;
 var init_snapshot = __esm({
   "src/browser/snapshot.ts"() {
     "use strict";
     init_cli_kit();
+    init_cdp();
     init_overlay();
     init_state();
     StaleRefError = class extends Error {
@@ -10145,7 +10152,6 @@ var init_snapshot = __esm({
       }
       selector;
     };
-    SELECTOR_GROUP = "selector-probe";
     NAME_MAX = 120;
     OVERLAY_HEADER = "- overlay (covers the page):";
     OVERLAY_RETRY_MS = 300;
@@ -10185,10 +10191,13 @@ var init_snapshot = __esm({
       constructor(table, frames) {
         this.frames = frames;
         this.refs = { ...table.refs };
+        this.containers = new Set(table.containers ?? []);
         this.next = table.next;
       }
       frames;
       refs;
+      /** The refs that name a container only, never a control. */
+      containers;
       next;
       seen = /* @__PURE__ */ new Set();
       trees = /* @__PURE__ */ new Map();
@@ -10246,7 +10255,12 @@ var init_snapshot = __esm({
         if (name2) head += ` "${(name2.length > NAME_MAX ? `${name2.slice(0, NAME_MAX)}\u2026` : name2).replace(/"/g, '\\"')}"`;
         const level = prop(n, "level");
         if (level !== void 0 && role === "heading") head += ` [level=${String(level)}]`;
-        if (wantsRef) head += ` [ref=${this.refFor(n.backendDOMNodeId)}]`;
+        if (wantsRef) {
+          const ref2 = this.refFor(n.backendDOMNodeId);
+          if (acts) this.containers.delete(ref2);
+          else this.containers.add(ref2);
+          head += ` [ref=${ref2}]`;
+        }
         for (const s of states(n)) head += ` ${s}`;
         let kids;
         let note = "";
@@ -10480,6 +10494,8 @@ async function click(session, ref2, opts = {}) {
   if (count !== 1 && count !== 2) throw new UsageError(`clickCount is 1 or 2, not ${count}`);
   const page = session.page;
   return withRef(session, ref2, async (node) => {
+    if (readRefs(session.targetId)?.containers?.includes(ref2))
+      throw new UsageError(`${ref2} is a container \u2014 click a control inside it (take a snapshot of ${ref2})`);
     await guardAction(page, { backendNodeId: node.backendNodeId, action: "click", ...opts.confirm ? { confirm: true } : {} });
     const { x, y } = await centreOf(page, node);
     const inner = await hitTarget(page, session.targetId, node, x, y);
@@ -10646,9 +10662,9 @@ async function scroll(session, target, opts = {}) {
   });
 }
 async function screenshot(session, opts = {}) {
-  if (opts.ref !== void 0 && opts.selector !== void 0) throw new UsageError("a screenshot is of the element a ref or a --selector names, not both");
+  if (opts.ref !== void 0 && opts.selector !== void 0) throw new UsageError("a screenshot is of the element a ref or a selector names, not both");
   if ((opts.ref !== void 0 || opts.selector !== void 0) && opts.full)
-    throw new UsageError("a screenshot is of one element (a ref or a --selector) or of the full page, not both");
+    throw new UsageError("a screenshot is of one element (a ref or a selector) or of the full page, not both");
   if (opts.ref !== void 0) checkRef(opts.ref);
   const format = opts.format ?? "png";
   if (format !== "png" && format !== "jpeg") throw new UsageError(`screenshot format is png or jpeg, not ${JSON.stringify(format)}`);
@@ -11093,6 +11109,7 @@ async function runBrowserCommand(action, args, flags = {}, deps = {}) {
   const ctx = { action, args, flags, deps };
   try {
     if (!Object.hasOwn(HANDLERS, action)) throw new UsageError(`usage: ${cliName()} browser ${BROWSER_ACTIONS.join("|")}`);
+    if (flags.selector !== void 0 && !SELECTOR_ACTIONS.has(action)) throw new UsageError("--selector goes with snapshot, screenshot and wait only");
     const out = await HANDLERS[action](ctx);
     const dialogs = unreported(ctx);
     return {
@@ -11195,7 +11212,7 @@ async function capturing(ctx, s, fn) {
     const value = await fn();
     stopped = true;
     const captured = (await rec.stop()).length;
-    return { value, capture: { captured, logged: listNetwork(s.targetId).length } };
+    return { value, capture: { captured, ...isNoWrite() ? {} : { logged: listNetwork(s.targetId).length } } };
   } finally {
     if (!stopped) await rec.stop().catch(() => {
     });
@@ -11257,7 +11274,7 @@ function currentTarget(ctx) {
   if (!saved) throw new Error(`no browser session: record what a page fetches with ${follow(ctx).capture}`);
   return saved.targetId;
 }
-var cliFollowUps, USAGE, BROWSER_ACTIONS, SNAPSHOT_MAX_CHARS, cliName, usageError, dialogsJson, unreported, actOpts, snapOpts, show, pretty, where, follow, dialogLine, frozen, challengeLine, capturedLine, capturedJson, VALUE_SHOWN, confirm, timeoutOpts, HANDLERS;
+var cliFollowUps, USAGE, BROWSER_ACTIONS, SNAPSHOT_MAX_CHARS, SELECTOR_ACTIONS, cliName, usageError, dialogsJson, unreported, actOpts, snapOpts, show, pretty, where, follow, dialogLine, frozen, challengeLine, capturedLine, capturedJson, VALUE_SHOWN, confirm, timeoutOpts, HANDLERS;
 var init_cli = __esm({
   "src/browser/cli.ts"() {
     "use strict";
@@ -11310,6 +11327,7 @@ var init_cli = __esm({
     };
     BROWSER_ACTIONS = Object.keys(USAGE);
     SNAPSHOT_MAX_CHARS = 2e4;
+    SELECTOR_ACTIONS = /* @__PURE__ */ new Set(["snapshot", "screenshot", "wait"]);
     cliName = () => brand().cli;
     usageError = (action) => new UsageError(`usage: ${cliName()} browser ${USAGE[action]}`);
     dialogsJson = (dialogs) => dialogs.length ? { dialogs } : {};
@@ -11332,8 +11350,8 @@ var init_cli = __esm({
     };
     frozen = (d) => d !== void 0 && !d.dismissed && !d.closed;
     challengeLine = (ctx, c) => `challenge: ${c.kind}${c.blocking ? " (blocking)" : ""} \u2014 let the human solve it, then ${follow(ctx).waitClear}`;
-    capturedLine = (ctx, c) => `captured ${c.captured} JSON response${c.captured === 1 ? "" : "s"} (${c.logged} in the log) \u2014 ${follow(ctx).networkList}`;
-    capturedJson = (c) => c ? { captured: c.captured, logged: c.logged } : {};
+    capturedLine = (ctx, c) => `captured ${c.captured} JSON response${c.captured === 1 ? "" : "s"}${c.logged !== void 0 ? ` (${c.logged} in the log)` : ""} \u2014 ${follow(ctx).networkList}`;
+    capturedJson = (c) => c ? { captured: c.captured, ...c.logged !== void 0 ? { logged: c.logged } : {} } : {};
     VALUE_SHOWN = 200;
     confirm = (ctx) => ctx.flags.confirm ? { confirm: true } : {};
     timeoutOpts = (ctx) => ctx.flags.timeout !== void 0 ? { timeoutMs: ctx.flags.timeout } : {};
@@ -11402,7 +11420,7 @@ var init_cli = __esm({
       async snapshot(ctx) {
         arity(ctx, 0, 1);
         const { selector } = ctx.flags;
-        if (ctx.args[0] !== void 0 && selector !== void 0) throw new UsageError("a snapshot is scoped to a ref or to a --selector, not both");
+        if (ctx.args[0] !== void 0 && selector !== void 0) throw new UsageError("a snapshot is scoped to a ref or to a selector, not both");
         if (ctx.args[0] !== void 0) refArg(ctx);
         const r = await onPage(ctx, (s) => takeSnapshot(s, { ...snapOpts(ctx, ctx.args[0]), ...selector !== void 0 ? { selector } : {} }));
         return { json: r, text: r.text };
@@ -11522,9 +11540,9 @@ var init_cli = __esm({
         const format = /\.jpe?g$/i.test(path) ? "jpeg" : "png";
         const ref2 = ctx.args[0];
         const { selector, full } = ctx.flags;
-        if (ref2 !== void 0 && selector !== void 0) throw new UsageError("a screenshot is of the element a ref or a --selector names, not both");
+        if (ref2 !== void 0 && selector !== void 0) throw new UsageError("a screenshot is of the element a ref or a selector names, not both");
         if ((ref2 !== void 0 || selector !== void 0) && full)
-          throw new UsageError("a screenshot is of one element (a ref or a --selector) or of the full page, not both");
+          throw new UsageError("a screenshot is of one element (a ref or a selector) or of the full page, not both");
         if (ref2 !== void 0) refArg(ctx);
         const bytes = await onPage(
           ctx,
@@ -17023,6 +17041,15 @@ var after = (a) => ({
   ...a.interactive === true ? { interactive: true } : {},
   ...num3(a.maxChars) !== void 0 ? { maxChars: num3(a.maxChars) } : {}
 });
+function refArg2(a) {
+  const v = String(a.ref ?? "");
+  if (!/^e\d+$/.test(v)) {
+    throw new ToolError(
+      "expected a ref like e12 from the latest snapshot; CSS selectors: pass `selector` to webindex_browser_screenshot or webindex_browser_snapshot, or wait with condition selector"
+    );
+  }
+  return v;
+}
 var confirmed = (a) => a.confirm === true ? { confirm: true } : {};
 function annotate(text, notes) {
   if (notes.length === 0) return text;
@@ -17195,19 +17222,20 @@ var Host = class {
     },
     snapshot: (a) => {
       const mode2 = oneOf(a, "mode", ["full", "interactive"]);
-      const r = str5(a.ref);
+      const r = a.ref === void 0 ? void 0 : refArg2(a);
       const selector = str5(a.selector);
+      if (r !== void 0 && selector !== void 0) throw new ToolError("a snapshot is scoped to a `ref` or to a `selector`, not both");
       return this.cli("snapshot", r ? [r] : [], {
         interactive: mode2 === "interactive",
         ...selector !== void 0 ? { selector } : {},
         ...num3(a.maxChars) !== void 0 ? { maxChars: num3(a.maxChars) } : {}
       });
     },
-    click: (a) => this.cli("click", [String(a.ref ?? "")], { ...after(a), ...confirmed(a) }),
-    hover: (a) => this.cli("hover", [String(a.ref ?? "")], after(a)),
-    type: (a) => this.cli("type", [String(a.ref ?? ""), String(a.text ?? "")], { ...after(a), ...confirmed(a), ...a.submit === true ? { submit: true } : {} }),
-    fill: (a) => this.cli("fill", [String(a.ref ?? ""), String(a.text ?? "")], after(a)),
-    select: (a) => this.cli("select", [String(a.ref ?? ""), ...strings2(a.values)], after(a)),
+    click: (a) => this.cli("click", [refArg2(a)], { ...after(a), ...confirmed(a) }),
+    hover: (a) => this.cli("hover", [refArg2(a)], after(a)),
+    type: (a) => this.cli("type", [refArg2(a), String(a.text ?? "")], { ...after(a), ...confirmed(a), ...a.submit === true ? { submit: true } : {} }),
+    fill: (a) => this.cli("fill", [refArg2(a), String(a.text ?? "")], after(a)),
+    select: (a) => this.cli("select", [refArg2(a), ...strings2(a.values)], after(a)),
     press: (a) => this.cli("press", [String(a.key ?? "")], { ...after(a), ...confirmed(a) }),
     upload: (a) => {
       const files = strings2(a.files).map((f) => this.localFile(f));
@@ -17216,7 +17244,7 @@ var Host = class {
           `uploading ${files.join(", ")} needs confirm: true: with no extract root, any file of this machine could go \u2014 ask the user, naming the files, then retry with confirm: true`
         );
       }
-      return this.cli("upload", [String(a.ref ?? ""), ...files], after(a));
+      return this.cli("upload", [refArg2(a), ...files], after(a));
     },
     scroll: (a) => this.cli("scroll", [String(a.target ?? "")], after(a)),
     history: (a) => {
@@ -17278,8 +17306,9 @@ var Host = class {
     },
     screenshot: async (a) => {
       const area2 = oneOf(a, "area", ["viewport", "full", "element"]);
-      const r = str5(a.ref);
+      const r = a.ref === void 0 ? void 0 : refArg2(a);
       const selector = str5(a.selector);
+      if (area2 !== "element" && (r !== void 0 || selector !== void 0)) throw new ToolError('`ref` and `selector` go with area "element"');
       if (area2 === "element" && r !== void 0 && selector !== void 0) throw new ToolError('area "element" takes a `ref` or a `selector`, not both');
       if (area2 === "element" && r === void 0 && selector === void 0)
         throw new ToolError('`ref` is required with area "element": the element to capture, from the latest snapshot (or a CSS `selector`)');
@@ -17562,18 +17591,18 @@ COMMANDS
              on first use (headed unless --headless) and reused by every later
              call, its tab and refs included. attach <port|url> (or --cdp)
              drives one on a loopback port; close shuts down only a browser it
-             launched. snapshot prints the accessibility tree with refs (e12)
-             on controls and containers (table, figure, article\u2026) for the
-             actions; --selector <css> scopes snapshot and screenshot to any
-             element. A ref from before a navigation is stale: snapshot again.
-             fill and type echo the value (never a password's). A click or an
-             Enter that looks irreversible (pay, delete, send\u2026) or submits a
-             password is refused unless --confirm: ask the user first. A
-             challenge is never bypassed: the human solves it, then wait
-             --clear. --capture records the JSON fetched while its command runs
-             (network list|get; the log grows until network clear). A dialog is
-             dismissed before the command ends; mcp --browser answers them.
-             Exit 1: a stale ref, a timeout, a refusal; --json on every action.
+             launched. snapshot prints the accessibility tree with refs (e12):
+             controls, for the actions; containers (table, figure\u2026), to scope
+             snapshot and screenshot, as --selector <css> does. A ref from
+             before a navigation is stale. fill and type echo the value (never
+             a password's). A click or an Enter that looks irreversible (pay,
+             delete, send\u2026) or submits a password is refused unless --confirm:
+             ask the user first. A challenge is never bypassed: the human
+             solves it, then wait --clear. --capture records the JSON fetched
+             while its command runs (network list|get; the log grows until
+             network clear). A dialog is dismissed before the command ends; mcp
+             --browser answers them. Exit 1: a stale ref, a timeout, a refusal;
+             --json on every action.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which
