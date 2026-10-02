@@ -93,8 +93,11 @@ const HELPERS = `const up = (n) => n.parentElement || (n.parentNode && n.parentN
  * document order, at most five. Elements, so the caller can name them by
  * backendNodeId.
  *
- * A dialog or a consent vendor's container counts when it is shown: on screen,
- * with no ancestor hidden, transparent, aria-hidden or inert. Any other element
+ * A consent vendor's container counts when it is shown: on screen, with no
+ * ancestor hidden, transparent, aria-hidden or inert. So does a dialog out of
+ * the flow of the page (fixed or absolute, itself or an ancestor, as a modal
+ * <dialog> is): one in the flow (a news ticker marked up as a modal dialog, as
+ * lemonde.fr's is) covers nothing. Any other element
  * counts when it is fixed (itself or an ancestor; sticky is layout, not an
  * overlay), covers 30% of the viewport, is wide (60%) or strictly across its
  * middle, and is on top at its centre. Such a layer that holds the main landmark
@@ -115,6 +118,14 @@ export const OVERLAYS_SOURCE = `function findOverlays() {
   const pageText = textOf(body);
   const fixed = (el) => {
     for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) if (getComputedStyle(n).position === "fixed") return true;
+    return false;
+  };
+  /** Out of the flow of the page, itself or an ancestor: what can be over something. */
+  const floating = (el) => {
+    for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) {
+      const p = getComputedStyle(n).position;
+      if (p === "fixed" || p === "absolute") return true;
+    }
     return false;
   };
   const hiddenUp = (el) => {
@@ -156,7 +167,8 @@ export const OVERLAYS_SOURCE = `function findOverlays() {
     let shell = inShell;
     let take = false;
     const role = roleOf(el);
-    if (isDialog(el) || isConsent(el)) take = shown(el) && !holdsMain(el);
+    if (isConsent(el)) take = shown(el) && !holdsMain(el);
+    else if (isDialog(el)) take = floating(el) && shown(el) && !holdsMain(el);
     else if (!inShell && role !== "presentation" && role !== "none") {
       const a = area(el);
       if (a && fixed(el) && shown(el) && covers(el, a)) {

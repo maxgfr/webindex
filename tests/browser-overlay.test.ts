@@ -121,10 +121,10 @@ const FULL = { left: 0, top: 0, width: VW, height: VH };
 describe("the in-page overlay probe", () => {
   it("finds a visible dialog, alertdialog, aria-modal element and open <dialog>, and skips hidden ones", () => {
     const { doc, body } = page();
-    const dialog = el("DIV", { attrs: { role: "dialog" } });
-    const alert = el("DIV", { attrs: { role: "alertdialog" } });
-    const modal = el("SECTION", { attrs: { "aria-modal": "true" } });
-    const native = el("DIALOG");
+    const dialog = el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" } });
+    const alert = el("DIV", { attrs: { role: "alertdialog" }, style: { position: "absolute" } });
+    const modal = el("SECTION", { attrs: { "aria-modal": "true" }, style: { position: "fixed" } });
+    const native = el("DIALOG", { style: { position: "absolute" } });
     native.open = true;
     const closed = el("DIALOG");
     const hidden = el("DIV", { attrs: { role: "dialog" }, style: { display: "none" } });
@@ -211,6 +211,20 @@ describe("the in-page overlay probe", () => {
     expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([banner]);
   });
 
+  it("does not take a dialog in the flow of the page (a news ticker) for an overlay: it covers nothing", () => {
+    const { doc, body } = page();
+    // lemonde.fr marks its "Actualités en continu" ticker up so, aria-modal included.
+    const ticker = el("DIV", {
+      attrs: { role: "dialog", "aria-modal": "true", "aria-label": "Live news" },
+      rect: { left: 0, top: 140, width: VW, height: 130 },
+    });
+    const box = el("DIV", { style: { position: "relative" } });
+    box.add(el("DIV", { attrs: { role: "dialog" } }));
+    body.add(ticker, box);
+    doc.top = ticker;
+    expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([]);
+  });
+
   it("does not take a fixed half-screen column for an overlay: over the middle means strictly across it", () => {
     const { doc, body } = page();
     const column = el("DIV", { style: { position: "fixed" }, rect: { left: 0, top: 0, width: VW / 2, height: VH } });
@@ -229,7 +243,7 @@ describe("the in-page overlay probe", () => {
     doc.top = feed;
     expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([]);
     // A dialog inside it still counts.
-    const modal = el("DIV", { attrs: { role: "dialog" }, rect: { left: 300, top: 200, width: 400, height: 300 } });
+    const modal = el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" }, rect: { left: 300, top: 200, width: 400, height: 300 } });
     feed.add(modal);
     expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([modal]);
   });
@@ -256,7 +270,7 @@ describe("the in-page overlay probe", () => {
     const { doc, body } = page();
     const root = el("DIV", { attrs: { role: "presentation" }, style: { position: "fixed" }, rect: FULL });
     const backdrop = el("DIV", { attrs: { "aria-hidden": "true" }, style: { position: "fixed" }, rect: FULL });
-    const dialog = el("DIV", { attrs: { role: "dialog" }, rect: { left: 300, top: 240, width: 400, height: 240 } });
+    const dialog = el("DIV", { attrs: { role: "dialog" }, style: { position: "absolute" }, rect: { left: 300, top: 240, width: 400, height: 240 } });
     root.add(backdrop, dialog);
     body.add(root);
     doc.top = dialog;
@@ -275,7 +289,7 @@ describe("the in-page overlay probe", () => {
   it("finds nothing without a body or a viewport, and at most five overlays", () => {
     expect(inPage(OVERLAYS_SOURCE, { body: null })).toEqual([]);
     const { doc, body } = page();
-    for (let i = 0; i < 8; i++) body.add(el("DIV", { attrs: { role: "dialog" } }));
+    for (let i = 0; i < 8; i++) body.add(el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" } }));
     expect(inPage(OVERLAYS_SOURCE, doc)).toHaveLength(5);
   });
 });

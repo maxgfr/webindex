@@ -52,7 +52,9 @@ not repeated in the tree below it:
 An overlay is one of these, shown on screen (no ancestor hidden, transparent,
 `aria-hidden` or `inert`):
 
-- a dialog: `role="dialog"` or `alertdialog`, `aria-modal`, an open `<dialog>`;
+- a dialog (`role="dialog"` or `alertdialog`, `aria-modal`, an open `<dialog>`)
+  that is out of the flow of the page (fixed or absolute positioning: one in
+  the flow covers nothing, whatever its markup says);
 - a consent vendor's container (OneTrust, Didomi, Cookiebot…), whatever its size;
 - a **fixed** layer (itself or an ancestor; sticky is layout) over at least 30%
   of the viewport, wide (60%) or strictly across its middle, and on top at its
