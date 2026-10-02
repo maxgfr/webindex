@@ -248,10 +248,11 @@ describe("open", () => {
     world.xhr = true;
     const r = await cli("open", ["https://b.test/"], { capture: true, json: true });
     expect(r.exitCode).toBe(0);
-    expect(r.json).toMatchObject({ captured: 1 });
+    expect(r.json).toMatchObject({ captured: 1, logged: 1 });
     expect(readNetwork("T1")).toMatchObject([{ n: 1, url: "https://a.test/api.json", json: { a: 1 } }]);
+    // What this command caught, and what the tab's log holds: it keeps growing until `network clear`.
     const text = await cli("open", ["https://c.test/"], { capture: true });
-    expect(text.text).toMatch(/captured 0 JSON responses/);
+    expect(text.text).toContain("captured 0 JSON responses (1 in the log) — `webindex-tests browser network list`");
   });
 
   it("appends the snapshot with --snapshot", async () => {
@@ -311,7 +312,24 @@ describe("snapshot", () => {
     expect(r.text).not.toContain("Search");
     const stale = await cli("snapshot", ["e99"]);
     expect(stale.exitCode).toBe(1);
-    expect(stale.text).toMatch(/take a new snapshot/);
+    expect(stale.text).toBe('ref "e99" is unknown or stale: take a new snapshot and use the refs it returns');
+  });
+
+  it("scopes to the element --selector matches; a selector as a ref, or with one, is a usage error", async () => {
+    await ready();
+    world.selectors = { "input.q": 12 };
+    const r = await cli("snapshot", [], { selector: "input.q" });
+    expect(r.exitCode).toBe(0);
+    expect(r.text).toContain('textbox "Query" [ref=e3]');
+    expect(r.text).not.toContain("Search");
+    const none = await cli("snapshot", [], { selector: "table.nope" });
+    expect(none.exitCode).toBe(1);
+    expect(none.text).toBe("no element matches table.nope");
+    const both = await cli("snapshot", ["e3"], { selector: "input.q" });
+    expect(both.exitCode).toBe(2);
+    const css = await cli("snapshot", ["table.infobox"]);
+    expect(css.exitCode).toBe(2);
+    expect(css.text).toBe("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)");
   });
 });
 
@@ -359,6 +377,21 @@ describe("page actions", () => {
     const filled = await cli("fill", ["e3", "new", "text"]);
     expect(filled.exitCode).toBe(0);
     expect(world.els.get(12)?.value).toBe("new text");
+    // The value the field ended with, quoted, so a mask or a maxlength shows.
+    expect(filled.text).toBe('fill e3: https://a.test/ — A page\n  value: "new text"');
+    expect((await cli("fill", ["e3", "Jane"], { json: true })).json).toMatchObject({ action: "fill", value: "Jane" });
+    expect((await cli("type", ["e3", "!"])).text).toContain('value: "Jane"');
+    // Never a password's.
+    const base = fake.handlerOf("Runtime.callFunctionOn");
+    fake.handle("Runtime.callFunctionOn", (p, sid) =>
+      /^function fieldKind/.test(p.functionDeclaration) ? { result: { value: { kind: "field", secret: true } } } : base?.(p, sid),
+    );
+    const secret = await cli("fill", ["e3", "hunter2"]);
+    expect(secret.text).toBe("fill e3: https://a.test/ — A page\n  value: (hidden)");
+    const secretJson = await cli("fill", ["e3", "hunter2"], { json: true });
+    expect(secretJson.json).toMatchObject({ valueHidden: true });
+    expect(JSON.stringify(secretJson.json)).not.toContain("hunter2");
+    fake.handle("Runtime.callFunctionOn", base as NonNullable<typeof base>);
     const picked = await cli("select", ["e4", "Medium"], { json: true });
     expect(picked.json).toMatchObject({ action: "select", value: ["m"] });
     expect((await cli("select", ["e4", "Medium"])).text).toContain('value: ["m"]');
@@ -428,7 +461,7 @@ describe("page actions", () => {
     await ready();
     world.xhr = true;
     const r = await cli("click", ["e1"], { capture: true });
-    expect(r.text).toMatch(/captured 1 JSON response\b/);
+    expect(r.text).toContain("captured 1 JSON response (1 in the log)");
   });
 
   it("lets go of the recorder when the action fails", async () => {
@@ -600,6 +633,25 @@ describe("screenshot", () => {
     const r = await cli("screenshot", ["e1"], { out: join(scratch, "e1.jpg") });
     expect(r.exitCode).toBe(0);
     expect(sent("Page.captureScreenshot").at(-1)?.params).toMatchObject({ format: "jpeg", clip: { width: 100, height: 40 } });
+  });
+
+  it("takes the element --selector matches; a CSS selector given as a ref is a usage error, before the browser", async () => {
+    await ready();
+    world.selectors = { "table.infobox": 12 };
+    const r = await cli("screenshot", [], { selector: "table.infobox", out: "box.png" });
+    expect(r.exitCode).toBe(0);
+    expect(sent("Page.captureScreenshot").at(-1)?.params).toMatchObject({ clip: { width: 100, height: 40 } });
+    const none = await cli("screenshot", [], { selector: "table.nope", out: "none.png" });
+    expect(none.exitCode).toBe(1);
+    expect(none.text).toBe("no element matches table.nope");
+    expect(existsSync(join(scratch, "none.png"))).toBe(false);
+    const calls = fake.calls.length;
+    const css = await cli("screenshot", ["table.infobox"], { out: "css.png" });
+    expect(css.exitCode).toBe(2);
+    expect(css.text).toBe("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)");
+    expect((await cli("screenshot", ["e1"], { selector: "table.infobox" })).exitCode).toBe(2);
+    expect((await cli("screenshot", [], { selector: "table.infobox", full: true })).exitCode).toBe(2);
+    expect(fake.calls.length).toBe(calls);
   });
 
   it("defaults to a private file under the temp dir", async () => {

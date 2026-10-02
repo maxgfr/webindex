@@ -122,12 +122,14 @@ export function browserToolDecls(): ToolDecl[] {
       "webindex_browser_snapshot",
       "Read the page as an accessibility tree",
       READS,
-      "The current page as an accessibility tree with a ref (e1, e2…) on each element: the refs every other tool takes. Refs hold until the page loads " +
-        "another document; a stale one is refused with a request for a new snapshot. mode interactive keeps only what can be clicked or typed into " +
-        "(much shorter); a ref scopes it to one element's subtree. Cut at maxChars (default 20000).",
+      "The current page as an accessibility tree with a ref (e1, e2…) on each control, and on the containers worth scoping to (a table, a figure, " +
+        "an article, main, a form, a named region or image): the refs every other tool takes. A ref holds while its element lives; a stale one, or one " +
+        "of a document the tab has left, is refused with a request for a new snapshot. mode interactive keeps only what can be clicked or typed into " +
+        "(much shorter); a ref, or a CSS selector, scopes it to one element's subtree. Cut at maxChars (default 20000).",
       {
         mode: { type: "string", enum: ["full", "interactive"], description: "full: every element; interactive: only controls." },
         ref: ref("the element whose subtree to show"),
+        selector: { type: "string", description: "A CSS selector: show the subtree of the first element it matches (not with ref)." },
         maxChars: { type: "number", description: "Cut at this many characters (default 20000)." },
       },
       ["mode"],
@@ -229,11 +231,12 @@ export function browserToolDecls(): ToolDecl[] {
       "webindex_browser_screenshot",
       "Take a screenshot",
       READS,
-      "A picture of the page, returned as an image (JPEG): the viewport, the full page, or one element (area element, with its ref). " +
-        "An image over 4 MB is withheld: take one element, or the viewport.",
+      "A picture of the page, returned as an image (JPEG): the viewport, the full page, or one element (area element, with its ref or a CSS " +
+        "selector). An image over 4 MB is withheld: take one element, or the viewport.",
       {
         area: { type: "string", enum: ["viewport", "full", "element"], description: "What to capture." },
         ref: ref("the element to capture, with area element"),
+        selector: { type: "string", description: "With area element and no ref: the first element this CSS selector matches." },
       },
       ["area"],
     ),
@@ -254,7 +257,8 @@ export function browserToolDecls(): ToolDecl[] {
       // Its clear deletes the log.
       COMMITS,
       "The JSON responses pages fetched (XHR/fetch) since webindex_browser_open with capture: true — often the cleanest data a JS-heavy site has. " +
-        "list: number, method, status, URL of each; get: one body, by n; clear: empty the log and stop recording. Headers are never recorded.",
+        "The tab's log keeps growing across calls until clear. list: number, method, status, URL of each; get: one body, by n; clear: empty the " +
+        "log and stop recording. Headers are never recorded.",
       {
         action: { type: "string", enum: ["list", "get", "clear"], description: "What to do with the log." },
         n: { type: "number", description: "The entry to get, from list." },
@@ -326,7 +330,7 @@ const SNAPSHOT_ADVICE = "pass `interactive: true`, or a smaller `maxChars`, for 
 /** What to narrow when a browser tool's answer is over the size cap. Merged into the adapter's capAdvice. */
 export const BROWSER_CAP_ADVICE: CapAdvice = {
   webindex_browser_open: SNAPSHOT_ADVICE,
-  webindex_browser_snapshot: "pass mode `interactive`, a `ref` to scope it, or a smaller `maxChars`",
+  webindex_browser_snapshot: "pass mode `interactive`, a `ref` or a `selector` to scope it, or a smaller `maxChars`",
   webindex_browser_click: SNAPSHOT_ADVICE,
   webindex_browser_hover: SNAPSHOT_ADVICE,
   webindex_browser_type: SNAPSHOT_ADVICE,
@@ -338,7 +342,7 @@ export const BROWSER_CAP_ADVICE: CapAdvice = {
   webindex_browser_history: SNAPSHOT_ADVICE,
   webindex_browser_dialog: SNAPSHOT_ADVICE,
   webindex_browser_wait: "nothing to narrow: a wait answers in one line",
-  webindex_browser_screenshot: 'the text is one line; for a smaller image, `area: "element"` with a `ref`',
+  webindex_browser_screenshot: 'the text is one line; for a smaller image, `area: "element"` with a `ref` or a `selector`',
   webindex_browser_eval: "return less from the expression: only the fields you need",
   webindex_browser_network: "get one entry by `n` instead of the list",
   webindex_browser_tabs: "close the tabs you no longer need",
@@ -584,8 +588,10 @@ class Host implements BrowserToolHost {
     snapshot: (a) => {
       const mode = oneOf(a, "mode", ["full", "interactive"] as const);
       const r = str(a.ref);
+      const selector = str(a.selector);
       return this.cli("snapshot", r ? [r] : [], {
         interactive: mode === "interactive",
+        ...(selector !== undefined ? { selector } : {}),
         ...(num(a.maxChars) !== undefined ? { maxChars: num(a.maxChars) } : {}),
       });
     },
@@ -670,16 +676,20 @@ class Host implements BrowserToolHost {
     screenshot: async (a) => {
       const area = oneOf(a, "area", ["viewport", "full", "element"] as const);
       const r = str(a.ref);
-      if (area === "element" && r === undefined) throw new ToolError('`ref` is required with area "element": the element to capture, from the latest snapshot');
+      const selector = str(a.selector);
+      if (area === "element" && r !== undefined && selector !== undefined) throw new ToolError('area "element" takes a `ref` or a `selector`, not both');
+      if (area === "element" && r === undefined && selector === undefined)
+        throw new ToolError('`ref` is required with area "element": the element to capture, from the latest snapshot (or a CSS `selector`)');
+      const element = r !== undefined ? { ref: r } : { selector: selector as string };
       const bytes = await this.onPage(
-        (s) => actions.screenshot(s, { format: "jpeg", quality: JPEG_QUALITY, ...(area === "element" ? { ref: r } : area === "full" ? { full: true } : {}) }),
+        (s) => actions.screenshot(s, { format: "jpeg", quality: JPEG_QUALITY, ...(area === "element" ? element : area === "full" ? { full: true } : {}) }),
         {},
       );
       const size = bytes.length >= 1024 * 1024 ? `${(bytes.length / (1024 * 1024)).toFixed(1)} MB` : `${Math.ceil(bytes.length / 1024)} KB`;
       if (bytes.length > MAX_IMAGE_BYTES) {
         throw new ToolError(`the screenshot is ${size}, over the 4 MB an answer may carry: take one element (area: "element" with a ref), or the viewport`);
       }
-      const what = area === "element" ? r : area === "full" ? "the full page" : "the viewport";
+      const what = area === "element" ? (r ?? selector) : area === "full" ? "the full page" : "the viewport";
       return { text: `screenshot of ${what} (JPEG, ${size})`, images: [{ data: bytes.toString("base64"), mimeType: "image/jpeg" }] };
     },
     status: async (a) => {

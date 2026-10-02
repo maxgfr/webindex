@@ -7,6 +7,7 @@ import type { BrowserDeps } from "../src/browser/deps.js";
 import { type BrowserSession, openBrowserSession } from "../src/browser/session.js";
 import { type AXNode, renderSnapshot, StaleRefError, takeSnapshot } from "../src/browser/snapshot.js";
 import { type RefTable, readRefs, writeRefs } from "../src/browser/state.js";
+import { UsageError } from "../src/cli-kit.js";
 import { FakeCdp } from "./helpers/fake-cdp.js";
 import { scriptBrowser } from "./helpers/fake-browser.js";
 import { fakeSpawn } from "./helpers/fake-spawn.js";
@@ -180,73 +181,117 @@ describe("renderSnapshot", () => {
     const r = renderSnapshot(
       tree(
         node(1, "generic", undefined, { properties: [prop("focusable", true)] }),
-        node(2, "region", "Plain"),
+        node(2, "group", "Plain"),
         node(3, "paragraph", "Edit", { properties: [prop("editable", "richtext")] }),
         node(4, "paragraph", "NotEditable", { properties: [prop("editable", false), prop("focusable", "false")] }),
         node(5, "button", "Orphan", { backendDOMNodeId: undefined }),
       ),
       { refs: fresh() },
     );
-    expect(r.text).toBe(lines("- generic [ref=e1]", '- region "Plain"', '- paragraph "Edit" [ref=e2]', '- paragraph "NotEditable"', '- button "Orphan"'));
+    expect(r.text).toBe(lines("- generic [ref=e1]", '- group "Plain"', '- paragraph "Edit" [ref=e2]', '- paragraph "NotEditable"', '- button "Orphan"'));
+  });
+
+  it("gives refs to structural containers (a table, a figure, an article, main, a form, a named region or image), never listed by interactive", () => {
+    const nodes = tree(
+      node(1, "table", "Florian Wirtz", {}, [top(node(11, "cell", "Born", { parentId: "1" }))]),
+      node(2, "figure", undefined),
+      node(3, "article", undefined),
+      node(4, "main", undefined),
+      node(5, "region", "Results"),
+      node(6, "region", undefined),
+      node(7, "complementary", undefined),
+      node(8, "form", undefined),
+      node(9, "image", "Portrait"),
+      node(10, "image", undefined),
+      node(12, "img", "Logo"),
+      node(13, "paragraph", "Plain"),
+      node(14, "button", "Go"),
+    );
+    const r = renderSnapshot(nodes, { refs: fresh() });
+    expect(r.text).toBe(
+      lines(
+        '- table "Florian Wirtz" [ref=e1]',
+        '  - cell "Born"',
+        "- figure [ref=e2]",
+        "- article [ref=e3]",
+        "- main [ref=e4]",
+        '- region "Results" [ref=e5]',
+        "- region",
+        "- complementary [ref=e6]",
+        "- form [ref=e7]",
+        '- image "Portrait" [ref=e8]',
+        "- image",
+        '- img "Logo" [ref=e9]',
+        '- paragraph "Plain"',
+        '- button "Go" [ref=e10]',
+      ),
+    );
+    expect(r.refCount).toBe(10);
+    // --interactive stays the controls only: a container's ref is for a scoped snapshot or an element screenshot.
+    const i = renderSnapshot(nodes, { refs: fresh(), interactive: true });
+    expect(i.text).toBe('- button "Go" [ref=e10]');
+    expect(i.refCount).toBe(1);
+    // A container's ref scopes a snapshot to it.
+    expect(renderSnapshot(nodes, { refs: r.refs, rootBackendId: 10 }).text).toBe(lines('- table "Florian Wirtz" [ref=e1]', '  - cell "Born"'));
   });
 
   it("gives no ref to the editor inside a text field: one ref per field (httpbin.org/forms/post, as Chrome reports it)", () => {
     const r = renderSnapshot(fixture("httpbin-form"), { refs: fresh() });
     expect(r.text).toBe(
       lines(
-        "- form",
+        "- form [ref=e1]",
         "  - paragraph",
         "    - LabelText",
         "      - text: Customer name:",
-        '      - textbox "Customer name:" [ref=e1]: Alice',
+        '      - textbox "Customer name:" [ref=e2]: Alice',
         "  - paragraph",
         "    - LabelText",
         "      - text: Telephone:",
-        '      - textbox "Telephone:" [ref=e2]',
+        '      - textbox "Telephone:" [ref=e3]',
         "  - paragraph",
         "    - LabelText",
         "      - text: E-mail address:",
-        '      - textbox "E-mail address:" [ref=e3]',
+        '      - textbox "E-mail address:" [ref=e4]',
         '  - group "Pizza Size"',
         "    - Legend",
         "      - text: Pizza Size",
         "    - paragraph",
-        '      - radio "Small" [ref=e4]',
+        '      - radio "Small" [ref=e5]',
         "    - paragraph",
-        '      - radio "Medium" [ref=e5]',
+        '      - radio "Medium" [ref=e6]',
         "    - paragraph",
-        '      - radio "Large" [ref=e6]',
+        '      - radio "Large" [ref=e7]',
         '  - group "Pizza Toppings"',
         "    - Legend",
         "      - text: Pizza Toppings",
         "    - paragraph",
-        '      - checkbox "Bacon" [ref=e7]',
+        '      - checkbox "Bacon" [ref=e8]',
         "    - paragraph",
-        '      - checkbox "Extra Cheese" [ref=e8]',
+        '      - checkbox "Extra Cheese" [ref=e9]',
         "    - paragraph",
-        '      - checkbox "Onion" [ref=e9]',
+        '      - checkbox "Onion" [ref=e10]',
         "    - paragraph",
-        '      - checkbox "Mushroom" [ref=e10]',
+        '      - checkbox "Mushroom" [ref=e11]',
         "  - paragraph",
         "    - LabelText",
         "      - text: Preferred delivery time:",
-        '      - InputTime "Preferred delivery time:" [ref=e11]',
-        '        - spinbutton "Hours Hours" [ref=e12]: 0',
+        '      - InputTime "Preferred delivery time:" [ref=e12]',
+        '        - spinbutton "Hours Hours" [ref=e13]: 0',
         "          - text: --",
         "        - text: :",
-        '        - spinbutton "Minutes Minutes" [ref=e13]: 0',
+        '        - spinbutton "Minutes Minutes" [ref=e14]: 0',
         "          - text: --",
-        '        - button "Show time picker Show time picker" [ref=e14]',
+        '        - button "Show time picker Show time picker" [ref=e15]',
         "  - paragraph",
         "    - LabelText",
         "      - text: Delivery instructions:",
-        '      - textbox "Delivery instructions:" [ref=e15]',
+        '      - textbox "Delivery instructions:" [ref=e16]',
         "  - paragraph",
-        '    - button "Submit order" [ref=e16]',
-        "- form",
-        '  - button "Choose File" [ref=e17]',
-        '  - button "Upload" [ref=e18]',
-        '  - button "Supprimer" [ref=e19]',
+        '    - button "Submit order" [ref=e17]',
+        "- form [ref=e18]",
+        '  - button "Choose File" [ref=e19]',
+        '  - button "Upload" [ref=e20]',
+        '  - button "Supprimer" [ref=e21]',
       ),
     );
     expect(renderSnapshot(fixture("httpbin-form"), { refs: fresh(), interactive: true }).text).not.toMatch(/generic/);
@@ -268,7 +313,7 @@ describe("renderSnapshot", () => {
           top(node(22, "button", undefined, { parentId: "2" })),
         ]),
         // A contenteditable region is a field of its own, wherever it sits.
-        node(3, "region", "Notes", {}, [top(editor(31, "3"))]),
+        node(3, "group", "Notes", {}, [top(editor(31, "3"))]),
       ),
       { refs: fresh() },
     );
@@ -281,7 +326,7 @@ describe("renderSnapshot", () => {
         '- combobox "City" [ref=e4]',
         '  - generic "Clear" [ref=e5]',
         "  - button [ref=e6]",
-        '- region "Notes"',
+        '- group "Notes"',
         "  - generic [ref=e7]",
       ),
     );
@@ -305,9 +350,9 @@ describe("renderSnapshot", () => {
   it("survives a cyclic or dangling tree", () => {
     const nodes: AXNode[] = [
       { nodeId: "1", role: { value: "RootWebArea" }, childIds: ["2", "404"], backendDOMNodeId: 1 },
-      { nodeId: "2", role: { value: "region" }, name: { value: "Loop" }, childIds: ["1", "2"], backendDOMNodeId: 2, parentId: "1" },
+      { nodeId: "2", role: { value: "group" }, name: { value: "Loop" }, childIds: ["1", "2"], backendDOMNodeId: 2, parentId: "1" },
     ];
-    expect(renderSnapshot(nodes, { refs: fresh() }).text).toBe('- region "Loop"');
+    expect(renderSnapshot(nodes, { refs: fresh() }).text).toBe('- group "Loop"');
     expect(renderSnapshot([], { refs: fresh() }).text).toBe("");
   });
 
@@ -338,12 +383,12 @@ describe("renderSnapshot", () => {
         '  - dialog "Cookies"',
         '    - button "Accepter et continuer" [ref=e1]',
         '    - button "Refuser" [ref=e2]',
-        "- article",
-        '  - heading "The news" [level=1] [ref=e3]',
+        "- article [ref=e3]",
+        '  - heading "The news" [level=1] [ref=e4]',
         '  - paragraph "A long paragraph of the article"',
       ),
     );
-    expect(r.refCount).toBe(3);
+    expect(r.refCount).toBe(4);
   });
 
   it("keeps the overlay when --max-chars cuts the page: the tree gets what the overlay leaves", () => {
@@ -365,7 +410,7 @@ describe("renderSnapshot", () => {
         "- overlay (covers the page):",
         '  - button "Accepter et continuer" [ref=e1]',
         '  - button "Refuser" [ref=e2]',
-        '- heading "The news" [level=1] [ref=e3]',
+        '- heading "The news" [level=1] [ref=e4]',
       ),
     );
   });
@@ -491,14 +536,47 @@ describe("takeSnapshot", () => {
     expect(sub.text).toBe(lines("url: https://a.test/", "title: T", '- link "Forgot password?" [ref=e5]', "  - /url: https://example.org/reset"));
     const err = await takeSnapshot(s, { ref: "e99" }).catch((e) => e);
     expect(err).toBeInstanceOf(StaleRefError);
-    expect(err.message).toMatch(/e99/);
-    expect(err.message).toMatch(/new snapshot/);
+    expect(err.message).toBe('ref "e99" is unknown or stale: take a new snapshot and use the refs it returns');
     // a known ref whose node left the tree is stale too
     writeRefs("T1", { loaderId: "L-main", url: "u", next: 8, refs: { e7: 4242 } });
     await expect(takeSnapshot(s, { ref: "e7" })).rejects.toBeInstanceOf(StaleRefError);
     // and so is any ref once the document changed
     loader = "L-other";
     await expect(takeSnapshot(s, { ref: "e5" })).rejects.toBeInstanceOf(StaleRefError);
+  });
+
+  it("refuses what is not a ref (a CSS selector) as a usage error that points at --selector", async () => {
+    fake.addTarget("https://a.test/", "T");
+    scriptAx({ main: fixture("login-form") });
+    const s = await attach();
+    const err = await takeSnapshot(s, { ref: "table.infobox" }).catch((e) => e);
+    expect(err).toBeInstanceOf(UsageError);
+    expect(err.message).toBe("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)");
+    expect(getFull).toEqual([]);
+  });
+
+  it("scopes to the element a CSS selector matches, and fails on one that matches nothing", async () => {
+    fake.addTarget("https://a.test/", "T");
+    scriptAx({ main: fixture("login-form") });
+    fake.handle("Runtime.evaluate", (p: { expression: string }) => {
+      if (!p.expression.includes("querySelector")) return { result: { type: "undefined" } };
+      if (p.expression.includes('"a.reset"')) return { result: { type: "object", subtype: "node", objectId: "sel-16" } };
+      if (p.expression.includes('"div["')) return { exceptionDetails: { text: "SyntaxError" }, result: { type: "object" } };
+      return { result: { type: "object", subtype: "null", value: null } };
+    });
+    const describe = fake.handlerOf("DOM.describeNode");
+    fake.handle("DOM.describeNode", (p: { objectId?: string }, sid) =>
+      p.objectId?.startsWith("sel-") ? { node: { nodeId: 0, backendNodeId: Number(p.objectId.slice(4)) } } : describe?.(p, sid),
+    );
+    const s = await attach();
+    const r = await takeSnapshot(s, { selector: "a.reset" });
+    expect(r.text).toBe(lines("url: https://a.test/", "title: T", '- link "Forgot password?" [ref=e1]', "  - /url: https://example.org/reset"));
+    expect(readRefs("T1")?.refs.e1).toBe(16);
+    const none = await takeSnapshot(s, { selector: "table.nope" }).catch((e) => e);
+    expect(none).not.toBeInstanceOf(UsageError);
+    expect(none.message).toBe("no element matches table.nope");
+    await expect(takeSnapshot(s, { selector: "div[" })).rejects.toBeInstanceOf(UsageError);
+    await expect(takeSnapshot(s, { selector: "a.reset", ref: "e1" })).rejects.toBeInstanceOf(UsageError);
   });
 
   it("applies interactive and maxChars", async () => {

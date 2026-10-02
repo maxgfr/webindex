@@ -29,7 +29,7 @@ import { isSameBrowser, readActivePort } from "./launch.js";
 import { clearNetworkLog, getNetworkEntry, listNetwork, NetworkRecorder } from "./network.js";
 import { ensurePrivateDir, importProfile, profileDir, resetProfile } from "./profile.js";
 import { type BrowserSession, type BrowserStatus, type BrowserTab, browserStatus, closeBrowser, type OpenOptions, withPage } from "./session.js";
-import { type SnapshotOptions, type SnapshotResult, takeSnapshot } from "./snapshot.js";
+import { checkRef, type SnapshotOptions, type SnapshotResult, takeSnapshot } from "./snapshot.js";
 import { readSession } from "./state.js";
 import { settle, type WaitCondition, waitFor } from "./wait.js";
 
@@ -122,7 +122,7 @@ const USAGE = {
   attach: "attach <port|url>",
   status: "status",
   close: "close [--all]",
-  snapshot: "snapshot [<ref>] [--interactive] [--max-chars <n>]",
+  snapshot: "snapshot [<ref> | --selector <css>] [--interactive] [--max-chars <n>]",
   click: "click <ref> [--confirm]",
   hover: "hover <ref>",
   type: "type <ref> <text> [--submit] [--confirm]",
@@ -133,7 +133,7 @@ const USAGE = {
   scroll: "scroll <ref|up|down|top|bottom>",
   wait: "wait --text <s> | --gone <s> | --selector <css> | --url <pattern> | --idle | --load | --clear | --ms <n> [--timeout <ms>]",
   eval: "eval <expr|->",
-  screenshot: "screenshot [<ref>] [--full] [--out <file>]",
+  screenshot: "screenshot [<ref> | --selector <css>] [--full] [--out <file>]",
   network: "network [list|get <n>|clear]",
   tabs: "tabs [list|new [<url>]|select <tN>|close <tN>]",
   back: "back [--timeout <ms>]",
@@ -313,8 +313,14 @@ const snapOpts = (ctx: Ctx, ref?: string): SnapshotOptions => ({
   ...(ref !== undefined ? { ref } : {}),
 });
 
-/** Run `fn` with a NetworkRecorder on the page when --capture asks; how many JSON responses it kept. */
-async function capturing<T>(ctx: Ctx, s: BrowserSession, fn: () => Promise<T>): Promise<{ value: T; captured?: number }> {
+/** What --capture recorded: during this command, and in the tab's log, which keeps every command's until `network clear`. */
+interface Captured {
+  captured: number;
+  logged: number;
+}
+
+/** Run `fn` with a NetworkRecorder on the page when --capture asks; how many JSON responses it kept, and how many the log holds now. */
+async function capturing<T>(ctx: Ctx, s: BrowserSession, fn: () => Promise<T>): Promise<{ value: T; capture?: Captured }> {
   if (!ctx.flags.capture) return { value: await fn() };
   const rec = new NetworkRecorder(s);
   await rec.start();
@@ -322,7 +328,8 @@ async function capturing<T>(ctx: Ctx, s: BrowserSession, fn: () => Promise<T>): 
   try {
     const value = await fn();
     stopped = true;
-    return { value, captured: (await rec.stop()).length };
+    const captured = (await rec.stop()).length;
+    return { value, capture: { captured, logged: listNetwork(s.targetId).length } };
   } finally {
     // On a throw: detach, and keep what was recorded before it.
     if (!stopped) await rec.stop().catch(() => {});
@@ -350,16 +357,30 @@ const frozen = (d: DialogInfo | undefined): boolean => d !== undefined && !d.dis
 const challengeLine = (ctx: Ctx, c: Challenge): string =>
   `challenge: ${c.kind}${c.blocking ? " (blocking)" : ""} — let the human solve it, then ${follow(ctx).waitClear}`;
 
-const capturedLine = (ctx: Ctx, n: number): string => `captured ${n} JSON response${n === 1 ? "" : "s"} — ${follow(ctx).networkList}`;
+const capturedLine = (ctx: Ctx, c: Captured): string =>
+  `captured ${c.captured} JSON response${c.captured === 1 ? "" : "s"} (${c.logged} in the log) — ${follow(ctx).networkList}`;
 
-function actionText(ctx: Ctx, r: ActionResult, captured: number | undefined, snap: SnapshotResult | undefined): string {
+const capturedJson = (c: Captured | undefined) => (c ? { captured: c.captured, logged: c.logged } : {});
+
+/** How much of a field's value a result line shows. */
+const VALUE_SHOWN = 200;
+
+/** The value a result line shows: a field's text quoted (so a mask or a maxlength shows), anything else as JSON. */
+function valueText(v: unknown): string {
+  if (typeof v !== "string") return show(v);
+  return JSON.stringify(v.length > VALUE_SHOWN ? `${v.slice(0, VALUE_SHOWN - 1)}…` : v);
+}
+
+function actionText(ctx: Ctx, r: ActionResult, capture: Captured | undefined, snap: SnapshotResult | undefined): string {
   const lines = [`${r.action}${r.ref !== undefined ? ` ${r.ref}` : ""}: ${r.navigated ? "navigated to " : ""}${where(r.url, r.title)}`];
-  // What the action yields (the options chosen, the scroll position); an empty protocol answer says nothing.
-  if (r.value !== undefined && !(typeof r.value === "object" && r.value !== null && Object.keys(r.value).length === 0)) lines.push(`  value: ${show(r.value)}`);
+  // What the action yields (the field's value, the options chosen, the scroll position); an empty protocol answer says nothing.
+  if (r.valueHidden) lines.push("  value: (hidden)");
+  else if (r.value !== undefined && !(typeof r.value === "object" && r.value !== null && Object.keys(r.value).length === 0))
+    lines.push(`  value: ${valueText(r.value)}`);
   if (r.note) lines.push(`note: ${r.note}`);
   if (r.dialog) lines.push(dialogLine(r.dialog, follow(ctx)));
   if (r.challenge) lines.push(challengeLine(ctx, r.challenge));
-  if (captured !== undefined) lines.push(capturedLine(ctx, captured));
+  if (capture) lines.push(capturedLine(ctx, capture));
   if (snap) lines.push("", snap.text);
   return lines.join("\n");
 }
@@ -371,19 +392,26 @@ function actionText(ctx: Ctx, r: ActionResult, captured: number | undefined, sna
  */
 function mutate(ctx: Ctx, run: (s: BrowserSession, o: ActionOptions) => Promise<ActionResult>): Promise<Out> {
   return onPage(ctx, async (s) => {
-    const { value: r, captured } = await capturing(ctx, s, async () => handled(ctx, await run(s, actOpts(ctx))));
+    const { value: r, capture } = await capturing(ctx, s, async () => handled(ctx, await run(s, actOpts(ctx))));
     const snap = ctx.flags.snapshot && !frozen(r.dialog) ? await takeSnapshot(s, snapOpts(ctx)) : undefined;
     return {
-      json: { ...r, ...(captured !== undefined ? { captured } : {}), ...(snap ? { snapshot: snap } : {}) },
-      text: actionText(ctx, r, captured, snap),
+      json: { ...r, ...capturedJson(capture), ...(snap ? { snapshot: snap } : {}) },
+      text: actionText(ctx, r, capture, snap),
     };
   });
+}
+
+/** The ref the action takes as its first argument, checked to be one before any browser is reached for. */
+function refArg(ctx: Ctx): string {
+  const ref = ctx.args[0] as string;
+  checkRef(ref);
+  return ref;
 }
 
 /** The ref and the rest of the arguments joined with one space (the text of type and fill). */
 function refAndText(ctx: Ctx): [string, string] {
   if (ctx.args.length < 2) throw usageError(ctx.action);
-  return [ctx.args[0] as string, ctx.args.slice(1).join(" ")];
+  return [refArg(ctx), ctx.args.slice(1).join(" ")];
 }
 
 const confirm = (ctx: Ctx) => (ctx.flags.confirm ? { confirm: true } : {});
@@ -432,7 +460,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     return onPage(
       ctx,
       async (s) => {
-        const { value: nav, captured } = await capturing(ctx, s, async () => {
+        const { value: nav, capture } = await capturing(ctx, s, async () => {
           const nav = await s.navigate(url, timeoutOpts(ctx));
           await settle(s, actOpts(ctx));
           return nav;
@@ -445,7 +473,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
         for (const n of notes) lines.push(`note: ${n}`);
         if (nav.note) lines.push(`note: ${nav.note}`);
         if (challenge) lines.push(challengeLine(ctx, challenge));
-        if (captured !== undefined) lines.push(capturedLine(ctx, captured));
+        if (capture) lines.push(capturedLine(ctx, capture));
         if (snap) lines.push("", snap.text);
         return {
           json: {
@@ -457,7 +485,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
             ...(notes.length ? { notes } : {}),
             tab: s.targetId,
             challenge,
-            ...(captured !== undefined ? { captured } : {}),
+            ...capturedJson(capture),
             ...(snap ? { snapshot: snap } : {}),
           },
           text: lines.join("\n"),
@@ -499,18 +527,23 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
 
   async snapshot(ctx) {
     arity(ctx, 0, 1);
-    const r = await onPage(ctx, (s) => takeSnapshot(s, snapOpts(ctx, ctx.args[0])));
+    const { selector } = ctx.flags;
+    if (ctx.args[0] !== undefined && selector !== undefined) throw new UsageError("a snapshot is scoped to a ref or to a --selector, not both");
+    if (ctx.args[0] !== undefined) refArg(ctx);
+    const r = await onPage(ctx, (s) => takeSnapshot(s, { ...snapOpts(ctx, ctx.args[0]), ...(selector !== undefined ? { selector } : {}) }));
     return { json: r, text: r.text };
   },
 
   async click(ctx) {
     arity(ctx, 1);
-    return mutate(ctx, (s, o) => actions.click(s, ctx.args[0] as string, { ...o, ...confirm(ctx) }));
+    const ref = refArg(ctx);
+    return mutate(ctx, (s, o) => actions.click(s, ref, { ...o, ...confirm(ctx) }));
   },
 
   async hover(ctx) {
     arity(ctx, 1);
-    return mutate(ctx, (s, o) => actions.hover(s, ctx.args[0] as string, o));
+    const ref = refArg(ctx);
+    return mutate(ctx, (s, o) => actions.hover(s, ref, o));
   },
 
   async type(ctx) {
@@ -525,7 +558,8 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
 
   async select(ctx) {
     arity(ctx, 2, Number.POSITIVE_INFINITY);
-    return mutate(ctx, (s, o) => actions.select(s, ctx.args[0] as string, ctx.args.slice(1), o));
+    const ref = refArg(ctx);
+    return mutate(ctx, (s, o) => actions.select(s, ref, ctx.args.slice(1), o));
   },
 
   async press(ctx) {
@@ -536,6 +570,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
 
   async upload(ctx) {
     arity(ctx, 2, Number.POSITIVE_INFINITY);
+    const ref = refArg(ctx);
     const cwd = ctx.deps.cwd ?? process.cwd();
     // Checked here, before a browser is reached for, so a typo costs nothing.
     const files = ctx.args.slice(1).map((f) => {
@@ -543,7 +578,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
       if (!existsSync(path) || !statSync(path).isFile()) throw new UsageError(`no such file: ${path}`);
       return path;
     });
-    return mutate(ctx, (s, o) => actions.upload(s, ctx.args[0] as string, files, o));
+    return mutate(ctx, (s, o) => actions.upload(s, ref, files, o));
   },
 
   async scroll(ctx) {
@@ -629,7 +664,20 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     const path = ctx.flags.out !== undefined ? resolve(ctx.deps.cwd ?? process.cwd(), ctx.flags.out) : join(shots, `shot-${stamp}.png`);
     const format = /\.jpe?g$/i.test(path) ? "jpeg" : "png";
     const ref = ctx.args[0];
-    const bytes = await onPage(ctx, (s) => actions.screenshot(s, { format, ...(ref !== undefined ? { ref } : {}), ...(ctx.flags.full ? { full: true } : {}) }));
+    const { selector, full } = ctx.flags;
+    // Checked here, before a browser is reached for.
+    if (ref !== undefined && selector !== undefined) throw new UsageError("a screenshot is of the element a ref or a --selector names, not both");
+    if ((ref !== undefined || selector !== undefined) && full)
+      throw new UsageError("a screenshot is of one element (a ref or a --selector) or of the full page, not both");
+    if (ref !== undefined) refArg(ctx);
+    const bytes = await onPage(ctx, (s) =>
+      actions.screenshot(s, {
+        format,
+        ...(ref !== undefined ? { ref } : {}),
+        ...(selector !== undefined ? { selector } : {}),
+        ...(full ? { full: true } : {}),
+      }),
+    );
     if (ctx.flags.out === undefined) ensurePrivateDir(shots);
     else mkdirSync(dirname(path), { recursive: true });
     // Atomic, through a fresh file: an existing one's looser mode is not kept.

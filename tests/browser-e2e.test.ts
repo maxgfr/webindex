@@ -137,6 +137,22 @@ addEventListener("beforeunload", (e) => {
   </div>
 </div>
 </body></html>`,
+  // A Wikipedia-like infobox: a data table, solid blue, 240 by 120 CSS pixels, after a heading.
+  "/infobox.html": `<!doctype html><html><head><title>Infobox</title></head><body style="margin: 0">
+<main><h1>Florian Wirtz</h1>
+<table class="infobox" aria-label="Florian Wirtz" style="width: 240px; height: 120px; background: #0000ff; color: #0000ff; border-collapse: collapse; border-spacing: 0">
+<tr><th>Born</th><td>3 May 2003</td></tr><tr><th>Club</th><td>Liverpool</td></tr><tr><th>Position</th><td>Midfielder</td></tr></table>
+<p>After the box</p></main></body></html>`,
+  // An ad slot as eurosport.fr's: a fixed layer over the top of the page that holds one image, no control, no text.
+  "/ad.html": `<!doctype html><html><head><title>Ad layer</title></head><body>
+<main><article><h1>Match report</h1>
+<button type="button" onclick="document.getElementById('out').textContent = 'Read'">Read the report</button>
+<p id="out">Nothing yet</p>
+<p>${"A report that a reader came for, long enough to be the main content of the page. ".repeat(12)}</p></article></main>
+<div id="ad" style="position: fixed; left: 0; top: 0; width: 100%; height: 50%; z-index: 100">
+  <img alt="Advertisement" style="display: block; width: 100%; height: 100%" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%23ddd'/%3E%3C/svg%3E">
+</div>
+</body></html>`,
   "/js.html": `<!doctype html><html><head><title>Rendered later</title></head><body><main id="root"></main>
 <script>
 fetch("/api.json").then((r) => r.json()).then((j) => {
@@ -343,7 +359,9 @@ describe.runIf(live)("a real browser, driven command by command", () => {
     "fills, selects, checks and uploads, then a click on Search passes the guard and the page's fetch is captured",
     async () => {
       await snapshot();
-      await ok("fill", [refOf(snap, "textbox", "Query"), "webindex"]);
+      const filled = await ok("fill", [refOf(snap, "textbox", "Query"), "webindex"]);
+      // The value the field ended with is echoed.
+      expect(filled.text.split("\n")[1]).toBe('  value: "webindex"');
       const sel = await ok("select", [refOf(snap, "combobox", "Kind"), "Beta"]);
       expect((sel.json as { value?: unknown }).value).toEqual(["b"]);
       await ok("click", [refOf(snap, "checkbox", "Agree")]);
@@ -383,7 +401,10 @@ describe.runIf(live)("a real browser, driven command by command", () => {
       expect((await ok("eval", ["document.getElementById('out').textContent"])).json).toMatchObject({ value: expect.stringMatching(/^Results:/) });
 
       await ok("fill", [refOf(snap, "textbox", "User"), "someone"]);
-      await ok("fill", [refOf(snap, "textbox", "Password"), "not-a-secret"]);
+      const secret = await ok("fill", [refOf(snap, "textbox", "Password"), "not-a-secret"]);
+      // Never a password's.
+      expect(secret.text.split("\n")[1]).toBe("  value: (hidden)");
+      expect(JSON.stringify(secret.json)).not.toContain("not-a-secret");
       const enter = await run("press", ["Enter"]);
       expect(enter.exitCode).toBe(1);
       expect(enter.text).toMatch(/refused to press Enter.*password field/);
@@ -577,6 +598,62 @@ describe.runIf(live)("a real browser, driven command by command", () => {
       await ok("click", [refuse]);
       expect((await ok("eval", ["document.getElementById('out').textContent"])).json).toMatchObject({ value: "Refused" });
       expect(await snapshot()).not.toContain("overlay (covers the page)");
+    },
+    STEP_MS,
+  );
+
+  it(
+    "does not take an image-only fixed ad layer for an overlay; a click it covers is told what is in the way, with no consent wording",
+    async () => {
+      const r = await ok("open", [`${base}/ad.html`], { snapshot: true });
+      expect(r.text).not.toContain("overlay (covers the page)");
+      expect(r.text).toContain('image "Advertisement"');
+      const read = await run("click", [refOf(r.text, "button", "Read the report")]);
+      expect(read.exitCode).toBe(1);
+      expect(read.text).toMatch(/^e\d+ is covered by <div#ad> at \(\d+, \d+\): close or move it out of the way, then retry$/);
+    },
+    STEP_MS,
+  );
+
+  it(
+    "screenshots a container by its ref and by --selector: the infobox table, not the page around it",
+    async () => {
+      const r = await ok("open", [`${base}/infobox.html`], { snapshot: true });
+      const table = refOf(r.text, "table", "Florian Wirtz");
+      // A container's ref is not a control: --interactive leaves it out.
+      expect((await ok("snapshot", [], { interactive: true })).text).not.toContain(`[ref=${table}]`);
+      await ok("screenshot", [table], { out: "box-ref.png" });
+      const css = await ok("screenshot", [], { selector: "table.infobox", out: "box-css.png" });
+      expect(css.json).toMatchObject({ format: "png" });
+      for (const file of ["box-ref.png", "box-css.png"]) {
+        const png = decodePng(readFileSync(join(scratch, file)));
+        const ratio = png.width / 240;
+        expect(ratio, file).toBeGreaterThanOrEqual(1);
+        expect(png.height, file).toBe(Math.round(120 * ratio));
+        // The clip is on the blue table, not on the white page around it.
+        for (const [x, y] of [
+          [2, 2],
+          [png.width >> 1, png.height >> 1],
+          [png.width - 3, png.height - 3],
+        ] as const) {
+          const [red, green, blue] = png.pixel(x, y);
+          expect(blue, file).toBeGreaterThan(200);
+          expect(red, file).toBeLessThan(60);
+          expect(green, file).toBeLessThan(60);
+        }
+      }
+      // A snapshot scoped the same two ways.
+      for (const scoped of [await ok("snapshot", [table]), await ok("snapshot", [], { selector: "table.infobox" })]) {
+        expect(scoped.text).toContain(`table "Florian Wirtz" [ref=${table}]`);
+        expect(scoped.text).toContain("Liverpool");
+        expect(scoped.text).not.toContain("After the box");
+      }
+      const none = await run("screenshot", [], { selector: "table.nope", out: "none.png" });
+      expect(none.exitCode).toBe(1);
+      expect(none.text).toBe("no element matches table.nope");
+      const asRef = await run("screenshot", ["table.infobox"]);
+      expect(asRef.exitCode).toBe(2);
+      expect(asRef.text).toMatch(/^expected a ref like e12 from the latest snapshot; CSS selectors: use --selector/);
     },
     STEP_MS,
   );
