@@ -35,6 +35,35 @@ Use plain `fetch` everywhere else: it is faster and needs no browser.
 `snapshot --interactive` lists only the controls and is much shorter.
 `snapshot e40` shows one subtree. Same-origin iframes are expanded.
 
+## Overlays and consent walls
+
+What covers the page comes first in a snapshot, under its own header, and is
+not repeated in the tree below it:
+
+```
+- overlay (covers the page):
+  - dialog "Vos choix"
+    - button "Accepter et continuer" [ref=e1]
+    - button "Refuser" [ref=e2]
+- banner
+  ...
+```
+
+An overlay is a visible dialog (`role="dialog"`, `alertdialog`, `aria-modal`,
+an open `<dialog>`) or a fixed or sticky layer over at least 30% of the
+viewport with nothing on top of it. A `--max-chars` cut never drops it, even
+when the page appends it at the end of `<body>`. A click that lands on one is
+refused (exit 1) with the overlay's controls and their refs, which you can use
+in the next command.
+
+**Ask the user before accepting tracking or consent.** "Accept", "Refuse",
+"Customise" and "Close" are the user's choices, not yours, even though the guard
+does not stop them. Tell the user what the overlay asks, and click the answer they
+pick. `fetch --browser` never needs an answer: it reads a copy of the page
+without its overlays, dialogs and consent panels (OneTrust, Didomi, Sourcepoint,
+Quantcast, Cookiebot, Usercentrics, TrustArc and the like). `--full-page` reads
+everything.
+
 ## Refs
 
 - **`eN` is the element's `backendDOMNodeId`**, kept in `refs/<tab>.json`. A
@@ -44,7 +73,8 @@ Use plain `fetch` everywhere else: it is faster and needs no browser.
   fails with exit 1: `ref "e12" is unknown or stale: take a new snapshot`. Take
   one and use its refs. Never guess a ref.
 - **A click is a real mouse press** at the element's centre, refused when
-  something covers that point (a cookie banner); the error names it.
+  something covers that point (a cookie banner). The error names it, and lists
+  the controls of the overlay it belongs to, with refs.
 
 ## Safety rules
 
@@ -83,7 +113,10 @@ lasts across runs. `profile import <chrome|brave|chromium|edge|path>` copies an
 existing browser's session in once. It refuses a source that is running and a
 target that exists unless `--force`. Cookies are encrypted per browser kind, so
 import from the same browser you run: a Brave profile under Chrome reads as
-logged out. `profile reset` deletes a profile, `profile path` prints it.
+logged out. So a profile belongs to one kind of browser: the kind it is imported
+from or first launched with, recorded in the profile. Launching another kind on
+it fails and suggests another profile (`--profile brave`). `profile reset` deletes
+a profile, `profile path` prints it.
 
 Each command finds its browser in this order:
 
@@ -96,7 +129,10 @@ Each command finds its browser in this order:
 3. **A new browser**, started with `--remote-debugging-port=0` and
    `--user-data-dir` set to the profile, reading the real port from
    `DevToolsActivePort`. It is headed unless `--headless`. A headless window has
-   nowhere for a human to solve a challenge.
+   nowhere for a human to solve a challenge. Which browser: `WEBINDEX_BROWSER_BIN`,
+   else the kind `open --browser-kind chrome|brave|chromium|edge` names, else
+   `WEBINDEX_BROWSER_KIND`, else the profile's own kind, else the first of Chrome,
+   Brave, Chromium and Edge found.
 
 There is no daemon: each command reconnects through `session.json`, so the tab
 and its refs carry over. A cross-process lock runs commands one at a time, and
@@ -119,6 +155,25 @@ where the human can solve a challenge. Each read uses a scratch tab that is
 closed afterwards, so your agent tab is left alone. An error page (HTTP 400 or
 higher) never counts as a browser read. Downloads are denied while a read runs,
 and `WEBINDEX_BROWSER_CONCURRENCY` limits how many pages render at once.
+
+## Ad blocking
+
+Ads and trackers slow pages down and put more overlays in the way. Two ways to
+block them in the dedicated browser:
+
+- **Brave**, which blocks ads and trackers on its own (Shields), and hides many
+  cookie notices too: `WEBINDEX_BROWSER_KIND=brave`, or
+  `browser open <url> --browser-kind brave`. Give it a profile of its own
+  (`--profile brave`) if the default one was made with Chrome.
+- **An unpacked extension**, such as uBlock Origin Lite: download the Chromium
+  zip of a release on github.com/uBlockOrigin/uBOL-home, unzip it, and name the folder that holds
+  `manifest.json`: `WEBINDEX_BROWSER_EXTENSIONS=/abs/path/uBOLite`. Several are
+  comma separated. They are loaded, and every other extension kept off, only when
+  webindex launches the browser: `close` a running one first. Chromium, Brave,
+  Edge and Chrome for Testing load them. **Branded Google Chrome 137 and later
+  ignores them**: `open` and `doctor` say so and point at the others.
+
+`doctor` shows the kind asked for and the extensions it would load.
 
 ## Network capture
 
@@ -153,6 +208,8 @@ that matters.
 |---|---|
 | `WEBINDEX_BROWSER_DIR` | the browser home (default `~/.webindex/browser`) |
 | `WEBINDEX_BROWSER_BIN` | the browser binary, instead of the first one found |
+| `WEBINDEX_BROWSER_KIND` | `chrome`, `brave`, `chromium` or `edge`: the kind launched when no binary is named (`open --browser-kind` wins) |
+| `WEBINDEX_BROWSER_EXTENSIONS` | unpacked extensions to load when webindex launches the browser: absolute folders holding a `manifest.json`, comma separated |
 | `WEBINDEX_BROWSER_FETCH` | `always`, `fallback` or `off` (default): whether `fetch` renders pages in the browser |
 | `WEBINDEX_BROWSER_CONCURRENCY` | pages the fetch rung renders at once (default 1, at most 4) |
 | `WEBINDEX_BROWSER_TIMEOUT_MS` | how long the fetch rung gives one page (default 30000) |
@@ -168,7 +225,7 @@ Tools that change the page return the snapshot taken after them.
 
 | CLI | MCP tool |
 |---|---|
-| `open <url>` (`--new-tab`, `--capture`, `--profile`, `--headless`) | `webindex_browser_open` |
+| `open <url>` (`--new-tab`, `--capture`, `--profile`, `--headless`, `--browser-kind`) | `webindex_browser_open` (`browserKind`) |
 | `snapshot [<ref>]` (`--interactive`) | `webindex_browser_snapshot` (`mode` required) |
 | `click`, `hover`, `type`, `fill`, `select`, `press`, `upload`, `scroll` | `webindex_browser_<same name>` |
 | `wait --text\|--gone\|--selector\|--url\|--load\|--idle\|--clear\|--ms` | `webindex_browser_wait` (`condition`, `value`) |
