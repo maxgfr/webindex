@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -121,6 +121,21 @@ addEventListener("beforeunload", (e) => {
   "/later.html": `<!doctype html><html><head><title>Later</title></head><body><h1>An alert after the command</h1>
 <script>setTimeout(() => alert("later"), 800);</script></body></html>`,
   "/second.html": `<!doctype html><html><head><title>Second page</title></head><body><h1>The second page</h1></body></html>`,
+  // A consent wall appended at the end of <body>, as lemonde.fr's is: fixed, over the whole viewport, no dialog role.
+  "/overlay.html": `<!doctype html><html><head><title>Walled article</title></head><body>
+<header><nav>${Array.from({ length: 30 }, (_, i) => `<a href="/s${i}">Section ${i}</a>`).join(" ")}</nav></header>
+<main><article><h1>The walled article</h1>
+<p>${"The article body that a reader came for, long enough to be the main content of the page. ".repeat(12)}</p>
+<button type="button" onclick="document.getElementById('out').textContent = 'Comments'">Show the comments</button>
+<p id="out">Nothing yet</p></article></main>
+<div id="cmp" style="position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 9999">
+  <div style="background: #fff; width: 60%; margin: 20vh auto; padding: 20px">
+    <p>We and our 812 partners store cookies to personalise ads and measure audiences.</p>
+    <button type="button" onclick="document.getElementById('cmp').remove(); document.getElementById('out').textContent = 'Refused'">Refuse and continue</button>
+    <button type="button" onclick="document.getElementById('cmp').remove(); document.getElementById('out').textContent = 'Accepted'">Accept and continue</button>
+  </div>
+</div>
+</body></html>`,
   "/js.html": `<!doctype html><html><head><title>Rendered later</title></head><body><main id="root"></main>
 <script>
 fetch("/api.json").then((r) => r.json()).then((j) => {
@@ -528,6 +543,45 @@ describe.runIf(live)("a real browser, driven command by command", () => {
   );
 
   it(
+    "shows a consent wall first, even under a small --max-chars, and a click under it lists the wall's controls by ref",
+    async () => {
+      const r = await ok("open", [`${base}/overlay.html`], { snapshot: true, maxChars: 400 });
+      const lines = r.text.split("\n");
+      const at = lines.indexOf("- overlay (covers the page):");
+      expect(at, r.text).toBeGreaterThan(0);
+      // Right after the url and title, before anything of the page, and kept whole by the cut.
+      expect(lines[at - 1]).toMatch(/^title: Walled article$/);
+      expect(() => refOf(r.text, "button", "Accept and continue")).not.toThrow();
+      expect(() => refOf(r.text, "button", "Refuse and continue")).not.toThrow();
+      expect(r.text).toContain("[truncated:");
+      expect(lines.slice(0, at).join("\n")).not.toMatch(/Section 0/);
+
+      await snapshot();
+      const buy = await run("click", [refOf(snap, "button", "Show the comments")]);
+      expect(buy.exitCode).toBe(1);
+      expect(buy.text).toMatch(/^e\d+ is covered by an overlay \(<div#cmp> "We and our 812 partners/);
+      expect(buy.text).toMatch(/ask before choosing$/);
+      const refuse = refOf(buy.text, "button", "Refuse and continue");
+      // The ref from the error works as it is: the user chose to refuse.
+      await ok("click", [refuse]);
+      expect((await ok("eval", ["document.getElementById('out').textContent"])).json).toMatchObject({ value: "Refused" });
+      expect(await snapshot()).not.toContain("overlay (covers the page)");
+    },
+    STEP_MS,
+  );
+
+  it(
+    "reads the article behind a visible consent wall, not the wall",
+    async () => {
+      const page = await readRenderedPage(`${base}/overlay.html`, { headless: true });
+      expect(page.text).toContain("The article body that a reader came for");
+      expect(page.text).not.toContain("812 partners");
+      expect(page.text).not.toContain("Accept and continue");
+    },
+    STEP_MS,
+  );
+
+  it(
     "guards Enter in a same-origin frame and in a shadow root, and a click on another origin's frame",
     async () => {
       await ok("open", [`${base}/frames.html`]);
@@ -618,6 +672,46 @@ describe.runIf(live)("a real browser, driven command by command", () => {
       const until = Date.now() + 10_000;
       while ((await isPortAlive(port as number)) && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
       expect(await isPortAlive(port as number)).toBe(false);
+    },
+    STEP_MS,
+  );
+
+  it(
+    "loads an unpacked extension when it launches the browser (not branded Chrome 137+, which ignores them)",
+    async (ctx) => {
+      const ext = join(scratch, "ext");
+      mkdirSync(ext, { recursive: true });
+      writeFileSync(
+        join(ext, "manifest.json"),
+        JSON.stringify({
+          manifest_version: 3,
+          name: "webindex e2e",
+          version: "1.0",
+          content_scripts: [{ matches: ["<all_urls>"], js: ["content.js"], run_at: "document_start" }],
+        }),
+      );
+      writeFileSync(join(ext, "content.js"), 'document.documentElement.dataset.webindexExt = "1";\n');
+      process.env[`${PREFIX}_BROWSER_EXTENSIONS`] = ext;
+      await ok("close", [], { all: true });
+      try {
+        const r = await ok("open", [`${base}/second.html`]);
+        const notes = (r.json as { notes?: string[] }).notes ?? [];
+        if (notes.some((n) => /ignores unpacked extensions/.test(n))) {
+          expect(r.text).toMatch(/note: Google Chrome ≥ 137 ignores unpacked extensions — use Brave/);
+          ctx.skip("branded Google Chrome 137+ ignores --load-extension: run with WEBINDEX_E2E_BROWSER set to Brave, Chromium or Chrome for Testing");
+        }
+        // A content script injected at document_start: it ran before the page's own.
+        const until = Date.now() + 10_000;
+        let marked: unknown;
+        while (Date.now() < until) {
+          marked = ((await ok("eval", ["document.documentElement.dataset.webindexExt ?? null"])).json as { value?: unknown }).value;
+          if (marked === "1") break;
+          await ok("reload");
+        }
+        expect(marked).toBe("1");
+      } finally {
+        await run("close", [], { all: true });
+      }
     },
     STEP_MS,
   );
