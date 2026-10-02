@@ -914,8 +914,9 @@ interface DetectOptions {
     exists?: (path: string) => boolean;
 }
 /**
- * The browser to launch: `<PREFIX>_BROWSER_BIN` if set, then `prefer`, then
- * Chrome, Brave, Chromium, Edge. `null` when none is installed.
+ * The browser to launch: `<PREFIX>_BROWSER_BIN` if set, then `prefer` (else
+ * `<PREFIX>_BROWSER_KIND`), then Chrome, Brave, Chromium, Edge. `null` when
+ * none is installed.
  *
  * An explicit path that does not exist throws rather than falling through: a
  * user who named a binary and was handed a different one would drive the wrong
@@ -1029,8 +1030,8 @@ interface BrowserDeps {
     sleep(ms: number): Promise<void>;
     connectCdp(wsUrl: string): Promise<CdpClient>;
     discovery: typeof discovery;
-    /** Which browser to launch when none is named (`detectBrowserBinary`). */
-    detectBrowser(): BrowserBinary | null;
+    /** Which browser to launch when none is named (`detectBrowserBinary`), trying `prefer` first. */
+    detectBrowser(prefer?: BrowserKind): BrowserBinary | null;
     /** Signal a process we launched in an earlier call, known only by its pid. */
     kill(pid: number, signal: NodeJS.Signals): void;
     /** Reads `WEBINDEX_<name>` (brand-aware), like the rest of the library. */
@@ -1046,6 +1047,8 @@ interface LaunchOptions {
     headless?: boolean;
     /** The browser binary; detected when unset. */
     binary?: string;
+    /** The kind of browser to launch (`--browser-kind`); BROWSER_KIND, then the profile's own kind, when unset. */
+    kind?: BrowserKind;
     /**
      * Never a saved browser this library did not launch (one `attach` or `--cdp`
      * named): the user lent it for the agent's session, not for reads in the
@@ -1063,6 +1066,8 @@ interface Endpoint {
     pid?: number;
     profile: string;
     headless: boolean;
+    /** What the launch has to tell the user (extensions the browser will not load); only from the call that spawned it. */
+    notes?: string[];
 }
 
 interface OpenOptions extends LaunchOptions {
@@ -1149,6 +1154,8 @@ declare class BrowserSession {
     get pid(): number | undefined;
     get profile(): string;
     get headless(): boolean;
+    /** What the launch had to say (extensions the browser will not load), once: the next call gets nothing. */
+    takeNotes(): string[];
     get targetId(): string;
     get sessionId(): string;
     /** The current tab's flat session. It changes with selectTab/newTab/closeTab: read it, do not keep it. */
@@ -1670,6 +1677,8 @@ interface RenderOptions {
     refs: RefTable;
     /** Same-process iframe trees, keyed by the iframe's backendDOMNodeId as a string. */
     frames?: Record<string, AXNode[]>;
+    /** The backendDOMNodeIds of the overlays over the page: rendered first, each under its own header. Ignored with rootBackendId. */
+    overlays?: number[];
 }
 interface RenderResult {
     text: string;

@@ -6270,19 +6270,33 @@ function detectBrowserBinary(opts = {}) {
     if (!found) throw new Error(`BROWSER_BIN points at "${explicit}", which is not an executable file`);
     return { kind: kindOf(found), path: found };
   }
-  const kinds = opts.prefer ? [opts.prefer, ...ORDER.filter((k) => k !== opts.prefer)] : ORDER;
+  let prefer = opts.prefer;
+  if (!prefer) {
+    const asked = (opts.env ? opts.env("BROWSER_KIND") : env("BROWSER_KIND"))?.trim().toLowerCase();
+    if (asked && !isBrowserKind(asked)) throw new Error(`BROWSER_KIND is "${asked}", not one of ${ORDER.join(", ")}`);
+    if (asked && isBrowserKind(asked)) prefer = asked;
+  }
+  const kinds = prefer ? [prefer, ...ORDER.filter((k) => k !== prefer)] : ORDER;
   for (const kind of kinds) {
     const path = candidates(kind, platform, sys, home).find(exists);
     if (path) return { kind, path };
   }
   return null;
 }
-var ORDER, MAC_APPS, LINUX_NAMES, WINDOWS_PATHS;
+function ignoresUnpackedExtensions(bin, browserVersion) {
+  if (bin.kind !== "chrome" || /for testing/i.test(bin.path.split(/[\\/]/).pop() ?? "")) return false;
+  if (browserVersion === void 0) return true;
+  const major = /^(?:Headless)?Chrome\/(\d+)\./.exec(browserVersion)?.[1];
+  return major !== void 0 && Number(major) >= 137;
+}
+var ORDER, BROWSER_KINDS, isBrowserKind, MAC_APPS, LINUX_NAMES, WINDOWS_PATHS;
 var init_detect = __esm({
   "src/browser/detect.ts"() {
     "use strict";
     init_brand();
     ORDER = ["chrome", "brave", "chromium", "edge"];
+    BROWSER_KINDS = ORDER;
+    isBrowserKind = (v) => ORDER.includes(v);
     MAC_APPS = {
       chrome: "Google Chrome",
       brave: "Brave Browser",
@@ -6440,7 +6454,7 @@ function defaultBrowserDeps() {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     connectCdp: (wsUrl) => CdpClient.connect(wsUrl),
     discovery: discovery_exports,
-    detectBrowser: () => detectBrowserBinary(),
+    detectBrowser: (prefer) => detectBrowserBinary(prefer ? { prefer } : {}),
     kill: (pid, signal) => void process.kill(pid, signal),
     env: (name2) => env(name2),
     platform: process.platform
@@ -6456,6 +6470,234 @@ var init_deps = __esm({
     init_cdp();
     init_detect();
     init_discovery();
+  }
+});
+
+// src/browser/overlay.ts
+async function backendIdOf(page, objectId) {
+  const { node } = await page.send("DOM.describeNode", { objectId }, { timeoutMs: PROBE_TIMEOUT_MS4 });
+  return typeof node?.backendNodeId === "number" && node.backendNodeId > 0 ? node.backendNodeId : void 0;
+}
+function releaseGroup(page) {
+  page.send("Runtime.releaseObjectGroup", { objectGroup: GROUP }).catch(() => {
+  });
+}
+async function findOverlays(page) {
+  try {
+    const r = await page.send(
+      "Runtime.evaluate",
+      { expression: `(${OVERLAYS_SOURCE})()`, returnByValue: false, objectGroup: GROUP },
+      { timeoutMs: PROBE_TIMEOUT_MS4 }
+    );
+    if (r.exceptionDetails || !r.result?.objectId) return [];
+    const { result = [] } = await page.send(
+      "Runtime.getProperties",
+      { objectId: r.result.objectId, ownProperties: true },
+      { timeoutMs: PROBE_TIMEOUT_MS4 }
+    );
+    const ids = [];
+    for (const p of result) {
+      if (!/^\d+$/.test(p.name) || !p.value?.objectId) continue;
+      const id = await backendIdOf(page, p.value.objectId);
+      if (id !== void 0) ids.push(id);
+    }
+    return ids;
+  } catch {
+    return [];
+  } finally {
+    releaseGroup(page);
+  }
+}
+async function overlayRootOf(page, objectId) {
+  try {
+    const call = (id, fn, byValue) => page.send(
+      "Runtime.callFunctionOn",
+      { objectId: id, functionDeclaration: fn, returnByValue: byValue, objectGroup: GROUP },
+      { timeoutMs: PROBE_TIMEOUT_MS4 }
+    );
+    const root = await call(objectId, OVERLAY_ROOT_SOURCE, false);
+    const rootId = root.result?.objectId;
+    if (root.exceptionDetails || !rootId) return void 0;
+    const backendNodeId = await backendIdOf(page, rootId);
+    if (backendNodeId === void 0) return void 0;
+    const named = await call(rootId, DESCRIBE_THIS, true);
+    const what = typeof named.result?.value === "string" ? named.result.value : "an element";
+    return { backendNodeId, what };
+  } catch {
+    return void 0;
+  } finally {
+    releaseGroup(page);
+  }
+}
+var CONSENT_SELECTORS, HELPERS, OVERLAYS_SOURCE, OVERLAY_ROOT_SOURCE, DESCRIBE_SOURCE, DESCRIBE_THIS, READ_DOCUMENT, GROUP, PROBE_TIMEOUT_MS4;
+var init_overlay = __esm({
+  "src/browser/overlay.ts"() {
+    "use strict";
+    CONSENT_SELECTORS = [
+      // OneTrust
+      "#onetrust-consent-sdk",
+      "#onetrust-banner-sdk",
+      "#onetrust-pc-sdk",
+      // Didomi
+      "#didomi-host",
+      "#didomi-notice",
+      '[class^="didomi-"]',
+      // Sourcepoint
+      '[id^="sp_message_container"]',
+      // Quantcast Choice
+      ".qc-cmp2-container",
+      "#qc-cmp2-container",
+      // Cookiebot
+      "#CybotCookiebotDialog",
+      "#CybotCookiebotDialogBodyUnderlay",
+      // Usercentrics
+      "#usercentrics-root",
+      "#usercentrics-cmp-ui",
+      // TrustArc
+      "#truste-consent-track",
+      "#consent_blackbar",
+      '[class^="truste_"]',
+      // consentmanager.net, Commanders Act, Axeptio, Iubenda, Complianz, CookieYes, Osano, Borlabs, Google Funding Choices
+      "#cmpbox",
+      "#cmpbox2",
+      "#tc-privacy-wrapper",
+      "#axeptio_overlay",
+      "#iubenda-cs-banner",
+      "#cmplz-cookiebanner-container",
+      ".cky-consent-container",
+      ".osano-cm-window",
+      "#BorlabsCookieBox",
+      ".fc-consent-root",
+      // The IAB TCF / GPP locator frames
+      'iframe[name="__tcfapiLocator"]',
+      'iframe[name="__cmpLocator"]',
+      'iframe[name="__gppLocator"]'
+    ];
+    HELPERS = `const up = (n) => n.parentElement || (n.parentNode && n.parentNode.host) || n.host || null;
+  const body = document.body;
+  const roleOf = (el) => String((el.getAttribute && el.getAttribute("role")) || "").toLowerCase();
+  const isDialog = (el) =>
+    roleOf(el) === "dialog" ||
+    roleOf(el) === "alertdialog" ||
+    (!!el.getAttribute && el.getAttribute("aria-modal") === "true") ||
+    (String(el.tagName || "").toUpperCase() === "DIALOG" && el.open === true);
+  const pinned = (el) => {
+    for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) {
+      const p = getComputedStyle(n).position;
+      if (p === "fixed" || p === "sticky") return true;
+    }
+    return false;
+  };`;
+    OVERLAYS_SOURCE = `function findOverlays() {
+  ${HELPERS}
+  const out = [];
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  if (!body || !(vw > 0) || !(vh > 0)) return out;
+  const isMain = (el) => String(el.tagName || "").toUpperCase() === "MAIN" || roleOf(el) === "main";
+  const holdsMain = (el) => isMain(el) || Array.prototype.some.call(el.querySelectorAll("*"), isMain);
+  const pageText = String(body.textContent || "").length;
+  const shown = (el) => {
+    const cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden" || cs.visibility === "collapse" || Number(cs.opacity) === 0) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  };
+  /** The part of the viewport the element covers, or null when it is under 30%. */
+  const area = (el) => {
+    const r = el.getBoundingClientRect();
+    const left = Math.max(r.left, 0);
+    const top = Math.max(r.top, 0);
+    const w = Math.min(r.right, vw) - left;
+    const h = Math.min(r.bottom, vh) - top;
+    return w > 0 && h > 0 && w * h >= 0.3 * vw * vh ? { left, top, w, h } : null;
+  };
+  const covers = (el, a) => {
+    // A side column is no overlay: one is wide, or over the middle of the screen.
+    const middle = a.left <= vw / 2 && a.left + a.w >= vw / 2 && a.top <= vh / 2 && a.top + a.h >= vh / 2;
+    if (a.w < 0.6 * vw && !middle) return false;
+    const root = el.getRootNode ? el.getRootNode() : document;
+    const at = (root && root.elementFromPoint ? root : document).elementFromPoint(a.left + a.w / 2, a.top + a.h / 2);
+    for (let n = at; n; n = up(n)) if (n === el) return true;
+    return false;
+  };
+  const found = [];
+  const walk = (root) => {
+    const els = root.querySelectorAll("*");
+    for (let i = 0; i < els.length; i++) {
+      const el = els[i];
+      let hit = false;
+      if (isDialog(el)) hit = shown(el);
+      else {
+        const a = area(el);
+        hit = !!a && shown(el) && pinned(el) && covers(el, a) && !(pageText > 0 && String(el.textContent || "").length > 0.6 * pageText);
+      }
+      if (hit && !holdsMain(el)) found.push(el);
+      if (el.shadowRoot) walk(el.shadowRoot);
+    }
+  };
+  walk(body);
+  const inside = (el, other) => {
+    for (let n = up(el); n; n = up(n)) if (n === other) return true;
+    return false;
+  };
+  for (const el of found) if (!found.some((o) => o !== el && inside(el, o))) out.push(el);
+  return out.slice(0, 5);
+}`;
+    OVERLAY_ROOT_SOURCE = `function overlayRoot() {
+  ${HELPERS}
+  const overlays = (${OVERLAYS_SOURCE})();
+  for (let n = this; n; n = up(n)) if (overlays.indexOf(n) >= 0) return n;
+  let outer = null;
+  for (let n = this; n && n !== body && n !== document.documentElement; n = up(n)) {
+    if (n.nodeType !== 1) continue;
+    if (isDialog(n)) return n;
+    if (pinned(n) && !pinned(up(n) || body)) outer = n;
+  }
+  return outer;
+}`;
+    DESCRIBE_SOURCE = `const describe = (el) => {
+    const tag = String(el.tagName || "").toLowerCase();
+    const attr = (n) => (el.getAttribute ? el.getAttribute(n) : null);
+    const role = attr("role");
+    const type = tag === "input" ? attr("type") : null;
+    const text = String(el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim();
+    const shown = text.length > 60 ? text.slice(0, 57) + "..." : text;
+    return "<" + tag + (el.id ? "#" + el.id : "") + (role ? ' role="' + role + '"' : "") + (type ? ' type="' + type + '"' : "") + ">" + (shown ? ' "' + shown + '"' : "");
+  };`;
+    DESCRIBE_THIS = `function describeOverlay() {
+  ${DESCRIBE_SOURCE}
+  return describe(this);
+}`;
+    READ_DOCUMENT = `(() => {
+  const findOverlays = ${OVERLAYS_SOURCE};
+  const root = document.documentElement;
+  if (!root) return { html: "", url: location.href };
+  let overlays = [];
+  try {
+    overlays = findOverlays();
+  } catch (e) {}
+  const mark = "data-overlay-" + Math.random().toString(36).slice(2, 10);
+  for (const el of overlays) if (el.getRootNode && el.getRootNode() === document) el.setAttribute(mark, "");
+  let copy;
+  try {
+    copy = root.cloneNode(true);
+  } finally {
+    for (const el of overlays) if (el.removeAttribute) el.removeAttribute(mark);
+  }
+  const drop = ["[" + mark + "]", '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', "dialog", ${CONSENT_SELECTORS.map((s) => JSON.stringify(s)).join(", ")}];
+  const main = (el) => el.tagName === "MAIN" || el.getAttribute("role") === "main" || !!el.querySelector("main, [role=main]");
+  for (const sel of drop) {
+    let els = [];
+    try {
+      els = Array.from(copy.querySelectorAll(sel));
+    } catch (e) {}
+    for (const el of els) if (!main(el)) el.remove();
+  }
+  return { html: copy.outerHTML, url: location.href };
+})()`;
+    GROUP = "overlay-probe";
+    PROBE_TIMEOUT_MS4 = 5e3;
   }
 });
 
@@ -6575,12 +6817,46 @@ var init_cli_kit = __esm({
   }
 });
 
+// src/browser/extensions.ts
+import { existsSync as existsSync5, statSync as statSync3 } from "fs";
+import { isAbsolute as isAbsolute2, join as join13 } from "path";
+function extensionDirs(raw) {
+  const name2 = envName("BROWSER_EXTENSIONS");
+  return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean).map((dir) => {
+    if (!isAbsolute2(dir)) throw new UsageError(`${name2} takes absolute paths, not ${JSON.stringify(dir)}`);
+    let isDir = false;
+    try {
+      isDir = statSync3(dir).isDirectory();
+    } catch {
+    }
+    if (!isDir) throw new UsageError(`${name2}: no such directory: ${dir}`);
+    if (!existsSync5(join13(dir, "manifest.json"))) {
+      throw new UsageError(`${name2}: ${dir} has no manifest.json \u2014 name the unpacked extension's own folder, the one that holds manifest.json`);
+    }
+    return dir;
+  });
+}
+function extensionArgs(dirs) {
+  if (dirs.length === 0) return [];
+  const list = dirs.join(",");
+  return [`--load-extension=${list}`, `--disable-extensions-except=${list}`];
+}
+var unpackedIgnoredNote;
+var init_extensions = __esm({
+  "src/browser/extensions.ts"() {
+    "use strict";
+    init_brand();
+    init_cli_kit();
+    unpackedIgnoredNote = () => `Google Chrome \u2265 137 ignores unpacked extensions \u2014 use Brave (built-in ad/tracker blocking: ${envName("BROWSER_KIND")}=brave), Chromium, Chrome for Testing or Edge`;
+  }
+});
+
 // src/browser/profile.ts
-import { chmodSync, copyFileSync as copyFileSync2, existsSync as existsSync5, lstatSync, mkdirSync as mkdirSync3, readdirSync as readdirSync5, realpathSync, rmSync as rmSync4, statSync as statSync3 } from "fs";
+import { chmodSync, copyFileSync as copyFileSync2, existsSync as existsSync6, lstatSync, mkdirSync as mkdirSync3, readdirSync as readdirSync5, readFileSync as readFileSync12, realpathSync, rmSync as rmSync4, statSync as statSync4, writeFileSync as writeFileSync6 } from "fs";
 import { homedir as homedir2 } from "os";
-import { basename as basename2, join as join13, resolve as resolve2, sep } from "path";
+import { basename as basename2, join as join14, resolve as resolve2, sep } from "path";
 function browserHome() {
-  return env("BROWSER_DIR") ?? brand().browserDir ?? join13(homedir2(), `.${brand().name}`, "browser");
+  return env("BROWSER_DIR") ?? brand().browserDir ?? join14(homedir2(), `.${brand().name}`, "browser");
 }
 function checkName(name2) {
   if (!PROFILE_NAME.test(name2) || name2 === "." || name2 === "..") {
@@ -6589,7 +6865,23 @@ function checkName(name2) {
 }
 function profileDir(name2 = "default") {
   checkName(name2);
-  return join13(browserHome(), "profiles", name2);
+  return join14(browserHome(), "profiles", name2);
+}
+function profileKindFile(name2 = "default") {
+  return join14(profileDir(name2), `.${brand().name}-kind`);
+}
+function readProfileKind(name2 = "default") {
+  try {
+    const kind = readFileSync12(profileKindFile(name2), "utf8").trim();
+    return isBrowserKind(kind) ? kind : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function writeProfileKind(name2, kind) {
+  ensurePrivateDir(profileDir(name2));
+  writeFileSync6(profileKindFile(name2), `${kind}
+`, { mode: 384 });
 }
 function ensurePrivateDir(path) {
   try {
@@ -6613,7 +6905,7 @@ function realish(path) {
     return realpathSync(p);
   } catch {
     const parent = resolve2(p, "..");
-    return parent === p ? p : join13(realish(parent), basename2(p));
+    return parent === p ? p : join14(realish(parent), basename2(p));
   }
 }
 function assertInsideHome(path) {
@@ -6624,7 +6916,7 @@ function assertInsideHome(path) {
 }
 function resetProfile(name2 = "default") {
   const dir = profileDir(name2);
-  if (!existsSync5(dir)) return;
+  if (!existsSync6(dir)) return;
   assertInsideHome(dir);
   rmSync4(dir, { recursive: true, force: true });
 }
@@ -6637,38 +6929,38 @@ function userDataDir(source2, opts) {
   if (platform === "win32") {
     const local2 = opts.localAppData ?? process.env.LOCALAPPDATA;
     if (!local2) throw new Error("LOCALAPPDATA is not set, so the browser profile cannot be located");
-    return join13(local2, ...parts);
+    return join14(local2, ...parts);
   }
-  return join13(opts.homeDir ?? homedir2(), ...parts);
+  return join14(opts.homeDir ?? homedir2(), ...parts);
 }
 function copyTree(from, to, rel, tally) {
   ensurePrivateDir(to);
   for (const entry of readdirSync5(from, { withFileTypes: true })) {
     const childRel = rel ? `${rel}/${entry.name}` : entry.name;
     if (SKIP_NAMES.has(entry.name) || SKIP_PATHS.has(childRel)) continue;
-    const src = join13(from, entry.name);
-    const dst = join13(to, entry.name);
+    const src = join14(from, entry.name);
+    const dst = join14(to, entry.name);
     if (entry.isDirectory()) {
       copyTree(src, dst, childRel, tally);
     } else if (entry.isFile()) {
       copyFileSync2(src, dst);
       chmodSync(dst, 384);
       tally.files++;
-      tally.bytes += statSync3(dst).size;
+      tally.bytes += statSync4(dst).size;
     }
   }
 }
 function importProfile(source2, opts = {}) {
   const to = profileDir(opts.name ?? "default");
   const from = userDataDir(source2, opts);
-  if (!existsSync5(from)) throw new Error(`browser profile not found at ${from}`);
-  const hasState = existsSync5(join13(from, "Local State"));
-  const hasDefault = existsSync5(join13(from, "Default"));
+  if (!existsSync6(from)) throw new Error(`browser profile not found at ${from}`);
+  const hasState = existsSync6(join14(from, "Local State"));
+  const hasDefault = existsSync6(join14(from, "Default"));
   if (!hasState && !hasDefault) throw new Error(`${from} has no Local State or Default profile to import`);
   const lockNames = (opts.platform ?? process.platform) === "win32" ? ["SingletonLock", "lockfile"] : ["SingletonLock"];
   const locked = lockNames.some((n) => {
     try {
-      lstatSync(join13(from, n));
+      lstatSync(join14(from, n));
       return true;
     } catch (e) {
       if (e.code !== "ENOENT") throw e;
@@ -6678,7 +6970,7 @@ function importProfile(source2, opts = {}) {
   if (locked && !opts.force) {
     throw new Error(`the browser using ${from} appears to be running: close it, or pass force to import anyway`);
   }
-  if (existsSync5(to) && readdirSync5(to).length > 0) {
+  if (existsSync6(to) && readdirSync5(to).length > 0) {
     if (!opts.force) throw new Error(`${to} already holds a profile: pass force to replace it`);
     const a = realish(from);
     const b = realish(to);
@@ -6688,16 +6980,18 @@ function importProfile(source2, opts = {}) {
     assertInsideHome(to);
     rmSync4(to, { recursive: true, force: true });
   }
-  ensurePrivateDir(join13(browserHome(), "profiles"));
+  ensurePrivateDir(join14(browserHome(), "profiles"));
   const tally = { files: 0, bytes: 0 };
   ensurePrivateDir(to);
   if (hasState) {
-    copyFileSync2(join13(from, "Local State"), join13(to, "Local State"));
-    chmodSync(join13(to, "Local State"), 384);
+    copyFileSync2(join14(from, "Local State"), join14(to, "Local State"));
+    chmodSync(join14(to, "Local State"), 384);
     tally.files++;
-    tally.bytes += statSync3(join13(to, "Local State")).size;
+    tally.bytes += statSync4(join14(to, "Local State")).size;
   }
-  if (hasDefault) copyTree(join13(from, "Default"), join13(to, "Default"), "", tally);
+  if (hasDefault) copyTree(join14(from, "Default"), join14(to, "Default"), "", tally);
+  const kind = String(source2);
+  if (Object.hasOwn(USER_DATA[opts.platform ?? process.platform] ?? {}, kind) && isBrowserKind(kind)) writeProfileKind(opts.name ?? "default", kind);
   return { from, to, ...tally };
 }
 var PROFILE_NAME, USER_DATA, SKIP_NAMES, SKIP_PATHS;
@@ -6706,6 +7000,7 @@ var init_profile = __esm({
     "use strict";
     init_brand();
     init_cli_kit();
+    init_detect();
     PROFILE_NAME = /^[A-Za-z0-9._-]{1,64}$/;
     USER_DATA = {
       darwin: {
@@ -6749,26 +7044,26 @@ var init_profile = __esm({
 
 // src/browser/state.ts
 import { randomUUID } from "crypto";
-import { appendFileSync, closeSync, existsSync as existsSync6, openSync, readFileSync as readFileSync12, rmSync as rmSync5, statSync as statSync4, unlinkSync as unlinkSync2, writeSync } from "fs";
-import { join as join14 } from "path";
+import { appendFileSync, closeSync, existsSync as existsSync7, openSync, readFileSync as readFileSync13, rmSync as rmSync5, statSync as statSync5, unlinkSync as unlinkSync2, writeSync } from "fs";
+import { join as join15 } from "path";
 function checkTargetId(id) {
   if (!/^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(id)) throw new Error(`invalid target id: ${JSON.stringify(id)}`);
   return id;
 }
 function readJson2(path) {
   try {
-    return JSON.parse(readFileSync12(path, "utf8"));
+    return JSON.parse(readFileSync13(path, "utf8"));
   } catch {
     return null;
   }
 }
 function writeJson(dir, name2, value) {
   ensurePrivateDir(dir);
-  writeFileAtomic(join14(dir, name2), `${JSON.stringify(value)}
+  writeFileAtomic(join15(dir, name2), `${JSON.stringify(value)}
 `, FILE_MODE);
 }
 function readSession(o) {
-  const v = readJson2(join14(homeOf(o), "session.json"));
+  const v = readJson2(join15(homeOf(o), "session.json"));
   if (!isObj(v) || v.version !== 1 || typeof v.port !== "number" || typeof v.targetId !== "string") return null;
   return v;
 }
@@ -6778,28 +7073,28 @@ function writeSession(s, o) {
 }
 function clearSession(o) {
   if (isNoWrite()) return;
-  rmSync5(join14(homeOf(o), "session.json"), { force: true });
+  rmSync5(join15(homeOf(o), "session.json"), { force: true });
 }
 function readRefs(targetId, o) {
-  const v = readJson2(join14(homeOf(o), "refs", `${checkTargetId(targetId)}.json`));
+  const v = readJson2(join15(homeOf(o), "refs", `${checkTargetId(targetId)}.json`));
   if (!isObj(v) || typeof v.loaderId !== "string" || typeof v.url !== "string" || typeof v.next !== "number" || !isObj(v.refs)) return null;
   return v;
 }
 function writeRefs(targetId, table, o) {
   const id = checkTargetId(targetId);
   if (isNoWrite()) return;
-  writeJson(join14(homeOf(o), "refs"), `${id}.json`, table);
+  writeJson(join15(homeOf(o), "refs"), `${id}.json`, table);
 }
 function clearRefs(targetId, o) {
   const id = targetId === void 0 ? void 0 : checkTargetId(targetId);
   if (isNoWrite()) return;
-  const dir = join14(homeOf(o), "refs");
-  rmSync5(id === void 0 ? dir : join14(dir, `${id}.json`), { recursive: true, force: true });
+  const dir = join15(homeOf(o), "refs");
+  rmSync5(id === void 0 ? dir : join15(dir, `${id}.json`), { recursive: true, force: true });
 }
 function readNetwork(targetId, o) {
   let raw;
   try {
-    raw = readFileSync12(networkFile(targetId, o), "utf8");
+    raw = readFileSync13(networkFile(targetId, o), "utf8");
   } catch (e) {
     if (e instanceof Error && e.message.startsWith("invalid target id")) throw e;
     return [];
@@ -6817,9 +7112,9 @@ function readNetwork(targetId, o) {
 function appendNetwork(targetId, entries, o) {
   const file = networkFile(targetId, o);
   if (isNoWrite() || entries.length === 0) return;
-  ensurePrivateDir(join14(homeOf(o), "network"));
+  ensurePrivateDir(join15(homeOf(o), "network"));
   const lines = entries.map((e) => JSON.stringify(e));
-  const existing = existsSync6(file) ? readFileSync12(file, "utf8").split("\n").filter(Boolean) : [];
+  const existing = existsSync7(file) ? readFileSync13(file, "utf8").split("\n").filter(Boolean) : [];
   if (existing.length + lines.length <= NETWORK_CAP) {
     appendFileSync(file, `${lines.join("\n")}
 `, { mode: FILE_MODE });
@@ -6830,7 +7125,7 @@ function appendNetwork(targetId, entries, o) {
 `, FILE_MODE);
 }
 function clearNetwork(targetId, o) {
-  const path = targetId === void 0 ? join14(homeOf(o), "network") : networkFile(targetId, o);
+  const path = targetId === void 0 ? join15(homeOf(o), "network") : networkFile(targetId, o);
   if (isNoWrite()) return;
   rmSync5(path, { recursive: true, force: true });
 }
@@ -6846,7 +7141,7 @@ function staleReason(path, staleMs, now) {
   let at;
   let pid;
   try {
-    const held = JSON.parse(readFileSync12(path, "utf8"));
+    const held = JSON.parse(readFileSync13(path, "utf8"));
     pid = held.pid;
     at = typeof held.at === "number" ? held.at : Number.NaN;
   } catch {
@@ -6854,7 +7149,7 @@ function staleReason(path, staleMs, now) {
   }
   if (Number.isNaN(at)) {
     try {
-      at = statSync4(path).mtimeMs;
+      at = statSync5(path).mtimeMs;
     } catch {
       return "gone";
     }
@@ -6865,7 +7160,7 @@ function staleReason(path, staleMs, now) {
 }
 function holds(path, token) {
   try {
-    const held = JSON.parse(readFileSync12(path, "utf8"));
+    const held = JSON.parse(readFileSync13(path, "utf8"));
     return held.pid === process.pid && held.token === token;
   } catch {
     return false;
@@ -6877,7 +7172,7 @@ async function withBrowserLock(fn, opts = {}) {
   const { now, sleep: sleep2 } = opts.deps ?? realDeps;
   const dir = homeOf(opts);
   ensurePrivateDir(dir);
-  const path = join14(dir, "lock");
+  const path = join15(dir, "lock");
   const token = randomUUID();
   const stamp = () => JSON.stringify({ pid: process.pid, at: now(), token });
   const deadline = now() + waitMs;
@@ -6934,7 +7229,7 @@ var init_state = __esm({
     FILE_MODE = 384;
     homeOf = (o) => o?.home ?? browserHome();
     isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-    networkFile = (targetId, o) => join14(homeOf(o), "network", `${checkTargetId(targetId)}.jsonl`);
+    networkFile = (targetId, o) => join15(homeOf(o), "network", `${checkTargetId(targetId)}.jsonl`);
     realDeps = {
       now: () => Date.now(),
       sleep: (ms) => new Promise((r) => setTimeout(r, ms))
@@ -6943,7 +7238,7 @@ var init_state = __esm({
 });
 
 // src/browser/launch.ts
-import { join as join15 } from "path";
+import { join as join16 } from "path";
 async function resolveEndpoint(opts = {}) {
   const deps = browserDeps(opts.deps);
   const profile = opts.profile ?? "default";
@@ -6978,24 +7273,38 @@ async function resolveEndpoint(opts = {}) {
     }
     clearSession();
   }
-  return launch(deps, opts.binary, profile, headless);
+  return launch(deps, opts.binary, profile, headless, opts.kind);
 }
-async function launch(deps, binary, profile, headless) {
-  const bin = binary ?? deps.detectBrowser()?.path;
-  if (!bin) {
+function preferredKind(deps, kind, profile) {
+  if (kind) return kind;
+  const asked = deps.env("BROWSER_KIND")?.trim().toLowerCase();
+  if (asked && !isBrowserKind(asked)) throw new UsageError(`${envName("BROWSER_KIND")} is "${asked}", not one of chrome, brave, chromium, edge`);
+  return asked && isBrowserKind(asked) ? asked : readProfileKind(profile);
+}
+async function launch(deps, binary, profile, headless, kind) {
+  const found = binary ? { kind: kindOf(binary), path: binary } : deps.detectBrowser(preferredKind(deps, kind, profile));
+  if (!found) {
     throw new Error(`no Chrome, Brave, Chromium or Edge found: install one, or set ${envName("BROWSER_BIN")} to the browser's executable`);
   }
+  const bin = found.path;
   const dir = profileDir(profile);
   ensurePrivateDir(browserHome());
-  ensurePrivateDir(join15(browserHome(), "profiles"));
+  ensurePrivateDir(join16(browserHome(), "profiles"));
   ensurePrivateDir(dir);
-  const portFile = join15(dir, "DevToolsActivePort");
+  const portFile = join16(dir, "DevToolsActivePort");
   const running = await readActivePort(deps, portFile);
   if (running && await isSameBrowser(deps, running.port, "127.0.0.1", running.path)) {
     return { host: "127.0.0.1", port: running.port, launchedByUs: true, profile, headless };
   }
+  const owner = readProfileKind(profile);
+  if (owner && owner !== found.kind) {
+    throw new UsageError(
+      `the profile "${profile}" belongs to ${owner} (its logins are encrypted for that browser), not ${found.kind}: use a profile of its own (\`--profile ${found.kind}\`), or ${owner} (\`--browser-kind ${owner}\`)`
+    );
+  }
+  const extensions = extensionDirs(deps.env("BROWSER_EXTENSIONS"));
   await deps.fs.rm(portFile, { force: true });
-  const args = ["--remote-debugging-port=0", `--user-data-dir=${dir}`, "--no-first-run", "--no-default-browser-check"];
+  const args = ["--remote-debugging-port=0", `--user-data-dir=${dir}`, "--no-first-run", "--no-default-browser-check", ...extensionArgs(extensions)];
   if (headless) args.push("--headless=new");
   args.push("about:blank");
   const child = deps.spawn(bin, args, { detached: true, stdio: "ignore" });
@@ -7014,7 +7323,17 @@ async function launch(deps, binary, profile, headless) {
     const active2 = await readActivePort(deps, portFile);
     if (active2 && await isSameBrowser(deps, active2.port, "127.0.0.1", active2.path)) {
       const port = active2.port;
-      return { host: "127.0.0.1", port, launchedByUs: true, ...child.pid !== void 0 ? { pid: child.pid } : {}, profile, headless };
+      if (!owner) writeProfileKind(profile, found.kind);
+      const notes = extensions.length > 0 && await dropsExtensions(deps, found, port) ? [unpackedIgnoredNote()] : [];
+      return {
+        host: "127.0.0.1",
+        port,
+        launchedByUs: true,
+        ...child.pid !== void 0 ? { pid: child.pid } : {},
+        profile,
+        headless,
+        ...notes.length ? { notes } : {}
+      };
     }
     if (failure2) throw new Error(failure2);
     if (deps.now() >= deadline) {
@@ -7023,6 +7342,11 @@ async function launch(deps, binary, profile, headless) {
     }
     await deps.sleep(POLL_MS);
   }
+}
+async function dropsExtensions(deps, bin, port) {
+  if (!ignoresUnpackedExtensions(bin)) return false;
+  const version = await deps.discovery.getVersion(port, "127.0.0.1").then((v) => typeof v.Browser === "string" ? v.Browser : void 0).catch(() => void 0);
+  return ignoresUnpackedExtensions(bin, version);
 }
 async function readActivePort(deps, file) {
   let text;
@@ -7059,7 +7383,9 @@ var init_launch = __esm({
     init_brand();
     init_cli_kit();
     init_deps();
+    init_detect();
     init_discovery();
+    init_extensions();
     init_profile();
     init_state();
     STARTUP_TIMEOUT_MS = 2e4;
@@ -7068,7 +7394,7 @@ var init_launch = __esm({
 });
 
 // src/browser/session.ts
-import { join as join16 } from "path";
+import { join as join17 } from "path";
 function cleanTabs(v) {
   const out = {};
   if (typeof v !== "object" || v === null) return out;
@@ -7226,7 +7552,7 @@ async function closeBrowser(opts = {}) {
     await closeAt(deps, saved.port, host, saved.pid);
     closed = true;
   } else if (!live) {
-    const own = await readActivePort(deps, join16(profileDir(opts.profile ?? saved?.profile), "DevToolsActivePort"));
+    const own = await readActivePort(deps, join17(profileDir(opts.profile ?? saved?.profile), "DevToolsActivePort"));
     if (own && await isSameBrowser(deps, own.port, "127.0.0.1", own.path)) {
       await closeAt(deps, own.port, "127.0.0.1", void 0);
       closed = launchedByUs = true;
@@ -7314,6 +7640,12 @@ var init_session = __esm({
       }
       get headless() {
         return this.endpoint.headless;
+      }
+      /** What the launch had to say (extensions the browser will not load), once: the next call gets nothing. */
+      takeNotes() {
+        const notes = this.endpoint.notes ?? [];
+        this.endpoint.notes = void 0;
+        return notes;
       }
       get targetId() {
         return this.current.targetId;
@@ -7982,7 +8314,7 @@ async function render(url, opts, deps, timeoutMs, run) {
     const challenge = await detectChallenge(session);
     const got = await page.send(
       "Runtime.evaluate",
-      { expression: DOCUMENT, returnByValue: true },
+      { expression: opts.fullPage ? WHOLE_DOCUMENT : READ_DOCUMENT, returnByValue: true },
       { timeoutMs }
     );
     const finalUrl = typeof got.result?.value?.url === "string" ? got.result.value.url : nav.url;
@@ -8039,7 +8371,7 @@ async function readRenderedPage(url, opts = {}) {
     signal?.removeEventListener("abort", onAbort);
   }
 }
-var IDLE_CAP_MS, WEB_PAGE, active, queue, DOCUMENT;
+var IDLE_CAP_MS, WEB_PAGE, active, queue, WHOLE_DOCUMENT;
 var init_read = __esm({
   "src/browser/read.ts"() {
     "use strict";
@@ -8047,6 +8379,7 @@ var init_read = __esm({
     init_fetch();
     init_challenge();
     init_deps();
+    init_overlay();
     init_session();
     init_state();
     init_wait();
@@ -8054,7 +8387,7 @@ var init_read = __esm({
     WEB_PAGE = /^(?:text\/html|application\/xhtml\+xml)$/i;
     active = 0;
     queue = [];
-    DOCUMENT = "({ html: document.documentElement ? document.documentElement.outerHTML : '', url: location.href })";
+    WHOLE_DOCUMENT = "({ html: document.documentElement ? document.documentElement.outerHTML : '', url: location.href })";
   }
 });
 
@@ -9351,12 +9684,24 @@ function flat(items, out) {
 function renderSnapshot(nodes, opts) {
   const r = new Renderer(opts.refs, opts.frames ?? {});
   const main2 = buildTree(nodes);
+  const all = [];
   let items = [];
   if (opts.rootBackendId !== void 0) {
     const hit = r.find(main2, opts.rootBackendId);
     if (hit) items = merge(r.collect(hit.tree, hit.node));
-  } else if (main2.root) items = merge(r.collect(main2, main2.root));
-  const all = [];
+  } else {
+    for (const id of opts.overlays ?? []) {
+      const hit = r.find(main2, id);
+      if (!hit) continue;
+      const lines = [];
+      const over = merge(r.collect(hit.tree, hit.node));
+      if (opts.interactive) flat(over, lines);
+      else nested(over, 1, lines);
+      if (lines.length === 0) continue;
+      all.push({ text: OVERLAY_HEADER, ref: false }, ...opts.interactive ? lines.map((l) => ({ ...l, text: `  ${l.text}` })) : lines);
+    }
+    if (main2.root) items = merge(r.collect(main2, main2.root));
+  }
   if (opts.interactive) flat(items, all);
   else nested(items, 0, all);
   let kept = all;
@@ -9435,7 +9780,13 @@ async function takeSnapshot(session, opts = {}) {
     if (rootBackendId === void 0) throw new StaleRefError(opts.ref);
   }
   await session.page.send("Accessibility.enable");
-  const { nodes } = await session.page.send("Accessibility.getFullAXTree", {});
+  const fetchTree = async () => (await session.page.send("Accessibility.getFullAXTree", {})).nodes;
+  let nodes = await fetchTree();
+  const overlays = rootBackendId === void 0 ? await findOverlays(session.page) : [];
+  if (overlays.some((id) => !nodes.some((n) => n.backendDOMNodeId === id))) {
+    await new Promise((r2) => setTimeout(r2, OVERLAY_RETRY_MS));
+    nodes = await fetchTree();
+  }
   const frames = await collectFrames(session, nodes);
   const hasRoot = rootBackendId === void 0 || [nodes, ...Object.values(frames)].some((l) => l.some((n) => n.backendDOMNodeId === rootBackendId));
   if (!hasRoot) throw new StaleRefError(opts.ref);
@@ -9444,17 +9795,19 @@ async function takeSnapshot(session, opts = {}) {
     frames,
     ...opts.interactive !== void 0 ? { interactive: opts.interactive } : {},
     ...opts.maxChars !== void 0 ? { maxChars: opts.maxChars } : {},
-    ...rootBackendId !== void 0 ? { rootBackendId } : {}
+    ...rootBackendId !== void 0 ? { rootBackendId } : {},
+    ...overlays.length ? { overlays } : {}
   });
   writeRefs(session.targetId, r.refs);
   return { text: `url: ${url}
 title: ${title}
 ${r.text}`, url, title, loaderId, refCount: r.refCount, truncated: r.truncated };
 }
-var StaleRefError, NAME_MAX, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, VALUE_ROLES, FIELD_ROLES, str4, squash, truthy, Renderer;
+var StaleRefError, NAME_MAX, OVERLAY_HEADER, OVERLAY_RETRY_MS, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, VALUE_ROLES, FIELD_ROLES, str4, squash, truthy, Renderer;
 var init_snapshot = __esm({
   "src/browser/snapshot.ts"() {
     "use strict";
+    init_overlay();
     init_state();
     StaleRefError = class extends Error {
       constructor(ref2) {
@@ -9465,6 +9818,8 @@ var init_snapshot = __esm({
       ref;
     };
     NAME_MAX = 120;
+    OVERLAY_HEADER = "- overlay (covers the page):";
+    OVERLAY_RETRY_MS = 300;
     FRAME_MAX = 10;
     COLLAPSIBLE = /* @__PURE__ */ new Set(["generic", "none", "presentation", "GenericContainer"]);
     HOISTED = /* @__PURE__ */ new Set(["RootWebArea", "WebArea"]);
@@ -9581,7 +9936,7 @@ var init_snapshot = __esm({
 });
 
 // src/browser/actions.ts
-import { isAbsolute as isAbsolute3 } from "path";
+import { isAbsolute as isAbsolute4 } from "path";
 async function resolveRef(session, ref2) {
   const table = readRefs(session.targetId);
   const backendNodeId = table && Object.hasOwn(table.refs, ref2) ? table.refs[ref2] : void 0;
@@ -9728,7 +10083,30 @@ async function centreOf(page, node) {
     y: Math.round((q[1] + q[3] + q[5] + q[7]) / 4)
   };
 }
-async function hitTarget(page, node, x, y) {
+async function coveredError(page, targetId, ref2, hitObjectId, where2, at) {
+  const root = await overlayRootOf(page, hitObjectId);
+  if (!root) return new ActionError(`${ref2} is covered by ${where2} at ${at}: close or move it out of the way, then retry`);
+  let controls = [];
+  try {
+    const table = readRefs(targetId);
+    if (table) {
+      await page.send("Accessibility.enable");
+      const { nodes = [] } = await page.send("Accessibility.getFullAXTree", {});
+      const r = renderSnapshot(nodes, { refs: table, rootBackendId: root.backendNodeId, interactive: true });
+      writeRefs(targetId, r.refs);
+      controls = r.text ? r.text.split("\n") : [];
+    }
+  } catch {
+  }
+  const shown2 = controls.slice(0, OVERLAY_CONTROLS_MAX);
+  const more = controls.length - shown2.length;
+  const list = shown2.length ? ["its controls:", ...shown2, ...more > 0 ? [`\u2026 ${more} more \u2014 take a snapshot to see them`] : []].join("\n") : "none of its controls is in the accessibility tree \u2014 take a snapshot";
+  return new ActionError(
+    `${ref2} is covered by an overlay (${root.what}) at ${at}; ${list}
+accepting tracking/consent or closing it is the user's choice \u2014 ask before choosing`
+  );
+}
+async function hitTarget(page, targetId, node, x, y) {
   const at = `(${Math.round(x)}, ${Math.round(y)})`;
   const unreachable = () => new ActionError(`${node.ref} is not reachable at its centre ${at}: the browser finds nothing there to click; scroll, or take a new snapshot`);
   const ask = async (method, params) => {
@@ -9749,7 +10127,7 @@ async function hitTarget(page, node, x, y) {
   try {
     const where2 = await callOn(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
     if (where2 === true) return void 0;
-    if (where2) throw new ActionError(`${node.ref} is covered by ${where2} at ${at}: close or move it out of the way, then retry`);
+    if (where2) throw await coveredError(page, targetId, node.ref, objectId, where2, at);
   } finally {
     release(page, objectId);
   }
@@ -9764,7 +10142,7 @@ async function click(session, ref2, opts = {}) {
   return withRef(session, ref2, async (node) => {
     await guardAction(page, { backendNodeId: node.backendNodeId, action: "click", ...opts.confirm ? { confirm: true } : {} });
     const { x, y } = await centreOf(page, node);
-    const inner = await hitTarget(page, node, x, y);
+    const inner = await hitTarget(page, session.targetId, node, x, y);
     if (inner !== void 0 && !opts.confirm) await guardAction(page, { backendNodeId: inner, action: "click" });
     const p = await perform(session, opts, async (pg) => {
       await pg.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0 });
@@ -9874,7 +10252,7 @@ async function upload(session, ref2, files, opts = {}) {
   if (files.length === 0) throw new UsageError("upload needs at least one file");
   const { fs } = browserDeps(opts.deps);
   for (const f of files) {
-    if (!isAbsolute3(f)) throw new UsageError(`upload takes absolute paths, not ${JSON.stringify(f)}`);
+    if (!isAbsolute4(f)) throw new UsageError(`upload takes absolute paths, not ${JSON.stringify(f)}`);
     let st;
     try {
       st = await fs.stat(f);
@@ -9991,7 +10369,7 @@ function forward(session, opts = {}) {
 function reload(session, opts = {}) {
   return history(session, "reload", (o) => session.reload(o), opts);
 }
-var ActionError, DESCRIBE, PAGE_FUNCTIONS, exceptionText, an, settleOpts, CutShortError, TARGET_INFO_TIMEOUT_MS, area, BUTTONS, squash2, alnum, POSITION, SCROLLS;
+var ActionError, DESCRIBE, PAGE_FUNCTIONS, exceptionText, an, settleOpts, CutShortError, TARGET_INFO_TIMEOUT_MS, area, OVERLAY_CONTROLS_MAX, BUTTONS, squash2, alnum, POSITION, SCROLLS;
 var init_actions = __esm({
   "src/browser/actions.ts"() {
     "use strict";
@@ -10000,6 +10378,7 @@ var init_actions = __esm({
     init_challenge();
     init_deps();
     init_keys();
+    init_overlay();
     init_risk();
     init_snapshot();
     init_state();
@@ -10010,15 +10389,7 @@ var init_actions = __esm({
         this.name = "ActionError";
       }
     };
-    DESCRIBE = `const describe = (el) => {
-    const tag = String(el.tagName || "").toLowerCase();
-    const attr = (n) => (el.getAttribute ? el.getAttribute(n) : null);
-    const role = attr("role");
-    const type = tag === "input" ? attr("type") : null;
-    const text = String(el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim();
-    const shown = text.length > 60 ? text.slice(0, 57) + "..." : text;
-    return "<" + tag + (el.id ? "#" + el.id : "") + (role ? ' role="' + role + '"' : "") + (type ? ' type="' + type + '"' : "") + ">" + (shown ? ' "' + shown + '"' : "");
-  };`;
+    DESCRIBE = DESCRIBE_SOURCE;
     PAGE_FUNCTIONS = {
       /**
        * Where `hit` (the node under the click point) is: true when it stands for the
@@ -10130,6 +10501,7 @@ var init_actions = __esm({
       for (let i = 0; i < 4; i++) s += q[i * 2] * q[(i + 1) % 4 * 2 + 1] - q[(i + 1) % 4 * 2] * q[i * 2 + 1];
       return Math.abs(s) / 2;
     };
+    OVERLAY_CONTROLS_MAX = 12;
     BUTTONS = { left: 1, right: 2, middle: 4 };
     squash2 = (s) => s.replace(/\s+/g, " ").trim();
     alnum = (s) => s.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
@@ -10352,9 +10724,9 @@ __export(cli_exports, {
   statusText: () => statusText,
   tabLines: () => tabLines
 });
-import { existsSync as existsSync12, mkdirSync as mkdirSync7, statSync as statSync10 } from "fs";
+import { existsSync as existsSync13, mkdirSync as mkdirSync7, statSync as statSync11 } from "fs";
 import { tmpdir as tmpdir6 } from "os";
-import { dirname as dirname5, join as join25, resolve as resolve9 } from "path";
+import { dirname as dirname5, join as join26, resolve as resolve9 } from "path";
 function arity(ctx, min, max = min) {
   if (ctx.args.length < min || ctx.args.length > max) throw usageError(ctx.action);
 }
@@ -10428,11 +10800,15 @@ async function handled(ctx, r) {
 }
 function onPage(ctx, fn, extra = {}) {
   if (ctx.deps.page) return ctx.deps.page(fn, extra);
-  const { cdp, profile, headless } = ctx.flags;
+  const { cdp, profile, headless, browserKind } = ctx.flags;
+  const kind = browserKind?.trim().toLowerCase();
+  if (kind !== void 0 && !isBrowserKind(kind))
+    throw new UsageError(`--browser-kind is one of ${BROWSER_KINDS.join(", ")}, not ${JSON.stringify(browserKind)}`);
   const opts = {
     ...cdp !== void 0 ? { cdp } : {},
     ...profile !== void 0 ? { profile } : {},
     ...headless ? { headless } : {},
+    ...kind !== void 0 ? { kind } : {},
     ...ctx.deps.browser ? { deps: ctx.deps.browser } : {},
     ...extra
   };
@@ -10500,7 +10876,7 @@ function statusText(st) {
 }
 async function assertProfileIdle(ctx, name2) {
   const deps = browserDeps(ctx.deps.browser);
-  const own = await readActivePort(deps, join25(profileDir(name2), "DevToolsActivePort"));
+  const own = await readActivePort(deps, join26(profileDir(name2), "DevToolsActivePort"));
   if (own && await isSameBrowser(deps, own.port, "127.0.0.1", own.path)) {
     throw new Error(`a browser is running on the profile ${name2 ?? "default"}: close it first: \`${cliName()} browser close\``);
   }
@@ -10521,6 +10897,7 @@ var init_cli = __esm({
     init_challenge();
     init_cdp();
     init_deps();
+    init_detect();
     init_keys();
     init_launch();
     init_network();
@@ -10536,7 +10913,7 @@ var init_cli = __esm({
       capture: `\`${cliName()} browser open <url> --capture\`, or --capture on an action`
     });
     USAGE = {
-      open: "open <url> [--new-tab] [--headless] [--profile <n>] [--capture] [--snapshot] [--timeout <ms>]",
+      open: "open <url> [--new-tab] [--headless] [--profile <n>] [--browser-kind chrome|brave|chromium|edge] [--capture] [--snapshot] [--timeout <ms>]",
       attach: "attach <port|url>",
       status: "status",
       close: "close [--all]",
@@ -10602,7 +10979,9 @@ var init_cli = __esm({
             const title = await s.title();
             const challenge = await detectChallenge(s);
             const snap = ctx.flags.snapshot ? await takeSnapshot(s, snapOpts(ctx)) : void 0;
+            const notes = s.takeNotes();
             const lines = [`${where(nav.url, title)}${nav.status !== void 0 ? ` (HTTP ${nav.status})` : ""}`];
+            for (const n of notes) lines.push(`note: ${n}`);
             if (nav.note) lines.push(`note: ${nav.note}`);
             if (challenge) lines.push(challengeLine(ctx, challenge));
             if (captured !== void 0) lines.push(capturedLine(ctx, captured));
@@ -10614,6 +10993,7 @@ var init_cli = __esm({
                 title,
                 ...nav.status !== void 0 ? { status: nav.status } : {},
                 ...nav.note ? { note: nav.note } : {},
+                ...notes.length ? { notes } : {},
                 tab: s.targetId,
                 challenge,
                 ...captured !== void 0 ? { captured } : {},
@@ -10681,7 +11061,7 @@ var init_cli = __esm({
         const cwd = ctx.deps.cwd ?? process.cwd();
         const files = ctx.args.slice(1).map((f) => {
           const path = resolve9(cwd, f);
-          if (!existsSync12(path) || !statSync10(path).isFile()) throw new UsageError(`no such file: ${path}`);
+          if (!existsSync13(path) || !statSync11(path).isFile()) throw new UsageError(`no such file: ${path}`);
           return path;
         });
         return mutate(ctx, (s, o) => upload(s, ctx.args[0], files, o));
@@ -10757,8 +11137,8 @@ var init_cli = __esm({
         arity(ctx, 0, 1);
         if (isNoWrite()) throw new Error(`nothing may be written (${envName("NO_WRITE")}), and a screenshot is a file`);
         const stamp = new Date(browserDeps(ctx.deps.browser).now()).toISOString().replace(/[:.]/g, "-");
-        const shots = join25(tmpdir6(), brand().name, "browser");
-        const path = ctx.flags.out !== void 0 ? resolve9(ctx.deps.cwd ?? process.cwd(), ctx.flags.out) : join25(shots, `shot-${stamp}.png`);
+        const shots = join26(tmpdir6(), brand().name, "browser");
+        const path = ctx.flags.out !== void 0 ? resolve9(ctx.deps.cwd ?? process.cwd(), ctx.flags.out) : join26(shots, `shot-${stamp}.png`);
         const format = /\.jpe?g$/i.test(path) ? "jpeg" : "png";
         const ref2 = ctx.args[0];
         const bytes = await onPage(ctx, (s) => screenshot(s, { format, ...ref2 !== void 0 ? { ref: ref2 } : {}, ...ctx.flags.full ? { full: true } : {} }));
@@ -10837,7 +11217,7 @@ var init_cli = __esm({
           arity(ctx, 1);
           await assertProfileIdle(ctx, name2);
           const path = profileDir(name2);
-          const existed = existsSync12(path);
+          const existed = existsSync13(path);
           resetProfile(name2);
           return { json: { ok: true, path, removed: existed }, text: existed ? `removed ${path}: the next launch starts logged out` : `no profile at ${path}` };
         }
@@ -11199,9 +11579,9 @@ async function repinSkill(root, config) {
 // src/cli.ts
 init_brand();
 init_charset();
-import { existsSync as existsSync13, mkdirSync as mkdirSync8, readFileSync as readFileSync18, realpathSync as realpathSync4, statSync as statSync11 } from "fs";
+import { existsSync as existsSync14, mkdirSync as mkdirSync8, readFileSync as readFileSync19, realpathSync as realpathSync4, statSync as statSync12 } from "fs";
 import { isIP as isIP2 } from "net";
-import { basename as basename5, extname, isAbsolute as isAbsolute4, join as join26, relative as relative4, resolve as resolve11 } from "path";
+import { basename as basename5, extname, isAbsolute as isAbsolute5, join as join27, relative as relative4, resolve as resolve11 } from "path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL } from "url";
 
 // src/version.ts
@@ -11222,8 +11602,8 @@ init_firecrawl();
 // src/stack.ts
 init_brand();
 import { spawnSync as spawnSync3 } from "child_process";
-import { existsSync as existsSync8, lstatSync as lstatSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync14, statSync as statSync6, writeFileSync as writeFileSync6 } from "fs";
-import { dirname as dirname2, join as join18, resolve as resolve3 } from "path";
+import { existsSync as existsSync9, lstatSync as lstatSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync15, statSync as statSync7, writeFileSync as writeFileSync7 } from "fs";
+import { dirname as dirname2, join as join19, resolve as resolve3 } from "path";
 
 // src/cache.ts
 init_fetch();
@@ -11234,12 +11614,12 @@ init_url();
 init_no_write();
 init_brand();
 init_mode();
-import { chmodSync as chmodSync2, existsSync as existsSync7, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync13, readdirSync as readdirSync6, rmSync as rmSync6, statSync as statSync5 } from "fs";
-import { dirname, join as join17 } from "path";
+import { chmodSync as chmodSync2, existsSync as existsSync8, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync14, readdirSync as readdirSync6, rmSync as rmSync6, statSync as statSync6 } from "fs";
+import { dirname, join as join18 } from "path";
 import { tmpdir as tmpdir4 } from "os";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
-  return namedCacheDir() ?? join17(tmpdir4(), userScoped(brand().name), "cache");
+  return namedCacheDir() ?? join18(tmpdir4(), userScoped(brand().name), "cache");
 }
 var namedCacheDir = () => env("CACHE_DIR") ?? brand().cacheDir;
 function userScoped(name2) {
@@ -11250,7 +11630,7 @@ function cachePath(url, acceptLanguage = "", extractor = "native", variant = "")
   const canon = canonicalizeUrl(url);
   const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
   const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
-  return join17(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
+  return join18(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
 }
 var TEXT_VARIANTS = ["", "consent", "full"];
 var MARKDOWN_VARIANTS = ["md", "consent-md", "full-md"];
@@ -11322,11 +11702,11 @@ function entryPaths(url, acceptLanguage, extractor, variant) {
 function readCache(url, acceptLanguage = "", extractor = "native", variant = "") {
   if (!entryDir(false)) return void 0;
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
-  if (!existsSync7(meta)) return void 0;
+  if (!existsSync8(meta)) return void 0;
   try {
-    const entry = JSON.parse(readFileSync13(meta, "utf8"));
+    const entry = JSON.parse(readFileSync14(meta, "utf8"));
     if (typeof entry.cachedAt !== "number") return void 0;
-    const text = existsSync7(body) ? readFileSync13(body, "utf8") : entry.text;
+    const text = existsSync8(body) ? readFileSync14(body, "utf8") : entry.text;
     if (!text?.trim()) return void 0;
     return { ...entry, text };
   } catch {
@@ -11487,7 +11867,7 @@ function ownFile(name2) {
 }
 function readEntryMeta(abs) {
   try {
-    const entry = JSON.parse(readFileSync13(abs, "utf8"));
+    const entry = JSON.parse(readFileSync14(abs, "utf8"));
     return entry && typeof entry.cachedAt === "number" && typeof entry.finalUrl === "string" ? entry : void 0;
   } catch {
     return void 0;
@@ -11496,7 +11876,7 @@ function readEntryMeta(abs) {
 var ORPHAN_GRACE_MS = 10 * 60 * 1e3;
 function sizeOf(abs) {
   try {
-    return statSync5(abs).size;
+    return statSync6(abs).size;
   } catch {
     return 0;
   }
@@ -11506,13 +11886,13 @@ function cacheStats(now = Date.now()) {
   const out = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
   const { refused } = openCacheDir(false);
   if (refused) return { ...out, refused };
-  if (!existsSync7(dir)) return out;
+  if (!existsSync8(dir)) return out;
   let oldest = Number.POSITIVE_INFINITY;
   let newest = 0;
   for (const name2 of readdirSync6(dir)) {
     const own = ownFile(name2);
     if (!own) continue;
-    const abs = join17(dir, name2);
+    const abs = join18(dir, name2);
     if (own.kind !== "json") {
       out.bytes += sizeOf(abs);
       continue;
@@ -11534,12 +11914,12 @@ function cacheStats(now = Date.now()) {
 }
 function cacheClean(all = false, now = Date.now()) {
   const dir = cacheDir();
-  if (isNoWrite() || !openCacheDir(false).dir || !existsSync7(dir)) return 0;
+  if (isNoWrite() || !openCacheDir(false).dir || !existsSync8(dir)) return 0;
   const names = readdirSync6(dir);
   const present = new Set(names);
   const remove = (name2) => {
     try {
-      rmSync6(join17(dir, name2), { force: true });
+      rmSync6(join18(dir, name2), { force: true });
       return true;
     } catch {
       return false;
@@ -11547,7 +11927,7 @@ function cacheClean(all = false, now = Date.now()) {
   };
   const abandoned = (name2) => {
     try {
-      return all || now - statSync5(join17(dir, name2)).mtimeMs > ORPHAN_GRACE_MS;
+      return all || now - statSync6(join18(dir, name2)).mtimeMs > ORPHAN_GRACE_MS;
     } catch {
       return false;
     }
@@ -11557,7 +11937,7 @@ function cacheClean(all = false, now = Date.now()) {
     const own = ownFile(name2);
     if (!own) continue;
     if (own.kind === "json") {
-      const entry = readEntryMeta(join17(dir, name2));
+      const entry = readEntryMeta(join18(dir, name2));
       if (!entry || !all && isCacheFresh(entry, now) || !remove(name2)) continue;
       remove(`${own.stem}.body`);
       removed++;
@@ -11829,11 +12209,11 @@ function renderAsset(template) {
   return template.replaceAll("{{CLI}}", brand().cli);
 }
 function composeAssets() {
-  const base2 = join18(cacheDir(), "compose");
+  const base2 = join19(cacheDir(), "compose");
   return [
-    { path: join18(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
-    { path: join18(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
-    { path: join18(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
+    { path: join19(base2, "docker-compose.yml"), content: renderAsset(COMPOSE_YAML) },
+    { path: join19(base2, "docker", "searxng", "settings.yml"), content: renderAsset(SEARXNG_SETTINGS_YAML) },
+    { path: join19(base2, "docker", "firecrawl", "firecrawl.env"), content: renderAsset(FIRECRAWL_ENV) }
   ];
 }
 function ensureComposeMaterialized() {
@@ -11846,7 +12226,7 @@ function untrustedStack() {
   for (const a of assets) {
     let body;
     try {
-      body = readFileSync14(a.path, "utf8");
+      body = readFileSync15(a.path, "utf8");
     } catch {
     }
     if (body !== a.content) return `${a.path} does not hold the stack this binary ships, and could not be rewritten`;
@@ -11862,7 +12242,7 @@ function untrustedStack() {
   }
   for (const p of [top, ...paths]) {
     try {
-      const st = p === top && chosen ? statSync6(p) : lstatSync3(p);
+      const st = p === top && chosen ? statSync7(p) : lstatSync3(p);
       if (st.isSymbolicLink()) return `${p} is a symbolic link`;
       if (st.uid !== uid) return `${p} belongs to another user`;
       if (st.mode & 2 && !(st.isDirectory() && st.mode & 512)) return `${p} is writable by anyone`;
@@ -11874,9 +12254,9 @@ function untrustedStack() {
 }
 function writeIfChanged(path, content) {
   try {
-    if (existsSync8(path) && readFileSync14(path, "utf8") === content) return;
+    if (existsSync9(path) && readFileSync15(path, "utf8") === content) return;
     mkdirSync5(dirname2(path), { recursive: true, mode: 448 });
-    writeFileSync6(path, content);
+    writeFileSync7(path, content);
   } catch {
   }
 }
@@ -13170,8 +13550,8 @@ async function hasChanged(url, previous, opts = {}) {
 }
 
 // src/skillkit/usage.ts
-import { readdirSync as readdirSync7, readFileSync as readFileSync15, statSync as statSync7 } from "fs";
-import { dirname as dirname3, join as join19, relative, resolve as resolve4 } from "path";
+import { readdirSync as readdirSync7, readFileSync as readFileSync16, statSync as statSync8 } from "fs";
+import { dirname as dirname3, join as join20, relative, resolve as resolve4 } from "path";
 var DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|enum)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm;
 var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']((?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs))["']/g;
 function engineExports(dts) {
@@ -13191,8 +13571,8 @@ function walkSources(dir, skip = "vendor", out = []) {
     return out;
   }
   for (const e of entries) {
-    const p = join19(dir, e);
-    if (statSync7(p).isDirectory()) {
+    const p = join20(dir, e);
+    if (statSync8(p).isDirectory()) {
       if (e !== skip) walkSources(p, skip, out);
     } else if (e.endsWith(".ts")) out.push(p);
   }
@@ -13200,13 +13580,13 @@ function walkSources(dir, skip = "vendor", out = []) {
 }
 function auditEngineUsage(root, config, dts, engineName) {
   const surface = engineExports(dts);
-  const files = walkSources(join19(root, "src"));
+  const files = walkSources(join20(root, "src"));
   const forks = new Map(Object.entries(config.forks));
   const collisions = [];
   const tolerated = [];
   const imported = /* @__PURE__ */ new Set();
   for (const file of files) {
-    const src = readFileSync15(file, "utf8");
+    const src = readFileSync16(file, "utf8");
     const rel = relative(root, file);
     for (const m of src.matchAll(DECL)) {
       const name2 = m[1] ?? m[2];
@@ -13223,7 +13603,7 @@ function auditEngineUsage(root, config, dts, engineName) {
         } else {
           let shim = "";
           try {
-            shim = readFileSync15(resolve4(dirname3(file), spec.replace(/\.js$/, ".ts")), "utf8");
+            shim = readFileSync16(resolve4(dirname3(file), spec.replace(/\.js$/, ".ts")), "utf8");
           } catch {
             continue;
           }
@@ -13243,24 +13623,24 @@ function auditEngineUsage(root, config, dts, engineName) {
 
 // src/skillkit/bundle.ts
 init_cli_kit();
-import { existsSync as existsSync9, readdirSync as readdirSync8, readFileSync as readFileSync16 } from "fs";
-import { join as join20 } from "path";
+import { existsSync as existsSync10, readdirSync as readdirSync8, readFileSync as readFileSync17 } from "fs";
+import { join as join21 } from "path";
 var DESC_MAX = 1e3;
 function auditSkillBundle(root, config, cli) {
   const out = [];
   const check = (ok, message) => out.push({ ok, message });
   const name2 = config.name;
-  const skillDir = join20(root, "skills", name2);
+  const skillDir = join21(root, "skills", name2);
   check(
-    !existsSync9(join20(root, "SKILL.md")),
-    existsSync9(join20(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name2}/SKILL.md` : "no root SKILL.md"
+    !existsSync10(join21(root, "SKILL.md")),
+    existsSync10(join21(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name2}/SKILL.md` : "no root SKILL.md"
   );
-  const skillMd = join20(skillDir, "SKILL.md");
-  if (!existsSync9(skillMd)) {
+  const skillMd = join21(skillDir, "SKILL.md");
+  if (!existsSync10(skillMd)) {
     check(false, `missing skills/${name2}/SKILL.md \u2014 the skill package has no SKILL.md`);
     return out;
   }
-  const raw = readFileSync16(skillMd, "utf8");
+  const raw = readFileSync17(skillMd, "utf8");
   const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
   if (!fm) {
     check(false, `skills/${name2}/SKILL.md has no frontmatter block`);
@@ -13283,13 +13663,13 @@ function auditSkillBundle(root, config, cli) {
       len <= DESC_MAX ? `description ${len} chars (<= ${DESC_MAX})` : `description ${len} chars exceeds the ${DESC_MAX}-char headroom cap`
     );
   }
-  const refsDir = join20(skillDir, "references");
-  if (existsSync9(refsDir)) {
+  const refsDir = join21(skillDir, "references");
+  if (existsSync10(refsDir)) {
     const files = readdirSync8(refsDir).filter((f) => f.endsWith(".md"));
     for (const m of new Set(raw.match(/references\/[\w.-]+\.md/g) ?? [])) {
       check(
-        existsSync9(join20(skillDir, m)),
-        existsSync9(join20(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
+        existsSync10(join21(skillDir, m)),
+        existsSync10(join21(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
       );
     }
     for (const f of files) {
@@ -13300,12 +13680,12 @@ function auditSkillBundle(root, config, cli) {
     }
   }
   const bundleRel = `scripts/${name2}.mjs`;
-  const rootBundle = join20(root, bundleRel);
-  const pkgBundle = join20(skillDir, bundleRel);
-  if (!existsSync9(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
-  else if (!existsSync9(pkgBundle)) check(false, `missing skills/${name2}/${bundleRel} \u2014 run \`skill copy\``);
+  const rootBundle = join21(root, bundleRel);
+  const pkgBundle = join21(skillDir, bundleRel);
+  if (!existsSync10(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
+  else if (!existsSync10(pkgBundle)) check(false, `missing skills/${name2}/${bundleRel} \u2014 run \`skill copy\``);
   else {
-    const same = readFileSync16(rootBundle).equals(readFileSync16(pkgBundle));
+    const same = readFileSync17(rootBundle).equals(readFileSync17(pkgBundle));
     check(
       same,
       same ? `embedded engine is byte-identical to ${bundleRel}` : `skills/${name2}/${bundleRel} differs from ${bundleRel} \u2014 run \`skill copy\` and commit`
@@ -13314,8 +13694,8 @@ function auditSkillBundle(root, config, cli) {
   if (!cli) return out;
   const universe = /* @__PURE__ */ new Set([...cli.valueFlags, ...cli.boolFlags, "help", "version", ...config.allowedForeignFlags]);
   const docs = [["SKILL.md", raw]];
-  if (existsSync9(refsDir)) {
-    for (const f of readdirSync8(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync16(join20(refsDir, f), "utf8")]);
+  if (existsSync10(refsDir)) {
+    for (const f of readdirSync8(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync17(join21(refsDir, f), "utf8")]);
   }
   let unknown = 0;
   for (const [file, text] of docs) {
@@ -13337,7 +13717,7 @@ function auditSkillBundle(root, config, cli) {
 
 // src/skillkit/scaffold.ts
 init_no_write();
-import { join as join21 } from "path";
+import { join as join22 } from "path";
 var enginesJson = (engine, repo, minRef) => JSON.stringify(
   {
     _comment: "The packaging contract for this skill, read by `skill vendor|check|bundle`. `forks` is a ratchet: entries may leave, never arrive \u2014 so the next declaration shadowing an engine export is an argued decision rather than a quiet copy. `usageFloor` goes up when a layer lands and never down to make a red run pass.",
@@ -13436,8 +13816,8 @@ function scaffoldSkill(root, name2, opts = {}) {
     // scaffolding; any older floor lets the staleness gate pass a pin that old.
     [SKILL_CONFIG]: `${enginesJson(name2, opts.engineRepo ?? "maxgfr/webindex", opts.minRef ?? `v${ENGINE_VERSION}`)}
 `,
-    [join21("src", "engine.ts")]: engineShim(name2, prefix),
-    [join21("skills", name2, "SKILL.md")]: `---
+    [join22("src", "engine.ts")]: engineShim(name2, prefix),
+    [join22("skills", name2, "SKILL.md")]: `---
 name: ${name2}
 description: TODO \u2014 one sentence saying WHEN to use this skill, under 1000 characters.
 ---
@@ -13446,18 +13826,18 @@ description: TODO \u2014 one sentence saying WHEN to use this skill, under 1000 
 
 TODO
 `,
-    [join21(".github", "workflows", "ci.yml")]: ci(),
+    [join22(".github", "workflows", "ci.yml")]: ci(),
     ".gitignore": gitignore
   };
   const written = [];
   const exists = opts.exists;
   for (const [rel, content] of Object.entries(files)) {
-    const path = join21(root, rel);
+    const path = join22(root, rel);
     if (exists?.(path)) {
       errors.push(`${rel} already exists \u2014 left alone.`);
       continue;
     }
-    ensureDir(join21(path, ".."));
+    ensureDir(join22(path, ".."));
     written.push(writeArtifact(path, content));
   }
   return { written, errors };
@@ -13717,7 +14097,7 @@ init_firecrawl();
 init_locale();
 init_url();
 var SEARXNG_DEFAULT_BASE = "http://localhost:8888";
-var PROBE_TIMEOUT_MS4 = 2e3;
+var PROBE_TIMEOUT_MS5 = 2e3;
 var QUERY_TIMEOUT_MS = 8e3;
 function searxngBase(opts = {}) {
   const raw = (opts.searxng ?? env("SEARXNG") ?? SEARXNG_DEFAULT_BASE).trim();
@@ -13731,7 +14111,7 @@ var probeCache2 = new ProbeMemo();
 function probeSearxng(base2, explicit = false) {
   return probeCache2.get(`${base2}|${explicit}`, async () => {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS4);
+    const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS5);
     try {
       const res = await fetch(`${base2}/healthz`, { signal: ctrl.signal });
       const body = await res.text().catch(() => "");
@@ -14205,9 +14585,9 @@ function resolveUrl2(url, base2) {
 init_brand();
 init_exec2();
 import { createHash as createHash4, randomBytes as randomBytes2 } from "crypto";
-import { existsSync as existsSync10, mkdirSync as mkdirSync6, readdirSync as readdirSync9, renameSync as renameSync3, rmSync as rmSync7, statSync as statSync8 } from "fs";
+import { existsSync as existsSync11, mkdirSync as mkdirSync6, readdirSync as readdirSync9, renameSync as renameSync3, rmSync as rmSync7, statSync as statSync9 } from "fs";
 import { tmpdir as tmpdir5 } from "os";
-import { basename as basename3, join as join22, resolve as resolve5 } from "path";
+import { basename as basename3, join as join23, resolve as resolve5 } from "path";
 
 // src/forge-host.ts
 init_brand();
@@ -14244,7 +14624,7 @@ function resolveRepo(raw, opts = {}) {
   const trimmed = raw.trim();
   if (trimmed && opts.local !== false) {
     const asPath = resolve5(trimmed);
-    if (existsSync10(asPath) && statSync8(asPath).isDirectory()) {
+    if (existsSync11(asPath) && statSync9(asPath).isDirectory()) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename3(asPath)}-${asPath}`)}` };
     }
   }
@@ -15133,8 +15513,8 @@ function isOriginAllowed(origin, allowed = []) {
 
 // src/mcp/resources.ts
 init_brand();
-import { existsSync as existsSync11, readdirSync as readdirSync10, readFileSync as readFileSync17, realpathSync as realpathSync2, statSync as statSync9 } from "fs";
-import { basename as basename4, dirname as dirname4, join as join23, relative as relative2, resolve as resolve7, sep as sep2 } from "path";
+import { existsSync as existsSync12, readdirSync as readdirSync10, readFileSync as readFileSync18, realpathSync as realpathSync2, statSync as statSync10 } from "fs";
+import { basename as basename4, dirname as dirname4, join as join24, relative as relative2, resolve as resolve7, sep as sep2 } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
 var URI_SCHEME = "skill://";
@@ -15142,17 +15522,17 @@ function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname4(fileURLToPath(import.meta.url));
   const name2 = brand().name;
   const candidates2 = [resolve7(here, ".."), resolve7(here, "..", "skills", name2), resolve7(here, "..", "..", "skills", name2)];
-  return candidates2.find((dir) => existsSync11(join23(dir, "SKILL.md")));
+  return candidates2.find((dir) => existsSync12(join24(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
-  const refDir = join23(root, "references");
-  if (!existsSync11(refDir)) return out;
+  const refDir = join24(root, "references");
+  if (!existsSync12(refDir)) return out;
   for (const file of readdirSync10(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
-    out.push(describe(root, join23("references", file), `${skillName()} reference: ${basename4(file, ".md")}`));
+    out.push(describe(root, join24("references", file), `${skillName()} reference: ${basename4(file, ".md")}`));
   }
   return out;
 }
@@ -15179,8 +15559,8 @@ function readResource(uri, moduleDir) {
   if (targetReal !== rootReal && !targetReal.startsWith(rootReal + sep2)) {
     throw new ResourceError(`resource path escapes the skill root: ${uri}`);
   }
-  if (!statSync9(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
-  return { uri, mimeType: "text/markdown", text: readFileSync17(targetReal, "utf8") };
+  if (!statSync10(targetReal).isFile()) throw new ResourceError(`not a file: ${uri}`);
+  return { uri, mimeType: "text/markdown", text: readFileSync18(targetReal, "utf8") };
 }
 var ResourceError = class extends Error {
 };
@@ -15191,14 +15571,14 @@ function describe(root, rel, fallbackTitle) {
     title: fallbackTitle,
     mimeType: "text/markdown"
   };
-  const summary = firstProse(join23(root, rel));
+  const summary = firstProse(join24(root, rel));
   if (summary) decl.description = summary;
   return decl;
 }
 function firstProse(file) {
   let text;
   try {
-    text = readFileSync17(file, "utf8");
+    text = readFileSync18(file, "utf8");
   } catch {
     return void 0;
   }
@@ -15757,14 +16137,15 @@ function readBody(req) {
 init_brand();
 init_detect();
 init_discovery();
+init_extensions();
 init_mode();
 init_profile();
 init_state();
 import { readdirSync as readdirSync11 } from "fs";
-import { join as join24 } from "path";
+import { join as join25 } from "path";
 function listProfiles(home) {
   try {
-    return readdirSync11(join24(home, "profiles"), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
+    return readdirSync11(join25(home, "profiles"), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
   } catch {
     return [];
   }
@@ -15776,7 +16157,8 @@ var defaults = {
   session: () => readSession(),
   alive: isPortAlive,
   fetchMode: () => browserFetchMode(),
-  concurrency: () => envInt("BROWSER_CONCURRENCY", 1, 1, 4)
+  concurrency: () => envInt("BROWSER_CONCURRENCY", 1, 1, 4),
+  env: (name2) => env(name2)
 };
 async function browserDoctor(own = {}) {
   const d = { ...defaults, ...own };
@@ -15794,7 +16176,27 @@ async function browserDoctor(own = {}) {
     const up = await d.alive(saved.port, saved.host ?? "127.0.0.1").catch(() => false);
     session = { state: up ? "alive" : "dead", port: saved.port, launchedByUs: saved.launchedByUs, profile: saved.profile };
   }
-  return { binary, home, profiles: d.profiles(home), session, fetch: { mode: d.fetchMode(), concurrency: d.concurrency() } };
+  const kind = d.env("BROWSER_KIND")?.trim();
+  const rawExtensions = d.env("BROWSER_EXTENSIONS");
+  let extensions;
+  if (rawExtensions?.trim()) {
+    try {
+      const paths = extensionDirs(rawExtensions);
+      const drops = binary.state === "found" && ignoresUnpackedExtensions({ kind: binary.kind, path: binary.path });
+      extensions = { paths, ...drops ? { note: unpackedIgnoredNote() } : {} };
+    } catch (e) {
+      extensions = { paths: [], error: e.message };
+    }
+  }
+  return {
+    binary,
+    home,
+    profiles: d.profiles(home),
+    session,
+    fetch: { mode: d.fetchMode(), concurrency: d.concurrency() },
+    ...kind ? { kind } : {},
+    ...extensions ? { extensions } : {}
+  };
 }
 
 // src/browser/mcp.ts
@@ -15804,7 +16206,7 @@ import { resolve as resolve10 } from "path";
 import { lookup as dnsLookup } from "dns/promises";
 import { realpathSync as realpathSync3 } from "fs";
 import { isIP } from "net";
-import { isAbsolute as isAbsolute2, relative as relative3, resolve as resolve8, sep as sep3 } from "path";
+import { isAbsolute as isAbsolute3, relative as relative3, resolve as resolve8, sep as sep3 } from "path";
 var V4_NON_PUBLIC = [
   ["0.0.0.0", 8],
   // "this network" — 0.0.0.0 itself reaches the local host
@@ -15904,7 +16306,7 @@ function confinePath(root, requested) {
   const rootReal = realpathSync3(root);
   const under = (base2, p) => {
     const rel = relative3(base2, p);
-    return !isAbsolute2(rel) && rel !== ".." && !rel.startsWith(`..${sep3}`);
+    return !isAbsolute3(rel) && rel !== ".." && !rel.startsWith(`..${sep3}`);
   };
   const outside = new Error(`${requested} is outside ${rootLex}, the only directory this server reads files from`);
   const target = resolve8(rootLex, requested);
@@ -15943,6 +16345,7 @@ function noop() {
 init_actions();
 init_cli();
 init_deps();
+init_detect();
 init_network();
 init_risk();
 init_session();
@@ -15998,6 +16401,11 @@ function browserToolDecls() {
         capture: { type: "boolean", description: "Record the JSON responses pages fetch from now on, until network clear or close." },
         profile: { type: "string", description: "The dedicated profile (default `default`), used when this call launches the browser." },
         headless: { type: "boolean", description: "No window, when this call launches the browser. A human cannot solve a challenge in it." },
+        browserKind: {
+          type: "string",
+          enum: ["chrome", "brave", "chromium", "edge"],
+          description: "Which browser to launch, when this call launches it (brave blocks ads and trackers on its own). A profile stays with the kind it was first launched with."
+        },
         ...AFTER
       },
       ["url"]
@@ -16371,15 +16779,16 @@ var Host = class {
   handlers = {
     open: async (a) => {
       const profile = str5(a.profile);
-      const launch2 = { ...profile ? { profile } : {}, ...a.headless === true ? { headless: true } : {} };
+      const kind = a.browserKind === void 0 ? void 0 : oneOf(a, "browserKind", BROWSER_KINDS);
+      const launch2 = { ...profile ? { profile } : {}, ...a.headless === true ? { headless: true } : {}, ...kind ? { kind } : {} };
       const running = this.live();
-      const moot = running && (profile !== void 0 && profile !== running.profile || a.headless === true && !running.headless);
+      const moot = running && (profile !== void 0 && profile !== running.profile || a.headless === true && !running.headless || kind !== void 0);
       const capture = a.capture === true;
       const out = await this.cli("open", [String(a.url ?? "")], { ...after(a), ...a.newTab === true ? { newTab: true } : {} }, { launch: launch2, capture });
       if (capture) this.capture = true;
       const notes = [
         ...moot ? [
-          `profile and headless apply only when this call launches the browser; one is already running on profile ${running.profile}${running.headless ? ", headless" : ""} (webindex_browser_close first to change them)`
+          `profile, headless and browserKind apply only when this call launches the browser; one is already running on profile ${running.profile}${running.headless ? ", headless" : ""} (webindex_browser_close first to change them)`
         ] : [],
         ...capture ? [`recording the JSON pages fetch \u2014 ${FOLLOW_UPS.networkList}`] : []
       ];
@@ -16554,6 +16963,7 @@ USAGE
   webindex video     frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]
   webindex video     list <playlist|channel> [--limit <n>] [--out <dir>] [--refresh] [--json]
   webindex browser   open <url> [--new-tab] [--headless] [--profile <n>] [--cdp <port|url>]
+                     [--browser-kind chrome|brave|chromium|edge]
                      [--capture] [--snapshot] [--timeout <ms>]
   webindex browser   attach <port|url> | status | close [--all]
   webindex browser   snapshot [<ref>] [--interactive] [--max-chars <n>]
@@ -16824,6 +17234,10 @@ ENVIRONMENT
   WEBINDEX_UA            override the browser User-Agent
   WEBINDEX_BROWSER_DIR   where \`browser\` keeps its profiles and session (default ~/.webindex/browser)
   WEBINDEX_BROWSER_BIN   the browser it drives (default the first Chrome, Brave, Chromium or Edge found)
+  WEBINDEX_BROWSER_KIND  the kind it launches when no binary is named: chrome, brave, chromium or edge
+                         (brave blocks ads and trackers on its own); --browser-kind on open wins
+  WEBINDEX_BROWSER_EXTENSIONS  unpacked extensions it loads when it launches the browser, absolute
+                         paths, comma separated (an ad blocker); branded Chrome \u2265 137 ignores them
   WEBINDEX_BROWSER_FETCH fetch renders pages in that browser: always, fallback or off (default)
   GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, GITEA_TOKEN
                          optional forge tokens (WEBINDEX_GITHUB_TOKEN and its kin win over
@@ -16869,6 +17283,7 @@ var VALUE_FLAGS = [
   "effort",
   "profile",
   "cdp",
+  "browser-kind",
   "max-chars",
   "text",
   "gone",
@@ -16977,7 +17392,7 @@ function mcpPolicy(args, allowRemote) {
     extractRoot = resolve11(rootArg);
     let isDir = false;
     try {
-      isDir = statSync11(extractRoot).isDirectory();
+      isDir = statSync12(extractRoot).isDirectory();
     } catch {
       isDir = false;
     }
@@ -17022,7 +17437,7 @@ function forgeTarget(raw, kind) {
 async function extractLocal(path, fullPage = false, given, format = "text") {
   let bytes;
   try {
-    bytes = given ?? readFileSync18(path);
+    bytes = given ?? readFileSync19(path);
   } catch (e) {
     throw new ToolError(`cannot read ${path}: ${e.message}`);
   }
@@ -17156,7 +17571,7 @@ function readDocsInput(args, usageLine) {
   if (src === void 0 && process.stdin.isTTY) usage(usageLine);
   const label = `--docs ${src === void 0 || src === "-" ? "(stdin)" : src}`;
   try {
-    return { text: readFileSync18(src === void 0 || src === "-" ? 0 : src, "utf8"), label };
+    return { text: readFileSync19(src === void 0 || src === "-" ? 0 : src, "utf8"), label };
   } catch (e) {
     fail(`cannot read ${src === void 0 || src === "-" ? "stdin" : src}: ${e.message}`);
   }
@@ -17164,7 +17579,7 @@ function readDocsInput(args, usageLine) {
 function readStdin(usageLine) {
   if (process.stdin.isTTY) usage(usageLine);
   try {
-    return readFileSync18(0);
+    return readFileSync19(0);
   } catch (e) {
     fail(`cannot read stdin: ${e.message}`);
   }
@@ -17179,7 +17594,7 @@ async function readPage(target, accept, usageLine) {
   if (target === "-") bytes = readStdin(usageLine);
   else {
     try {
-      bytes = readFileSync18(target.startsWith("file:") ? fileURLToPath2(target) : target);
+      bytes = readFileSync19(target.startsWith("file:") ? fileURLToPath2(target) : target);
     } catch (e) {
       fail(`${target} is neither an http(s) URL nor a readable file (${e.code ?? e.message})`);
     }
@@ -17287,11 +17702,11 @@ function webindexAdapter(policy = {}) {
   const repoRef = (raw, kind) => {
     if (root === void 0 && localFiles) return resolveRepo(raw, kind);
     const named = raw.trim();
-    if (isAbsolute4(named) || /^(?:\.{1,2}|~)(?:[\\/]|$)/.test(named)) return resolveRepo(localPath(named), kind);
+    if (isAbsolute5(named) || /^(?:\.{1,2}|~)(?:[\\/]|$)/.test(named)) return resolveRepo(localPath(named), kind);
     if (named && root !== void 0) {
       try {
         const under = confinePath(root, named);
-        if (statSync11(under).isDirectory()) return resolveRepo(under, kind);
+        if (statSync12(under).isDirectory()) return resolveRepo(under, kind);
       } catch {
       }
     }
@@ -17312,13 +17727,13 @@ function webindexAdapter(policy = {}) {
     const base2 = videoRoot();
     if (raw === void 0 || raw === null || raw === "") return base2;
     const named = String(raw);
-    if (!guarded) return isAbsolute4(named) ? named : resolve11(base2, named);
+    if (!guarded) return isAbsolute5(named) ? named : resolve11(base2, named);
     if (!/^[A-Za-z0-9._-]+$/.test(named) || named === "." || named === "..") {
       throw new ToolError(`\`dir\` must be the name of a directory inside ${base2} on this server, not a path.`);
     }
     mkdirSync8(base2, { recursive: true });
-    const target = join26(base2, named);
-    if (existsSync13(target) && relative4(realpathSync4(base2), realpathSync4(target)).startsWith("..")) {
+    const target = join27(base2, named);
+    if (existsSync14(target) && relative4(realpathSync4(base2), realpathSync4(target)).startsWith("..")) {
       throw new ToolError(`${named} leads outside ${base2}, the only directory this server writes videos to.`);
     }
     return target;
@@ -17880,7 +18295,7 @@ extractor: ${r.extractor}` };
           knownHostsOnly: guarded
         });
         if (!r.ok) throw new ToolError(`No transcript for ${url}: ${r.reason}.`);
-        const text = r.markdown ?? readFileSync18(r.transcript, "utf8");
+        const text = r.markdown ?? readFileSync19(r.transcript, "utf8");
         return { text: `${text}
 ---
 run: ${r.dir}
@@ -17902,7 +18317,7 @@ via: ${r.meta.via}${r.reused ? " (already on disk)" : ""}` };
         if (!run.ok) throw new ToolError(`No transcript for ${url}: ${run.reason}.`);
         const r = await extractFrames(run.dir, { effort, signal, url, knownHostsOnly: guarded });
         if (!r.ok) throw new ToolError(r.reason);
-        const frames = r.frames.map((f) => ({ image: join26(run.dir, f.file), stamp: f.stamp, chapter: f.chapter, kind: f.kind, said: f.text }));
+        const frames = r.frames.map((f) => ({ image: join27(run.dir, f.file), stamp: f.stamp, chapter: f.chapter, kind: f.kind, said: f.text }));
         return { text: JSON.stringify({ markdown: r.markdown, candidates: r.candidates, duplicates: r.duplicates, frames }, null, 2) };
       }
       if (name2 === "webindex_video_list") {
@@ -18061,7 +18476,7 @@ async function dispatch(argv) {
     const bad = urls.find((u) => !/^https?:\/\//i.test(u));
     if (bad !== void 0) {
       fail(
-        `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync13(bad) ? ` \u2014 for a file on disk, \`webindex extract ${bad}\`` : ""}`
+        `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync14(bad) ? ` \u2014 for a file on disk, \`webindex extract ${bad}\`` : ""}`
       );
     }
     const fullPage = argBool(args, "full-page");
@@ -18556,7 +18971,7 @@ async function dispatch(argv) {
       const summary = { ...r, title: r.meta.title, via: r.meta.via, duration: r.meta.duration };
       if (asJson) process.stdout.write(jsonLine(summary));
       else if (isNoWrite()) {
-        process.stdout.write(r.markdown ?? readFileSync18(r.transcript, "utf8"));
+        process.stdout.write(r.markdown ?? readFileSync19(r.transcript, "utf8"));
       } else {
         const m = r.meta;
         const facts = [m.channel, m.duration !== void 0 ? formatStamp(m.duration) : void 0, m.via, `${r.segments} segment${r.segments === 1 ? "" : "s"}`].filter(Boolean).join(" \xB7 ");
@@ -18598,7 +19013,7 @@ ${rows.join("\n")}
         const r2 = await fetchVideoRun(target, root, { lang: argValue(args, "lang") });
         if (!r2.ok) fail(`no transcript for ${target}: ${r2.reason}`);
         runDir = r2.dir;
-      } else runDir = existsSync13(join26(root, target, "meta.json")) ? join26(root, target) : resolve11(target);
+      } else runDir = existsSync14(join27(root, target, "meta.json")) ? join27(root, target) : resolve11(target);
       const r = await extractFrames(runDir, { effort });
       if (!r.ok) {
         if (asJson) process.stdout.write(jsonLine(r));
@@ -18640,6 +19055,7 @@ ${rows.join("\n")}
         headless: argBool(args, "headless"),
         profile: argValue(args, "profile"),
         cdp: argValue(args, "cdp"),
+        browserKind: argValue(args, "browser-kind"),
         capture: argBool(args, "capture"),
         snapshot: argBool(args, "snapshot"),
         interactive: argBool(args, "interactive"),
@@ -18664,7 +19080,7 @@ ${rows.join("\n")}
         // A UsageError, not usage(): runBrowserCommand turns it into exit 2 with its JSON.
         stdin: () => {
           if (process.stdin.isTTY) throw new UsageError("usage: webindex browser eval <expr|-> \u2014 `-` reads the expression from a pipe, not a terminal");
-          return readFileSync18(0, "utf8");
+          return readFileSync19(0, "utf8");
         }
       }
     );
@@ -18687,7 +19103,7 @@ ${rows.join("\n")}
       if (!name2) usage("usage: webindex skill init <name> [--root <dir>]");
       const badName = skillNameProblem(name2);
       if (badName) usage(badName);
-      const r = scaffoldSkill(root, name2, { exists: existsSync13 });
+      const r = scaffoldSkill(root, name2, { exists: existsSync14 });
       for (const e of r.errors) process.stderr.write(`  ${e}
 `);
       if (asJson) process.stdout.write(jsonLine(r));
@@ -18774,7 +19190,7 @@ ${rows.join("\n")}
         const dtsFile = pin?.files?.find((f) => f.local.endsWith(".d.mts"))?.local;
         let dts = "";
         try {
-          dts = readFileSync18(join26(root, config.vendorDir, dtsFile ?? ""), "utf8");
+          dts = readFileSync19(join27(root, config.vendorDir, dtsFile ?? ""), "utf8");
         } catch {
           fail(`cannot read the vendored declarations for "${engineName}" \u2014 run \`webindex skill vendor --ref <tag>\` first`);
         }
@@ -18808,11 +19224,11 @@ ${rows.join("\n")}
       return;
     }
     if (action === "bundle") {
-      const built = join26(root, "scripts", `${config.name}.mjs`);
+      const built = join27(root, "scripts", `${config.name}.mjs`);
       let surface;
       let surfaceProblem;
       const flagList = (v) => v == null || typeof v === "string" || typeof v[Symbol.iterator] !== "function" ? void 0 : [...v];
-      if (existsSync13(built)) {
+      if (existsSync14(built)) {
         try {
           const mod = await import(pathToFileURL(built).href);
           const valueFlags = flagList(mod.VALUE_FLAGS);
@@ -18845,11 +19261,11 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
       return;
     }
     if (action === "copy") {
-      const from = join26(root, "scripts", `${config.name}.mjs`);
-      if (!existsSync13(from)) fail(`missing ${relative4(root, from)} \u2014 run the build first`);
-      const to = join26(root, "skills", config.name, "scripts", `${config.name}.mjs`);
-      ensureDir(join26(to, ".."));
-      writeArtifact(to, readFileSync18(from, "utf8"));
+      const from = join27(root, "scripts", `${config.name}.mjs`);
+      if (!existsSync14(from)) fail(`missing ${relative4(root, from)} \u2014 run the build first`);
+      const to = join27(root, "skills", config.name, "scripts", `${config.name}.mjs`);
+      ensureDir(join27(to, ".."));
+      writeArtifact(to, readFileSync19(from, "utf8"));
       process.stdout.write(`  copied ${relative4(root, from)} -> ${relative4(root, to)}
 `);
       return;
@@ -18953,7 +19369,12 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
       `  browser     ${bin.state === "found" ? `${bin.kind} at ${bin.path}` : bin.state === "error" ? bin.error : `not found \u2014 ${bin.hint}`}`,
       `              home ${browser.home}${browser.profiles.length ? ` (profiles: ${browser.profiles.join(", ")})` : ""}`,
       `              session ${sess.state === "none" ? "none" : `port ${sess.port}, profile ${sess.profile}, ${sess.launchedByUs ? "launched by webindex" : "attached"}, ${sess.state === "alive" ? "answering" : "not answering"}`}`,
-      `              fetch ${browser.fetch.mode === "off" ? `off (${envName("BROWSER_FETCH")}=always|fallback turns it on)` : browser.fetch.mode}, concurrency ${browser.fetch.concurrency}`
+      `              fetch ${browser.fetch.mode === "off" ? `off (${envName("BROWSER_FETCH")}=always|fallback turns it on)` : browser.fetch.mode}, concurrency ${browser.fetch.concurrency}`,
+      ...browser.kind ? [`              prefers ${browser.kind} (${envName("BROWSER_KIND")})`] : [],
+      ...browser.extensions ? [
+        `              extensions ${browser.extensions.error ?? browser.extensions.paths.join(", ")}`,
+        ...browser.extensions.note ? [`              note: ${browser.extensions.note}`] : []
+      ] : []
     ];
     const lines = [
       `webindex ${ENGINE_VERSION}`,
