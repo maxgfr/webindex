@@ -259,6 +259,10 @@ describe("renderSnapshot", () => {
         // A field with no ref of its own (no backend id): its editor is what can be acted on.
         node(1, "textbox", "Orphan", { backendDOMNodeId: undefined }, [top(editor(11, "1"))]),
         // A named control inside a combobox (a clear button) is a control of its own.
+        // An unnamed focusable toggle in a custom ARIA combobox (an icon-only clear button) is not an editor: it keeps its ref.
+        node(4, "combobox", "Country", { properties: [prop("focusable", true)] }, [
+          top(node(41, "generic", undefined, { parentId: "4", properties: [prop("focusable", true)] })),
+        ]),
         node(2, "combobox", "City", { properties: [prop("focusable", true)] }, [
           top(editor(21, "2", "Clear")),
           top(node(22, "button", undefined, { parentId: "2" })),
@@ -272,11 +276,13 @@ describe("renderSnapshot", () => {
       lines(
         '- textbox "Orphan"',
         "  - generic [ref=e1]",
-        '- combobox "City" [ref=e2]',
-        '  - generic "Clear" [ref=e3]',
-        "  - button [ref=e4]",
+        '- combobox "Country" [ref=e2]',
+        "  - generic [ref=e3]",
+        '- combobox "City" [ref=e4]',
+        '  - generic "Clear" [ref=e5]',
+        "  - button [ref=e6]",
         '- region "Notes"',
-        "  - generic [ref=e5]",
+        "  - generic [ref=e7]",
       ),
     );
   });

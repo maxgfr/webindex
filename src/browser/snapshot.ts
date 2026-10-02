@@ -210,7 +210,7 @@ class Renderer {
     const hasRole = REF_ROLES.has(role.toLowerCase());
     const wantsRef = n.backendDOMNodeId !== undefined && (hasRole || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
     // The editor inside a text field's user-agent shadow tree: the field's ref already acts on it.
-    const editor = wantsRef && !hasRole && !name && parent?.ref === true && FIELD_ROLES.has(parent.role);
+    const editor = wantsRef && !hasRole && !name && truthy(prop(n, "editable")) && parent?.ref === true && FIELD_ROLES.has(parent.role);
     if ((COLLAPSIBLE.has(role) && !name && !wantsRef) || editor) return [{ t: "break" }, ...this.children(tree, n, parent), { t: "break" }];
 
     const isFrame = role.toLowerCase() === "iframe";
