@@ -383,11 +383,12 @@ function compactUrl(url: string, base: string): string {
   let shown = url;
   try {
     const u = new URL(url, base);
-    if (u.origin === new URL(base).origin) shown = `${u.pathname}${u.search}`;
+    if (u.origin !== "null" && u.origin === new URL(base).origin) shown = `${u.pathname}${u.search}${u.hash}`;
   } catch {
     /* not parseable: as it is */
   }
-  return shown.length > LINK_URL_MAX ? `${shown.slice(0, LINK_URL_MAX)}…` : shown;
+  const chars = Array.from(shown);
+  return chars.length > LINK_URL_MAX ? `${chars.slice(0, LINK_URL_MAX).join("")}…` : shown;
 }
 
 function flat(items: Item[], out: Line[], base: string): void {

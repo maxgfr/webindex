@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
 import * as discovery from "../src/browser/discovery.js";
-import { type BrowserSession, browserStatus, closeBrowser, openBrowserSession, withPage } from "../src/browser/session.js";
+import { assertOpenableUrl, type BrowserSession, browserStatus, closeBrowser, openBrowserSession, withPage } from "../src/browser/session.js";
 import { appendNetwork, readNetwork, readRefs, readSession, type Session, writeRefs, writeSession } from "../src/browser/state.js";
 import { profileDir } from "../src/browser/profile.js";
 import { FakeCdp } from "./helpers/fake-cdp.js";
@@ -176,6 +176,9 @@ describe("openBrowserSession", () => {
     expect(s.targetId).toBe("T2");
     expect(fake.calls.find((c) => c.method === "Target.attachToTarget")?.params).toEqual({ targetId: "T2", flatten: true });
     await s.navigate("https://read.test/");
+    await expect(s.navigate("file:///etc/passwd")).rejects.toThrow(/only http\(s\) URLs/);
+    await expect(s.newTab("javascript:alert(1)")).rejects.toThrow(/only http\(s\) URLs/);
+    expect(fake.calls.filter((c) => c.method === "Page.navigate").map((c) => c.params)).toEqual([{ url: "https://read.test/" }]);
     await s.listTabs();
     s.save();
     expect(readSession()).toEqual(before);
@@ -796,5 +799,23 @@ describe("withPage", () => {
     fake.addTarget();
     await withPage({ cdp: fake.port, deps: deps() }, (s) => s.shutdown());
     expect(readSession()).toBeNull();
+  });
+});
+
+describe("assertOpenableUrl", () => {
+  it.each(["https://a.test/", "HTTP://A.TEST/x", "  https://a.test/ ", "about:blank", "ABOUT:BLANK", "#part"])("allows %j", (u) => {
+    expect(() => assertOpenableUrl(u)).not.toThrow();
+  });
+  it.each([
+    "javascript:alert(1)",
+    "JavaScript:alert(1)",
+    "data:text/html,hi",
+    "file:///Users/me/.ssh/id_rsa",
+    "chrome://settings",
+    "about:srcdoc",
+    "/relative",
+    "  javascript:1",
+  ])("refuses %j", (u) => {
+    expect(() => assertOpenableUrl(u)).toThrow(/only http\(s\) URLs \(and about:blank\) can be opened — use `webindex-tests extract <path>`/);
   });
 });

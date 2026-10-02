@@ -492,6 +492,10 @@ describe("WaitTimeoutError messages", () => {
     [{ url: "/done" }, 'the url did not match "/done" after 5 ms'],
     [{ load: true }, "the page did not finish loading after 5 ms"],
     [{ idle: true }, "the network did not go idle after 5 ms"],
+    [
+      { clear: true },
+      "the challenge is still there after 5 ms — a human must solve it in the browser window (`webindex-tests browser open <url>` shows it), then run wait --clear again",
+    ],
   ] as const)("reads %j in words", (cond, msg) => {
     expect(new WaitTimeoutError(cond, 5).message).toBe(msg);
   });

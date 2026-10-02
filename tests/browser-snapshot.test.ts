@@ -113,12 +113,20 @@ describe("renderSnapshot", () => {
     );
     expect(r.text).toBe(
       lines(
-        '- link "Docs" [ref=e1] → /docs?x=1',
+        '- link "Docs" [ref=e1] → /docs?x=1#top',
         '- link "Out" [ref=e2] → https://b.test/x',
         `- link "Long" [ref=e3] → ${long.slice(0, 80)}…`,
         '- button "Go" [ref=e4]',
       ),
     );
+  });
+
+  it("does not render an opaque-origin url (javascript:, data:) as a relative one, and cuts on whole characters", () => {
+    const link = (id: number, name: string, url: string) => node(id, "link", name, { properties: [{ name: "url", value: { type: "string", value: url } }] });
+    const emoji = `https://other.test/${"😀".repeat(100)}`;
+    const r = renderSnapshot(tree(link(1, "Run", "javascript:void(0)"), link(2, "Em", emoji)), { refs: fresh(), interactive: true });
+    expect(r.text.split("\n")[0]).toBe('- link "Run" [ref=e1] → javascript:void(0)');
+    expect(r.text.split("\n")[1]).toBe(`- link "Em" [ref=e2] → ${Array.from(emoji).slice(0, 80).join("")}…`);
   });
 
   it("reuses refs already seen and does not mutate the table it is given", () => {

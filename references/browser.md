@@ -20,7 +20,7 @@ Use plain `fetch` everywhere else: it is faster and needs no browser.
 
 ## The loop
 
-1. `webindex browser open <url> --snapshot` loads the page, launching the browser
+1. `webindex browser open <url> --snapshot` (http(s) URLs and `about:blank` only; anything else, `file:` and `javascript:` included, is refused: use `webindex extract <path>` for local files) loads the page, launching the browser
    on first use, and prints the tree. A page that committed but has not loaded
    within 30 s (`--timeout <ms>`: a cold server, a render-blocking script that
    holds even DOMContentLoaded) is opened all the same, with a `still loading after
@@ -41,7 +41,7 @@ Use plain `fetch` everywhere else: it is faster and needs no browser.
 `snapshot --interactive` (and `open <url> --snapshot --interactive`) lists only
 the controls and is much shorter. A link line ends with its target, e.g.
 `- link "Docs" [ref=e5] → /docs` (path and query on the page's own origin, the
-whole URL elsewhere, cut at about 80 characters), so `eval` is not needed to read
+whole URL elsewhere, cut at about 80 characters: for a long one read the full snapshot's `/url:` line), so `eval` is not needed to read
 an `href`. `snapshot e40` shows one subtree, and so does
 `snapshot --selector <css>` for the first element a CSS selector matches.
 `--max-chars <n>` cuts a snapshot at a line (20000 characters by default) and
@@ -121,10 +121,18 @@ refused (exit 1) with the overlay's controls and their refs, which you can use
 in the next command. A click blocked by something that is no overlay (a sticky
 header, a chat bubble) is refused with what is in the way and its controls.
 
-**A link covered by an overlay** is refused the same way, and the error ends with
-`or open its URL directly: webindex browser open <url>`. Read the link's URL from
-the snapshot line (`→ <url>` in `--interactive`, `/url:` in a full snapshot) and
-`open` it: navigating there does not accept anything.
+**A link covered by an overlay** is refused the same way. When the link goes to an
+http(s) URL, the error ends with
+
+```
+or open its URL directly (navigating doesn't accept anything):
+url: <url>
+`webindex browser open '<url>'`
+```
+
+Take the URL from that line (or from the snapshot: `→ <url>` in `--interactive`,
+`/url:` in a full snapshot) and `open` it: navigating there does not accept
+anything. A `javascript:` or `data:` link gets no such hint.
 
 **Ask the user before accepting tracking or consent.** "Accept", "Refuse",
 "Customise" and "Close" are the user's choices, not yours, even though the guard

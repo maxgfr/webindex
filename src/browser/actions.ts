@@ -147,11 +147,6 @@ export const PAGE_FUNCTIONS = {
    * when it is inside the target (a button in a card, which the guard then looks
    * at), else a description of what covers the target.
    */
-  /** The url of the link the target is, or sits inside; null when it is no link. */
-  linkHref: `function linkHref() {
-  const a = this.closest ? this.closest("a[href]") : null;
-  return a ? String(a.href) : null;
-}`,
   hitTest: `function hitTest(hit) {
   ${DESCRIBE}
   const owner = ${OWNER_SOURCE};
@@ -162,6 +157,20 @@ export const PAGE_FUNCTIONS = {
   // A target inside a frame: the top document's hit test stops at the frame element.
   if (el.ownerDocument !== this.ownerDocument && /^i?frame$/i.test(el.tagName)) return null;
   return describe(el);
+}`,
+  /** The url of the link the target is, or sits inside (an SVG <a> too); null when it is no link. */
+  linkHref: `function linkHref() {
+  const a = this.closest ? this.closest("a[href], a[*|href]") : null;
+  if (!a) return null;
+  let h = a.href;
+  if (h && typeof h === "object") h = h.baseVal;
+  if (typeof h !== "string") h = a.getAttribute("href") || a.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+  if (typeof h !== "string") return null;
+  try {
+    return new URL(h, a.ownerDocument.baseURI).href;
+  } catch (e) {
+    return null;
+  }
 }`,
   /** What fill can do with the element: a field, a contenteditable, or nothing (with a hint at the right action). */
   fieldKind: `function fieldKind() {
@@ -490,6 +499,21 @@ const OVERLAY_CONTROLS_MAX = 12;
  * overlay (a cookie wall, a dialog), which one to press — accepting tracking,
  * refusing it, closing — is the user's; a sticky header is only in the way.
  */
+/** The url as the page gave it, when it is an http(s) one; undefined for anything else (javascript:, data:…). */
+function httpUrl(href: string): string | undefined {
+  try {
+    const u = new URL(href);
+    return /^https?:$/.test(u.protocol) ? u.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One shell word, whatever the text holds. */
+export function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
 async function coveredError(
   page: CdpSession,
   targetId: string,
@@ -501,7 +525,9 @@ async function coveredError(
 ): Promise<ActionError> {
   const err = await coveredBy(page, targetId, ref, hitObjectId, where, at);
   // A covered link can still be reached by its address, and navigating there accepts nothing.
-  if (href) err.message += `\nor open its URL directly: \`${brand().cli} browser open ${href}\` (navigating doesn't accept anything)`;
+  const safe = href ? httpUrl(href) : undefined;
+  if (safe)
+    err.message += `\nor open its URL directly (navigating doesn't accept anything):\nurl: ${safe}\n\`${brand().cli} browser open ${shellQuote(safe)}\``;
   return err;
 }
 

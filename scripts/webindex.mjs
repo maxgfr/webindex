@@ -7537,6 +7537,17 @@ function tabList(map, pages, current2) {
     return { id, targetId, url: p?.url ?? "", title: p?.title ?? "", active: targetId === current2 };
   });
 }
+function assertOpenableUrl(url) {
+  const u = url.trim();
+  let ok = /^about:blank$/i.test(u) || u.startsWith("#");
+  if (!ok) {
+    try {
+      ok = /^https?:$/.test(new URL(u).protocol);
+    } catch {
+    }
+  }
+  if (!ok) throw new UsageError(`only http(s) URLs (and about:blank) can be opened \u2014 use \`${brand().cli} extract <path>\` for local files`);
+}
 async function createTarget(cdp) {
   const { targetId } = await cdp.send("Target.createTarget", { url: "about:blank" });
   return targetId;
@@ -7690,6 +7701,7 @@ var init_session = __esm({
   "src/browser/session.ts"() {
     "use strict";
     init_brand();
+    init_cli_kit();
     init_cdp();
     init_deps();
     init_discovery();
@@ -7906,6 +7918,7 @@ var init_session = __esm({
        * is the page now, still loading: it resolves, with a `note`.
        */
       async navigate(url, opts = {}) {
+        assertOpenableUrl(url);
         const waitUntil = opts.waitUntil ?? "load";
         const timeoutMs = opts.timeoutMs ?? NAVIGATION_TIMEOUT_MS;
         const nav = this.watch();
@@ -8031,6 +8044,7 @@ var init_session = __esm({
       }
       /** Open a tab, make it current and, given a url, load it. */
       async newTab(url, opts = {}) {
+        if (url !== void 0) assertOpenableUrl(url);
         const targetId = await createTarget(this.cdp);
         try {
           await this.switchTo(targetId);
@@ -10019,10 +10033,11 @@ function compactUrl(url, base2) {
   let shown2 = url;
   try {
     const u = new URL(url, base2);
-    if (u.origin === new URL(base2).origin) shown2 = `${u.pathname}${u.search}`;
+    if (u.origin !== "null" && u.origin === new URL(base2).origin) shown2 = `${u.pathname}${u.search}${u.hash}`;
   } catch {
   }
-  return shown2.length > LINK_URL_MAX ? `${shown2.slice(0, LINK_URL_MAX)}\u2026` : shown2;
+  const chars = Array.from(shown2);
+  return chars.length > LINK_URL_MAX ? `${chars.slice(0, LINK_URL_MAX).join("")}\u2026` : shown2;
 }
 function flat(items, out, base2) {
   for (const it of items) {
@@ -10509,10 +10524,25 @@ async function centreOf(page, node) {
     y: Math.round((q[1] + q[3] + q[5] + q[7]) / 4)
   };
 }
+function httpUrl2(href) {
+  try {
+    const u = new URL(href);
+    return /^https?:$/.test(u.protocol) ? u.href : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function shellQuote(s) {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
 async function coveredError(page, targetId, ref2, hitObjectId, where2, at, href = null) {
   const err = await coveredBy(page, targetId, ref2, hitObjectId, where2, at);
-  if (href) err.message += `
-or open its URL directly: \`${brand().cli} browser open ${href}\` (navigating doesn't accept anything)`;
+  const safe = href ? httpUrl2(href) : void 0;
+  if (safe)
+    err.message += `
+or open its URL directly (navigating doesn't accept anything):
+url: ${safe}
+\`${brand().cli} browser open ${shellQuote(safe)}\``;
   return err;
 }
 async function coveredBy(page, targetId, ref2, hitObjectId, where2, at) {
@@ -10857,11 +10887,6 @@ var init_actions = __esm({
        * when it is inside the target (a button in a card, which the guard then looks
        * at), else a description of what covers the target.
        */
-      /** The url of the link the target is, or sits inside; null when it is no link. */
-      linkHref: `function linkHref() {
-  const a = this.closest ? this.closest("a[href]") : null;
-  return a ? String(a.href) : null;
-}`,
       hitTest: `function hitTest(hit) {
   ${DESCRIBE}
   const owner = ${OWNER_SOURCE};
@@ -10872,6 +10897,20 @@ var init_actions = __esm({
   // A target inside a frame: the top document's hit test stops at the frame element.
   if (el.ownerDocument !== this.ownerDocument && /^i?frame$/i.test(el.tagName)) return null;
   return describe(el);
+}`,
+      /** The url of the link the target is, or sits inside (an SVG <a> too); null when it is no link. */
+      linkHref: `function linkHref() {
+  const a = this.closest ? this.closest("a[href], a[*|href]") : null;
+  if (!a) return null;
+  let h = a.href;
+  if (h && typeof h === "object") h = h.baseVal;
+  if (typeof h !== "string") h = a.getAttribute("href") || a.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+  if (typeof h !== "string") return null;
+  try {
+    return new URL(h, a.ownerDocument.baseURI).href;
+  } catch (e) {
+    return null;
+  }
 }`,
       /** What fill can do with the element: a field, a contenteditable, or nothing (with a hint at the right action). */
       fieldKind: `function fieldKind() {
