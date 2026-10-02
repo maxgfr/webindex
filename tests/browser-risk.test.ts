@@ -396,6 +396,90 @@ describe("frames and shadow roots", () => {
     expect(expression).not.toContain(".call(document.activeElement");
   });
 
+  // An <input> as the collector reads it: attributes, no form, no labels.
+  const input = (type: string, value = "", over: object = {}): any => {
+    const attrs: Record<string, string> = { type, value };
+    const e: any = {
+      nodeType: 1,
+      tagName: "INPUT",
+      type,
+      value,
+      ownerDocument: { getElementById: () => null },
+      form: null,
+      labels: [],
+      parentElement: null,
+      getAttribute: (n: string) => attrs[n] ?? null,
+      hasAttribute: (n: string) => n in attrs,
+      closest: (sel: string) => (sel.split(",").includes(`input[type=${type}]`) ? e : null),
+      querySelectorAll: () => [],
+      ...over,
+    };
+    return e;
+  };
+  /** The user-agent shadow root Chrome hit-tests into: the host does not expose it as its shadowRoot. */
+  const uaRoot = (host: any): any => ({ nodeType: 11, nodeName: "#document-fragment", parentNode: null, host });
+
+  it("collects the input a node of its user-agent shadow tree belongs to: the root itself, a text in it, the editor", () => {
+    const upload = input("submit", "Upload");
+    const root = uaRoot(upload);
+    const label = { nodeType: 3, parentNode: root, parentElement: null };
+    const want = { role: "button", label: "Upload", isSubmit: false, formHasPassword: false, submitLabel: "" };
+    expect(run(COLLECT_SOURCE, upload, ["click"])).toEqual(want);
+    // What DOM.getNodeForLocation with includeUserAgentShadowDOM returns on an <input type=submit>: its shadow root.
+    expect(run(COLLECT_SOURCE, root, ["click"])).toEqual(want);
+    expect(run(COLLECT_SOURCE, label, ["click"])).toEqual(want);
+    // A text field's editor is an element of that tree: the field is what is acted on, not a div named by what was typed.
+    const field = input("text", "delete everything");
+    const fieldRoot = uaRoot(field);
+    const editor = el("DIV", { parentNode: fieldRoot, getRootNode: () => fieldRoot, innerText: "delete everything" });
+    expect(run(COLLECT_SOURCE, editor, ["click"])).toMatchObject({ role: "textbox", label: "" });
+  });
+
+  it("finds no element for a node of an author shadow tree (refused), and labels the host by its open root's text", () => {
+    // <x-del role=button> whose open shadow root holds only "Delete": Chrome's innerText (and textContent) of the host is "".
+    const attrs: Record<string, string> = { role: "button" };
+    const host = el("X-DEL", {
+      ownerDocument: { getElementById: () => null },
+      getAttribute: (n: string) => attrs[n] ?? null,
+      hasAttribute: (n: string) => n in attrs,
+      closest: (sel: string) => (sel.split(",").includes("[role=button]") ? host : null),
+      querySelectorAll: () => [],
+      innerText: "",
+      textContent: "",
+    });
+    const root = { nodeType: 11, parentNode: null, host, textContent: "Delete" };
+    host.shadowRoot = root;
+    // Its text, or the root itself, is no control: an author's shadow tree can hold anything, so nothing is called harmless.
+    expect(run(COLLECT_SOURCE, { nodeType: 3, parentNode: root, parentElement: null }, ["click"])).toBeNull();
+    expect(run(COLLECT_SOURCE, root, ["click"])).toBeNull();
+    // The host itself is labelled by what its open root shows.
+    expect(run(COLLECT_SOURCE, host, ["click"])).toMatchObject({ role: "button", label: "Delete" });
+    // A closed root (no shadowRoot to read) leaves the host unlabelled: guarded as before.
+    const closed = el("X-DEL", { ...host, shadowRoot: null });
+    closed.closest = (sel: string) => (sel.split(",").includes("[role=button]") ? closed : null);
+    expect(run(COLLECT_SOURCE, closed, ["click"])).toMatchObject({ role: "button", label: "" });
+    expect(run(COLLECT_SOURCE, { nodeType: 3, parentNode: null, parentElement: null }, ["click"])).toBeNull();
+    expect(run(COLLECT_SOURCE, { nodeType: 9, parentNode: null }, ["click"])).toBeNull();
+  });
+
+  it("still refuses an <input type=button> that deletes, reached through its shadow root", async () => {
+    const del = uaRoot(input("button", "Supprimer"));
+    const p = new FakePage();
+    p.handle("DOM.resolveNode", () => ({ object: { objectId: "o" } }));
+    p.handle("Runtime.callFunctionOn", ({ functionDeclaration, arguments: args }) => ({
+      result: {
+        value: run(
+          functionDeclaration,
+          del,
+          args.map((a: any) => a.value),
+        ),
+      },
+    }));
+    const err = await guardAction(p, { backendNodeId: 7, action: "click" }).catch((e) => e);
+    expect(err).toBeInstanceOf(RiskRefusedError);
+    expect(err.message).toMatch(/refused to click on "Supprimer".*matches "supprimer"/);
+  });
+
   it("collects a frame as a frame, saying whether its content is readable", () => {
     expect(run(COLLECT_SOURCE, el("IFRAME", { contentDocument: null }), ["click"])).toEqual({ frame: true, readable: false });
     expect(run(COLLECT_SOURCE, el("IFRAME", { contentDocument: {} }), ["press"])).toEqual({ frame: true, readable: true });

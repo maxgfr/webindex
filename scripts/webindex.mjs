@@ -5480,15 +5480,68 @@ var init_firecrawl = __esm({
   }
 });
 
+// src/junk.ts
+function looksLikeJunkExtraction(text) {
+  const t = text.trim();
+  if (t.length >= 2e3) return void 0;
+  const head = t.slice(0, 800);
+  const hits = JUNK_PATTERNS.filter(([re]) => re.test(head));
+  const strong = hits.find(([, , kind]) => kind === "strong");
+  if (!strong) return void 0;
+  if (hits.length >= 2) return strong[1];
+  const prose = t.split("\n").filter((l) => l.trim().length >= 60 && !JUNK_PATTERNS.some(([re]) => re.test(l))).length;
+  return prose < 3 ? strong[1] : void 0;
+}
+var JUNK_PATTERNS;
+var init_junk = __esm({
+  "src/junk.ts"() {
+    "use strict";
+    JUNK_PATTERNS = [
+      [/\b(accept|manage)\s+(all\s+)?cookies\b/i, "cookie/consent wall", "strong"],
+      [/\bwe use cookies\b/i, "cookie/consent wall", "strong"],
+      [/\bcookie (policy|settings|consent|preferences)\b/i, "cookie/consent wall", "weak"],
+      [/\b(accept|reject|allow|decline) all\b/i, "cookie/consent wall", "weak"],
+      [/\b(please )?enable javascript\b/i, "JavaScript-required shell", "strong"],
+      [/\bjavascript is (disabled|required|not enabled)\b/i, "JavaScript-required shell", "strong"],
+      [
+        /\bverify(ing)? (that )?(you are|you're) (a )?(human|not a (ro)?bot)\b|\bare you a (human|robot)\b|\bhuman verification\b/i,
+        "anti-bot interstitial",
+        "strong"
+      ],
+      [/\battention required\b.*cloudflare|\bunusual traffic from your (computer )?network\b|\bchecking your browser\b/i, "anti-bot interstitial", "strong"],
+      // Akamai's and Cloudflare's denials carry an incident reference; without one
+      // the phrase is as likely a permission-error article.
+      [/\baccess denied\b[\s\S]{0,300}?(\breference #|\bray id\b|\bpermission to access\b)/i, "anti-bot interstitial", "strong"],
+      // Cloudflare's WAF block page. Its "Attention Required!" is the <title>,
+      // which extraction drops, so the body's own wording has to carry it.
+      [/\bsorry, you have been blocked\b|\byou are unable to access\b[\s\S]{0,300}?\bray id\b/i, "anti-bot interstitial", "strong"],
+      [/\baccess denied\b|\benable cookies\b/i, "anti-bot interstitial", "weak"],
+      // FR / DE (the locale layer targets non-EN markets)
+      [/\bnous utilisons des cookies\b|\baccepter (tous )?les cookies\b|\bactiver javascript\b/i, "cookie/consent wall (fr)", "strong"],
+      [/\bwir verwenden cookies\b|\bcookies akzeptieren\b|\bjavascript aktivieren\b/i, "cookie/consent wall (de)", "strong"]
+    ];
+  }
+});
+
 // src/browser/mode.ts
 function browserFetchMode(explicit) {
   const m = (explicit ?? env("BROWSER_FETCH"))?.toLowerCase();
   return m === "always" || m === "fallback" ? m : "off";
 }
+function worthRendering(res) {
+  if (RENDER_STATUS.has(res.status)) return res.status ? `got HTTP ${res.status}` : "got no answer";
+  if (res.status < 200 || res.status >= 300) return void 0;
+  const junk = looksLikeJunkExtraction(res.text);
+  if (junk) return `read a ${junk}`;
+  return res.text.trim().length < 200 ? "found almost no text" : void 0;
+}
+var RENDER_STATUS;
 var init_mode = __esm({
   "src/browser/mode.ts"() {
     "use strict";
     init_brand();
+    init_junk();
+    RENDER_STATUS = /* @__PURE__ */ new Set([0, 401, 403, 429, 503]);
   }
 });
 
@@ -7198,7 +7251,7 @@ async function withPage(opts, fn) {
     { deps }
   );
 }
-var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, STATUS_TIMEOUT_MS, ATTACH_TIMEOUT_MS, TAB_ID, LIFECYCLE, sameTabs, tabNumber, BrowserSession;
+var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, STATUS_TIMEOUT_MS, ATTACH_TIMEOUT_MS, TAB_ID, LIFECYCLE, NavigationTimeoutError, committedIn, stillLoading, sameTabs, tabNumber, BrowserSession;
 var init_session = __esm({
   "src/browser/session.ts"() {
     "use strict";
@@ -7215,6 +7268,10 @@ var init_session = __esm({
     ATTACH_TIMEOUT_MS = 5e3;
     TAB_ID = /^t([1-9]\d*)$/;
     LIFECYCLE = { load: "load", domcontentloaded: "DOMContentLoaded" };
+    NavigationTimeoutError = class extends Error {
+    };
+    committedIn = (frameId, isNew) => (e) => e.frameId === frameId && isNew(e.loaderId) && (e.kind === "commit" || e.kind === "lifecycle" && e.name !== "init");
+    stillLoading = (timeoutMs) => `still loading after ${timeoutMs} ms \u2014 take a snapshot or \`${brand().cli} browser wait --load\``;
     sameTabs = (a, b) => Object.keys(a).length === Object.keys(b).length && Object.entries(a).every(([k, v]) => b[k] === v);
     tabNumber = (id) => Number(TAB_ID.exec(id)?.[1] ?? 0);
     BrowserSession = class {
@@ -7340,8 +7397,15 @@ var init_session = __esm({
         const handlers = [
           ["Page.lifecycleEvent", (p) => push({ kind: "lifecycle", frameId: p.frameId, loaderId: p.loaderId, name: p.name })],
           ["Page.navigatedWithinDocument", (p) => push({ kind: "same-document", frameId: p.frameId })],
-          // A page restored from the back/forward cache fires no lifecycle event.
-          ["Page.frameNavigated", (p) => p.type === "BackForwardCacheRestore" && push({ kind: "bfcache", frameId: p.frame?.id, loaderId: p.frame?.loaderId })],
+          // A page restored from the back/forward cache fires no lifecycle event. Any other is a new
+          // document committing: in the main frame, what a navigation that has not loaded yet has got to.
+          [
+            "Page.frameNavigated",
+            (p) => {
+              if (p.type === "BackForwardCacheRestore") push({ kind: "bfcache", frameId: p.frame?.id, loaderId: p.frame?.loaderId });
+              else if (p.frame && !p.frame.parentId) push({ kind: "commit", frameId: p.frame.id, loaderId: p.frame.loaderId });
+            }
+          ],
           ["Page.javascriptDialogOpening", (p) => leaving = p?.type === "beforeunload"],
           [
             "Page.javascriptDialogClosed",
@@ -7364,10 +7428,12 @@ var init_session = __esm({
             for (const [method, h] of handlers) page.off(method, h);
             offClose();
           },
+          /** Whether such an event has come, whatever was waited for. */
+          saw: (match) => seen.some(match),
           until: (match, timeoutMs, what, cancelledWhat) => new Promise((resolve12, reject) => {
             const timer = setTimeout(() => {
               wake = void 0;
-              reject(new Error(`${what} within ${timeoutMs} ms`));
+              reject(new NavigationTimeoutError(`${what} within ${timeoutMs} ms`));
             }, timeoutMs);
             wake = () => {
               const hit = seen.find(match);
@@ -7386,14 +7452,17 @@ var init_session = __esm({
        * Load `url` in the current tab and wait for the new document's `load` (or
        * `DOMContentLoaded`, or nothing). The tab's refs are cleared: they named
        * nodes of the document that is going away. A navigation the browser refuses
-       * (`errorText`: DNS failure, refused connection…) rejects.
+       * (`errorText`: DNS failure, refused connection…) rejects, and so does one
+       * that did not even commit in time. One that committed but has not loaded
+       * (a cold server, a render-blocking script that holds even DOMContentLoaded)
+       * is the page now, still loading: it resolves, with a `note`.
        */
       async navigate(url, opts = {}) {
         const waitUntil = opts.waitUntil ?? "load";
         const timeoutMs = opts.timeoutMs ?? NAVIGATION_TIMEOUT_MS;
         const nav = this.watch();
         try {
-          const r = await this.page.send("Page.navigate", { url });
+          const r = await this.page.send("Page.navigate", { url }, { timeoutMs });
           if (r.errorText) throw new Error(`navigation to ${url} failed: ${r.errorText}`);
           if (!r.loaderId) {
             const f = await this.frame();
@@ -7402,29 +7471,46 @@ var init_session = __esm({
           clearRefs(this.targetId);
           if (waitUntil === "none") return { url, loaderId: r.loaderId };
           const name2 = LIFECYCLE[waitUntil];
-          await nav.until(
-            (e) => e.kind === "lifecycle" && e.name === name2 && e.loaderId === r.loaderId,
-            timeoutMs,
-            `navigation to ${url} did not reach ${name2}`,
-            `navigation to ${url}`
-          );
+          try {
+            await nav.until(
+              (e) => e.kind === "lifecycle" && e.name === name2 && e.loaderId === r.loaderId,
+              timeoutMs,
+              `navigation to ${url} did not reach ${name2}`,
+              `navigation to ${url}`
+            );
+          } catch (e) {
+            if (!(e instanceof NavigationTimeoutError) || !nav.saw(committedIn(r.frameId, (l) => l === r.loaderId))) throw e;
+            return { ...await this.loaded(), note: stillLoading(timeoutMs) };
+          }
           return await this.loaded();
         } finally {
           nav.stop();
         }
       }
-      /** Run a history move or a reload and wait until the main frame shows another document (or the same one, scrolled). */
+      /**
+       * Run a history move or a reload and wait until the main frame shows another
+       * document (or the same one, scrolled). One that committed but has not loaded
+       * in time resolves with a `note`, as in navigate.
+       */
       async settle(what, trigger, timeoutMs = NAVIGATION_TIMEOUT_MS) {
         const before = await this.frame();
         const nav = this.watch();
         try {
-          await trigger();
-          const hit = await nav.until(
-            (e) => e.frameId === before.id && (e.kind !== "lifecycle" || e.name === "load" && e.loaderId !== before.loaderId),
-            timeoutMs,
-            `${what} did not reach load`,
-            what
-          );
+          await trigger(timeoutMs);
+          const isNew = (l) => l !== before.loaderId;
+          let hit;
+          try {
+            hit = await nav.until(
+              (e) => e.frameId === before.id && (e.kind === "same-document" || e.kind === "bfcache" || e.kind === "lifecycle" && e.name === "load" && isNew(e.loaderId)),
+              timeoutMs,
+              `${what} did not reach load`,
+              what
+            );
+          } catch (e) {
+            if (!(e instanceof NavigationTimeoutError) || !nav.saw(committedIn(before.id, isNew))) throw e;
+            clearRefs(this.targetId);
+            return { ...await this.loaded(), note: stillLoading(timeoutMs) };
+          }
           if (hit.kind !== "same-document") clearRefs(this.targetId);
           return await this.loaded();
         } finally {
@@ -7435,7 +7521,11 @@ var init_session = __esm({
         const h = await this.page.send("Page.getNavigationHistory");
         const entry = h.entries[h.currentIndex + step];
         if (!entry) throw new Error(step < 0 ? "no previous page in this tab's history" : "no next page in this tab's history");
-        return this.settle(step < 0 ? "going back" : "going forward", () => this.page.send("Page.navigateToHistoryEntry", { entryId: entry.id }), timeoutMs);
+        return this.settle(
+          step < 0 ? "going back" : "going forward",
+          (t) => this.page.send("Page.navigateToHistoryEntry", { entryId: entry.id }, { timeoutMs: t }),
+          timeoutMs
+        );
       }
       back(opts = {}) {
         return this.history(-1, opts.timeoutMs);
@@ -7444,7 +7534,7 @@ var init_session = __esm({
         return this.history(1, opts.timeoutMs);
       }
       reload(opts = {}) {
-        return this.settle("reloading", () => this.page.send("Page.reload"), opts.timeoutMs);
+        return this.settle("reloading", (t) => this.page.send("Page.reload", void 0, { timeoutMs: t }), opts.timeoutMs);
       }
       // --- tabs --------------------------------------------------------------------
       /** The browser's tabs with their stable short ids; the map is refreshed and saved. */
@@ -8516,13 +8606,6 @@ async function fetchAndExtract(url, opts = {}) {
     return { ...got.result, note: [`Read ${url} in the browser: the built-in fetch ${why}.`, got.result.note].filter(Boolean).join(" ") };
   return { ...res, note: [res.note, got.result ? got.result.note : `${got.note}.`, got.detail].filter(Boolean).join(" ") || void 0 };
 }
-function worthRendering(res) {
-  if (RENDER_STATUS.has(res.status)) return res.status ? `got HTTP ${res.status}` : "got no answer";
-  if (res.status < 200 || res.status >= 300) return void 0;
-  const junk = looksLikeJunkExtraction(res.text);
-  if (junk) return `read a ${junk}`;
-  return res.text.trim().length < 200 ? "found almost no text" : void 0;
-}
 async function renderInBrowser(url, opts) {
   try {
     const { readRenderedPage: readRenderedPage2 } = await Promise.resolve().then(() => (init_read(), read_exports));
@@ -8680,17 +8763,6 @@ function extractFromHtml(html, finalUrl, opts = {}) {
     ...opts.keepHtml ? { html } : {}
   };
 }
-function looksLikeJunkExtraction(text) {
-  const t = text.trim();
-  if (t.length >= 2e3) return void 0;
-  const head = t.slice(0, 800);
-  const hits = JUNK_PATTERNS.filter(([re]) => re.test(head));
-  const strong = hits.find(([, , kind]) => kind === "strong");
-  if (!strong) return void 0;
-  if (hits.length >= 2) return strong[1];
-  const prose = t.split("\n").filter((l) => l.trim().length >= 60 && !JUNK_PATTERNS.some(([re]) => re.test(l))).length;
-  return prose < 3 ? strong[1] : void 0;
-}
 function stripConsentBoilerplate(text, opts = {}) {
   if (opts.markdown) return stripConsentMarkdown(text);
   let dropped = 0;
@@ -8743,7 +8815,7 @@ function metaDescriptionOf(html) {
   }
   return og;
 }
-var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, NOT_TITLE, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, RENDER_STATUS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, JUNK_PATTERNS, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP;
+var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, NOT_TITLE, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP;
 var init_fetch = __esm({
   "src/fetch.ts"() {
     "use strict";
@@ -8760,6 +8832,7 @@ var init_fetch = __esm({
     init_firecrawl();
     init_video();
     init_mode();
+    init_junk();
     DEFAULT_BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
     RETRY_STATUS = /* @__PURE__ */ new Set([429, 503, 502, 504]);
     defaultTimeoutMs2 = () => envInt("TIMEOUT_MS", 2e4, 1e3, 3e5);
@@ -8812,33 +8885,8 @@ ${NUL2}${i}${NUL2}
     PDF_FETCH_OPTS = { accept: "application/pdf,*/*", binary: true, maxBytes: 16 * 1024 * 1024 };
     DOC_FETCH_OPTS = { accept: "*/*", binary: true, maxBytes: 16 * 1024 * 1024 };
     PURE_VIDEO_HOSTS = /* @__PURE__ */ new Set(["youtube", "vimeo", "dailymotion"]);
-    RENDER_STATUS = /* @__PURE__ */ new Set([0, 401, 403, 429, 503]);
     HTML_TYPE_RE = /^(?:text\/html|application\/xhtml\+xml)$/;
     NON_TEXT_TYPE_RE = /^(?:image\/(?!svg\+xml$)|audio\/|video\/|font\/|model\/|application\/(?:gzip|x-gzip|x-tar|x-bzip2|x-xz|x-7z-compressed|x-rar-compressed|vnd\.rar|java-archive|wasm|x-msdownload|vnd\.android\.package-archive|x-shockwave-flash|ogg)$)/;
-    JUNK_PATTERNS = [
-      [/\b(accept|manage)\s+(all\s+)?cookies\b/i, "cookie/consent wall", "strong"],
-      [/\bwe use cookies\b/i, "cookie/consent wall", "strong"],
-      [/\bcookie (policy|settings|consent|preferences)\b/i, "cookie/consent wall", "weak"],
-      [/\b(accept|reject|allow|decline) all\b/i, "cookie/consent wall", "weak"],
-      [/\b(please )?enable javascript\b/i, "JavaScript-required shell", "strong"],
-      [/\bjavascript is (disabled|required|not enabled)\b/i, "JavaScript-required shell", "strong"],
-      [
-        /\bverify(ing)? (that )?(you are|you're) (a )?(human|not a (ro)?bot)\b|\bare you a (human|robot)\b|\bhuman verification\b/i,
-        "anti-bot interstitial",
-        "strong"
-      ],
-      [/\battention required\b.*cloudflare|\bunusual traffic from your (computer )?network\b|\bchecking your browser\b/i, "anti-bot interstitial", "strong"],
-      // Akamai's and Cloudflare's denials carry an incident reference; without one
-      // the phrase is as likely a permission-error article.
-      [/\baccess denied\b[\s\S]{0,300}?(\breference #|\bray id\b|\bpermission to access\b)/i, "anti-bot interstitial", "strong"],
-      // Cloudflare's WAF block page. Its "Attention Required!" is the <title>,
-      // which extraction drops, so the body's own wording has to carry it.
-      [/\bsorry, you have been blocked\b|\byou are unable to access\b[\s\S]{0,300}?\bray id\b/i, "anti-bot interstitial", "strong"],
-      [/\baccess denied\b|\benable cookies\b/i, "anti-bot interstitial", "weak"],
-      // FR / DE (the locale layer targets non-EN markets)
-      [/\bnous utilisons des cookies\b|\baccepter (tous )?les cookies\b|\bactiver javascript\b/i, "cookie/consent wall (fr)", "strong"],
-      [/\bwir verwenden cookies\b|\bcookies akzeptieren\b|\bjavascript aktivieren\b/i, "cookie/consent wall (de)", "strong"]
-    ];
     CONSENT_PATTERNS = [
       /\bcookies?\b/i,
       /\bconsent\b/i,
@@ -9057,7 +9105,7 @@ async function guardAction(page, opts) {
     throw new RiskRefusedError(opts.action, risk.reason ?? "looks irreversible", onTarget ? el.label : el.submitLabel || el.label, opts.key);
   }
 }
-var PASSWORD_REASON, IRREVERSIBLE, SIGN, IRREVERSIBLE_RE, norm2, ENTER, SPACE, lastKey, isEnter, isSpace2, ACTIVATES, SPACE_ACTIVATES, shown, FOCUS_SOURCE, COLLECT_SOURCE, UninspectableError, FRAME_REASON, RiskRefusedError;
+var PASSWORD_REASON, IRREVERSIBLE, SIGN, IRREVERSIBLE_RE, norm2, ENTER, SPACE, lastKey, isEnter, isSpace2, ACTIVATES, SPACE_ACTIVATES, shown, FOCUS_SOURCE, OWNER_SOURCE, COLLECT_SOURCE, UninspectableError, FRAME_REASON, RiskRefusedError;
 var init_risk = __esm({
   "src/browser/risk.ts"() {
     "use strict";
@@ -9142,10 +9190,21 @@ var init_risk = __esm({
   }
   return el;
 }`;
+    OWNER_SOURCE = `(node) => {
+  const formHost = (h) => !!h && /^(input|textarea|select)$/i.test(h.tagName || "");
+  let el = node;
+  for (let i = 0; el && el.nodeType !== 1 && i < 64; i++) el = el.nodeType === 11 ? (formHost(el.host) ? el.host : null) : el.parentElement || el.parentNode;
+  for (let i = 0; el && el.nodeType === 1 && i < 8; i++) {
+    const root = el.getRootNode ? el.getRootNode() : null;
+    const host = root && root.nodeType === 11 ? root.host : null;
+    if (!formHost(host)) break;
+    el = host;
+  }
+  return el && el.nodeType === 1 ? el : null;
+}`;
     COLLECT_SOURCE = `function (action) {
-  let el = this;
-  if (el && el.nodeType === 3) el = el.parentElement;
-  if (!el || el.nodeType !== 1) return null;
+  const el = (${OWNER_SOURCE})(this);
+  if (!el) return null;
   if (/^i?frame$/i.test(el.tagName || "")) {
     let inner = null;
     try { inner = el.contentDocument; } catch (e) { inner = null; }
@@ -9172,7 +9231,9 @@ var init_risk = __esm({
     const alts = Array.from(e.querySelectorAll("img[alt],svg title"), (n) => n.getAttribute("alt") || n.textContent);
     const labels = isBtn && e.labels ? Array.from(e.labels, (l) => l.textContent) : [];
     const value = t === "input" && ["button", "submit", "reset", "image"].includes(ty) ? e.value : "";
-    return norm([e.getAttribute("aria-label"), by, e.getAttribute("title"), e.getAttribute("alt"), value, t === "input" ? "" : e.innerText || e.textContent, ...alts, ...labels].filter(Boolean).join(" "));
+    // A web component's text may live in its open shadow root only: innerText and textContent of the host do not show it.
+    const shadow = t !== "input" && e.shadowRoot ? e.shadowRoot.textContent : "";
+    return norm([e.getAttribute("aria-label"), by, e.getAttribute("title"), e.getAttribute("alt"), value, t === "input" ? "" : e.innerText || e.textContent, shadow, ...alts, ...labels].filter(Boolean).join(" "));
   };
   const explicit = (ctl.getAttribute("role") || "").toLowerCase();
   let role = explicit;
@@ -9309,9 +9370,17 @@ function renderSnapshot(nodes, opts) {
       used += cost;
       n++;
     }
-    if (n < all.length) {
+    const hint = "use `snapshot <ref>` or --interactive";
+    if (n === 0 && all.length > 0) {
+      const first = all[0];
+      const text2 = `${first.text.slice(0, Math.max(0, opts.maxChars - 1))}\u2026`;
+      const ref2 = first.ref && /\[ref=e\d+\]/.test(text2);
+      const more = all.length - 1;
+      kept = [{ text: text2, ref: ref2 }];
+      tail = `\u2026 [truncated: the first line cut${more ? `, ${more} more line${more === 1 ? "" : "s"}` : ""} \u2014 ${hint}]`;
+    } else if (n < all.length) {
       kept = all.slice(0, n);
-      tail = `\u2026 [truncated: ${all.length - n} more lines \u2014 use \`snapshot <ref>\` or --interactive]`;
+      tail = `\u2026 [truncated: ${all.length - n} more lines \u2014 ${hint}]`;
     }
   }
   const text = [...kept.map((l) => l.text), ...tail ? [tail] : []].join("\n");
@@ -9382,7 +9451,7 @@ async function takeSnapshot(session, opts = {}) {
 title: ${title}
 ${r.text}`, url, title, loaderId, refCount: r.refCount, truncated: r.truncated };
 }
-var StaleRefError, NAME_MAX, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, VALUE_ROLES, str4, squash, truthy, Renderer;
+var StaleRefError, NAME_MAX, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, VALUE_ROLES, FIELD_ROLES, str4, squash, truthy, Renderer;
 var init_snapshot = __esm({
   "src/browser/snapshot.ts"() {
     "use strict";
@@ -9422,6 +9491,7 @@ var init_snapshot = __esm({
       "heading"
     ]);
     VALUE_ROLES = /* @__PURE__ */ new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider"]);
+    FIELD_ROLES = /* @__PURE__ */ new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
     str4 = (v) => typeof v?.value === "string" ? v.value : typeof v?.value === "number" ? String(v.value) : "";
     squash = (s) => s.replace(/\s+/g, " ").trim();
     truthy = (v) => v === true || v === "true" || typeof v === "string" && v !== "" && v !== "false";
@@ -9457,29 +9527,31 @@ var init_snapshot = __esm({
         }
         return void 0;
       }
-      children(tree, n) {
+      children(tree, n, parent) {
         const out = [];
         for (const id of n.childIds ?? []) {
           const c = tree.byId.get(id);
-          if (c) out.push(...this.collect(tree, c));
+          if (c) out.push(...this.collect(tree, c, parent));
         }
         return out;
       }
-      collect(tree, n) {
+      collect(tree, n, parent = void 0) {
         if (this.seen.has(n)) return [];
         this.seen.add(n);
         const role = str4(n.role);
-        if (n.ignored) return this.children(tree, n);
+        if (n.ignored) return this.children(tree, n, parent);
         if (role === "InlineTextBox") return [];
         if (role === "LineBreak") return [{ t: "break" }];
         if (TEXT_ROLES.has(role)) {
           const boxes = (n.childIds ?? []).map((id) => str4(tree.byId.get(id)?.name)).join("");
           return [{ t: "text", text: str4(n.name) || boxes }];
         }
-        if (HOISTED.has(role)) return this.children(tree, n);
+        if (HOISTED.has(role)) return this.children(tree, n, parent);
         const name2 = squash(str4(n.name));
-        const wantsRef = n.backendDOMNodeId !== void 0 && (REF_ROLES.has(role.toLowerCase()) || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
-        if (COLLAPSIBLE.has(role) && !name2 && !wantsRef) return [{ t: "break" }, ...this.children(tree, n), { t: "break" }];
+        const hasRole = REF_ROLES.has(role.toLowerCase());
+        const wantsRef = n.backendDOMNodeId !== void 0 && (hasRole || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
+        const editor = wantsRef && !hasRole && !name2 && truthy(prop(n, "editable")) && parent?.ref === true && FIELD_ROLES.has(parent.role);
+        if (COLLAPSIBLE.has(role) && !name2 && !wantsRef || editor) return [{ t: "break" }, ...this.children(tree, n, parent), { t: "break" }];
         const isFrame = role.toLowerCase() === "iframe";
         const shown2 = isFrame ? "iframe" : role;
         let head = `- ${shown2}`;
@@ -9492,14 +9564,14 @@ var init_snapshot = __esm({
         let note = "";
         const inner = isFrame && n.backendDOMNodeId !== void 0 ? this.frameTree(n.backendDOMNodeId) : void 0;
         if (isFrame) {
-          if (inner?.root) kids = merge(this.collect(inner, inner.root));
+          if (inner?.root) kids = merge(this.collect(inner, inner.root, void 0));
           else {
             kids = [];
             note = " (cross-origin, not expanded)";
           }
-        } else kids = merge(this.children(tree, n));
-        if (name2) kids = kids.filter((k) => !(k.t === "text" && k.text === name2));
+        } else kids = merge(this.children(tree, n, { role, ref: wantsRef }));
         const value = VALUE_ROLES.has(role) ? squash(str4(n.value)) : "";
+        kids = kids.filter((k) => !(k.t === "text" && (name2 && k.text === name2 || value && k.text === value)));
         const rawUrl = role === "link" ? prop(n, "url") : void 0;
         const url = typeof rawUrl === "string" ? rawUrl : "";
         return [{ t: "node", head: value ? `${head}${note}: ${value}` : `${head}${note}`, ref: wantsRef, ...url ? { url } : {}, note, children: kids }];
@@ -9633,7 +9705,8 @@ async function finish(session, action, ref2, p) {
     title,
     ...p.dialog ? { dialog: p.dialog } : {},
     challenge,
-    ...p.value !== void 0 ? { value: p.value } : {}
+    ...p.value !== void 0 ? { value: p.value } : {},
+    ...p.note ? { note: p.note } : {}
   };
 }
 async function visibleQuads(page, node) {
@@ -9674,8 +9747,9 @@ async function hitTarget(page, node, x, y) {
   const objectId = (await ask("DOM.resolveNode", { backendNodeId: hit })).object?.objectId;
   if (!objectId) throw unreachable();
   try {
-    const cover = await callOn(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
-    if (cover) throw new ActionError(`${node.ref} is covered by ${cover} at ${at}: close or move it out of the way, then retry`);
+    const where2 = await callOn(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
+    if (where2 === true) return void 0;
+    if (where2) throw new ActionError(`${node.ref} is covered by ${where2} at ${at}: close or move it out of the way, then retry`);
   } finally {
     release(page, objectId);
   }
@@ -9906,7 +9980,7 @@ async function history(session, action, move, opts) {
   const before = await session.loaderId();
   const nav = await move(opts.timeoutMs !== void 0 ? { timeoutMs: opts.timeoutMs } : {});
   await settle(session, settleOpts(opts));
-  return finish(session, action, void 0, { navigated: nav.loaderId !== before });
+  return finish(session, action, void 0, { navigated: nav.loaderId !== before, ...nav.note ? { note: nav.note } : {} });
 }
 function back(session, opts = {}) {
   return history(session, "back", (o) => session.back(o), opts);
@@ -9946,11 +10020,18 @@ var init_actions = __esm({
     return "<" + tag + (el.id ? "#" + el.id : "") + (role ? ' role="' + role + '"' : "") + (type ? ' type="' + type + '"' : "") + ">" + (shown ? ' "' + shown + '"' : "");
   };`;
     PAGE_FUNCTIONS = {
-      /** null when `hit` (the node under the click point) is the target or inside it; else a description of what covers it. */
+      /**
+       * Where `hit` (the node under the click point) is: true when it stands for the
+       * target itself (its own text, its user-agent shadow tree: see OWNER_SOURCE), null
+       * when it is inside the target (a button in a card, which the guard then looks
+       * at), else a description of what covers the target.
+       */
       hitTest: `function hitTest(hit) {
   ${DESCRIBE}
+  const owner = ${OWNER_SOURCE};
+  const el = hit ? owner(hit) : null;
+  if (el === this) return true;
   for (let n = hit; n; n = n.parentNode || n.host) if (n === this) return null;
-  const el = hit && hit.nodeType !== 1 ? hit.parentElement : hit;
   if (!el) return "nothing";
   // A target inside a frame: the top document's hit test stops at the frame element.
   if (el.ownerDocument !== this.ownerDocument && /^i?frame$/i.test(el.tagName)) return null;
@@ -10387,6 +10468,7 @@ async function capturing(ctx, s, fn) {
 function actionText(ctx, r, captured, snap) {
   const lines = [`${r.action}${r.ref !== void 0 ? ` ${r.ref}` : ""}: ${r.navigated ? "navigated to " : ""}${where(r.url, r.title)}`];
   if (r.value !== void 0 && !(typeof r.value === "object" && r.value !== null && Object.keys(r.value).length === 0)) lines.push(`  value: ${show(r.value)}`);
+  if (r.note) lines.push(`note: ${r.note}`);
   if (r.dialog) lines.push(dialogLine(r.dialog, follow(ctx)));
   if (r.challenge) lines.push(challengeLine(ctx, r.challenge));
   if (captured !== void 0) lines.push(capturedLine(ctx, captured));
@@ -10428,7 +10510,7 @@ function currentTarget(ctx) {
   if (!saved) throw new Error(`no browser session: record what a page fetches with ${follow(ctx).capture}`);
   return saved.targetId;
 }
-var cliFollowUps, USAGE, BROWSER_ACTIONS, SNAPSHOT_MAX_CHARS, cliName, usageError, dialogsJson, unreported, actOpts, snapOpts, show, pretty, where, follow, dialogLine, frozen, challengeLine, capturedLine, confirm, historyOpts, HANDLERS;
+var cliFollowUps, USAGE, BROWSER_ACTIONS, SNAPSHOT_MAX_CHARS, cliName, usageError, dialogsJson, unreported, actOpts, snapOpts, show, pretty, where, follow, dialogLine, frozen, challengeLine, capturedLine, confirm, timeoutOpts, HANDLERS;
 var init_cli = __esm({
   "src/browser/cli.ts"() {
     "use strict";
@@ -10454,7 +10536,7 @@ var init_cli = __esm({
       capture: `\`${cliName()} browser open <url> --capture\`, or --capture on an action`
     });
     USAGE = {
-      open: "open <url> [--new-tab] [--headless] [--profile <n>] [--capture] [--snapshot]",
+      open: "open <url> [--new-tab] [--headless] [--profile <n>] [--capture] [--snapshot] [--timeout <ms>]",
       attach: "attach <port|url>",
       status: "status",
       close: "close [--all]",
@@ -10504,7 +10586,7 @@ var init_cli = __esm({
     challengeLine = (ctx, c) => `challenge: ${c.kind}${c.blocking ? " (blocking)" : ""} \u2014 let the human solve it, then ${follow(ctx).waitClear}`;
     capturedLine = (ctx, n) => `captured ${n} JSON response${n === 1 ? "" : "s"} \u2014 ${follow(ctx).networkList}`;
     confirm = (ctx) => ctx.flags.confirm ? { confirm: true } : {};
-    historyOpts = (ctx) => ctx.flags.timeout !== void 0 ? { timeoutMs: ctx.flags.timeout } : {};
+    timeoutOpts = (ctx) => ctx.flags.timeout !== void 0 ? { timeoutMs: ctx.flags.timeout } : {};
     HANDLERS = {
       async open(ctx) {
         arity(ctx, 1);
@@ -10513,7 +10595,7 @@ var init_cli = __esm({
           ctx,
           async (s) => {
             const { value: nav, captured } = await capturing(ctx, s, async () => {
-              const nav2 = await s.navigate(url);
+              const nav2 = await s.navigate(url, timeoutOpts(ctx));
               await settle(s, actOpts(ctx));
               return nav2;
             });
@@ -10521,6 +10603,7 @@ var init_cli = __esm({
             const challenge = await detectChallenge(s);
             const snap = ctx.flags.snapshot ? await takeSnapshot(s, snapOpts(ctx)) : void 0;
             const lines = [`${where(nav.url, title)}${nav.status !== void 0 ? ` (HTTP ${nav.status})` : ""}`];
+            if (nav.note) lines.push(`note: ${nav.note}`);
             if (challenge) lines.push(challengeLine(ctx, challenge));
             if (captured !== void 0) lines.push(capturedLine(ctx, captured));
             if (snap) lines.push("", snap.text);
@@ -10530,6 +10613,7 @@ var init_cli = __esm({
                 url: nav.url,
                 title,
                 ...nav.status !== void 0 ? { status: nav.status } : {},
+                ...nav.note ? { note: nav.note } : {},
                 tab: s.targetId,
                 challenge,
                 ...captured !== void 0 ? { captured } : {},
@@ -10609,15 +10693,15 @@ var init_cli = __esm({
       },
       async back(ctx) {
         arity(ctx, 0);
-        return mutate(ctx, (s, o) => back(s, { ...o, ...historyOpts(ctx) }));
+        return mutate(ctx, (s, o) => back(s, { ...o, ...timeoutOpts(ctx) }));
       },
       async forward(ctx) {
         arity(ctx, 0);
-        return mutate(ctx, (s, o) => forward(s, { ...o, ...historyOpts(ctx) }));
+        return mutate(ctx, (s, o) => forward(s, { ...o, ...timeoutOpts(ctx) }));
       },
       async reload(ctx) {
         arity(ctx, 0);
-        return mutate(ctx, (s, o) => reload(s, { ...o, ...historyOpts(ctx) }));
+        return mutate(ctx, (s, o) => reload(s, { ...o, ...timeoutOpts(ctx) }));
       },
       async dialog(ctx) {
         const answer = ctx.args[0];
@@ -11330,7 +11414,7 @@ async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date
   const variant = variantOf(opts);
   const served = (entry, note) => {
     countFetch(Buffer.byteLength(entry.text), true);
-    const { note: _stored, ...rest } = entry;
+    const { note: _stored, browserTried: _tried, ...rest } = entry;
     const about = note ?? (entry.truncated ? `The cached text of ${url} is a prefix: the page overran the response size cap.` : void 0);
     return { ...rest, cached: true, ...about ? { note: about } : {} };
   };
@@ -11342,12 +11426,14 @@ async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date
     return { text: "", finalUrl: url, status: 0, note: `Offline: ${url} is not in the cache (drop --offline, or warm it with a normal run).` };
   }
   const ns = await currentExtractor(opts, url);
-  const store = (result) => {
+  const fallback = browserFetchMode(opts.browser) === "fallback";
+  const store = (result, tried = false) => {
     const target = namespaceFor(result, ns);
-    const entry = ns === "firecrawl" && target === "native" ? { ...result, fallbackFrom: "firecrawl" } : result;
+    let entry = ns === "firecrawl" && target === "native" ? { ...result, fallbackFrom: "firecrawl" } : result;
+    if (tried && wouldRender(entry)) entry = { ...entry, browserTried: true };
     writeCache(url, entry, now, lang, target, variant);
   };
-  const hit = refresh ? void 0 : lookup(url, lang, ns, variant, browserFetchMode(opts.browser) === "fallback");
+  const hit = refresh ? void 0 : lookup(url, lang, ns, variant, fallback);
   if (hit && isCacheFresh(hit, now)) return served(hit);
   let res;
   const revalidate = hit ? revalidationHeaders(hit) : {};
@@ -11364,9 +11450,10 @@ async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date
     }
     if (probe.status !== 412 && !(probe.status >= 200 && probe.status < 300)) res = probe;
   }
+  const unconditional = res === void 0;
   res ??= await fetchAndExtract(url, opts);
   if (res.text?.trim()) {
-    store(res);
+    store(res, fallback && unconditional);
     return res;
   }
   const stale = hit ?? readAnyCopy(url, lang, variant);
@@ -11374,10 +11461,12 @@ async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date
   return res;
 }
 function lookup(url, acceptLanguage, ns, variant, browserFallback = false) {
-  const best = lookupOwn(url, acceptLanguage, ns, variant);
+  const own = lookupOwn(url, acceptLanguage, ns, variant);
+  const best = browserFallback && own && wouldRender(own) ? void 0 : own;
   const rendered = browserFallback ? readCache(url, acceptLanguage, "browser", variant) : void 0;
   return rendered && (!best || rendered.cachedAt > best.cachedAt) ? rendered : best;
 }
+var wouldRender = (entry) => !entry.browserTried && !entry.documentType && ["native", "firecrawl"].includes(entry.extractor ?? "native") && worthRendering(entry) !== void 0;
 function lookupOwn(url, acceptLanguage, ns, variant) {
   const best = readAnyNamespace(url, acceptLanguage, [.../* @__PURE__ */ new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
   if (ns === VIDEO_CACHE_NS && !best) return readCache(url, acceptLanguage, "native", variant);
@@ -16465,7 +16554,7 @@ USAGE
   webindex video     frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]
   webindex video     list <playlist|channel> [--limit <n>] [--out <dir>] [--refresh] [--json]
   webindex browser   open <url> [--new-tab] [--headless] [--profile <n>] [--cdp <port|url>]
-                     [--capture] [--snapshot]
+                     [--capture] [--snapshot] [--timeout <ms>]
   webindex browser   attach <port|url> | status | close [--all]
   webindex browser   snapshot [<ref>] [--interactive] [--max-chars <n>]
   webindex browser   click|hover <ref> [--confirm] | type <ref> <text> [--submit]

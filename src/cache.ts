@@ -8,7 +8,7 @@ import { firecrawlBase, firecrawlIsExplicit, probeFirecrawl } from "./firecrawl.
 import { canonicalizeUrl, domainOf, fnv1a64 } from "./url.js";
 import { isNoWrite, writeFileAtomic } from "./no-write.js";
 import { brand, countFetch, env, envInt, envName } from "./brand.js";
-import { type BrowserFetchMode, browserFetchMode } from "./browser/mode.js";
+import { type BrowserFetchMode, browserFetchMode, worthRendering } from "./browser/mode.js";
 
 // Opt-in on-disk fetch cache (--cache). The in-process hydrate cache only spans
 // ONE gather; the deep tier fans out N separate `gather` processes (one per
@@ -35,6 +35,13 @@ export interface CacheEntry extends Extract {
    * TTL paid for the same failed scrape plus a fresh download.
    */
   fallbackFrom?: "firecrawl";
+  /**
+   * Set on a built-in or Firecrawl read stored while the browser fallback was
+   * on, that the fallback would retry: the browser was tried and did no better.
+   * Served until its TTL like any other entry, rather than rendered again on
+   * every call.
+   */
+  browserTried?: true;
 }
 
 // 24h default; override with `<PREFIX>_CACHE_TTL_MS` (0 = always stale → refetch).
@@ -485,7 +492,7 @@ export async function cachedFetchAndExtract(
     countFetch(Buffer.byteLength(entry.text), true);
     // A note stored by an older engine is dropped for the reason writeCache
     // no longer stores one.
-    const { note: _stored, ...rest } = entry;
+    const { note: _stored, browserTried: _tried, ...rest } = entry;
     const about = note ?? (entry.truncated ? `The cached text of ${url} is a prefix: the page overran the response size cap.` : undefined);
     return { ...rest, cached: true, ...(about ? { note: about } : {}) };
   };
@@ -505,14 +512,17 @@ export async function cachedFetchAndExtract(
   // shared namespace resolved above, for the reason documented there. The
   // fallback is marked, so the next lookup — still predicting Firecrawl — can
   // find it instead of paying for the same failed scrape again.
-  const store = (result: Extract): void => {
+  const fallback = browserFetchMode(opts.browser) === "fallback";
+  // `tried`: the result of a plain fetch with the fallback on, which ran the browser if the read needed it.
+  const store = (result: Extract, tried = false): void => {
     const target = namespaceFor(result, ns);
-    const entry = ns === "firecrawl" && target === "native" ? { ...result, fallbackFrom: "firecrawl" as const } : result;
+    let entry: CacheEntry | Extract = ns === "firecrawl" && target === "native" ? { ...result, fallbackFrom: "firecrawl" as const } : result;
+    if (tried && wouldRender(entry as CacheEntry)) entry = { ...entry, browserTried: true as const };
     writeCache(url, entry, now, lang, target, variant);
   };
   // --refresh does not read, but it still writes: the point is to replace what
   // is there, not to stop caching for the run.
-  const hit = refresh ? undefined : lookup(url, lang, ns, variant, browserFetchMode(opts.browser) === "fallback");
+  const hit = refresh ? undefined : lookup(url, lang, ns, variant, fallback);
   if (hit && isCacheFresh(hit, now)) return served(hit);
 
   // Stale but revalidatable: ask the origin whether anything changed. A 304
@@ -543,9 +553,10 @@ export async function cachedFetchAndExtract(
     if (probe.status !== 412 && !(probe.status >= 200 && probe.status < 300)) res = probe;
   }
 
+  const unconditional = res === undefined;
   res ??= await fetchAndExtract(url, opts);
   if (res.text?.trim()) {
-    store(res);
+    store(res, fallback && unconditional);
     return res;
   }
   // The origin gave us nothing. A stale copy of the page beats a hole in the
@@ -562,12 +573,21 @@ export async function cachedFetchAndExtract(
 // and — when Firecrawl is predicted — the built-in text of a page Firecrawl
 // failed on, which is still the best this page has. With the browser as a
 // fallback, a page that needed it was filed under "browser", which is only
-// ever written for such a page (or by `always`): that copy is as good.
+// ever written for such a page (or by `always`): that copy is as good. And a
+// built-in or Firecrawl read the fallback would have retried (a refusal, a
+// wall, almost no text) is not served at all: fetchAndExtract runs again, with
+// the browser, and the better read is what gets stored. Otherwise a page cached
+// once without the fallback kept its thin read for the whole TTL.
 function lookup(url: string, acceptLanguage: string, ns: CacheNamespace, variant: CacheVariant, browserFallback = false): CacheEntry | undefined {
-  const best = lookupOwn(url, acceptLanguage, ns, variant);
+  const own = lookupOwn(url, acceptLanguage, ns, variant);
+  const best = browserFallback && own && wouldRender(own) ? undefined : own;
   const rendered = browserFallback ? readCache(url, acceptLanguage, "browser", variant) : undefined;
   return rendered && (!best || rendered.cachedAt > best.cachedAt) ? rendered : best;
 }
+
+/** A web page read without the browser that the fallback would send to it (worthRendering). */
+const wouldRender = (entry: CacheEntry): boolean =>
+  !entry.browserTried && !entry.documentType && ["native", "firecrawl"].includes(entry.extractor ?? "native") && worthRendering(entry) !== undefined;
 
 function lookupOwn(url: string, acceptLanguage: string, ns: CacheNamespace, variant: CacheVariant): CacheEntry | undefined {
   const best = readAnyNamespace(url, acceptLanguage, [...new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);

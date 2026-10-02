@@ -24,7 +24,7 @@ import { CdpError, type CdpHandler, type CdpSession } from "./cdp.js";
 import { type Challenge, detectChallenge } from "./challenge.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
 import { type KeySpec, keyEventsFor, keyName, parseKey } from "./keys.js";
-import { guardAction } from "./risk.js";
+import { guardAction, OWNER_SOURCE } from "./risk.js";
 import type { NavigationResult } from "./session.js";
 import { StaleRefError } from "./snapshot.js";
 import { readRefs } from "./state.js";
@@ -70,6 +70,8 @@ export interface ActionResult {
   /** An anti-bot challenge on the page after the action; null when none. */
   challenge?: Challenge | null;
   value?: unknown;
+  /** The page the move landed on committed but was still loading when the wait ran out. */
+  note?: string;
 }
 
 export interface ActionOptions {
@@ -138,11 +140,18 @@ const DESCRIBE = `const describe = (el) => {
   };`;
 
 export const PAGE_FUNCTIONS = {
-  /** null when `hit` (the node under the click point) is the target or inside it; else a description of what covers it. */
+  /**
+   * Where `hit` (the node under the click point) is: true when it stands for the
+   * target itself (its own text, its user-agent shadow tree: see OWNER_SOURCE), null
+   * when it is inside the target (a button in a card, which the guard then looks
+   * at), else a description of what covers the target.
+   */
   hitTest: `function hitTest(hit) {
   ${DESCRIBE}
+  const owner = ${OWNER_SOURCE};
+  const el = hit ? owner(hit) : null;
+  if (el === this) return true;
   for (let n = hit; n; n = n.parentNode || n.host) if (n === this) return null;
-  const el = hit && hit.nodeType !== 1 ? hit.parentElement : hit;
   if (!el) return "nothing";
   // A target inside a frame: the top document's hit test stops at the frame element.
   if (el.ownerDocument !== this.ownerDocument && /^i?frame$/i.test(el.tagName)) return null;
@@ -307,6 +316,7 @@ interface Performed {
   /** The url of the frame that opened the dialog, from the event: known without asking the frozen page. */
   dialogUrl?: string;
   value?: unknown;
+  note?: string;
 }
 
 function watchDialogs(page: CdpSession) {
@@ -422,6 +432,7 @@ async function finish(session: ActionSession, action: string, ref: string | unde
     ...(p.dialog ? { dialog: p.dialog } : {}),
     challenge,
     ...(p.value !== undefined ? { value: p.value } : {}),
+    ...(p.note ? { note: p.note } : {}),
   };
 }
 
@@ -486,8 +497,10 @@ async function hitTarget(page: CdpSession, node: ResolvedRef, x: number, y: numb
   const objectId = (await ask<{ object?: { objectId?: string } }>("DOM.resolveNode", { backendNodeId: hit })).object?.objectId;
   if (!objectId) throw unreachable();
   try {
-    const cover = await callOn<string | null>(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
-    if (cover) throw new ActionError(`${node.ref} is covered by ${cover} at ${at}: close or move it out of the way, then retry`);
+    const where = await callOn<string | true | null>(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
+    // The target itself, reached through its own text or user-agent shadow tree: its guard has run already.
+    if (where === true) return undefined;
+    if (where) throw new ActionError(`${node.ref} is covered by ${where} at ${at}: close or move it out of the way, then retry`);
   } finally {
     release(page, objectId);
   }
@@ -824,7 +837,7 @@ async function history(session: HistorySession, action: string, move: (o: { time
   const before = await session.loaderId();
   const nav = await move(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {});
   await settle(session, settleOpts(opts));
-  return finish(session, action, undefined, { navigated: nav.loaderId !== before });
+  return finish(session, action, undefined, { navigated: nav.loaderId !== before, ...(nav.note ? { note: nav.note } : {}) });
 }
 
 export function back(session: HistorySession, opts: HistoryOptions = {}): Promise<ActionResult> {

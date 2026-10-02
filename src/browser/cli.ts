@@ -115,7 +115,7 @@ export interface BrowserCliResult {
 }
 
 const USAGE = {
-  open: "open <url> [--new-tab] [--headless] [--profile <n>] [--capture] [--snapshot]",
+  open: "open <url> [--new-tab] [--headless] [--profile <n>] [--capture] [--snapshot] [--timeout <ms>]",
   attach: "attach <port|url>",
   status: "status",
   close: "close [--all]",
@@ -349,6 +349,7 @@ function actionText(ctx: Ctx, r: ActionResult, captured: number | undefined, sna
   const lines = [`${r.action}${r.ref !== undefined ? ` ${r.ref}` : ""}: ${r.navigated ? "navigated to " : ""}${where(r.url, r.title)}`];
   // What the action yields (the options chosen, the scroll position); an empty protocol answer says nothing.
   if (r.value !== undefined && !(typeof r.value === "object" && r.value !== null && Object.keys(r.value).length === 0)) lines.push(`  value: ${show(r.value)}`);
+  if (r.note) lines.push(`note: ${r.note}`);
   if (r.dialog) lines.push(dialogLine(r.dialog, follow(ctx)));
   if (r.challenge) lines.push(challengeLine(ctx, r.challenge));
   if (captured !== undefined) lines.push(capturedLine(ctx, captured));
@@ -379,7 +380,7 @@ function refAndText(ctx: Ctx): [string, string] {
 }
 
 const confirm = (ctx: Ctx) => (ctx.flags.confirm ? { confirm: true } : {});
-const historyOpts = (ctx: Ctx) => (ctx.flags.timeout !== undefined ? { timeoutMs: ctx.flags.timeout } : {});
+const timeoutOpts = (ctx: Ctx) => (ctx.flags.timeout !== undefined ? { timeoutMs: ctx.flags.timeout } : {});
 
 export function tabLines(tabs: BrowserTab[]): string {
   return tabs.map((t) => `${t.active ? "*" : " "} ${t.id}  ${where(t.url, t.title)}`).join("\n");
@@ -425,7 +426,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
       ctx,
       async (s) => {
         const { value: nav, captured } = await capturing(ctx, s, async () => {
-          const nav = await s.navigate(url);
+          const nav = await s.navigate(url, timeoutOpts(ctx));
           await settle(s, actOpts(ctx));
           return nav;
         });
@@ -433,6 +434,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
         const challenge = await detectChallenge(s);
         const snap = ctx.flags.snapshot ? await takeSnapshot(s, snapOpts(ctx)) : undefined;
         const lines = [`${where(nav.url, title)}${nav.status !== undefined ? ` (HTTP ${nav.status})` : ""}`];
+        if (nav.note) lines.push(`note: ${nav.note}`);
         if (challenge) lines.push(challengeLine(ctx, challenge));
         if (captured !== undefined) lines.push(capturedLine(ctx, captured));
         if (snap) lines.push("", snap.text);
@@ -442,6 +444,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
             url: nav.url,
             title,
             ...(nav.status !== undefined ? { status: nav.status } : {}),
+            ...(nav.note ? { note: nav.note } : {}),
             tab: s.targetId,
             challenge,
             ...(captured !== undefined ? { captured } : {}),
@@ -541,17 +544,17 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
 
   async back(ctx) {
     arity(ctx, 0);
-    return mutate(ctx, (s, o) => actions.back(s, { ...o, ...historyOpts(ctx) }));
+    return mutate(ctx, (s, o) => actions.back(s, { ...o, ...timeoutOpts(ctx) }));
   },
 
   async forward(ctx) {
     arity(ctx, 0);
-    return mutate(ctx, (s, o) => actions.forward(s, { ...o, ...historyOpts(ctx) }));
+    return mutate(ctx, (s, o) => actions.forward(s, { ...o, ...timeoutOpts(ctx) }));
   },
 
   async reload(ctx) {
     arity(ctx, 0);
-    return mutate(ctx, (s, o) => actions.reload(s, { ...o, ...historyOpts(ctx) }));
+    return mutate(ctx, (s, o) => actions.reload(s, { ...o, ...timeoutOpts(ctx) }));
   },
 
   async dialog(ctx) {

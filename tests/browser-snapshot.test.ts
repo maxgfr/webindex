@@ -102,6 +102,28 @@ describe("renderSnapshot", () => {
     expect(all.text.split("\n")).toHaveLength(25);
   });
 
+  it("cuts the first line itself when it alone is over the budget, instead of showing nothing", () => {
+    // httpbin.org/post: the JSON body is one line, far longer than --max-chars.
+    const body = `{ "args": {}, "data": "", ${'"x": "y", '.repeat(200)}}`;
+    const r = renderSnapshot(tree(node(1, "StaticText", body), node(2, "button", "After")), { refs: fresh(), maxChars: 90 });
+    const [first, marker, ...rest] = r.text.split("\n");
+    expect(rest).toEqual([]);
+    expect(first).toBe(`- text: ${body.slice(0, 81)}…`);
+    expect(first).toHaveLength(90);
+    expect(marker).toBe("… [truncated: the first line cut, 1 more line — use `snapshot <ref>` or --interactive]");
+    expect(r.truncated).toBe(true);
+    expect(r.refCount).toBe(0);
+    // The only line, cut: nothing more to count.
+    const only = renderSnapshot(tree(node(1, "StaticText", body)), { refs: fresh(), maxChars: 20 });
+    expect(only.text).toBe(`- text: ${body.slice(0, 11)}…\n… [truncated: the first line cut — use \`snapshot <ref>\` or --interactive]`);
+    // A cut line keeps its ref only if the ref is still in what is shown.
+    const named = renderSnapshot(tree(node(1, "button", "b".repeat(40))), { refs: fresh(), maxChars: 30 });
+    expect(named.refCount).toBe(0);
+    const tail = renderSnapshot(tree(node(1, "button", "b".repeat(40), { properties: [prop("disabled", true)] })), { refs: fresh(), maxChars: 65 });
+    expect(tail.text.split("\n")[0]).toBe(`- button "${"b".repeat(40)}" [ref=e1] [di…`);
+    expect(tail.refCount).toBe(1);
+  });
+
   it("expands a same-origin iframe from frames and flags the others", () => {
     const { main, frames } = fixture<{ main: AXNode[]; frames: Record<string, AXNode[]> }>("iframes");
     const r = renderSnapshot(main, { refs: fresh(), frames });
@@ -166,6 +188,103 @@ describe("renderSnapshot", () => {
       { refs: fresh() },
     );
     expect(r.text).toBe(lines("- generic [ref=e1]", '- region "Plain"', '- paragraph "Edit" [ref=e2]', '- paragraph "NotEditable"', '- button "Orphan"'));
+  });
+
+  it("gives no ref to the editor inside a text field: one ref per field (httpbin.org/forms/post, as Chrome reports it)", () => {
+    const r = renderSnapshot(fixture("httpbin-form"), { refs: fresh() });
+    expect(r.text).toBe(
+      lines(
+        "- form",
+        "  - paragraph",
+        "    - LabelText",
+        "      - text: Customer name:",
+        '      - textbox "Customer name:" [ref=e1]: Alice',
+        "  - paragraph",
+        "    - LabelText",
+        "      - text: Telephone:",
+        '      - textbox "Telephone:" [ref=e2]',
+        "  - paragraph",
+        "    - LabelText",
+        "      - text: E-mail address:",
+        '      - textbox "E-mail address:" [ref=e3]',
+        '  - group "Pizza Size"',
+        "    - Legend",
+        "      - text: Pizza Size",
+        "    - paragraph",
+        '      - radio "Small" [ref=e4]',
+        "    - paragraph",
+        '      - radio "Medium" [ref=e5]',
+        "    - paragraph",
+        '      - radio "Large" [ref=e6]',
+        '  - group "Pizza Toppings"',
+        "    - Legend",
+        "      - text: Pizza Toppings",
+        "    - paragraph",
+        '      - checkbox "Bacon" [ref=e7]',
+        "    - paragraph",
+        '      - checkbox "Extra Cheese" [ref=e8]',
+        "    - paragraph",
+        '      - checkbox "Onion" [ref=e9]',
+        "    - paragraph",
+        '      - checkbox "Mushroom" [ref=e10]',
+        "  - paragraph",
+        "    - LabelText",
+        "      - text: Preferred delivery time:",
+        '      - InputTime "Preferred delivery time:" [ref=e11]',
+        '        - spinbutton "Hours Hours" [ref=e12]: 0',
+        "          - text: --",
+        "        - text: :",
+        '        - spinbutton "Minutes Minutes" [ref=e13]: 0',
+        "          - text: --",
+        '        - button "Show time picker Show time picker" [ref=e14]',
+        "  - paragraph",
+        "    - LabelText",
+        "      - text: Delivery instructions:",
+        '      - textbox "Delivery instructions:" [ref=e15]',
+        "  - paragraph",
+        '    - button "Submit order" [ref=e16]',
+        "- form",
+        '  - button "Choose File" [ref=e17]',
+        '  - button "Upload" [ref=e18]',
+        '  - button "Supprimer" [ref=e19]',
+      ),
+    );
+    expect(renderSnapshot(fixture("httpbin-form"), { refs: fresh(), interactive: true }).text).not.toMatch(/generic/);
+  });
+
+  it("keeps the ref of a named or role-bearing control inside a field, and of an editor in no field", () => {
+    const editor = (id: number, parent: string, name?: string) => node(id, "generic", name, { parentId: parent, properties: [prop("editable", "plaintext")] });
+    const r = renderSnapshot(
+      tree(
+        // A field with no ref of its own (no backend id): its editor is what can be acted on.
+        node(1, "textbox", "Orphan", { backendDOMNodeId: undefined }, [top(editor(11, "1"))]),
+        // A named control inside a combobox (a clear button) is a control of its own.
+        // An unnamed focusable toggle in a custom ARIA combobox (an icon-only clear button) is not an editor: it keeps its ref.
+        node(4, "combobox", "Country", { properties: [prop("focusable", true)] }, [
+          top(node(41, "generic", undefined, { parentId: "4", properties: [prop("focusable", true)] })),
+        ]),
+        node(2, "combobox", "City", { properties: [prop("focusable", true)] }, [
+          top(editor(21, "2", "Clear")),
+          top(node(22, "button", undefined, { parentId: "2" })),
+        ]),
+        // A contenteditable region is a field of its own, wherever it sits.
+        node(3, "region", "Notes", {}, [top(editor(31, "3"))]),
+      ),
+      { refs: fresh() },
+    );
+    expect(r.text).toBe(
+      lines(
+        '- textbox "Orphan"',
+        "  - generic [ref=e1]",
+        '- combobox "Country" [ref=e2]',
+        "  - generic [ref=e3]",
+        '- combobox "City" [ref=e4]',
+        '  - generic "Clear" [ref=e5]',
+        "  - button [ref=e6]",
+        '- region "Notes"',
+        "  - generic [ref=e7]",
+      ),
+    );
   });
 
   it("builds text from inline boxes when a static text has no name, and drops empty text", () => {

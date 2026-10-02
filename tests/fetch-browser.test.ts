@@ -248,12 +248,72 @@ describe("cachedFetchAndExtract and the browser rung", () => {
   });
 
   it("prefers a newer built-in copy to an older rendered one", async () => {
-    installFetchMock(routes([["x.test", { body: SHORT }]]));
+    let body = SHORT;
+    installFetchMock((url) => (url.includes("x.test") ? { body } : undefined));
     await cachedFetchAndExtract("https://x.test/a", { browser: "fallback" }, true, 1000);
+    body = LONG;
     await cachedFetchAndExtract("https://x.test/a", {}, true, 2000);
     const again = await cachedFetchAndExtract("https://x.test/a", { browser: "fallback" }, true, 3000);
+    expect(again).toMatchObject({ cached: true });
+    expect(again.text).toContain("Good page");
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("never serves a cached built-in read the fallback would have retried: it goes to the browser and keeps the better read", async () => {
+    // Cached without the browser (the 166-byte "Login" page of quotes.toscrape.com/js/), then asked for with the fallback on.
+    const spy = installFetchMock(routes([["x.test", { body: SHORT }]]));
+    const plain = await cachedFetchAndExtract("https://x.test/a", {}, true, 1000);
+    expect(plain).toMatchObject({ text: "Loading…" });
+    expect(read).not.toHaveBeenCalled();
+    const fallback = await cachedFetchAndExtract("https://x.test/a", { browser: "fallback" }, true, 2000);
+    expect(fallback).toMatchObject({ text: RENDERED, extractor: "browser" });
+    expect(fallback.cached).toBeUndefined();
+    expect(read).toHaveBeenCalledTimes(1);
+    // The better read is what the cache holds now: served without fetching or rendering again.
+    const again = await cachedFetchAndExtract("https://x.test/a", { browser: "fallback" }, true, 3000);
+    expect(again).toMatchObject({ text: RENDERED, cached: true });
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("takes the fallback from BROWSER_FETCH for a cached read too, and leaves a good one alone", async () => {
+    installFetchMock(
+      routes([
+        ["x.test/wall", { body: WALL }],
+        ["x.test/good", { body: LONG }],
+      ]),
+    );
+    await cachedFetchAndExtract("https://x.test/wall", {}, true, 1000);
+    await cachedFetchAndExtract("https://x.test/good", {}, true, 1000);
+    process.env[envName("BROWSER_FETCH")] = "fallback";
+    expect((await cachedFetchAndExtract("https://x.test/wall", {}, true, 2000)).extractor).toBe("browser");
+    const good = await cachedFetchAndExtract("https://x.test/good", {}, true, 2000);
+    expect(good).toMatchObject({ cached: true });
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render the same thin page again on every call: a read the browser could not better is served until its TTL", async () => {
+    process.env[envName("CACHE_TTL_MS")] = "10000";
+    const spy = installFetchMock(routes([["x.test", { body: SHORT }]]));
+    read.mockResolvedValue(rendered("https://x.test/a", { text: "  " }));
+    const first = await cachedFetchAndExtract("https://x.test/a", { browser: "fallback" }, true, 1000);
+    expect(first.text).toBe("Loading…");
+    expect(read).toHaveBeenCalledTimes(1);
+    const again = await cachedFetchAndExtract("https://x.test/a", { browser: "fallback" }, true, 2000);
     expect(again).toMatchObject({ text: "Loading…", cached: true });
     expect(read).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledTimes(1);
+    // Once stale, the page is tried again, browser included.
+    await cachedFetchAndExtract("https://x.test/a", { browser: "fallback" }, true, 20_000);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it("still serves the thin cached read offline: no network, no browser", async () => {
+    installFetchMock(routes([["x.test", { body: SHORT }]]));
+    await cachedFetchAndExtract("https://x.test/a", {}, true, 1000);
+    setCacheMode({ offline: true });
+    expect(await cachedFetchAndExtract("https://x.test/a", { browser: "fallback" }, true, 2000)).toMatchObject({ text: "Loading…", cached: true });
+    expect(read).not.toHaveBeenCalled();
   });
 
   it("never lets an error page the browser rendered replace a good cached read", async () => {

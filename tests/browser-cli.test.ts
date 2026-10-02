@@ -228,6 +228,29 @@ describe("open", () => {
     expect(j.json).toMatchObject({ snapshot: { refCount: 5, truncated: false } });
   });
 
+  it("succeeds with a note when the page is shown but its load does not come within --timeout", async () => {
+    const script = scriptBrowser(fake, { lifecycle: "dcl" });
+    await cli("attach", [String(fake.port)]);
+    const r = await cli("open", ["https://slow.test/"], { timeout: 50, json: true });
+    expect(r.exitCode).toBe(0);
+    const note = "still loading after 50 ms — take a snapshot or `webindex-tests browser wait --load`";
+    expect(r.json).toMatchObject({ ok: true, url: "https://slow.test/", note });
+    expect(r.text.split("\n")).toContain(`note: ${note}`);
+    // One that only committed (held before DOMContentLoaded) too, and its reload; one that never committed fails.
+    script.options.lifecycle = "commit";
+    const held = await cli("open", ["https://held.test/"], { timeout: 50, json: true });
+    expect(held.exitCode).toBe(0);
+    expect(held.json).toMatchObject({ ok: true, url: "https://held.test/", note });
+    const reload = await cli("reload", [], { timeout: 50 });
+    expect(reload.exitCode).toBe(0);
+    expect(reload.text.split("\n")).toContain(`note: ${note}`);
+    expect((await cli("reload", [], { timeout: 50, json: true })).json).toMatchObject({ action: "reload", note });
+    script.options.lifecycle = "never";
+    const never = await cli("open", ["https://slower.test/"], { timeout: 50 });
+    expect(never.exitCode).toBe(1);
+    expect(never.text).toMatch(/did not reach load within 50 ms/);
+  });
+
   it("fails with exit 1 when the navigation fails", async () => {
     await cli("attach", [String(fake.port)]);
     const r = await cli("open", ["https://unreachable.test/"]);
