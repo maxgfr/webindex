@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.31.0](https://github.com/maxgfr/webindex/compare/v1.30.0...v1.31.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **cli:** keep the exit code a result set when the reader closes the pipe early ([adea5c1](https://github.com/maxgfr/webindex/commit/adea5c1b5c934c15a3699d833756bb1f7dee391d))
+* **cli:** set the exit code after printing a result instead of exiting, so a pipe gets all of it ([0968f4a](https://github.com/maxgfr/webindex/commit/0968f4a5f77c5fde9534624567c29b8db372a11b))
+
+
+### Features
+
+* **browser:** exit 3 on a blocking challenge, browser text, scoped action snapshots, hints on unclear fields ([6be02f6](https://github.com/maxgfr/webindex/commit/6be02f6d32e3aa1dff5ceb64344a16a68ef93f3c))
+
 # [1.30.0](https://github.com/maxgfr/webindex/compare/v1.29.3...v1.30.0) (2026-10-02)
 
 
