@@ -376,11 +376,25 @@ function nested(items: Item[], depth: number, out: Line[]): void {
   }
 }
 
-function flat(items: Item[], out: Line[]): void {
+const LINK_URL_MAX = 80;
+
+/** A link's target for an interactive line: path and query when it is on the page's own origin, else the whole url, cut at about 80 characters. */
+function compactUrl(url: string, base: string): string {
+  let shown = url;
+  try {
+    const u = new URL(url, base);
+    if (u.origin === new URL(base).origin) shown = `${u.pathname}${u.search}`;
+  } catch {
+    /* not parseable: as it is */
+  }
+  return shown.length > LINK_URL_MAX ? `${shown.slice(0, LINK_URL_MAX)}…` : shown;
+}
+
+function flat(items: Item[], out: Line[], base: string): void {
   for (const it of items) {
     if (it.t !== "node") continue;
-    if (it.act) out.push({ text: it.head, ref: true });
-    flat(it.children, out);
+    if (it.act) out.push({ text: it.url ? `${it.head} → ${compactUrl(it.url, base)}` : it.head, ref: true });
+    flat(it.children, out, base);
   }
 }
 
@@ -405,7 +419,7 @@ export function renderSnapshot(nodes: AXNode[], opts: RenderOptions): RenderResu
       if (!hit) continue;
       const lines: Line[] = [];
       const over = merge(r.collect(hit.tree, hit.node));
-      if (opts.interactive) flat(over, lines);
+      if (opts.interactive) flat(over, lines, opts.refs.url);
       else nested(over, 1, lines);
       if (lines.length === 0) continue;
       all.push({ text: OVERLAY_HEADER, ref: false }, ...(opts.interactive ? lines.map((l) => ({ ...l, text: `  ${l.text}` })) : lines));
@@ -413,7 +427,7 @@ export function renderSnapshot(nodes: AXNode[], opts: RenderOptions): RenderResu
     if (main.root) items = merge(r.collect(main, main.root));
   }
 
-  if (opts.interactive) flat(items, all);
+  if (opts.interactive) flat(items, all, opts.refs.url);
   else nested(items, 0, all);
 
   let kept = all;

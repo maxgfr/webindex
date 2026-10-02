@@ -46,6 +46,8 @@ interface El {
   quads?: number[][];
   /** The node found at its centre; itself by default. */
   hit?: number;
+  /** The address of a link (<a href>). */
+  href?: string;
   parent?: number;
   /** What the risk collector reads as its label. */
   label?: string;
@@ -199,6 +201,8 @@ class World {
         el.value = String((value as string[])[0] ?? "");
         return { result: { value } };
       }
+      case "linkHref":
+        return { result: { value: el.href ?? null } };
       case "overlayRoot":
         return this.overlayRoot === undefined
           ? { result: { type: "object", subtype: "null", value: null } }
@@ -482,6 +486,21 @@ describe("click", () => {
     expect(err.message).toMatch(
       /^e1 is covered by an overlay \(<div#consent role="dialog">.*\) at \(50, 20\); none of its controls is in the accessibility tree — take a snapshot\naccepting tracking/,
     );
+  });
+
+  it("tells a covered link's click to open its url directly", async () => {
+    w.add(101, { tag: "A", href: "https://shop.test/cart" });
+    wall(["Cart"]);
+    const err = await click(session, "e1", { deps }).catch((e) => e);
+    expect(err.message).toMatch(/accepting tracking\/consent or closing it is the user's choice — ask before choosing/);
+    expect(err.message).toMatch(/\nor open its URL directly: `webindex-tests browser open https:\/\/shop\.test\/cart` \(navigating doesn't accept anything\)$/);
+  });
+
+  it("gives no url hint when the covered target is no link", async () => {
+    w.add(101, { tag: "BUTTON" });
+    wall(["Cart"]);
+    const err = await click(session, "e1", { deps }).catch((e) => e);
+    expect(err.message).not.toMatch(/open its URL/);
   });
 
   it("calls an element without a box not visible", async () => {

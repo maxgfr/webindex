@@ -85,7 +85,7 @@ webindex skill check|bundle|vendor|copy|doctor|init|repin|finish|recall
 webindex mcp [--transport http]       # the webindex_* tools over MCP; --public-only, --extract-root <dir> wall it in; --browser adds the browser tools
 webindex doctor [--json]
 webindex browser open <url> --snapshot  # a separate browser on a dedicated profile; the page as a tree with refs (e12)
-webindex browser open <url> --snapshot --interactive  # the same, only the controls: much shorter
+webindex browser open <url> --snapshot --interactive  # the same, only the controls (links show their `→ /url`): much shorter
 webindex browser snapshot [<ref>|--selector <css>] --max-chars <n>  # one element's subtree; --max-chars cuts snapshot and text (20000 by default)
 webindex browser text [<ref>|--selector <css>] [--markdown]  # the current tab's main content as fetch reads it (overlays stripped), or one element's text
 webindex browser click|fill|select|type|upload|scroll <ref> …  # act on a ref; --snapshot returns the new tree, --selector <css> scopes that tree

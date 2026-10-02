@@ -452,7 +452,7 @@ describe("the other tools", () => {
     expect((await h.call("webindex_browser_wait", { condition: "load" })).text).toMatch(/^load held/);
     await expect(h.call("webindex_browser_wait", { condition: "text" })).rejects.toThrow(/`value`/);
     await expect(h.call("webindex_browser_wait", { condition: "ms", value: "soon" })).rejects.toThrow(/`value`/);
-    await expect(h.call("webindex_browser_wait", { condition: "text", value: "Order shipped", timeoutMs: 1000 })).rejects.toThrow(/timed out/);
+    await expect(h.call("webindex_browser_wait", { condition: "text", value: "Order shipped", timeoutMs: 1000 })).rejects.toThrow(/did not appear/);
     await expect(h.call("webindex_browser_scroll", { target: "sideways" })).rejects.toThrow(ToolError);
     world.active = { role: "textbox", label: "Password", isSubmit: true, formHasPassword: true, submitLabel: "Log in" };
     await expect(h.call("webindex_browser_press", { key: "Enter" })).rejects.toThrow(/refused.*password/);

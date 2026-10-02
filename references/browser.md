@@ -39,7 +39,10 @@ Use plain `fetch` everywhere else: it is faster and needs no browser.
    then take a new snapshot before the next act.
 
 `snapshot --interactive` (and `open <url> --snapshot --interactive`) lists only
-the controls and is much shorter. `snapshot e40` shows one subtree, and so does
+the controls and is much shorter. A link line ends with its target, e.g.
+`- link "Docs" [ref=e5] → /docs` (path and query on the page's own origin, the
+whole URL elsewhere, cut at about 80 characters), so `eval` is not needed to read
+an `href`. `snapshot e40` shows one subtree, and so does
 `snapshot --selector <css>` for the first element a CSS selector matches.
 `--max-chars <n>` cuts a snapshot at a line (20000 characters by default) and
 says how many lines it left out. Same-origin iframes are expanded.
@@ -71,7 +74,10 @@ or a list of results; `eval` with a guessed selector is not needed for that.
 ref (`screenshot e40`), or the first element a CSS selector matches
 (`screenshot --selector table.infobox`), captured whole even when it is taller
 than the window. A selector that matches nothing fails with exit 1,
-`no element matches <css>`.
+`no element matches <css>`. `--out <path>` writes the image there (`.jpg` or
+`.jpeg` makes a JPEG, anything else a PNG); without it the file goes to
+`<tmpdir>/webindex/browser/shot-<timestamp>.png` (the OS temp directory), and the
+path is printed.
 
 ## Overlays and consent walls
 
@@ -114,6 +120,11 @@ when the page appends it at the end of `<body>`. A click that lands on one is
 refused (exit 1) with the overlay's controls and their refs, which you can use
 in the next command. A click blocked by something that is no overlay (a sticky
 header, a chat bubble) is refused with what is in the way and its controls.
+
+**A link covered by an overlay** is refused the same way, and the error ends with
+`or open its URL directly: webindex browser open <url>`. Read the link's URL from
+the snapshot line (`→ <url>` in `--interactive`, `/url:` in a full snapshot) and
+`open` it: navigating there does not accept anything.
 
 **Ask the user before accepting tracking or consent.** "Accept", "Refuse",
 "Customise" and "Close" are the user's choices, not yours, even though the guard
@@ -173,7 +184,8 @@ everything.
   `open` reports `challenge: cloudflare (blocking)` it exits 3 (so does `back`,
   `forward`, `reload`, a `click`, `press`, `type --submit` or `tabs new <url>` that lands on one),
   with the result printed as on success and `challenge` in its JSON. Tell the
-  user, then run `wait --clear`, which waits up to 5 minutes for the wall to go
+  user, then run `wait --clear`, which waits up to 5 minutes for the wall to go (on a
+  timeout it says `the challenge is still there after N ms — a human must solve it…`)
   and holds the browser all that time. **Unattended** (no one at the window, a
   headless browser), do not wait the 5 minutes: pass a short `--timeout`, or
   skip the wait, and tell the user the page needs them. A consent wall is no

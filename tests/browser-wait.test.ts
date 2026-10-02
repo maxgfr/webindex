@@ -125,8 +125,7 @@ describe("waitFor", () => {
     const err = await waitFor({ page: scriptedPage() }, { text: "never" }, { deps: clock, timeoutMs: 1000 }).catch((e) => e);
     expect(err).toBeInstanceOf(WaitTimeoutError);
     expect(err.name).toBe("WaitTimeoutError");
-    expect(err.message).toContain('{"text":"never"}');
-    expect(err.message).toMatch(/1000 ms/);
+    expect(err.message).toBe('text "never" did not appear after 1000 ms');
     expect(err.elapsedMs).toBe(1000);
   });
 
@@ -209,7 +208,9 @@ describe("waitFor { clear }", () => {
     const err = await waitFor({ page: scriptedPage({ blocking: true }) }, { clear: true }, { deps: fakeClock() }).catch((e) => e);
     expect(err).toBeInstanceOf(WaitTimeoutError);
     expect(err.elapsedMs).toBe(300_000);
-    expect(err.message).toContain('{"clear":true}');
+    expect(err.message).toBe(
+      "the challenge is still there after 300000 ms — a human must solve it in the browser window (`webindex-tests browser open <url>` shows it), then run wait --clear again",
+    );
   });
 });
 
@@ -480,5 +481,18 @@ describe("armSettle", () => {
       if (t === 2500) p.emit("Page.lifecycleEvent", { frameId: "main", loaderId: "L2", name: "load" });
     });
     expect((await settle({ page: p }, { deps: clock })).waitedMs).toBeGreaterThanOrEqual(1500 + 300);
+  });
+});
+
+describe("WaitTimeoutError messages", () => {
+  it.each([
+    [{ text: "a" }, 'text "a" did not appear after 5 ms'],
+    [{ gone: "Spinner" }, 'text "Spinner" is still on the page after 5 ms'],
+    [{ selector: "#x" }, 'no element matches "#x" after 5 ms'],
+    [{ url: "/done" }, 'the url did not match "/done" after 5 ms'],
+    [{ load: true }, "the page did not finish loading after 5 ms"],
+    [{ idle: true }, "the network did not go idle after 5 ms"],
+  ] as const)("reads %j in words", (cond, msg) => {
+    expect(new WaitTimeoutError(cond, 5).message).toBe(msg);
   });
 });

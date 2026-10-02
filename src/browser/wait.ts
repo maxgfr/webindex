@@ -2,6 +2,7 @@
 // action (`settle`). Both poll through the injected `now`/`sleep`, so tests run
 // on a fake clock.
 
+import { brand } from "../brand.js";
 import type { CdpHandler, CdpSession } from "./cdp.js";
 import { probeChallenge } from "./challenge.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
@@ -30,12 +31,25 @@ export interface WaitResult {
   matched: string;
 }
 
+/** The failed condition in words: what the agent should read, not the JSON it was given. */
+function timeoutText(c: WaitCondition, elapsedMs: number): string {
+  if ("text" in c) return `text ${JSON.stringify(c.text)} did not appear after ${elapsedMs} ms`;
+  if ("gone" in c) return `text ${JSON.stringify(c.gone)} is still on the page after ${elapsedMs} ms`;
+  if ("selector" in c) return `no element matches ${JSON.stringify(c.selector)} after ${elapsedMs} ms`;
+  if ("url" in c) return `the url did not match ${JSON.stringify(c.url)} after ${elapsedMs} ms`;
+  if ("load" in c) return `the page did not finish loading after ${elapsedMs} ms`;
+  if ("idle" in c) return `the network did not go idle after ${elapsedMs} ms`;
+  if ("clear" in c)
+    return `the challenge is still there after ${elapsedMs} ms — a human must solve it in the browser window (\`${brand().cli} browser open <url>\` shows it), then run wait --clear again`;
+  return `timed out after ${elapsedMs} ms`;
+}
+
 export class WaitTimeoutError extends Error {
   constructor(
     readonly condition: WaitCondition,
     readonly elapsedMs: number,
   ) {
-    super(`timed out waiting for ${JSON.stringify(condition)} after ${elapsedMs} ms`);
+    super(timeoutText(condition, elapsedMs));
     this.name = "WaitTimeoutError";
   }
 }

@@ -9185,6 +9185,17 @@ var init_overlay = __esm({
 });
 
 // src/browser/wait.ts
+function timeoutText(c, elapsedMs) {
+  if ("text" in c) return `text ${JSON.stringify(c.text)} did not appear after ${elapsedMs} ms`;
+  if ("gone" in c) return `text ${JSON.stringify(c.gone)} is still on the page after ${elapsedMs} ms`;
+  if ("selector" in c) return `no element matches ${JSON.stringify(c.selector)} after ${elapsedMs} ms`;
+  if ("url" in c) return `the url did not match ${JSON.stringify(c.url)} after ${elapsedMs} ms`;
+  if ("load" in c) return `the page did not finish loading after ${elapsedMs} ms`;
+  if ("idle" in c) return `the network did not go idle after ${elapsedMs} ms`;
+  if ("clear" in c)
+    return `the challenge is still there after ${elapsedMs} ms \u2014 a human must solve it in the browser window (\`${brand().cli} browser open <url>\` shows it), then run wait --clear again`;
+  return `timed out after ${elapsedMs} ms`;
+}
 async function watchNetwork(page) {
   const inflight3 = /* @__PURE__ */ new Set();
   const handlers = [
@@ -9299,11 +9310,12 @@ var WaitTimeoutError, WaitCancelledError, POLL_MS2, DEFAULT_TIMEOUT_MS3, CLEAR_T
 var init_wait = __esm({
   "src/browser/wait.ts"() {
     "use strict";
+    init_brand();
     init_challenge();
     init_deps();
     WaitTimeoutError = class extends Error {
       constructor(condition, elapsedMs) {
-        super(`timed out waiting for ${JSON.stringify(condition)} after ${elapsedMs} ms`);
+        super(timeoutText(condition, elapsedMs));
         this.condition = condition;
         this.elapsedMs = elapsedMs;
         this.name = "WaitTimeoutError";
@@ -9737,11 +9749,21 @@ function nested(items, depth, out) {
     }
   }
 }
-function flat(items, out) {
+var LINK_URL_MAX = 80;
+function compactUrl(url, base2) {
+  let shown = url;
+  try {
+    const u = new URL(url, base2);
+    if (u.origin === new URL(base2).origin) shown = `${u.pathname}${u.search}`;
+  } catch {
+  }
+  return shown.length > LINK_URL_MAX ? `${shown.slice(0, LINK_URL_MAX)}\u2026` : shown;
+}
+function flat(items, out, base2) {
   for (const it of items) {
     if (it.t !== "node") continue;
-    if (it.act) out.push({ text: it.head, ref: true });
-    flat(it.children, out);
+    if (it.act) out.push({ text: it.url ? `${it.head} \u2192 ${compactUrl(it.url, base2)}` : it.head, ref: true });
+    flat(it.children, out, base2);
   }
 }
 function renderSnapshot(nodes, opts) {
@@ -9758,14 +9780,14 @@ function renderSnapshot(nodes, opts) {
       if (!hit) continue;
       const lines = [];
       const over = merge(r.collect(hit.tree, hit.node));
-      if (opts.interactive) flat(over, lines);
+      if (opts.interactive) flat(over, lines, opts.refs.url);
       else nested(over, 1, lines);
       if (lines.length === 0) continue;
       all.push({ text: OVERLAY_HEADER, ref: false }, ...opts.interactive ? lines.map((l) => ({ ...l, text: `  ${l.text}` })) : lines);
     }
     if (main.root) items = merge(r.collect(main, main.root));
   }
-  if (opts.interactive) flat(items, all);
+  if (opts.interactive) flat(items, all, opts.refs.url);
   else nested(items, 0, all);
   let kept = all;
   let tail = "";

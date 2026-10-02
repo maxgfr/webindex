@@ -21,6 +21,7 @@
 // the agent decides with handleDialog.
 
 import { isAbsolute } from "node:path";
+import { brand } from "../brand.js";
 import { UsageError } from "../cli-kit.js";
 import { CdpError, type CdpHandler, type CdpSession } from "./cdp.js";
 import { type Challenge, detectChallenge } from "./challenge.js";
@@ -146,6 +147,11 @@ export const PAGE_FUNCTIONS = {
    * when it is inside the target (a button in a card, which the guard then looks
    * at), else a description of what covers the target.
    */
+  /** The url of the link the target is, or sits inside; null when it is no link. */
+  linkHref: `function linkHref() {
+  const a = this.closest ? this.closest("a[href]") : null;
+  return a ? String(a.href) : null;
+}`,
   hitTest: `function hitTest(hit) {
   ${DESCRIBE}
   const owner = ${OWNER_SOURCE};
@@ -484,7 +490,22 @@ const OVERLAY_CONTROLS_MAX = 12;
  * overlay (a cookie wall, a dialog), which one to press — accepting tracking,
  * refusing it, closing — is the user's; a sticky header is only in the way.
  */
-async function coveredError(page: CdpSession, targetId: string, ref: string, hitObjectId: string, where: string, at: string): Promise<ActionError> {
+async function coveredError(
+  page: CdpSession,
+  targetId: string,
+  ref: string,
+  hitObjectId: string,
+  where: string,
+  at: string,
+  href: string | null = null,
+): Promise<ActionError> {
+  const err = await coveredBy(page, targetId, ref, hitObjectId, where, at);
+  // A covered link can still be reached by its address, and navigating there accepts nothing.
+  if (href) err.message += `\nor open its URL directly: \`${brand().cli} browser open ${href}\` (navigating doesn't accept anything)`;
+  return err;
+}
+
+async function coveredBy(page: CdpSession, targetId: string, ref: string, hitObjectId: string, where: string, at: string): Promise<ActionError> {
   const root = await overlayRootOf(page, hitObjectId);
   if (!root) return new ActionError(`${ref} is covered by ${where} at ${at}: close or move it out of the way, then retry`);
   let controls: string[] = [];
@@ -542,7 +563,10 @@ async function hitTarget(page: CdpSession, targetId: string, node: ResolvedRef, 
     const where = await callOn<string | true | null>(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
     // The target itself, reached through its own text or user-agent shadow tree: its guard has run already.
     if (where === true) return undefined;
-    if (where) throw await coveredError(page, targetId, node.ref, objectId, where, at);
+    if (where) {
+      const href = await callOn<string | null>(page, node.objectId, PAGE_FUNCTIONS.linkHref).catch(() => null);
+      throw await coveredError(page, targetId, node.ref, objectId, where, at, href);
+    }
   } finally {
     release(page, objectId);
   }
