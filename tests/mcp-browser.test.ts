@@ -10,6 +10,7 @@ import { writeProfileKind } from "../src/browser/profile.js";
 import { readSession, writeSession } from "../src/browser/state.js";
 import { main, webindexAdapter } from "../src/cli.js";
 import { createServer, type JsonRpcMessage, ToolError } from "../src/mcp/server.js";
+import { READ_DOCUMENT } from "../src/browser/overlay.js";
 import { BrowserWorld } from "./helpers/browser-world.js";
 import { scriptBrowser } from "./helpers/fake-browser.js";
 import { FakeCdp } from "./helpers/fake-cdp.js";
@@ -22,6 +23,7 @@ import { fakeClock } from "./helpers/fake-page.js";
 const NAMES = [
   "open",
   "snapshot",
+  "text",
   "click",
   "hover",
   "type",
@@ -98,7 +100,7 @@ describe("tools/list", () => {
   it("offers every browser tool with --browser, each annotated for what it does", async () => {
     const tools = (await list({ browser: true })).filter((t) => t.name.startsWith("webindex_browser_"));
     expect(tools.map((t) => t.name).sort()).toEqual([...NAMES].sort());
-    const readOnly = ["snapshot", "screenshot", "status", "wait"];
+    const readOnly = ["snapshot", "text", "screenshot", "status", "wait"];
     // network: its clear deletes the log.
     const destructive = ["click", "press", "type", "fill", "select", "upload", "eval", "dialog", "close", "network"];
     for (const t of tools) {
@@ -151,14 +153,18 @@ async function run(argv: string[]): Promise<{ code: number; err: string }> {
     throw new Error(`__exit__${code ?? 0}`);
   }) as never);
   let code = 0;
+  process.exitCode = undefined;
   try {
     await main(argv);
+    // A printed result sets the code instead of exiting, so a pipe gets all of it.
+    code = Number(process.exitCode ?? 0);
   } catch (e) {
     const m = /^__exit__(\d+)$/.exec((e as Error).message);
     if (!m) throw e;
     code = Number(m[1]);
   } finally {
     vi.restoreAllMocks();
+    process.exitCode = undefined;
   }
   return { code, err: err.join("") };
 }
@@ -414,7 +420,6 @@ describe("network capture", () => {
     world.xhr = true;
     const opened = await h.call("webindex_browser_open", { url: "https://b.test/", capture: true });
     expect(opened.text).toContain("webindex_browser_network");
-    await new Promise((r) => setTimeout(r, 20));
     const list = await h.call("webindex_browser_network", { action: "list" });
     expect(list.text).toBe("1  GET 200 https://a.test/api.json (application/json, 7 B)");
     expect((await h.call("webindex_browser_network", { action: "get", n: 1 })).text).toBe('{\n  "a": 1\n}');
@@ -513,7 +518,7 @@ describe("the other tools", () => {
       expect(err.message).not.toContain("--selector");
     }
     await expect(h.call("webindex_browser_click", { ref: "table.infobox" })).rejects.toThrow(
-      "expected a ref like e12 from the latest snapshot; CSS selectors: pass `selector` to webindex_browser_screenshot or webindex_browser_snapshot, or wait with condition selector",
+      "expected a ref like e12 from the latest snapshot; CSS selectors: pass `selector` to webindex_browser_screenshot, webindex_browser_snapshot or webindex_browser_text, or wait with condition selector",
     );
     // A ref or a selector goes with area element, never ignored.
     await expect(h.call("webindex_browser_screenshot", { area: "full", selector: "table.infobox" })).rejects.toThrow(/area "element"/);
@@ -603,6 +608,54 @@ describe("the other tools", () => {
     const desc = browserToolDecls().find((t) => t.name === "webindex_browser_eval")!.description;
     expect(desc).toMatch(/form\.submit\(\)/);
     expect(desc).toMatch(/logged-in/);
+  });
+
+  it("reads the page's text, or one element's, without a snapshot", async () => {
+    const decl = browserToolDecls().find((t) => t.name === "webindex_browser_text")!;
+    expect(decl.inputSchema.required).toEqual(["scope"]);
+    const h = await host();
+    const evaluate = fake.handlerOf("Runtime.evaluate");
+    const prose = "The article a reader came for, told at length so the extractor keeps it. ".repeat(8);
+    fake.handle("Runtime.evaluate", (p, sid) =>
+      p.expression === READ_DOCUMENT
+        ? {
+            result: {
+              type: "object",
+              value: { html: `<html><body><main><article><h1>Story</h1><p>${prose}</p></article></main></body></html>`, url: "https://a.test/" },
+            },
+          }
+        : evaluate?.(p, sid),
+    );
+    const call = fake.handlerOf("Runtime.callFunctionOn");
+    fake.handle("Runtime.callFunctionOn", (p, sid) =>
+      /^function elementText/.test(p.functionDeclaration) ? { result: { value: { text: "Only the box", html: "<p>Only the box</p>" } } } : call?.(p, sid),
+    );
+    const page = await h.call("webindex_browser_text", { scope: "page" });
+    expect(page.text).toContain("The article a reader came for");
+    expect(page.text).not.toContain("[ref=");
+    const cut = await h.call("webindex_browser_text", { scope: "page", maxChars: 30 });
+    expect(cut.text).toMatch(/truncated at 30 of \d+ characters: raise maxChars, or read one element \(scope element with a ref or a selector\)/);
+    await h.call("webindex_browser_snapshot", { mode: "full" });
+    expect((await h.call("webindex_browser_text", { scope: "element", ref: "e3" })).text).toContain("Only the box");
+    world.selectors = { "div.box": 12 };
+    expect((await h.call("webindex_browser_text", { scope: "element", selector: "div.box", markdown: true })).text).toContain("Only the box");
+    await expect(h.call("webindex_browser_text", { scope: "element" })).rejects.toThrow(/`ref` or a `selector`/);
+    await expect(h.call("webindex_browser_text", { scope: "page", ref: "e3" })).rejects.toThrow(/scope "element"/);
+    await expect(h.call("webindex_browser_text", { scope: "all" })).rejects.toThrow(/`scope` must be one of page, element/);
+    for (const maxChars of [-5, 0, 2.5]) {
+      await expect(h.call("webindex_browser_text", { scope: "page", maxChars }), String(maxChars)).rejects.toThrow(/`maxChars` must be a whole number/);
+    }
+  });
+
+  it("names a blocking challenge an action lands on in a line after the result line, and is no error", async () => {
+    const h = await host();
+    world.blocking = true;
+    const r = await h.call("webindex_browser_open", { url: "https://b.test/" });
+    // Resolved, not thrown: the tool result is no error.
+    expect(r.text.split("\n")[0]).toMatch(/^https:\/\/b\.test\//);
+    expect(r.text).toMatch(/^challenge: cloudflare \(blocking\) — let the human solve it, then webindex_browser_wait with condition clear/m);
+    await h.call("webindex_browser_snapshot", { mode: "full" });
+    expect((await h.call("webindex_browser_click", { ref: "e1" })).text).toMatch(/challenge: cloudflare \(blocking\)/);
   });
 
   it("refuses an unknown tool", async () => {

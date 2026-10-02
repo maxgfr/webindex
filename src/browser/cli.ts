@@ -3,7 +3,9 @@
 // Library-safe: nothing here prints, exits or reads stdin. runBrowserCommand
 // returns what to print and the exit code, and src/cli.ts prints it — 0 done,
 // 1 ran and failed (a stale ref, a timeout, a guard refusal, a page error),
-// 2 the invocation was wrong. Stdin, for `eval -`, is handed in.
+// 2 the invocation was wrong, 3 done but a human is needed: a navigation (open,
+// back, forward, reload, a click, an Enter, tabs new <url>) ended on a blocking
+// challenge. Stdin, for `eval -`, is handed in.
 //
 // Every command that touches a page runs inside withPage: under the browser
 // lock, reconnected to the tab the last call left, detached at the end — the
@@ -15,7 +17,7 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { brand, envName } from "../brand.js";
-import { UsageError } from "../cli-kit.js";
+import { EXIT_HUMAN, UsageError } from "../cli-kit.js";
 import { isNoWrite, writeFileAtomic } from "../no-write.js";
 import * as actions from "./actions.js";
 import type { ActionOptions, ActionResult, DialogInfo } from "./actions.js";
@@ -31,6 +33,7 @@ import { ensurePrivateDir, importProfile, profileDir, resetProfile } from "./pro
 import { type BrowserSession, type BrowserStatus, type BrowserTab, browserStatus, closeBrowser, type OpenOptions, withPage } from "./session.js";
 import { checkRef, type SnapshotOptions, type SnapshotResult, takeSnapshot } from "./snapshot.js";
 import { readSession } from "./state.js";
+import { readPageText } from "./text.js";
 import { settle, type WaitCondition, waitFor } from "./wait.js";
 
 /** The flags a browser command reads, already parsed and checked by the caller. */
@@ -49,6 +52,8 @@ export interface BrowserCliFlags {
   capture?: boolean;
   /** Append the snapshot taken after the command. */
   snapshot?: boolean;
+  /** text: Markdown instead of plain text. */
+  markdown?: boolean;
   interactive?: boolean;
   maxChars?: number;
   /** The user said yes to this very action: past the irreversibility guard. */
@@ -98,6 +103,8 @@ export interface BrowserFollowUps {
   networkList: string;
   /** How to record what pages fetch. */
   capture: string;
+  /** How to read more of a text that was cut. */
+  textMore: string;
 }
 
 const cliFollowUps = (): BrowserFollowUps => ({
@@ -105,6 +112,7 @@ const cliFollowUps = (): BrowserFollowUps => ({
   waitClear: `\`${cliName()} browser wait --clear\``,
   networkList: `\`${cliName()} browser network list\``,
   capture: `\`${cliName()} browser open <url> --capture\`, or --capture on an action`,
+  textMore: "raise --max-chars, or read one element (a ref or --selector)",
 });
 
 export interface BrowserCliResult {
@@ -112,7 +120,7 @@ export interface BrowserCliResult {
   json: unknown;
   /** What is printed without --json; on failure, the message for stderr. */
   text: string;
-  exitCode: 0 | 1 | 2;
+  exitCode: 0 | 1 | 2 | typeof EXIT_HUMAN;
   /** A screenshot written to disk. */
   image?: { path: string };
 }
@@ -123,6 +131,7 @@ const USAGE = {
   status: "status",
   close: "close [--all]",
   snapshot: "snapshot [<ref> | --selector <css>] [--interactive] [--max-chars <n>]",
+  text: "text [<ref> | --selector <css>] [--markdown] [--max-chars <n>]",
   click: "click <ref> [--confirm]",
   hover: "hover <ref>",
   type: "type <ref> <text> [--submit] [--confirm]",
@@ -149,8 +158,13 @@ type Action = keyof typeof USAGE;
 export const BROWSER_ACTIONS = Object.keys(USAGE) as Action[];
 
 const SNAPSHOT_MAX_CHARS = 20_000;
+const TEXT_MAX_CHARS = 20_000;
 /** The actions --selector means something to. */
-const SELECTOR_ACTIONS = new Set(["snapshot", "screenshot", "wait"]);
+const SELECTOR_ACTIONS = new Set(["snapshot", "screenshot", "wait", "text"]);
+/** The actions --snapshot appends a snapshot to: --selector scopes it there, and never names what they act on. */
+const SNAPSHOT_ACTIONS = new Set(["open", "click", "hover", "type", "fill", "select", "press", "upload", "scroll", "back", "forward", "reload", "dialog"]);
+/** The actions that may land on another page: one that lands on a blocking challenge exits 3. type only with --submit, tabs only new <url>. */
+const NAVIGATING = new Set(["open", "click", "press", "back", "forward", "reload", "tabs"]);
 
 interface Ctx {
   action: Action;
@@ -161,7 +175,10 @@ interface Ctx {
   dialogs?: DialogWatch;
 }
 
-type Out = Omit<BrowserCliResult, "exitCode">;
+type Out = Omit<BrowserCliResult, "exitCode"> & {
+  /** The page the command ended on is a blocking challenge. */
+  challenged?: boolean;
+};
 
 const cliName = (): string => brand().cli;
 const usageError = (action: Action): UsageError => new UsageError(`usage: ${cliName()} browser ${USAGE[action]}`);
@@ -180,8 +197,9 @@ export async function runBrowserCommand(action: string, args: string[], flags: B
   try {
     if (!Object.hasOwn(HANDLERS, action)) throw new UsageError(`usage: ${cliName()} browser ${BROWSER_ACTIONS.join("|")}`);
     // Any other action would ignore it, and act on something the agent did not mean.
-    if (flags.selector !== undefined && !SELECTOR_ACTIONS.has(action)) throw new UsageError("--selector goes with snapshot, screenshot and wait only");
-    const out = await HANDLERS[action as Action](ctx);
+    if (flags.selector !== undefined && !SELECTOR_ACTIONS.has(action) && !(flags.snapshot && SNAPSHOT_ACTIONS.has(action)))
+      throw new UsageError("--selector goes with snapshot, screenshot, wait and text, or scopes the --snapshot an action prints");
+    const { challenged, ...out } = await HANDLERS[action as Action](ctx);
     const dialogs = unreported(ctx);
     // Every success says so in its JSON, as every failure does with `ok: false`.
     return {
@@ -191,7 +209,8 @@ export async function runBrowserCommand(action: string, args: string[], flags: B
         dialogs.map((d) => dialogLine(d)),
       ),
       json: { ok: true, ...(out.json as object), ...dialogsJson(dialogs) },
-      exitCode: 0,
+      // Done, and the page needs a human: a script tells it from a plain success without reading the text.
+      exitCode: challenged && (NAVIGATING.has(action) || (action === "type" && flags.submit)) ? EXIT_HUMAN : 0,
     };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
@@ -317,6 +336,29 @@ const snapOpts = (ctx: Ctx, ref?: string): SnapshotOptions => ({
   ...(ref !== undefined ? { ref } : {}),
 });
 
+/** What --snapshot appends after an action: the page, or the element --selector names. */
+type After = { snap?: SnapshotResult; error?: string };
+
+/**
+ * The snapshot an action appends with --snapshot (scoped to --selector), once
+ * it is done. The action happened whatever the snapshot meets: a selector that
+ * matches nothing, or nothing the tree holds, is said, not failed.
+ */
+async function afterSnapshot(ctx: Ctx, s: BrowserSession): Promise<After> {
+  if (!ctx.flags.snapshot) return {};
+  const { selector } = ctx.flags;
+  if (selector === undefined) return { snap: await takeSnapshot(s, snapOpts(ctx)) };
+  try {
+    return { snap: await takeSnapshot(s, { ...snapOpts(ctx), selector }) };
+  } catch (e) {
+    if (e instanceof CdpError) throw e;
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+const afterJson = (a: After) => (a.snap ? { snapshot: a.snap } : a.error !== undefined ? { snapshotError: a.error } : {});
+const afterLines = (a: After): string[] => (a.snap ? ["", a.snap.text] : a.error !== undefined ? ["", `snapshot: ${a.error}`] : []);
+
 /** What --capture recorded: during this command, and in the tab's log, which keeps every command's until `network clear`. */
 interface Captured {
   captured: number;
@@ -376,7 +418,7 @@ function valueText(v: unknown): string {
   return JSON.stringify(v.length > VALUE_SHOWN ? `${v.slice(0, VALUE_SHOWN - 1)}…` : v);
 }
 
-function actionText(ctx: Ctx, r: ActionResult, capture: Captured | undefined, snap: SnapshotResult | undefined): string {
+function actionText(ctx: Ctx, r: ActionResult, capture: Captured | undefined, after: After): string {
   const lines = [`${r.action}${r.ref !== undefined ? ` ${r.ref}` : ""}: ${r.navigated ? "navigated to " : ""}${where(r.url, r.title)}`];
   // What the action yields (the field's value, the options chosen, the scroll position); an empty protocol answer says nothing.
   if (r.valueHidden) lines.push("  value: (hidden)");
@@ -386,7 +428,7 @@ function actionText(ctx: Ctx, r: ActionResult, capture: Captured | undefined, sn
   if (r.dialog) lines.push(dialogLine(r.dialog, follow(ctx)));
   if (r.challenge) lines.push(challengeLine(ctx, r.challenge));
   if (capture) lines.push(capturedLine(ctx, capture));
-  if (snap) lines.push("", snap.text);
+  lines.push(...afterLines(after));
   return lines.join("\n");
 }
 
@@ -398,10 +440,11 @@ function actionText(ctx: Ctx, r: ActionResult, capture: Captured | undefined, sn
 function mutate(ctx: Ctx, run: (s: BrowserSession, o: ActionOptions) => Promise<ActionResult>): Promise<Out> {
   return onPage(ctx, async (s) => {
     const { value: r, capture } = await capturing(ctx, s, async () => handled(ctx, await run(s, actOpts(ctx))));
-    const snap = ctx.flags.snapshot && !frozen(r.dialog) ? await takeSnapshot(s, snapOpts(ctx)) : undefined;
+    const after = frozen(r.dialog) ? {} : await afterSnapshot(ctx, s);
     return {
-      json: { ...r, ...capturedJson(capture), ...(snap ? { snapshot: snap } : {}) },
-      text: actionText(ctx, r, capture, snap),
+      json: { ...r, ...capturedJson(capture), ...afterJson(after) },
+      text: actionText(ctx, r, capture, after),
+      ...(r.challenge?.blocking ? { challenged: true } : {}),
     };
   });
 }
@@ -472,14 +515,14 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
         });
         const title = await s.title();
         const challenge = await detectChallenge(s);
-        const snap = ctx.flags.snapshot ? await takeSnapshot(s, snapOpts(ctx)) : undefined;
+        const after = await afterSnapshot(ctx, s);
         const notes = s.takeNotes();
         const lines = [`${where(nav.url, title)}${nav.status !== undefined ? ` (HTTP ${nav.status})` : ""}`];
         for (const n of notes) lines.push(`note: ${n}`);
         if (nav.note) lines.push(`note: ${nav.note}`);
         if (challenge) lines.push(challengeLine(ctx, challenge));
         if (capture) lines.push(capturedLine(ctx, capture));
-        if (snap) lines.push("", snap.text);
+        lines.push(...afterLines(after));
         return {
           json: {
             ok: true,
@@ -491,9 +534,10 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
             tab: s.targetId,
             challenge,
             ...capturedJson(capture),
-            ...(snap ? { snapshot: snap } : {}),
+            ...afterJson(after),
           },
           text: lines.join("\n"),
+          ...(challenge?.blocking ? { challenged: true } : {}),
         };
       },
       ctx.flags.newTab ? { newTab: true } : {},
@@ -537,6 +581,32 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     if (ctx.args[0] !== undefined) refArg(ctx);
     const r = await onPage(ctx, (s) => takeSnapshot(s, { ...snapOpts(ctx, ctx.args[0]), ...(selector !== undefined ? { selector } : {}) }));
     return { json: r, text: r.text };
+  },
+
+  async text(ctx) {
+    arity(ctx, 0, 1);
+    const ref = ctx.args[0];
+    const { selector } = ctx.flags;
+    if (ref !== undefined && selector !== undefined) throw new UsageError("text reads the element a ref or a selector names, not both");
+    if (ref !== undefined) refArg(ctx);
+    const max = ctx.flags.maxChars ?? TEXT_MAX_CHARS;
+    const r = await onPage(ctx, (s) =>
+      readPageText(s, {
+        ...(ref !== undefined ? { ref } : {}),
+        ...(selector !== undefined ? { selector } : {}),
+        ...(ctx.flags.markdown ? { markdown: true } : {}),
+        maxChars: max,
+      }),
+    );
+    const element = ref !== undefined || selector !== undefined;
+    const body = r.text
+      ? r.text
+      : element
+        ? "(no text in this element)"
+        : "(no readable text on this page: take a snapshot, or read one element with a ref or a selector)";
+    const lines = [`url: ${r.url}`, `title: ${r.title}`, "", body];
+    if (r.truncated) lines.push(`… [truncated at ${max} of ${r.chars} characters: ${follow(ctx).textMore}]`);
+    return { json: r, text: lines.join("\n") };
   },
 
   async click(ctx) {
@@ -731,8 +801,20 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     }
     if (sub === "new") {
       arity(ctx, 1, 2);
-      const tab = await onPage(ctx, (s) => s.newTab(ctx.args[1]));
-      return { json: tab, text: tabLines([tab]) };
+      const url = ctx.args[1];
+      const { tab, challenge } = await onPage(ctx, async (s) => {
+        const tab = await s.newTab(url);
+        if (url === undefined) return { tab, challenge: undefined };
+        // A tab opened on a URL is a navigation like open's: a wall it lands on is said, and exits 3.
+        await settle(s, actOpts(ctx));
+        return { tab, challenge: await detectChallenge(s) };
+      });
+      if (challenge === undefined) return { json: tab, text: tabLines([tab]) };
+      return {
+        json: { ...tab, challenge },
+        text: [tabLines([tab]), ...(challenge ? [challengeLine(ctx, challenge)] : [])].join("\n"),
+        ...(challenge?.blocking ? { challenged: true } : {}),
+      };
     }
     if (sub === "select") {
       arity(ctx, 2);

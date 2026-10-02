@@ -25,16 +25,28 @@ export class BrowserWorld {
   aimed: number | undefined;
   /** document.activeElement as the risk collector reads it. */
   active = { role: "textbox", label: "Query", isSubmit: true, formHasPassword: false, submitLabel: "Search" };
-  /** What the challenge probe sees. */
+  /** What the challenge probe sees: a wall (blocking), or a captcha widget on an ordinary page (widget). */
   blocking = false;
+  widget = false;
   bodyText = "Welcome";
   evalValue: unknown = "A page";
   /** The next mouse release opens this dialog. */
   dialogOnClick: { type: string; message: string } | undefined;
-  /** Network events the first Network.enable sends, as a page's own XHR would. */
+  /** Each click and each navigation makes the page fetch one JSON resource. */
   xhr = false;
   /** What document.querySelector finds: a CSS selector to a backendNodeId. */
   selectors: Record<string, number> = {};
+
+  private requests = 0;
+
+  /** One JSON request of the page, start to finish, as the Network domain reports it. */
+  fetched(sessionId: string): void {
+    const requestId = `r${++this.requests}`;
+    const url = "https://a.test/api.json";
+    this.fake.emit("Network.requestWillBeSent", { requestId, type: "XHR", request: { method: "GET", url } }, sessionId);
+    this.fake.emit("Network.responseReceived", { requestId, type: "XHR", response: { url, status: 200, mimeType: "application/json" } }, sessionId);
+    this.fake.emit("Network.loadingFinished", { requestId, encodedDataLength: 9 }, sessionId);
+  }
 
   constructor(readonly fake: FakeCdp) {
     const ax = (id: string, role: string, name: string, backendDOMNodeId: number) => ({
@@ -71,6 +83,7 @@ export class BrowserWorld {
       if (el) el.value = text;
     });
     fake.handle("Input.dispatchMouseEvent", (e, sessionId) => {
+      if (e.type === "mouseReleased" && this.xhr) this.fetched(sessionId as string);
       if (e.type === "mouseReleased" && this.dialogOnClick) {
         fake.emit("Page.javascriptDialogOpening", { ...this.dialogOnClick, url: "https://a.test/" }, sessionId);
         this.dialogOnClick = undefined;
@@ -100,7 +113,15 @@ export class BrowserWorld {
       if (e.includes(COLLECT_SOURCE)) return { result: { value: this.active } };
       if (e.includes("document.cookie")) {
         return {
-          result: { value: { url: "u", title: this.blocking ? "Just a moment..." : "Shop", text: "x".repeat(2000), status: this.blocking ? 503 : 200 } },
+          result: {
+            value: {
+              url: "u",
+              title: this.blocking ? "Just a moment..." : "Shop",
+              text: "x".repeat(2000),
+              status: this.blocking ? 503 : 200,
+              ...(this.widget ? { iframeSrcs: ["https://www.google.com/recaptcha/api2/anchor?k=x"] } : {}),
+            },
+          },
         };
       }
       if (e.includes("responseStatus")) return { result: { type: "number", value: 200 } };
@@ -113,20 +134,13 @@ export class BrowserWorld {
     fake.handle("Page.handleJavaScriptDialog", () => {
       throw { code: -32000, message: "No dialog is showing" };
     });
-    let sent = false;
-    fake.handle("Network.enable", (_p, sessionId) => {
-      if (!this.xhr || sent) return {};
-      sent = true;
-      setTimeout(() => {
-        fake.emit("Network.requestWillBeSent", { requestId: "r1", type: "XHR", request: { method: "GET", url: "https://a.test/api.json" } }, sessionId);
-        fake.emit(
-          "Network.responseReceived",
-          { requestId: "r1", type: "XHR", response: { url: "https://a.test/api.json", status: 200, mimeType: "application/json" } },
-          sessionId,
-        );
-        fake.emit("Network.loadingFinished", { requestId: "r1", encodedDataLength: 9 }, sessionId);
-      }, 0);
-      return {};
+    // The page's own XHR, sent by what causes it (a click, a navigation), never on a timer: a recorder
+    // started before the action sees it before the action answers, however fast or slow the round trips.
+    const navigate = fake.handlerOf("Page.navigate");
+    fake.handle("Page.navigate", (p, sessionId) => {
+      const r = navigate?.(p, sessionId);
+      if (this.xhr) this.fetched(sessionId as string);
+      return r;
     });
     fake.handle("Network.getResponseBody", () => ({ body: '{"a":1}' }));
   }

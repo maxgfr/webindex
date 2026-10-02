@@ -1,10 +1,13 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "tsup";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { BrowserWorld } from "./helpers/browser-world.js";
+import { scriptBrowser } from "./helpers/fake-browser.js";
+import { FakeCdp } from "./helpers/fake-cdp.js";
 
 let dir: string;
 let binary: string;
@@ -130,4 +133,74 @@ describe("MCP process survival", () => {
     );
     expect(responses).toHaveLength(2);
   });
+});
+
+describe("browser output through a pipe", () => {
+  /**
+   * Run the built CLI with its stdout on a pipe (as `… | jq` has it), and read
+   * all of it — or, with `firstChunk`, close the pipe after the first chunk, as
+   * `| head -1` does.
+   */
+  const piped = (args: string[], env: Record<string, string>, firstChunk = false): Promise<{ status: number | null; stdout: string; stderr: string }> =>
+    new Promise((resolve) => {
+      const child = spawn(process.execPath, [binary, ...args], { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8").on("data", (c: string) => {
+        stdout += c;
+        if (firstChunk) child.stdout.destroy();
+      });
+      child.stderr.setEncoding("utf8").on("data", (c: string) => {
+        stderr += c;
+      });
+      child.on("close", (status) => resolve({ status, stdout, stderr }));
+    });
+
+  /** A fake browser whose page is a blocking challenge far over a pipe's buffer; `run` gets its port and a browser home. */
+  async function onBigChallenge(run: (port: number, home: string) => Promise<void>): Promise<void> {
+    const fake = await FakeCdp.start();
+    const home = mkdtempSync(join(tmpdir(), "webindex-pipe-"));
+    try {
+      scriptBrowser(fake);
+      const world = new BrowserWorld(fake);
+      fake.addTarget("https://a.test/", "A page");
+      world.blocking = true;
+      // A page far over a pipe's buffer: 6000 buttons, each a line of the snapshot.
+      const buttons = Array.from({ length: 6000 }, (_, i) => ({
+        nodeId: String(i + 2),
+        parentId: "1",
+        role: { value: "button" },
+        name: { value: `Button number ${i} of a very long page` },
+        backendDOMNodeId: 100 + i,
+      }));
+      fake.handle("Accessibility.getFullAXTree", () => ({
+        nodes: [{ nodeId: "1", role: { value: "RootWebArea" }, name: { value: "A" }, childIds: buttons.map((b) => b.nodeId), backendDOMNodeId: 1 }, ...buttons],
+      }));
+      await run(fake.port, home);
+    } finally {
+      await fake.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  const bigOpen = (port: number) => ["browser", "open", "https://b.test/", "--cdp", String(port), "--json", "--snapshot", "--max-chars", "1000000"];
+
+  it("writes all of a large result before it exits 3 on a blocking challenge", async () => {
+    await onBigChallenge(async (port, home) => {
+      const r = await piped(bigOpen(port), { WEBINDEX_BROWSER_DIR: home });
+      expect(r.status, r.stderr).toBe(3);
+      expect(r.stdout.length).toBeGreaterThan(200_000);
+      const json = JSON.parse(r.stdout);
+      expect(json).toMatchObject({ ok: true, challenge: { blocking: true } });
+      expect(json.snapshot.text).toContain("Button number 5999 of a very long page");
+    });
+  }, 30_000);
+
+  it("keeps exit 3 when the reader stops early (`| head -1`), quietly", async () => {
+    await onBigChallenge(async (port, home) => {
+      const r = await piped(bigOpen(port), { WEBINDEX_BROWSER_DIR: home }, true);
+      expect(r.status, r.stderr).toBe(3);
+      expect(r.stderr).not.toMatch(/EPIPE|Unhandled|node:events/);
+    });
+  }, 30_000);
 });

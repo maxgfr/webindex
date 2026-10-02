@@ -28,7 +28,10 @@ Use plain `fetch` everywhere else: it is faster and needs no browser.
    `reload` lands on. One that never committed fails.
 2. Read the snapshot. Each element you can act on carries a ref: `button "Search" [ref=e12]`.
 3. Act on one ref: `click e12`, `fill e7 "text"`, `select e9 Beta`, `upload e11 cv.pdf`,
-   `press Escape`. Add `--snapshot` to get the new tree in the same call.
+   `press Escape`. Add `--snapshot` to get the new tree in the same call, and
+   `--selector <css>` with it to get only that element's subtree
+   (`press Enter --snapshot --selector .results`). The selector only scopes the
+   snapshot: what the action acts on is always the ref (or the focus).
    `fill` and `type` echo what the field holds afterwards (`value: "Jane Doe"`,
    as an input mask may have reformatted it), and `select` the options chosen; a
    password field's value is never echoed (`value: (hidden)`).
@@ -38,7 +41,31 @@ Use plain `fetch` everywhere else: it is faster and needs no browser.
 `snapshot --interactive` (and `open <url> --snapshot --interactive`) lists only
 the controls and is much shorter. `snapshot e40` shows one subtree, and so does
 `snapshot --selector <css>` for the first element a CSS selector matches.
-Same-origin iframes are expanded.
+`--max-chars <n>` cuts a snapshot at a line (20000 characters by default) and
+says how many lines it left out. Same-origin iframes are expanded.
+
+A form control with no name, or with the name another one has, cannot be told
+apart by its line, so it gets its element's `type`, `name` and `placeholder`
+(its `id` when it has no `name`) after its ref. Two `<label>`s for one field
+make that common:
+
+```
+- textbox "Username Password" [ref=e5]
+- textbox [ref=e6] (type=password, name="password")
+```
+
+Its value is never shown. A snapshot hints 50 controls at most.
+
+## Reading the page
+
+`browser text` prints what the current tab says, loading nothing: its main
+content, as `fetch` reads a page (navigation and boilerplate left out), from a
+copy without the overlays, dialogs and consent panels, so a cookie wall over
+the page is not what comes back and needs no answer. `text e40` or
+`text --selector article` reads one element instead: its text as the page
+shows it. `--markdown` keeps headings, links and lists; `--max-chars <n>` cuts
+it (20000 by default) with a `[truncated at …]` line. Use it to read an article
+or a list of results; `eval` with a guessed selector is not needed for that.
 
 `screenshot` takes the viewport, the full page (`--full`), one element by its
 ref (`screenshot e40`), or the first element a CSS selector matches
@@ -106,8 +133,9 @@ everything.
   `image` that has a name. `--interactive` lists only the first kind. A
   container's ref is refused by `click` (exit 2): whatever sits at its centre
   is what would be pressed, so click a control inside it. Anything else (a
-  `div` with a class) is reached with `--selector <css>` on `snapshot` and
-  `screenshot`; any other action refuses `--selector` (exit 2).
+  `div` with a class) is reached with `--selector <css>` on `snapshot`,
+  `screenshot` and `text`, and on an action's `--snapshot`. An action without
+  `--snapshot` refuses `--selector` (exit 2): it would act on the ref anyway.
 - **`eN` is the element's `backendDOMNodeId`**, kept in `refs/<tab>.json`. A
   ref is stable while its element node lives: a later snapshot of the same
   document hands the same element the same `eN`. A widget the page re-renders
@@ -119,7 +147,7 @@ everything.
   use the refs it returns`. Take one and use its refs. Never guess a ref.
 - **A ref is `e` and a number.** Anything else (a CSS selector such as
   `table.infobox`) is a usage error, exit 2: `expected a ref like e12 from the
-  latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)`.
+  latest snapshot; CSS selectors: use --selector (screenshot, snapshot, text, wait)`.
 - **A click is a real mouse press** at the element's centre, refused when
   something covers that point (a cookie banner). The error names it, and lists
   the controls of the overlay it belongs to, with refs.
@@ -142,15 +170,33 @@ everything.
   chat box with no form around it, and a `select` that submits on change, are
   not guarded. Ask first when one of those would send or commit something.
 - **The human logs in and solves challenges** in the visible window. When
-  `open` reports `challenge: cloudflare (blocking)`, tell the user, then run
-  `wait --clear`, which waits up to 5 minutes for the wall to go. After a login,
-  run `wait --url <pattern>`. Do not log in for the user.
+  `open` reports `challenge: cloudflare (blocking)` it exits 3 (so does `back`,
+  `forward`, `reload`, a `click`, `press`, `type --submit` or `tabs new <url>` that lands on one),
+  with the result printed as on success and `challenge` in its JSON. Tell the
+  user, then run `wait --clear`, which waits up to 5 minutes for the wall to go
+  and holds the browser all that time. **Unattended** (no one at the window, a
+  headless browser), do not wait the 5 minutes: pass a short `--timeout`, or
+  skip the wait, and tell the user the page needs them. A consent wall is no
+  challenge: `browser text` and `fetch --browser` read the page behind it. After
+  a login, run `wait --url <pattern>`. Do not log in for the user.
 - **No anti-bot bypass of any kind**: no stealth patches, no captcha solvers,
   no fingerprint spoofing. A challenge is named and left to the human.
 - **`eval` runs in the logged-in page.** Read with it. Never use it to do what
   the guard would refuse, such as `el.click()` on a pay button.
 - **MCP uploads** stay under `--extract-root`; with none, they need
   `confirm: true` after the user approves the exact files.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | done |
+| 1 | ran and failed: a stale ref, a timeout, a guard refusal, a selector that matches nothing, a page error |
+| 2 | the invocation was wrong: a missing argument, an unknown flag, a CSS selector where a ref goes |
+| 3 | done, and a human is needed: a navigation (`open`, `back`, `forward`, `reload`, a `click`, `press`, `type --submit`, `tabs new <url>`) ended on a blocking challenge |
+
+Over MCP there are no exit codes: the same result is no error, and a
+`challenge: … (blocking)` line follows the result line.
 
 ## Profiles and the launch policy
 
@@ -278,7 +324,7 @@ that matters.
 
 ## Over MCP
 
-`webindex mcp --browser` adds 19 tools over one session that lives as long as
+`webindex mcp --browser` adds 20 tools over one session that lives as long as
 the server, so captures and dialogs persist across calls: a dialog stays open,
 and the page tools are refused, until `webindex_browser_dialog` answers it.
 They are refused with `--allow-remote` or `--public-only`: a logged-in browser
@@ -289,6 +335,7 @@ Tools that change the page return the snapshot taken after them.
 |---|---|
 | `open <url>` (`--new-tab`, `--capture`, `--profile`, `--headless`, `--browser-kind`) | `webindex_browser_open` (`browserKind`) |
 | `snapshot [<ref>]` (`--interactive`, `--selector`) | `webindex_browser_snapshot` (`mode` required, `ref` or `selector`) |
+| `text [<ref>]` (`--selector`, `--markdown`, `--max-chars`) | `webindex_browser_text` (`scope` required: `page`, or `element` with `ref` or `selector`; `markdown`, `maxChars`) |
 | `click`, `hover`, `type`, `fill`, `select`, `press`, `upload`, `scroll` | `webindex_browser_<same name>` |
 | `wait --text\|--gone\|--selector\|--url\|--load\|--idle\|--clear\|--ms` | `webindex_browser_wait` (`condition`, `value`) |
 | `screenshot [<ref>]` (`--full`, `--selector`) | `webindex_browser_screenshot` (`area` required, `ref` or `selector` with `element`; JPEG, 4 MB at most) |

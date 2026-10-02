@@ -22,6 +22,7 @@ import { resolve } from "node:path";
 import { confinePath, MAX_TOOL_WAIT_MS, toolTimeoutMs } from "../mcp/policy.js";
 import type { CapAdvice, JsonSchemaProp } from "../mcp/protocol.js";
 import { type ToolAnnotations, type ToolCallContext, type ToolDecl, ToolError, type ToolOutcome } from "../mcp/server.js";
+import { EXIT_HUMAN } from "../cli-kit.js";
 import { withRunLock } from "../run-lock.js";
 import type { DialogInfo } from "./actions.js";
 import * as actions from "./actions.js";
@@ -47,6 +48,7 @@ const FOLLOW_UPS: BrowserFollowUps = {
   waitClear: "webindex_browser_wait with condition clear",
   networkList: "webindex_browser_network with action list",
   capture: "webindex_browser_open with capture: true",
+  textMore: "raise maxChars, or read one element (scope element with a ref or a selector)",
 };
 
 /** What may still run while a dialog freezes the page: nothing that asks the page anything. */
@@ -133,6 +135,23 @@ export function browserToolDecls(): ToolDecl[] {
         maxChars: { type: "number", description: "Cut at this many characters (default 20000)." },
       },
       ["mode"],
+    ),
+    tool(
+      "webindex_browser_text",
+      "Read the page's text",
+      READS,
+      "The text of the current tab, loading nothing: scope page reads its main content as webindex_fetch would (navigation and boilerplate left " +
+        "out, cookie walls, consent panels and other overlays stripped, even while one covers the page); scope element reads one element's text, by " +
+        "its ref or a CSS selector. markdown: true keeps headings, links and lists. Cut at maxChars (default 20000). Read an article or a list of " +
+        "results with it; the snapshot is for acting on the page.",
+      {
+        scope: { type: "string", enum: ["page", "element"], description: "page: the tab's main content; element: the element ref or selector names." },
+        ref: ref("the element to read, with scope element"),
+        selector: { type: "string", description: "With scope element and no ref: the first element this CSS selector matches." },
+        markdown: { type: "boolean", description: "Markdown instead of plain text." },
+        maxChars: { type: "number", description: "Cut at this many characters (default 20000)." },
+      },
+      ["scope"],
     ),
     tool(
       "webindex_browser_click",
@@ -331,6 +350,7 @@ const SNAPSHOT_ADVICE = "pass `interactive: true`, or a smaller `maxChars`, for 
 export const BROWSER_CAP_ADVICE: CapAdvice = {
   webindex_browser_open: SNAPSHOT_ADVICE,
   webindex_browser_snapshot: "pass mode `interactive`, a `ref` or a `selector` to scope it, or a smaller `maxChars`",
+  webindex_browser_text: 'pass a smaller `maxChars`, or `scope: "element"` with a `ref` or a `selector`',
   webindex_browser_click: SNAPSHOT_ADVICE,
   webindex_browser_hover: SNAPSHOT_ADVICE,
   webindex_browser_type: SNAPSHOT_ADVICE,
@@ -397,7 +417,7 @@ function refArg(a: Record<string, unknown>): string {
   const v = String(a.ref ?? "");
   if (!/^e\d+$/.test(v)) {
     throw new ToolError(
-      "expected a ref like e12 from the latest snapshot; CSS selectors: pass `selector` to webindex_browser_screenshot or webindex_browser_snapshot, or wait with condition selector",
+      "expected a ref like e12 from the latest snapshot; CSS selectors: pass `selector` to webindex_browser_screenshot, webindex_browser_snapshot or webindex_browser_text, or wait with condition selector",
     );
   }
   return v;
@@ -555,7 +575,8 @@ class Host implements BrowserToolHost {
       followUps: FOLLOW_UPS,
       ...(this.signal ? { signal: this.signal } : {}),
     });
-    if (r.exitCode !== 0) throw new ToolError(r.text);
+    // A blocking challenge (exit 3) is no failure: a `challenge:` line follows the result line.
+    if (r.exitCode !== 0 && r.exitCode !== EXIT_HUMAN) throw new ToolError(r.text);
     return { text: r.text, json: r.json };
   }
 
@@ -604,6 +625,22 @@ class Host implements BrowserToolHost {
       return this.cli("snapshot", r ? [r] : [], {
         interactive: mode === "interactive",
         ...(selector !== undefined ? { selector } : {}),
+        ...(num(a.maxChars) !== undefined ? { maxChars: num(a.maxChars) } : {}),
+      });
+    },
+    text: (a) => {
+      const scope = oneOf(a, "scope", ["page", "element"] as const);
+      const r = a.ref === undefined ? undefined : refArg(a);
+      const selector = str(a.selector);
+      if (scope === "page" && (r !== undefined || selector !== undefined)) throw new ToolError('`ref` and `selector` go with scope "element"');
+      if (scope === "element" && r !== undefined && selector !== undefined) throw new ToolError('scope "element" takes a `ref` or a `selector`, not both');
+      if (scope === "element" && r === undefined && selector === undefined)
+        throw new ToolError('scope "element" needs a `ref` or a `selector`: the element to read, from the latest snapshot');
+      if (a.maxChars !== undefined && !(typeof a.maxChars === "number" && Number.isInteger(a.maxChars) && a.maxChars >= 1))
+        throw new ToolError(`\`maxChars\` must be a whole number of characters, 1 or more, not ${JSON.stringify(a.maxChars)}`);
+      return this.cli("text", r !== undefined ? [r] : [], {
+        ...(selector !== undefined ? { selector } : {}),
+        ...(a.markdown === true ? { markdown: true } : {}),
         ...(num(a.maxChars) !== undefined ? { maxChars: num(a.maxChars) } : {}),
       });
     },

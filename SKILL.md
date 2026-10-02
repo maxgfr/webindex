@@ -86,7 +86,9 @@ webindex mcp [--transport http]       # the webindex_* tools over MCP; --public-
 webindex doctor [--json]
 webindex browser open <url> --snapshot  # a separate browser on a dedicated profile; the page as a tree with refs (e12)
 webindex browser open <url> --snapshot --interactive  # the same, only the controls: much shorter
-webindex browser click|fill|select|type|upload|scroll <ref> …  # act on a ref; --snapshot returns the new tree
+webindex browser snapshot [<ref>|--selector <css>] --max-chars <n>  # one element's subtree; --max-chars cuts snapshot and text (20000 by default)
+webindex browser text [<ref>|--selector <css>] [--markdown]  # the current tab's main content as fetch reads it (overlays stripped), or one element's text
+webindex browser click|fill|select|type|upload|scroll <ref> …  # act on a ref; --snapshot returns the new tree, --selector <css> scopes that tree
 webindex browser press <key>         # Enter, Escape, Control+A… on the focused element
 webindex browser wait --text <s>|--url <p>|--clear  # check the result; --clear waits for the human to solve a challenge
 webindex browser network list|get <n>  # the JSON fetched during each command given --capture; the log grows until network clear
@@ -99,10 +101,14 @@ commands, which print docker's own report, and `mcp`. Human output goes to
 stdout and degradation notes to stderr, so `webindex search q | head` stays a
 clean URL list. `webindex <command> --help` prints that command's usage alone.
 
-Exit codes: 0 when the command did what was asked; 1 when it ran and the answer
-is a failure — nothing found, a page unreadable, robots.txt saying no, a gate
-refusing; 2 when the invocation itself was wrong — an unknown command or flag, a
-missing or out-of-range value, a stray argument.
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | The command did what was asked. |
+| 1 | It ran and the answer is a failure: nothing found, a page unreadable, robots.txt saying no, a gate refusing, a stale ref. |
+| 2 | The invocation itself was wrong: an unknown command or flag, a missing or out-of-range value, a stray argument. |
+| 3 | `browser` only: done, but a human is needed. `open`, `back`, `forward`, `reload`, a `click`, `press`, `type --submit` or `tabs new <url>` landed on a blocking challenge (captcha, bot check). The result is printed as on success, `challenge` in its JSON. |
 
 ## What it will and will not do
 
@@ -156,7 +162,14 @@ are not guarded: ask first. Refs go to the controls and to containers (a
 table, a figure, an article, `main`, a form), so `screenshot e40` can capture an
 infobox; `--interactive` lists only the controls. A ref holds while its element
 lives: a widget the page re-renders gets new refs, so snapshot again after
-acting on one. Read `references/browser.md` before driving it.
+acting on one. A form control with no name, or a name another one shares, shows
+its `type`, `name` and `placeholder` after its ref. To read a page, `browser
+text` gives its main content without the cookie wall over it; `eval` is not
+needed for that. `wait --clear` needs a human and can hold the browser for up to
+5 minutes: when nobody is watching, pass a short `--timeout` and tell the user
+the page needs them. A consent wall needs no one: `browser text` and `fetch
+--browser` read the page behind it. Read `references/browser.md` before driving
+it.
 
 ## Three rules that constrain every change
 

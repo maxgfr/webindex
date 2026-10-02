@@ -6569,7 +6569,7 @@ function isInvokedDirectly(argv1 = process.argv[1], cli = brand().cli) {
   if (!argv1) return false;
   return basename(argv1).replace(/\.(mjs|cjs|js)$/, "") === cli;
 }
-var EXIT_OK, EXIT_FAILURE, EXIT_USAGE, UsageError;
+var EXIT_OK, EXIT_FAILURE, EXIT_USAGE, EXIT_HUMAN, UsageError;
 var init_cli_kit = __esm({
   "src/cli-kit.ts"() {
     "use strict";
@@ -6578,6 +6578,7 @@ var init_cli_kit = __esm({
     EXIT_OK = 0;
     EXIT_FAILURE = 1;
     EXIT_USAGE = 2;
+    EXIT_HUMAN = 3;
     UsageError = class extends Error {
       exitCode = EXIT_USAGE;
     };
@@ -9918,7 +9919,7 @@ var init_risk = __esm({
 // src/browser/snapshot.ts
 function checkRef(ref2) {
   if (!REF_SHAPE.test(ref2))
-    throw new UsageError("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)");
+    throw new UsageError("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, text, wait)");
 }
 async function elementBySelector(page, selector) {
   const { root } = await page.send("DOM.getDocument", { depth: 0 });
@@ -9933,6 +9934,21 @@ async function elementBySelector(page, selector) {
   const { node } = await page.send("DOM.describeNode", { nodeId });
   if (typeof node?.backendNodeId !== "number" || node.backendNodeId <= 0) throw new NoMatchError(selector);
   return node.backendNodeId;
+}
+function fieldHint(nodeName, attributes) {
+  const attr3 = /* @__PURE__ */ new Map();
+  for (let i = 0; i + 1 < attributes.length; i += 2) attr3.set(attributes[i].toLowerCase(), attributes[i + 1]);
+  const quote = (v) => JSON.stringify(v.length > HINT_VALUE_MAX ? `${v.slice(0, HINT_VALUE_MAX)}\u2026` : v);
+  const parts = [];
+  const type = attr3.get("type")?.trim().toLowerCase() || (nodeName.toUpperCase() === "INPUT" ? "text" : "");
+  if (type) parts.push(`type=${type}`);
+  const name2 = attr3.get("name")?.trim();
+  if (name2) parts.push(`name=${quote(name2)}`);
+  const placeholder = attr3.get("placeholder")?.trim();
+  if (placeholder) parts.push(`placeholder=${quote(placeholder)}`);
+  const id = attr3.get("id")?.trim();
+  if (!name2 && id) parts.push(`id=${quote(id)}`);
+  return parts.length ? `(${parts.join(", ")})` : void 0;
 }
 function buildTree(nodes) {
   const byId = /* @__PURE__ */ new Map();
@@ -9995,7 +10011,7 @@ function flat(items, out) {
   }
 }
 function renderSnapshot(nodes, opts) {
-  const r = new Renderer(opts.refs, opts.frames ?? {});
+  const r = new Renderer(opts.refs, opts.frames ?? {}, opts.hints);
   const main2 = buildTree(nodes);
   const all = [];
   let items = [];
@@ -10052,8 +10068,28 @@ function renderSnapshot(nodes, opts) {
       ...r.containers.size ? { containers: [...r.containers].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))) } : {}
     },
     truncated: tail !== "",
-    refCount: kept.filter((l) => l.ref).length
+    refCount: kept.filter((l) => l.ref).length,
+    unclear: unclearControls(r.controls)
   };
+}
+function unclearControls(controls) {
+  const count = /* @__PURE__ */ new Map();
+  for (const c of controls) count.set(c.name, (count.get(c.name) ?? 0) + 1);
+  return controls.filter((c) => c.name === "" || (count.get(c.name) ?? 0) > 1).map((c) => c.id);
+}
+async function lookupHints(page, ids) {
+  const out = {};
+  await Promise.all(
+    ids.slice(0, HINT_MAX).map(async (backendNodeId) => {
+      try {
+        const { node } = await page.send("DOM.describeNode", { backendNodeId });
+        const hint = fieldHint(node?.nodeName ?? "", node?.attributes ?? []);
+        if (hint) out[backendNodeId] = hint;
+      } catch {
+      }
+    })
+  );
+  return out;
 }
 function frameIds(t, into = /* @__PURE__ */ new Set()) {
   into.add(t.frame.id);
@@ -10114,20 +10150,26 @@ async function takeSnapshot(session, opts = {}) {
     if (opts.ref !== void 0) throw new StaleRefError(opts.ref);
     throw new Error(`the element ${opts.selector} matches is not in the accessibility tree: scope to an ancestor, or take the whole snapshot`);
   }
-  const r = renderSnapshot(nodes, {
+  const render2 = (hints) => renderSnapshot(nodes, {
     refs: table,
     frames,
     ...opts.interactive !== void 0 ? { interactive: opts.interactive } : {},
     ...opts.maxChars !== void 0 ? { maxChars: opts.maxChars } : {},
     ...rootBackendId !== void 0 ? { rootBackendId } : {},
-    ...overlays.length ? { overlays } : {}
+    ...overlays.length ? { overlays } : {},
+    ...hints ? { hints } : {}
   });
+  let r = render2();
+  if (r.unclear.length) {
+    const hints = await lookupHints(session.page, r.unclear);
+    if (Object.keys(hints).length) r = render2(hints);
+  }
   writeRefs(session.targetId, r.refs);
   return { text: `url: ${url}
 title: ${title}
 ${r.text}`, url, title, loaderId, refCount: r.refCount, truncated: r.truncated };
 }
-var StaleRefError, REF_SHAPE, NoMatchError, NAME_MAX, OVERLAY_HEADER, OVERLAY_RETRY_MS, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, CONTAINER_ROLES, NAMED_CONTAINER_ROLES, VALUE_ROLES, FIELD_ROLES, str4, squash, truthy, Renderer;
+var StaleRefError, REF_SHAPE, NoMatchError, NAME_MAX, OVERLAY_HEADER, OVERLAY_RETRY_MS, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, CONTAINER_ROLES, NAMED_CONTAINER_ROLES, VALUE_ROLES, FIELD_ROLES, HINT_ROLES, HINT_MAX, HINT_VALUE_MAX, str4, squash, truthy, Renderer;
 var init_snapshot = __esm({
   "src/browser/snapshot.ts"() {
     "use strict";
@@ -10184,21 +10226,28 @@ var init_snapshot = __esm({
     NAMED_CONTAINER_ROLES = /* @__PURE__ */ new Set(["region", "image", "img"]);
     VALUE_ROLES = /* @__PURE__ */ new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider"]);
     FIELD_ROLES = /* @__PURE__ */ new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
+    HINT_ROLES = /* @__PURE__ */ new Set(["textbox", "searchbox", "combobox", "spinbutton", "checkbox", "radio", "button"]);
+    HINT_MAX = 50;
+    HINT_VALUE_MAX = 40;
     str4 = (v) => typeof v?.value === "string" ? v.value : typeof v?.value === "number" ? String(v.value) : "";
     squash = (s) => s.replace(/\s+/g, " ").trim();
     truthy = (v) => v === true || v === "true" || typeof v === "string" && v !== "" && v !== "false";
     Renderer = class {
-      constructor(table, frames) {
+      constructor(table, frames, hints = {}) {
         this.frames = frames;
+        this.hints = hints;
         this.refs = { ...table.refs };
         this.containers = new Set(table.containers ?? []);
         this.next = table.next;
       }
       frames;
+      hints;
       refs;
       /** The refs that name a container only, never a control. */
       containers;
       next;
+      /** The form controls rendered, in document order, with the name each was shown with. */
+      controls = [];
       seen = /* @__PURE__ */ new Set();
       trees = /* @__PURE__ */ new Map();
       refFor(backendId) {
@@ -10260,6 +10309,10 @@ var init_snapshot = __esm({
           if (acts) this.containers.delete(ref2);
           else this.containers.add(ref2);
           head += ` [ref=${ref2}]`;
+          const id = n.backendDOMNodeId;
+          if (acts && HINT_ROLES.has(role)) this.controls.push({ id, name: name2 });
+          const hint = this.hints[id];
+          if (hint) head += ` ${hint}`;
         }
         for (const s of states(n)) head += ` ${s}`;
         let kids;
@@ -11090,6 +11143,77 @@ var init_network = __esm({
   }
 });
 
+// src/browser/text.ts
+async function elementObject(session, opts) {
+  if (opts.ref !== void 0) return (await resolveRef(session, opts.ref)).objectId;
+  const selector = opts.selector;
+  const backendNodeId = await elementBySelector(session.page, selector);
+  try {
+    const { object } = await session.page.send("DOM.resolveNode", { backendNodeId });
+    if (object.objectId) return object.objectId;
+  } catch (e) {
+    if (!(e instanceof CdpError)) throw e;
+  }
+  throw new NoMatchError(selector);
+}
+async function readElement(session, opts, url) {
+  const objectId = await elementObject(session, opts);
+  try {
+    const r = await session.page.send("Runtime.callFunctionOn", { objectId, functionDeclaration: ELEMENT_TEXT, returnByValue: true });
+    if (r.exceptionDetails) throw new Error(`the page threw: ${r.exceptionDetails.text ?? "page error"}`);
+    const got = r.result?.value ?? {};
+    if (opts.markdown && typeof got.html === "string") return extractFromHtml(got.html, url, { format: "markdown", fullPage: true }).text;
+    return typeof got.text === "string" ? got.text : "";
+  } finally {
+    session.page.send("Runtime.releaseObject", { objectId }).catch(() => {
+    });
+  }
+}
+async function readDocument(session, opts) {
+  const got = await session.page.send("Runtime.evaluate", { expression: READ_DOCUMENT, returnByValue: true });
+  const value = got.result?.value ?? {};
+  const url = typeof value.url === "string" ? value.url : await session.currentUrl();
+  const html = typeof value.html === "string" ? value.html : "";
+  const r = extractFromHtml(html, url, { format: opts.markdown ? "markdown" : "text", stripConsent: true });
+  return { text: r.text, url };
+}
+async function readPageText(session, opts = {}) {
+  const element2 = opts.ref !== void 0 || opts.selector !== void 0;
+  let url = await session.currentUrl();
+  let text;
+  if (element2) text = await readElement(session, opts, url);
+  else ({ text, url } = await readDocument(session, opts));
+  text = text.trim();
+  const title = await session.title();
+  const max = opts.maxChars;
+  if (max !== void 0 && !(Number.isInteger(max) && max >= 1)) throw new RangeError(`maxChars must be a whole number, 1 or more, not ${max}`);
+  const truncated = max !== void 0 && text.length > max;
+  return {
+    url,
+    title,
+    ...opts.ref !== void 0 ? { ref: opts.ref } : {},
+    ...opts.selector !== void 0 ? { selector: opts.selector } : {},
+    text: truncated ? text.slice(0, max).trimEnd() : text,
+    chars: text.length,
+    truncated
+  };
+}
+var ELEMENT_TEXT;
+var init_text2 = __esm({
+  "src/browser/text.ts"() {
+    "use strict";
+    init_fetch();
+    init_actions();
+    init_cdp();
+    init_overlay();
+    init_snapshot();
+    ELEMENT_TEXT = `function elementText() {
+  const text = typeof this.innerText === "string" ? this.innerText : this.textContent || "";
+  return { text, html: typeof this.outerHTML === "string" ? this.outerHTML : "" };
+}`;
+  }
+});
+
 // src/browser/cli.ts
 var cli_exports = {};
 __export(cli_exports, {
@@ -11109,8 +11233,9 @@ async function runBrowserCommand(action, args, flags = {}, deps = {}) {
   const ctx = { action, args, flags, deps };
   try {
     if (!Object.hasOwn(HANDLERS, action)) throw new UsageError(`usage: ${cliName()} browser ${BROWSER_ACTIONS.join("|")}`);
-    if (flags.selector !== void 0 && !SELECTOR_ACTIONS.has(action)) throw new UsageError("--selector goes with snapshot, screenshot and wait only");
-    const out = await HANDLERS[action](ctx);
+    if (flags.selector !== void 0 && !SELECTOR_ACTIONS.has(action) && !(flags.snapshot && SNAPSHOT_ACTIONS.has(action)))
+      throw new UsageError("--selector goes with snapshot, screenshot, wait and text, or scopes the --snapshot an action prints");
+    const { challenged, ...out } = await HANDLERS[action](ctx);
     const dialogs = unreported(ctx);
     return {
       ...out,
@@ -11119,7 +11244,8 @@ async function runBrowserCommand(action, args, flags = {}, deps = {}) {
         dialogs.map((d) => dialogLine(d))
       ),
       json: { ok: true, ...out.json, ...dialogsJson(dialogs) },
-      exitCode: 0
+      // Done, and the page needs a human: a script tells it from a plain success without reading the text.
+      exitCode: challenged && (NAVIGATING.has(action) || action === "type" && flags.submit) ? EXIT_HUMAN : 0
     };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
@@ -11203,6 +11329,17 @@ function onPage(ctx, fn, extra = {}) {
     }
   });
 }
+async function afterSnapshot(ctx, s) {
+  if (!ctx.flags.snapshot) return {};
+  const { selector } = ctx.flags;
+  if (selector === void 0) return { snap: await takeSnapshot(s, snapOpts(ctx)) };
+  try {
+    return { snap: await takeSnapshot(s, { ...snapOpts(ctx), selector }) };
+  } catch (e) {
+    if (e instanceof CdpError) throw e;
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
 async function capturing(ctx, s, fn) {
   if (!ctx.flags.capture) return { value: await fn() };
   const rec = new NetworkRecorder(s);
@@ -11222,7 +11359,7 @@ function valueText(v) {
   if (typeof v !== "string") return show(v);
   return JSON.stringify(v.length > VALUE_SHOWN ? `${v.slice(0, VALUE_SHOWN - 1)}\u2026` : v);
 }
-function actionText(ctx, r, capture, snap) {
+function actionText(ctx, r, capture, after2) {
   const lines = [`${r.action}${r.ref !== void 0 ? ` ${r.ref}` : ""}: ${r.navigated ? "navigated to " : ""}${where(r.url, r.title)}`];
   if (r.valueHidden) lines.push("  value: (hidden)");
   else if (r.value !== void 0 && !(typeof r.value === "object" && r.value !== null && Object.keys(r.value).length === 0))
@@ -11231,16 +11368,17 @@ function actionText(ctx, r, capture, snap) {
   if (r.dialog) lines.push(dialogLine(r.dialog, follow(ctx)));
   if (r.challenge) lines.push(challengeLine(ctx, r.challenge));
   if (capture) lines.push(capturedLine(ctx, capture));
-  if (snap) lines.push("", snap.text);
+  lines.push(...afterLines(after2));
   return lines.join("\n");
 }
 function mutate(ctx, run) {
   return onPage(ctx, async (s) => {
     const { value: r, capture } = await capturing(ctx, s, async () => handled(ctx, await run(s, actOpts(ctx))));
-    const snap = ctx.flags.snapshot && !frozen(r.dialog) ? await takeSnapshot(s, snapOpts(ctx)) : void 0;
+    const after2 = frozen(r.dialog) ? {} : await afterSnapshot(ctx, s);
     return {
-      json: { ...r, ...capturedJson(capture), ...snap ? { snapshot: snap } : {} },
-      text: actionText(ctx, r, capture, snap)
+      json: { ...r, ...capturedJson(capture), ...afterJson(after2) },
+      text: actionText(ctx, r, capture, after2),
+      ...r.challenge?.blocking ? { challenged: true } : {}
     };
   });
 }
@@ -11274,7 +11412,7 @@ function currentTarget(ctx) {
   if (!saved) throw new Error(`no browser session: record what a page fetches with ${follow(ctx).capture}`);
   return saved.targetId;
 }
-var cliFollowUps, USAGE, BROWSER_ACTIONS, SNAPSHOT_MAX_CHARS, SELECTOR_ACTIONS, cliName, usageError, dialogsJson, unreported, actOpts, snapOpts, show, pretty, where, follow, dialogLine, frozen, challengeLine, capturedLine, capturedJson, VALUE_SHOWN, confirm, timeoutOpts, HANDLERS;
+var cliFollowUps, USAGE, BROWSER_ACTIONS, SNAPSHOT_MAX_CHARS, TEXT_MAX_CHARS, SELECTOR_ACTIONS, SNAPSHOT_ACTIONS, NAVIGATING, cliName, usageError, dialogsJson, unreported, actOpts, snapOpts, afterJson, afterLines, show, pretty, where, follow, dialogLine, frozen, challengeLine, capturedLine, capturedJson, VALUE_SHOWN, confirm, timeoutOpts, HANDLERS;
 var init_cli = __esm({
   "src/browser/cli.ts"() {
     "use strict";
@@ -11293,12 +11431,14 @@ var init_cli = __esm({
     init_session();
     init_snapshot();
     init_state();
+    init_text2();
     init_wait();
     cliFollowUps = () => ({
       dialog: `\`${cliName()} browser dialog accept|dismiss\``,
       waitClear: `\`${cliName()} browser wait --clear\``,
       networkList: `\`${cliName()} browser network list\``,
-      capture: `\`${cliName()} browser open <url> --capture\`, or --capture on an action`
+      capture: `\`${cliName()} browser open <url> --capture\`, or --capture on an action`,
+      textMore: "raise --max-chars, or read one element (a ref or --selector)"
     });
     USAGE = {
       open: "open <url> [--new-tab] [--headless] [--profile <n>] [--browser-kind chrome|brave|chromium|edge] [--capture] [--snapshot] [--timeout <ms>]",
@@ -11306,6 +11446,7 @@ var init_cli = __esm({
       status: "status",
       close: "close [--all]",
       snapshot: "snapshot [<ref> | --selector <css>] [--interactive] [--max-chars <n>]",
+      text: "text [<ref> | --selector <css>] [--markdown] [--max-chars <n>]",
       click: "click <ref> [--confirm]",
       hover: "hover <ref>",
       type: "type <ref> <text> [--submit] [--confirm]",
@@ -11327,7 +11468,10 @@ var init_cli = __esm({
     };
     BROWSER_ACTIONS = Object.keys(USAGE);
     SNAPSHOT_MAX_CHARS = 2e4;
-    SELECTOR_ACTIONS = /* @__PURE__ */ new Set(["snapshot", "screenshot", "wait"]);
+    TEXT_MAX_CHARS = 2e4;
+    SELECTOR_ACTIONS = /* @__PURE__ */ new Set(["snapshot", "screenshot", "wait", "text"]);
+    SNAPSHOT_ACTIONS = /* @__PURE__ */ new Set(["open", "click", "hover", "type", "fill", "select", "press", "upload", "scroll", "back", "forward", "reload", "dialog"]);
+    NAVIGATING = /* @__PURE__ */ new Set(["open", "click", "press", "back", "forward", "reload", "tabs"]);
     cliName = () => brand().cli;
     usageError = (action) => new UsageError(`usage: ${cliName()} browser ${USAGE[action]}`);
     dialogsJson = (dialogs) => dialogs.length ? { dialogs } : {};
@@ -11338,6 +11482,8 @@ var init_cli = __esm({
       ...ctx.flags.interactive ? { interactive: true } : {},
       ...ref2 !== void 0 ? { ref: ref2 } : {}
     });
+    afterJson = (a) => a.snap ? { snapshot: a.snap } : a.error !== void 0 ? { snapshotError: a.error } : {};
+    afterLines = (a) => a.snap ? ["", a.snap.text] : a.error !== void 0 ? ["", `snapshot: ${a.error}`] : [];
     show = (v) => typeof v === "string" ? v : v === void 0 ? "undefined" : JSON.stringify(v);
     pretty = (v) => typeof v === "string" ? v : v === void 0 ? "undefined" : JSON.stringify(v, null, 2);
     where = (url, title) => `${url}${title ? ` \u2014 ${title}` : ""}`;
@@ -11369,14 +11515,14 @@ var init_cli = __esm({
             });
             const title = await s.title();
             const challenge = await detectChallenge(s);
-            const snap = ctx.flags.snapshot ? await takeSnapshot(s, snapOpts(ctx)) : void 0;
+            const after2 = await afterSnapshot(ctx, s);
             const notes = s.takeNotes();
             const lines = [`${where(nav.url, title)}${nav.status !== void 0 ? ` (HTTP ${nav.status})` : ""}`];
             for (const n of notes) lines.push(`note: ${n}`);
             if (nav.note) lines.push(`note: ${nav.note}`);
             if (challenge) lines.push(challengeLine(ctx, challenge));
             if (capture) lines.push(capturedLine(ctx, capture));
-            if (snap) lines.push("", snap.text);
+            lines.push(...afterLines(after2));
             return {
               json: {
                 ok: true,
@@ -11388,9 +11534,10 @@ var init_cli = __esm({
                 tab: s.targetId,
                 challenge,
                 ...capturedJson(capture),
-                ...snap ? { snapshot: snap } : {}
+                ...afterJson(after2)
               },
-              text: lines.join("\n")
+              text: lines.join("\n"),
+              ...challenge?.blocking ? { challenged: true } : {}
             };
           },
           ctx.flags.newTab ? { newTab: true } : {}
@@ -11424,6 +11571,28 @@ var init_cli = __esm({
         if (ctx.args[0] !== void 0) refArg(ctx);
         const r = await onPage(ctx, (s) => takeSnapshot(s, { ...snapOpts(ctx, ctx.args[0]), ...selector !== void 0 ? { selector } : {} }));
         return { json: r, text: r.text };
+      },
+      async text(ctx) {
+        arity(ctx, 0, 1);
+        const ref2 = ctx.args[0];
+        const { selector } = ctx.flags;
+        if (ref2 !== void 0 && selector !== void 0) throw new UsageError("text reads the element a ref or a selector names, not both");
+        if (ref2 !== void 0) refArg(ctx);
+        const max = ctx.flags.maxChars ?? TEXT_MAX_CHARS;
+        const r = await onPage(
+          ctx,
+          (s) => readPageText(s, {
+            ...ref2 !== void 0 ? { ref: ref2 } : {},
+            ...selector !== void 0 ? { selector } : {},
+            ...ctx.flags.markdown ? { markdown: true } : {},
+            maxChars: max
+          })
+        );
+        const element2 = ref2 !== void 0 || selector !== void 0;
+        const body = r.text ? r.text : element2 ? "(no text in this element)" : "(no readable text on this page: take a snapshot, or read one element with a ref or a selector)";
+        const lines = [`url: ${r.url}`, `title: ${r.title}`, "", body];
+        if (r.truncated) lines.push(`\u2026 [truncated at ${max} of ${r.chars} characters: ${follow(ctx).textMore}]`);
+        return { json: r, text: lines.join("\n") };
       },
       async click(ctx) {
         arity(ctx, 1);
@@ -11591,8 +11760,19 @@ var init_cli = __esm({
         }
         if (sub === "new") {
           arity(ctx, 1, 2);
-          const tab = await onPage(ctx, (s) => s.newTab(ctx.args[1]));
-          return { json: tab, text: tabLines([tab]) };
+          const url = ctx.args[1];
+          const { tab, challenge } = await onPage(ctx, async (s) => {
+            const tab2 = await s.newTab(url);
+            if (url === void 0) return { tab: tab2, challenge: void 0 };
+            await settle(s, actOpts(ctx));
+            return { tab: tab2, challenge: await detectChallenge(s) };
+          });
+          if (challenge === void 0) return { json: tab, text: tabLines([tab]) };
+          return {
+            json: { ...tab, challenge },
+            text: [tabLines([tab]), ...challenge ? [challengeLine(ctx, challenge)] : []].join("\n"),
+            ...challenge?.blocking ? { challenged: true } : {}
+          };
         }
         if (sub === "select") {
           arity(ctx, 2);
@@ -16739,6 +16919,9 @@ function toolTimeoutMs(value) {
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(MAX_TOOL_WAIT_MS, Math.max(1, Math.round(n))) : void 0;
 }
 
+// src/browser/mcp.ts
+init_cli_kit();
+
 // src/run-lock.ts
 var chains = /* @__PURE__ */ new Map();
 function withRunLock(slug, fn) {
@@ -16772,7 +16955,8 @@ var FOLLOW_UPS = {
   dialog: "answer it with webindex_browser_dialog (accept or dismiss)",
   waitClear: "webindex_browser_wait with condition clear",
   networkList: "webindex_browser_network with action list",
-  capture: "webindex_browser_open with capture: true"
+  capture: "webindex_browser_open with capture: true",
+  textMore: "raise maxChars, or read one element (scope element with a ref or a selector)"
 };
 var DIALOG_SAFE = /* @__PURE__ */ new Set(["dialog", "status", "close", "network", "tabs"]);
 var READS = { readOnlyHint: true, destructiveHint: false, idempotentHint: true };
@@ -16836,6 +17020,20 @@ function browserToolDecls() {
         maxChars: { type: "number", description: "Cut at this many characters (default 20000)." }
       },
       ["mode"]
+    ),
+    tool(
+      "webindex_browser_text",
+      "Read the page's text",
+      READS,
+      "The text of the current tab, loading nothing: scope page reads its main content as webindex_fetch would (navigation and boilerplate left out, cookie walls, consent panels and other overlays stripped, even while one covers the page); scope element reads one element's text, by its ref or a CSS selector. markdown: true keeps headings, links and lists. Cut at maxChars (default 20000). Read an article or a list of results with it; the snapshot is for acting on the page.",
+      {
+        scope: { type: "string", enum: ["page", "element"], description: "page: the tab's main content; element: the element ref or selector names." },
+        ref: ref("the element to read, with scope element"),
+        selector: { type: "string", description: "With scope element and no ref: the first element this CSS selector matches." },
+        markdown: { type: "boolean", description: "Markdown instead of plain text." },
+        maxChars: { type: "number", description: "Cut at this many characters (default 20000)." }
+      },
+      ["scope"]
     ),
     tool(
       "webindex_browser_click",
@@ -17015,6 +17213,7 @@ var SNAPSHOT_ADVICE = "pass `interactive: true`, or a smaller `maxChars`, for th
 var BROWSER_CAP_ADVICE = {
   webindex_browser_open: SNAPSHOT_ADVICE,
   webindex_browser_snapshot: "pass mode `interactive`, a `ref` or a `selector` to scope it, or a smaller `maxChars`",
+  webindex_browser_text: 'pass a smaller `maxChars`, or `scope: "element"` with a `ref` or a `selector`',
   webindex_browser_click: SNAPSHOT_ADVICE,
   webindex_browser_hover: SNAPSHOT_ADVICE,
   webindex_browser_type: SNAPSHOT_ADVICE,
@@ -17045,7 +17244,7 @@ function refArg2(a) {
   const v = String(a.ref ?? "");
   if (!/^e\d+$/.test(v)) {
     throw new ToolError(
-      "expected a ref like e12 from the latest snapshot; CSS selectors: pass `selector` to webindex_browser_screenshot or webindex_browser_snapshot, or wait with condition selector"
+      "expected a ref like e12 from the latest snapshot; CSS selectors: pass `selector` to webindex_browser_screenshot, webindex_browser_snapshot or webindex_browser_text, or wait with condition selector"
     );
   }
   return v;
@@ -17186,7 +17385,7 @@ var Host = class {
       followUps: FOLLOW_UPS,
       ...this.signal ? { signal: this.signal } : {}
     });
-    if (r.exitCode !== 0) throw new ToolError(r.text);
+    if (r.exitCode !== 0 && r.exitCode !== EXIT_HUMAN) throw new ToolError(r.text);
     return { text: r.text, json: r.json };
   }
   /** An upload path as the policy allows it: under the root, or not at all. */
@@ -17228,6 +17427,22 @@ var Host = class {
       return this.cli("snapshot", r ? [r] : [], {
         interactive: mode2 === "interactive",
         ...selector !== void 0 ? { selector } : {},
+        ...num3(a.maxChars) !== void 0 ? { maxChars: num3(a.maxChars) } : {}
+      });
+    },
+    text: (a) => {
+      const scope = oneOf(a, "scope", ["page", "element"]);
+      const r = a.ref === void 0 ? void 0 : refArg2(a);
+      const selector = str5(a.selector);
+      if (scope === "page" && (r !== void 0 || selector !== void 0)) throw new ToolError('`ref` and `selector` go with scope "element"');
+      if (scope === "element" && r !== void 0 && selector !== void 0) throw new ToolError('scope "element" takes a `ref` or a `selector`, not both');
+      if (scope === "element" && r === void 0 && selector === void 0)
+        throw new ToolError('scope "element" needs a `ref` or a `selector`: the element to read, from the latest snapshot');
+      if (a.maxChars !== void 0 && !(typeof a.maxChars === "number" && Number.isInteger(a.maxChars) && a.maxChars >= 1))
+        throw new ToolError(`\`maxChars\` must be a whole number of characters, 1 or more, not ${JSON.stringify(a.maxChars)}`);
+      return this.cli("text", r !== void 0 ? [r] : [], {
+        ...selector !== void 0 ? { selector } : {},
+        ...a.markdown === true ? { markdown: true } : {},
         ...num3(a.maxChars) !== void 0 ? { maxChars: num3(a.maxChars) } : {}
       });
     },
@@ -17401,6 +17616,7 @@ USAGE
                      [--capture] [--snapshot] [--timeout <ms>]
   webindex browser   attach <port|url> | status | close [--all] | eval <expr|->
   webindex browser   snapshot [<ref> | --selector <css>] [--interactive] [--max-chars <n>]
+  webindex browser   text [<ref> | --selector <css>] [--markdown] [--max-chars <n>]
   webindex browser   click|hover <ref> [--confirm] | type <ref> <text> [--submit]
   webindex browser   fill <ref> <text> | select <ref> <val\u2026> | press <key> [--confirm]
   webindex browser   upload <ref> <file\u2026> | scroll <ref|up|down|top|bottom>
@@ -17409,8 +17625,7 @@ USAGE
   webindex browser   screenshot [<ref> | --selector <css>] [--full] [--out <file>]
   webindex browser   network [list|get <n>|clear] | tabs [list|new|select <tN>|close <tN>]
   webindex browser   back|forward|reload | dialog accept|dismiss (MCP only)
-  webindex browser   profile import <chrome|brave|chromium|edge|path> [--force]
-                     | reset | path
+  webindex browser   profile import <kind|path> [--force] | reset | path
   webindex doctor [--json]
   webindex version
 
@@ -17591,18 +17806,18 @@ COMMANDS
              on first use (headed unless --headless) and reused by every later
              call, its tab and refs included. attach <port|url> (or --cdp)
              drives one on a loopback port; close shuts down only a browser it
-             launched. snapshot prints the accessibility tree with refs (e12):
-             controls, for the actions; containers (table, figure\u2026), to scope
-             snapshot and screenshot, as --selector <css> does. A ref from
-             before a navigation is stale. fill and type echo the value (never
-             a password's). A click or an Enter that looks irreversible (pay,
-             delete, send\u2026) or submits a password is refused unless --confirm:
+             launched. snapshot prints the accessibility tree with refs (e12)
+             on controls and containers (table, figure\u2026); a ref or --selector
+             scopes snapshot, screenshot and text, and --selector an action's
+             --snapshot. text reads the tab's main content, overlays gone. A
+             ref from before a navigation is stale. An irreversible-looking
+             click or Enter (pay, delete, send, a password) needs --confirm:
              ask the user first. A challenge is never bypassed: the human
              solves it, then wait --clear. --capture records the JSON fetched
-             while its command runs (network list|get; the log grows until
-             network clear). A dialog is dismissed before the command ends; mcp
-             --browser answers them. Exit 1: a stale ref, a timeout, a refusal;
-             --json on every action.
+             (network list|get|clear). A dialog is dismissed before the command
+             ends; mcp --browser answers them. --json on every action. Exit 1:
+             a stale ref, a timeout, a refusal; Exit 3: the page needs a human
+             (a blocking challenge), the result printed as on success.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which
@@ -17788,6 +18003,9 @@ var SPEC = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS 
 var SKILL_ACTIONS = ["check", "bundle", "vendor", "copy", "doctor", "init", "repin", "finish", "recall"];
 var VIDEO_ACTIONS = ["fetch", "search", "frames", "list"];
 var YTDLP_STALE_DAYS = 60;
+function exitAfterOutput(code) {
+  process.exitCode = code;
+}
 function fail(msg) {
   process.stderr.write(`webindex: ${msg}
 `);
@@ -18809,9 +19027,22 @@ function commandHelp(cmd) {
     ...usageLines,
     "",
     ...described,
+    ...cmd === "mcp" ? ["", ...browserToolsHelp()] : [],
     "",
     "Run `webindex --help` for every command and the environment variables."
   ].join("\n");
+}
+function browserToolsHelp() {
+  const lines = ["BROWSER TOOLS (--browser): each one's arguments are in references/browser.md", "  (skill://references/browser.md over MCP)"];
+  let line = " ";
+  for (const t of browserToolDecls()) {
+    if (line.length + t.name.length + 1 > 78) {
+      lines.push(line);
+      line = " ";
+    }
+    line += ` ${t.name}`;
+  }
+  return [...lines, line];
 }
 async function fetchSeveral(urls, fetchOne, json2, record2) {
   const results = [];
@@ -18901,7 +19132,7 @@ async function dispatch(argv) {
       for (const n of r.notes) process.stderr.write(`  ${n}
 `);
     }
-    if (!r.hits.length) process.exit(EXIT_FAILURE);
+    if (!r.hits.length) exitAfterOutput(EXIT_FAILURE);
     return;
   }
   if (cmd === "fetch") {
@@ -19037,7 +19268,7 @@ async function dispatch(argv) {
     if (!valid.includes(action)) usage(`usage: webindex ${cmd} ${valid.join("|")}`);
     const r = stackControl(cmd === "stack" ? "all" : cmd, action);
     (r.code === 0 ? process.stdout : process.stderr).write(r.message + "\n");
-    if (r.code !== 0) process.exit(r.code);
+    if (r.code !== 0) exitAfterOutput(r.code);
     return;
   }
   if (cmd === "rank") {
@@ -19072,7 +19303,7 @@ async function dispatch(argv) {
 `);
     if (!r.queryTerms.length) {
       process.stderr.write("The question has no rankable terms once stopwords are removed \u2014 the order is arbitrary.\n");
-      process.exit(1);
+      exitAfterOutput(EXIT_FAILURE);
     }
     return;
   }
@@ -19154,7 +19385,7 @@ async function dispatch(argv) {
         ...r.crawlDelayMs ? [`  delay     ${r.crawlDelayMs}ms`] : [],
         ...r.sitemaps.length ? [`  sitemaps  ${r.sitemaps.join("\n            ")}`] : []
       ]);
-      if (!allowed) process.exit(1);
+      if (!allowed) exitAfterOutput(EXIT_FAILURE);
       return;
     }
     if (cmd === "sitemap") {
@@ -19275,7 +19506,7 @@ async function dispatch(argv) {
       for (const n of r.notes) process.stderr.write(`  ${n}
 `);
     }
-    if (!r.pages.length) process.exit(EXIT_FAILURE);
+    if (!r.pages.length) exitAfterOutput(EXIT_FAILURE);
     return;
   }
   if (cmd === "tables") {
@@ -19386,7 +19617,7 @@ async function dispatch(argv) {
       if (v.note) process.stderr.write(`  ${v.note}
 `);
     }
-    if (v.changed === void 0) process.exit(EXIT_FAILURE);
+    if (v.changed === void 0) exitAfterOutput(EXIT_FAILURE);
     return;
   }
   if (cmd === "video") {
@@ -19492,6 +19723,7 @@ ${rows.join("\n")}
         browserKind: argValue(args, "browser-kind"),
         capture: argBool(args, "capture"),
         snapshot: argBool(args, "snapshot"),
+        markdown: argBool(args, "markdown"),
         interactive: argBool(args, "interactive"),
         maxChars: argInt(args, "max-chars", { min: 1 }),
         confirm: argBool(args, "confirm"),
@@ -19518,14 +19750,17 @@ ${rows.join("\n")}
         }
       }
     );
-    if (r.exitCode === 0) {
+    if (r.exitCode === 0 || r.exitCode === EXIT_HUMAN) {
       process.stdout.write(asJson ? jsonLine(r.json) : `${r.text}
 `);
+      if (r.exitCode === EXIT_HUMAN) exitAfterOutput(EXIT_HUMAN);
       return;
     }
     if (asJson) process.stdout.write(jsonLine(r.json));
-    if (r.exitCode === EXIT_USAGE) usage(r.text);
-    fail(r.text);
+    process.stderr.write(`webindex: ${r.text}
+`);
+    exitAfterOutput(r.exitCode === EXIT_USAGE ? EXIT_USAGE : EXIT_FAILURE);
+    return;
   }
   if (cmd === "skill") {
     const action = args.positional[0] ?? "";
@@ -19543,7 +19778,7 @@ ${rows.join("\n")}
       if (asJson) process.stdout.write(jsonLine(r));
       else if (r.written.length) process.stdout.write(`${r.written.map((p) => `  wrote ${relative4(root, p)}`).join("\n")}
 `);
-      if (!r.written.length) process.exit(EXIT_FAILURE);
+      if (!r.written.length) exitAfterOutput(EXIT_FAILURE);
       return;
     }
     const { config, errors: configErrors } = readSkillConfig(root);
@@ -19586,7 +19821,7 @@ ${rows.join("\n")}
             else for (const p of s.problems) process.stderr.write(`  FAIL ${p}
 `);
           }
-        if (statuses.some((s) => !s.ok)) process.exit(EXIT_FAILURE);
+        if (statuses.some((s) => !s.ok)) exitAfterOutput(EXIT_FAILURE);
         return;
       }
       const ref2 = argValue(args, "ref");
@@ -19606,7 +19841,8 @@ ${rows.join("\n")}
         if (r.errors.length) {
           for (const e of r.errors) process.stderr.write(`webindex: ${e}
 `);
-          process.exit(EXIT_FAILURE);
+          exitAfterOutput(EXIT_FAILURE);
+          return;
         }
         process.stdout.write(`  pinned ${n} ${r.tag} (${r.engineVersion})
 `);
@@ -19654,7 +19890,7 @@ ${rows.join("\n")}
           );
         }
       }
-      if (failedAny) process.exit(EXIT_FAILURE);
+      if (failedAny) exitAfterOutput(EXIT_FAILURE);
       return;
     }
     if (action === "bundle") {
@@ -19687,7 +19923,8 @@ ${rows.join("\n")}
         process.stderr.write(`
 webindex: ${bad} problem(s) \u2014 the published skill would not install correctly.
 `);
-        process.exit(EXIT_FAILURE);
+        exitAfterOutput(EXIT_FAILURE);
+        return;
       }
       if (!asJson) process.stdout.write(`
   skills/${config.name}/ installs as a complete skill.
@@ -19840,7 +20077,7 @@ function isStartedFile() {
 if (isInvokedDirectly() || isStartedFile()) {
   for (const stream of [process.stdout, process.stderr]) {
     stream.on("error", (e) => {
-      if (e.code === "EPIPE") process.exit(EXIT_OK);
+      if (e.code === "EPIPE") process.exit(Number(process.exitCode ?? EXIT_OK));
       throw e;
     });
   }

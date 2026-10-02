@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BOOL_FLAGS, COMMANDS, HELP, main, VALUE_FLAGS, webindexAdapter } from "../src/cli.js";
-import { documentedFlags, missingFromHelp } from "../src/cli-kit.js";
+import { documentedFlags, EXIT_HUMAN, missingFromHelp } from "../src/cli-kit.js";
+import { browserToolDecls } from "../src/browser/mcp.js";
 import { createServer, ToolError } from "../src/mcp/server.js";
 import { LATEST_PROTOCOL } from "../src/mcp/protocol.js";
 import { STACK_SERVICES } from "../src/stack.js";
@@ -62,20 +63,26 @@ afterAll(() => vi.restoreAllMocks());
 const stdout = () => out.join("");
 const stderr = () => err.join("");
 
-/** main() calls process.exit on failure; catch it so the case can assert. */
+/**
+ * main() calls process.exit on a failure it prints itself, and sets
+ * process.exitCode after printing a result (so a pipe gets all of it): catch
+ * the one, read the other, and leave neither behind.
+ */
 async function run(argv: string[]): Promise<number> {
   const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
     throw new Error(`__exit__${code ?? 0}`);
   }) as never);
+  process.exitCode = undefined;
   try {
     await main(argv);
-    return 0;
+    return Number(process.exitCode ?? 0);
   } catch (e) {
     const m = /^__exit__(\d+)$/.exec((e as Error).message);
     if (m) return Number(m[1]);
     throw e;
   } finally {
     exit.mockRestore();
+    process.exitCode = undefined;
   }
 }
 
@@ -139,6 +146,22 @@ describe("help and version", () => {
       expect(stdout(), cmd).toMatch(new RegExp(`^\\s+webindex ${cmd}\\b`, "m"));
       expect(stdout().split("\n").length, cmd).toBeLessThan(40);
     }
+  });
+
+  it("names every browser tool in `mcp --help`, and where their arguments are", async () => {
+    expect(await run(["mcp", "--help"])).toBe(0);
+    const help = stdout();
+    for (const t of browserToolDecls()) expect(help, t.name).toMatch(new RegExp(`\\b${t.name}\\b`));
+    expect(help).toContain("references/browser.md");
+    expect(help.split("\n").length).toBeLessThan(40);
+  });
+
+  it("documents exit 3 (a human is needed) and browser text in `browser --help`", async () => {
+    expect(EXIT_HUMAN).toBe(3);
+    expect(await run(["browser", "--help"])).toBe(0);
+    const help = stdout();
+    expect(help).toMatch(/^\s+webindex browser\s+text \[<ref> \| --selector <css>\] \[--markdown\] \[--max-chars <n>\]/m);
+    expect(help).toMatch(/Exit 3/);
   });
 
   it("prints a bare semver for version", async () => {

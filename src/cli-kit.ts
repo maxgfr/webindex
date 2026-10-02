@@ -25,10 +25,11 @@ import { brand } from "./brand.js";
 import { escapeRegExp } from "./text.js";
 
 // ── Exit codes ──────────────────────────────────────────────────────────────
-// Three, and the distinction between the last two is the one that matters: a
-// caller scripting this engine needs to tell "your question had no answer" from
-// "you asked wrongly". Collapsing them onto 1 — which is what an unguarded
-// `process.exit(1)` does — makes a typo indistinguishable from an empty result.
+// Three everywhere (`browser` adds a fourth, EXIT_HUMAN), and the distinction
+// between 1 and 2 is the one that matters: a caller scripting this engine needs
+// to tell "your question had no answer" from "you asked wrongly". Collapsing
+// them onto 1 — which is what an unguarded `process.exit(1)` does — makes a
+// typo indistinguishable from an empty result.
 
 /** The command did what it was asked. */
 export const EXIT_OK = 0;
@@ -36,6 +37,12 @@ export const EXIT_OK = 0;
 export const EXIT_FAILURE = 1;
 /** The invocation itself was wrong: unknown command, unknown flag, missing value. */
 export const EXIT_USAGE = 2;
+/**
+ * `browser` only: the command did what it was asked, and the page it ended on
+ * is a blocking challenge that a human has to solve. Its result is printed as
+ * on success; a script that sees 3 hands the window to a person.
+ */
+export const EXIT_HUMAN = 3;
 
 /**
  * The invocation was malformed. Carries EXIT_USAGE so a caller can map every

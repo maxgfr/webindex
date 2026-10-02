@@ -7,6 +7,7 @@ import { readRenderedPage } from "../src/browser/read.js";
 import { type BrowserCliFlags, runBrowserCommand } from "../src/browser/cli.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
 import * as discovery from "../src/browser/discovery.js";
+import { READ_DOCUMENT } from "../src/browser/overlay.js";
 import { profileDir } from "../src/browser/profile.js";
 import { appendNetwork, readNetwork, readSession, writeSession } from "../src/browser/state.js";
 import { main } from "../src/cli.js";
@@ -118,10 +119,16 @@ describe("usage errors exit 2", () => {
     ["fill", ["e3", "x"]],
     ["open", ["https://b.test/"]],
     ["eval", ["1"]],
-  ])("refuses --selector on %s, which ignores it, before reaching for the browser", async (action, args) => {
+  ])("refuses --selector on %s without --snapshot, which would ignore it, before reaching for the browser", async (action, args) => {
     const r = await cli(action, args, { selector: "table" });
     expect(r.exitCode).toBe(2);
-    expect(r.text).toBe("--selector goes with snapshot, screenshot and wait only");
+    expect(r.text).toBe("--selector goes with snapshot, screenshot, wait and text, or scopes the --snapshot an action prints");
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("refuses --selector with --snapshot on eval, which takes no snapshot", async () => {
+    const r = await cli("eval", ["1"], { selector: "table", snapshot: true });
+    expect(r.exitCode).toBe(2);
     expect(fake.calls).toEqual([]);
   });
 
@@ -246,13 +253,18 @@ describe("open", () => {
     expect(again.json).not.toHaveProperty("notes");
   });
 
-  it("names a challenge and tells the agent to let the human solve it", async () => {
+  it("names a blocking challenge, tells the agent to let the human solve it, and exits 3", async () => {
     await cli("attach", [String(fake.port)]);
     world.blocking = true;
     const r = await cli("open", ["https://b.test/"]);
-    expect(r.exitCode).toBe(0);
+    expect(r.exitCode).toBe(3);
     expect(r.text).toMatch(/challenge: cloudflare \(blocking\)/);
     expect(r.text).toContain("let the human solve it, then `webindex-tests browser wait --clear`");
+    const j = await cli("open", ["https://b.test/"], { json: true });
+    expect(j.exitCode).toBe(3);
+    expect(j.json).toMatchObject({ ok: true, url: "https://b.test/", challenge: { kind: "cloudflare", blocking: true } });
+    world.blocking = false;
+    expect((await cli("open", ["https://c.test/"])).exitCode).toBe(0);
   });
 
   it("captures the JSON the page fetched with --capture", async () => {
@@ -349,7 +361,91 @@ describe("snapshot", () => {
     expect(both.exitCode).toBe(2);
     const css = await cli("snapshot", ["table.infobox"]);
     expect(css.exitCode).toBe(2);
-    expect(css.text).toBe("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)");
+    expect(css.text).toBe("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, text, wait)");
+  });
+});
+
+describe("text", () => {
+  const PROSE = "A long paragraph that tells the story of the match, as the reader came for it. ".repeat(10);
+  const ARTICLE = `<html><head><title>Story</title></head><body><nav><a href="/">Home</a> <a href="/news">News</a></nav><main><article><h1>The match</h1><p>${PROSE}</p></article></main></body></html>`;
+  /** The page's answers to text: the document READ_DOCUMENT serialises, and an element's text and markup. */
+  const scriptText = (html = ARTICLE) => {
+    const evaluate = fake.handlerOf("Runtime.evaluate");
+    fake.handle("Runtime.evaluate", (p, sid) =>
+      p.expression === READ_DOCUMENT ? { result: { type: "object", value: { html, url: "https://a.test/story" } } } : evaluate?.(p, sid),
+    );
+    const call = fake.handlerOf("Runtime.callFunctionOn");
+    fake.handle("Runtime.callFunctionOn", (p, sid) =>
+      /^function elementText/.test(p.functionDeclaration)
+        ? { result: { value: { text: `Text of ${p.objectId}`, html: `<div><p>Text of <b>${p.objectId}</b></p></div>` } } }
+        : call?.(p, sid),
+    );
+  };
+
+  it("reads the current tab's main content as fetch would, consent and overlays stripped, without navigating", async () => {
+    await ready();
+    scriptText();
+    const r = await cli("text", [], { json: true });
+    expect(r.exitCode, r.text).toBe(0);
+    expect(r.json).toMatchObject({ ok: true, url: "https://a.test/story", title: "A page", truncated: false });
+    expect((r.json as { text: string }).text).toContain("tells the story of the match");
+    const plain = await cli("text");
+    expect(plain.text.split("\n").slice(0, 2)).toEqual(["url: https://a.test/story", "title: A page"]);
+    expect(plain.text).toContain("tells the story of the match");
+    // The strip runs in the page, on a copy: READ_DOCUMENT is what fetch --browser evaluates.
+    expect(sent("Runtime.evaluate").some((c) => c.params.expression === READ_DOCUMENT)).toBe(true);
+    expect(sent("Page.navigate")).toEqual([]);
+    const md = await cli("text", [], { markdown: true });
+    expect(md.text).toMatch(/^# The match$/m);
+  });
+
+  it("cuts at --max-chars (20000 by default) and says so", async () => {
+    await ready();
+    scriptText();
+    const r = await cli("text", [], { maxChars: 40, json: true });
+    expect(r.json).toMatchObject({ truncated: true });
+    expect((r.json as { text: string }).text.length).toBeLessThanOrEqual(40);
+    const t = await cli("text", [], { maxChars: 40 });
+    expect(t.text).toMatch(/\n… \[truncated at 40 of \d+ characters: raise --max-chars, or read one element \(a ref or --selector\)\]$/);
+    scriptText(`<html><body><main><p>${"word ".repeat(6000)}</p></main></body></html>`);
+    expect((await cli("text", [], { json: true })).json).toMatchObject({ truncated: true });
+  });
+
+  it("says when the page has no text to read", async () => {
+    await ready();
+    scriptText("<html><body></body></html>");
+    const r = await cli("text");
+    expect(r.exitCode).toBe(0);
+    expect(r.text).toMatch(/no readable text/);
+  });
+
+  it("reads one element by ref or by --selector; --markdown keeps its markup", async () => {
+    await ready();
+    scriptText();
+    const byRef = await cli("text", ["e3"], { json: true });
+    expect(byRef.exitCode, byRef.text).toBe(0);
+    expect(byRef.json).toMatchObject({ ok: true, ref: "e3", text: "Text of o12" });
+    world.selectors = { "article.story": 12 };
+    const bySel = await cli("text", [], { selector: "article.story" });
+    expect(bySel.text).toContain("Text of o12");
+    const md = await cli("text", ["e3"], { markdown: true });
+    expect(md.text).toContain("Text of **o12**");
+    const none = await cli("text", [], { selector: "p.nope" });
+    expect(none.exitCode).toBe(1);
+    expect(none.text).toBe("no element matches p.nope");
+    const stale = await cli("text", ["e99"]);
+    expect(stale.exitCode).toBe(1);
+    expect(stale.text).toMatch(/stale/);
+  });
+
+  it.each([
+    ["a ref and a selector", ["e3"], { selector: "p" }],
+    ["a selector as a ref", ["div.story"], {}],
+    ["two refs", ["e1", "e2"], {}],
+  ] as [string, string[], BrowserCliFlags][])("refuses %s as a usage error", async (_what, args, flags) => {
+    const r = await cli("text", args, flags);
+    expect(r.exitCode).toBe(2);
+    expect(fake.calls).toEqual([]);
   });
 });
 
@@ -437,6 +533,91 @@ describe("page actions", () => {
     expect(r.exitCode).toBe(0);
     expect(r.json).toMatchObject({ action: "upload", value: { files: 1 } });
     expect(sent("DOM.setFileInputFiles")[0]?.params).toEqual({ files: [join(scratch, "a.pdf")], backendNodeId: 14 });
+  });
+
+  it("exits 3 when a click, a history move, an Enter or a submitted type lands on a blocking challenge; hover and fill do not", async () => {
+    await ready();
+    world.blocking = true;
+    for (const [action, args, flags] of [
+      ["click", ["e1"], {}],
+      ["reload", [], {}],
+      ["press", ["Enter"], {}],
+      ["type", ["e3", "x"], { submit: true }],
+      ["open", ["https://b.test/"], {}],
+      ["back", [], {}],
+      ["forward", [], {}],
+    ] as [string, string[], BrowserCliFlags][]) {
+      const r = await cli(action, args, { ...flags, json: true });
+      expect(r.exitCode, `${action}: ${r.text}`).toBe(3);
+      expect(r.json).toMatchObject({ ok: true, challenge: { blocking: true } });
+      expect(r.text).toMatch(/challenge: cloudflare \(blocking\)/);
+      await cli("snapshot");
+    }
+    for (const [action, args] of [
+      ["hover", ["e1"]],
+      ["fill", ["e3", "x"]],
+      ["type", ["e3", "x"]],
+    ] as [string, string[]][]) {
+      const r = await cli(action, args);
+      expect(r.exitCode, `${action}: ${r.text}`).toBe(0);
+      expect(r.text).toMatch(/challenge: cloudflare \(blocking\)/);
+    }
+  });
+
+  it("exits 0 when the page only carries a challenge widget (a captcha on a form), not a wall", async () => {
+    await ready();
+    world.widget = true;
+    for (const [action, args] of [
+      ["click", ["e1"]],
+      ["reload", []],
+      ["open", ["https://b.test/"]],
+    ] as [string, string[]][]) {
+      const r = await cli(action, args, { json: true });
+      expect(r.exitCode, `${action}: ${r.text}`).toBe(0);
+      expect(r.json).toMatchObject({ challenge: { kind: "recaptcha", blocking: false } });
+      expect(r.text).toMatch(/challenge: recaptcha — let the human/);
+      await cli("snapshot");
+    }
+  });
+
+  it("exits 3 when tabs new <url> lands on a blocking challenge, and says so", async () => {
+    await ready();
+    world.blocking = true;
+    const r = await cli("tabs", ["new", "https://b.test/"], { json: true });
+    expect(r.exitCode, r.text).toBe(3);
+    expect(r.json).toMatchObject({ ok: true, id: "t2", challenge: { blocking: true } });
+    const t = await cli("tabs", ["new", "https://c.test/"]);
+    expect(t.exitCode).toBe(3);
+    expect(t.text.split("\n")[1]).toMatch(/^challenge: cloudflare \(blocking\)/);
+    world.blocking = false;
+    const clear = await cli("tabs", ["new", "https://d.test/"], { json: true });
+    expect(clear.exitCode).toBe(0);
+    expect(clear.json).toMatchObject({ challenge: null });
+    // A blank tab loads nothing: nothing to look at.
+    expect((await cli("tabs", ["new"], { json: true })).json).not.toHaveProperty("challenge");
+  });
+
+  it("scopes the post-action snapshot to --selector, never the action's target", async () => {
+    await ready();
+    world.selectors = { "input.q": 12 };
+    const r = await cli("click", ["e1"], { snapshot: true, selector: "input.q" });
+    expect(r.exitCode, r.text).toBe(0);
+    expect(r.text.split("\n")[0]).toBe("click e1: https://a.test/ — A page");
+    expect(r.text).toContain('textbox "Query" [ref=e3]');
+    expect(r.text).not.toContain('button "Search"');
+    // The click went to e1 (backend node 10), whatever the selector names.
+    expect(sent("DOM.getContentQuads").map((c) => c.params.backendNodeId)).toEqual([10]);
+    const opened = await cli("open", ["https://a.test/"], { snapshot: true, selector: "input.q" });
+    expect(opened.exitCode, opened.text).toBe(0);
+    expect(opened.text).toContain('textbox "Query"');
+    expect(opened.text).not.toContain('button "Search"');
+    // The action is done whatever the snapshot meets: said, not failed.
+    const none = await cli("press", ["Escape"], { snapshot: true, selector: "table.nope", json: true });
+    expect(none.exitCode).toBe(0);
+    expect(none.json).toMatchObject({ action: "press", snapshotError: "no element matches table.nope" });
+    expect((await cli("press", ["Escape"], { snapshot: true, selector: "table.nope" })).text).toMatch(
+      /^press: https:\/\/a\.test\/ — .*\n\nsnapshot: no element matches table\.nope$/,
+    );
   });
 
   it("appends the post-action snapshot with --snapshot", async () => {
@@ -668,7 +849,7 @@ describe("screenshot", () => {
     const calls = fake.calls.length;
     const css = await cli("screenshot", ["table.infobox"], { out: "css.png" });
     expect(css.exitCode).toBe(2);
-    expect(css.text).toBe("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)");
+    expect(css.text).toBe("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, text, wait)");
     expect((await cli("screenshot", ["e1"], { selector: "table.infobox" })).exitCode).toBe(2);
     expect((await cli("screenshot", [], { selector: "table.infobox", full: true })).exitCode).toBe(2);
     expect(fake.calls.length).toBe(calls);
@@ -826,14 +1007,18 @@ async function run(argv: string[]): Promise<{ code: number; out: string; err: st
     throw new Error(`__exit__${code ?? 0}`);
   }) as never);
   let code = 0;
+  process.exitCode = undefined;
   try {
     await main(argv);
+    // A printed result sets the code instead of exiting, so a pipe gets all of it.
+    code = Number(process.exitCode ?? 0);
   } catch (e) {
     const m = /^__exit__(\d+)$/.exec((e as Error).message);
     if (!m) throw e;
     code = Number(m[1]);
   } finally {
     vi.restoreAllMocks();
+    process.exitCode = undefined;
   }
   return { code, out: out.join(""), err: err.join("") };
 }
@@ -872,6 +1057,18 @@ describe("through main", () => {
       if (tty) Object.defineProperty(process.stdin, "isTTY", tty);
       else delete (process.stdin as { isTTY?: boolean }).isTTY;
     }
+  });
+
+  it("exits 3 when the page needs a human (a blocking challenge), the result on stdout", async () => {
+    expect((await run(["browser", "attach", String(fake.port)])).code).toBe(0);
+    world.blocking = true;
+    const r = await run(["browser", "open", "https://b.test/"]);
+    expect(r.code).toBe(3);
+    expect(r.out).toMatch(/challenge: cloudflare \(blocking\)/);
+    expect(r.err).toBe("");
+    const j = await run(["browser", "open", "https://b.test/", "--json"]);
+    expect(j.code).toBe(3);
+    expect(JSON.parse(j.out)).toMatchObject({ ok: true, challenge: { blocking: true } });
   });
 
   it("takes any number of words after the action", async () => {
