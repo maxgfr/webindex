@@ -492,13 +492,6 @@ async function centreOf(page: CdpSession, node: ResolvedRef): Promise<{ x: numbe
 /** How many of an overlay's controls a refused click lists. */
 const OVERLAY_CONTROLS_MAX = 12;
 
-/**
- * Why a click was refused when `hitObjectId` (what it would land on) is not the
- * target. What covers it is named, and its controls are listed with refs from
- * the tab's own table, saved, so the next command can use them. When it is an
- * overlay (a cookie wall, a dialog), which one to press — accepting tracking,
- * refusing it, closing — is the user's; a sticky header is only in the way.
- */
 /** The url as the page gave it, when it is an http(s) one; undefined for anything else (javascript:, data:…). */
 function httpUrl(href: string): string | undefined {
   try {
@@ -514,6 +507,13 @@ export function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * Why a click was refused when `hitObjectId` (what it would land on) is not the
+ * target. What covers it is named, and its controls are listed with refs from
+ * the tab's own table, saved, so the next command can use them. When it is an
+ * overlay (a cookie wall, a dialog), which one to press — accepting tracking,
+ * refusing it, closing — is the user's; a sticky header is only in the way.
+ */
 async function coveredError(
   page: CdpSession,
   targetId: string,
