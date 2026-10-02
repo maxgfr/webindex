@@ -84,7 +84,11 @@ const REF_ROLES = new Set([
   "heading",
 ]);
 const VALUE_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider"]);
+/** Fields whose editor (a node in the input's user-agent shadow tree) is the field itself, not a control of its own. */
+const FIELD_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
 
+/** The nearest ancestor printed as a line: its role, and whether it has a ref. */
+type Parent = { role: string; ref: boolean } | undefined;
 type Item = { t: "text"; text: string } | { t: "break" } | { t: "node"; head: string; ref: boolean; url?: string; note: string; children: Item[] };
 interface Tree {
   byId: Map<string, AXNode>;
@@ -180,31 +184,34 @@ class Renderer {
     return undefined;
   }
 
-  children(tree: Tree, n: AXNode): Item[] {
+  children(tree: Tree, n: AXNode, parent: Parent): Item[] {
     const out: Item[] = [];
     for (const id of n.childIds ?? []) {
       const c = tree.byId.get(id);
-      if (c) out.push(...this.collect(tree, c));
+      if (c) out.push(...this.collect(tree, c, parent));
     }
     return out;
   }
 
-  collect(tree: Tree, n: AXNode): Item[] {
+  collect(tree: Tree, n: AXNode, parent: Parent = undefined): Item[] {
     if (this.seen.has(n)) return [];
     this.seen.add(n);
     const role = str(n.role);
-    if (n.ignored) return this.children(tree, n);
+    if (n.ignored) return this.children(tree, n, parent);
     if (role === "InlineTextBox") return [];
     if (role === "LineBreak") return [{ t: "break" }];
     if (TEXT_ROLES.has(role)) {
       const boxes = (n.childIds ?? []).map((id) => str(tree.byId.get(id)?.name)).join("");
       return [{ t: "text", text: str(n.name) || boxes }];
     }
-    if (HOISTED.has(role)) return this.children(tree, n);
+    if (HOISTED.has(role)) return this.children(tree, n, parent);
 
     const name = squash(str(n.name));
-    const wantsRef = n.backendDOMNodeId !== undefined && (REF_ROLES.has(role.toLowerCase()) || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
-    if (COLLAPSIBLE.has(role) && !name && !wantsRef) return [{ t: "break" }, ...this.children(tree, n), { t: "break" }];
+    const hasRole = REF_ROLES.has(role.toLowerCase());
+    const wantsRef = n.backendDOMNodeId !== undefined && (hasRole || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
+    // The editor inside a text field's user-agent shadow tree: the field's ref already acts on it.
+    const editor = wantsRef && !hasRole && !name && parent?.ref === true && FIELD_ROLES.has(parent.role);
+    if ((COLLAPSIBLE.has(role) && !name && !wantsRef) || editor) return [{ t: "break" }, ...this.children(tree, n, parent), { t: "break" }];
 
     const isFrame = role.toLowerCase() === "iframe";
     const shown = isFrame ? "iframe" : role;
@@ -219,15 +226,16 @@ class Renderer {
     let note = "";
     const inner = isFrame && n.backendDOMNodeId !== undefined ? this.frameTree(n.backendDOMNodeId) : undefined;
     if (isFrame) {
-      if (inner?.root) kids = merge(this.collect(inner, inner.root));
+      if (inner?.root) kids = merge(this.collect(inner, inner.root, undefined));
       else {
         kids = [];
         note = " (cross-origin, not expanded)";
       }
-    } else kids = merge(this.children(tree, n));
-    if (name) kids = kids.filter((k) => !(k.t === "text" && k.text === name));
-
+    } else kids = merge(this.children(tree, n, { role, ref: wantsRef }));
     const value = VALUE_ROLES.has(role) ? squash(str(n.value)) : "";
+    // The name is on the line already, and so is a field's value (the text of its editor).
+    kids = kids.filter((k) => !(k.t === "text" && ((name && k.text === name) || (value && k.text === value))));
+
     const rawUrl = role === "link" ? prop(n, "url") : undefined;
     const url = typeof rawUrl === "string" ? rawUrl : "";
     return [{ t: "node", head: value ? `${head}${note}: ${value}` : `${head}${note}`, ref: wantsRef, ...(url ? { url } : {}), note, children: kids }];

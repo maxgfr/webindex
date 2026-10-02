@@ -190,6 +190,97 @@ describe("renderSnapshot", () => {
     expect(r.text).toBe(lines("- generic [ref=e1]", '- region "Plain"', '- paragraph "Edit" [ref=e2]', '- paragraph "NotEditable"', '- button "Orphan"'));
   });
 
+  it("gives no ref to the editor inside a text field: one ref per field (httpbin.org/forms/post, as Chrome reports it)", () => {
+    const r = renderSnapshot(fixture("httpbin-form"), { refs: fresh() });
+    expect(r.text).toBe(
+      lines(
+        "- form",
+        "  - paragraph",
+        "    - LabelText",
+        "      - text: Customer name:",
+        '      - textbox "Customer name:" [ref=e1]: Alice',
+        "  - paragraph",
+        "    - LabelText",
+        "      - text: Telephone:",
+        '      - textbox "Telephone:" [ref=e2]',
+        "  - paragraph",
+        "    - LabelText",
+        "      - text: E-mail address:",
+        '      - textbox "E-mail address:" [ref=e3]',
+        '  - group "Pizza Size"',
+        "    - Legend",
+        "      - text: Pizza Size",
+        "    - paragraph",
+        '      - radio "Small" [ref=e4]',
+        "    - paragraph",
+        '      - radio "Medium" [ref=e5]',
+        "    - paragraph",
+        '      - radio "Large" [ref=e6]',
+        '  - group "Pizza Toppings"',
+        "    - Legend",
+        "      - text: Pizza Toppings",
+        "    - paragraph",
+        '      - checkbox "Bacon" [ref=e7]',
+        "    - paragraph",
+        '      - checkbox "Extra Cheese" [ref=e8]',
+        "    - paragraph",
+        '      - checkbox "Onion" [ref=e9]',
+        "    - paragraph",
+        '      - checkbox "Mushroom" [ref=e10]',
+        "  - paragraph",
+        "    - LabelText",
+        "      - text: Preferred delivery time:",
+        '      - InputTime "Preferred delivery time:" [ref=e11]',
+        '        - spinbutton "Hours Hours" [ref=e12]: 0',
+        "          - text: --",
+        "        - text: :",
+        '        - spinbutton "Minutes Minutes" [ref=e13]: 0',
+        "          - text: --",
+        '        - button "Show time picker Show time picker" [ref=e14]',
+        "  - paragraph",
+        "    - LabelText",
+        "      - text: Delivery instructions:",
+        '      - textbox "Delivery instructions:" [ref=e15]',
+        "  - paragraph",
+        '    - button "Submit order" [ref=e16]',
+        "- form",
+        '  - button "Choose File" [ref=e17]',
+        '  - button "Upload" [ref=e18]',
+        '  - button "Supprimer" [ref=e19]',
+      ),
+    );
+    expect(renderSnapshot(fixture("httpbin-form"), { refs: fresh(), interactive: true }).text).not.toMatch(/generic/);
+  });
+
+  it("keeps the ref of a named or role-bearing control inside a field, and of an editor in no field", () => {
+    const editor = (id: number, parent: string, name?: string) => node(id, "generic", name, { parentId: parent, properties: [prop("editable", "plaintext")] });
+    const r = renderSnapshot(
+      tree(
+        // A field with no ref of its own (no backend id): its editor is what can be acted on.
+        node(1, "textbox", "Orphan", { backendDOMNodeId: undefined }, [top(editor(11, "1"))]),
+        // A named control inside a combobox (a clear button) is a control of its own.
+        node(2, "combobox", "City", { properties: [prop("focusable", true)] }, [
+          top(editor(21, "2", "Clear")),
+          top(node(22, "button", undefined, { parentId: "2" })),
+        ]),
+        // A contenteditable region is a field of its own, wherever it sits.
+        node(3, "region", "Notes", {}, [top(editor(31, "3"))]),
+      ),
+      { refs: fresh() },
+    );
+    expect(r.text).toBe(
+      lines(
+        '- textbox "Orphan"',
+        "  - generic [ref=e1]",
+        '- combobox "City" [ref=e2]',
+        '  - generic "Clear" [ref=e3]',
+        "  - button [ref=e4]",
+        '- region "Notes"',
+        "  - generic [ref=e5]",
+      ),
+    );
+  });
+
   it("builds text from inline boxes when a static text has no name, and drops empty text", () => {
     const box = (id: number, text: string, parent: string) => node(id, "InlineTextBox", text, { parentId: parent });
     const r = renderSnapshot(
