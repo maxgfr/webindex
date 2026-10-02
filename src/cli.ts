@@ -3143,7 +3143,8 @@ if (isInvokedDirectly() || isStartedFile()) {
   // Node stack trace printed over the output that was asked for.
   for (const stream of [process.stdout, process.stderr]) {
     stream.on("error", (e: NodeJS.ErrnoException) => {
-      if (e.code === "EPIPE") process.exit(EXIT_OK);
+      // The code a printed result already set (3, a challenge; 1, no hits) still stands.
+      if (e.code === "EPIPE") process.exit(Number(process.exitCode ?? EXIT_OK));
       throw e;
     });
   }

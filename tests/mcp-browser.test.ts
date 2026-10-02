@@ -420,7 +420,6 @@ describe("network capture", () => {
     world.xhr = true;
     const opened = await h.call("webindex_browser_open", { url: "https://b.test/", capture: true });
     expect(opened.text).toContain("webindex_browser_network");
-    await new Promise((r) => setTimeout(r, 20));
     const list = await h.call("webindex_browser_network", { action: "list" });
     expect(list.text).toBe("1  GET 200 https://a.test/api.json (application/json, 7 B)");
     expect((await h.call("webindex_browser_network", { action: "get", n: 1 })).text).toBe('{\n  "a": 1\n}');
