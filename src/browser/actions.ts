@@ -8,7 +8,9 @@
 //
 // Input is real input wherever it can be: a click is a mouse press and release
 // at the centre of the element's box, after checking that the element, and not
-// a cookie banner over it, is what sits under that point; typing is key events.
+// a cookie banner over it, is what sits under that point (a click that would
+// land on an overlay is refused with the overlay's controls, for the agent to
+// ask the user which one); typing is key events.
 // Pages listen for those (and ignore `el.click()` or a bare `value =` more often
 // than one would hope); fill keeps the native value setter only as a fallback.
 //
@@ -24,10 +26,11 @@ import { CdpError, type CdpHandler, type CdpSession } from "./cdp.js";
 import { type Challenge, detectChallenge } from "./challenge.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
 import { type KeySpec, keyEventsFor, keyName, parseKey } from "./keys.js";
+import { DESCRIBE_SOURCE, overlayRootOf } from "./overlay.js";
 import { guardAction, OWNER_SOURCE } from "./risk.js";
 import type { NavigationResult } from "./session.js";
-import { StaleRefError } from "./snapshot.js";
-import { readRefs } from "./state.js";
+import { type AXNode, renderSnapshot, StaleRefError } from "./snapshot.js";
+import { readRefs, writeRefs } from "./state.js";
 import { armSettle, type SettleOptions, settle } from "./wait.js";
 
 /** What the actions need of a session; BrowserSession is one. */
@@ -129,15 +132,7 @@ export class ActionError extends Error {
 // named, so a test can tell them apart. Keep `${` out of them.
 
 /** `<div#id role="dialog"> "Its text"`: an element as the agent can recognise it in a snapshot. */
-const DESCRIBE = `const describe = (el) => {
-    const tag = String(el.tagName || "").toLowerCase();
-    const attr = (n) => (el.getAttribute ? el.getAttribute(n) : null);
-    const role = attr("role");
-    const type = tag === "input" ? attr("type") : null;
-    const text = String(el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim();
-    const shown = text.length > 60 ? text.slice(0, 57) + "..." : text;
-    return "<" + tag + (el.id ? "#" + el.id : "") + (role ? ' role="' + role + '"' : "") + (type ? ' type="' + type + '"' : "") + ">" + (shown ? ' "' + shown + '"' : "");
-  };`;
+const DESCRIBE = DESCRIBE_SOURCE;
 
 export const PAGE_FUNCTIONS = {
   /**
@@ -470,12 +465,47 @@ async function centreOf(page: CdpSession, node: ResolvedRef): Promise<{ x: numbe
   };
 }
 
+/** How many of an overlay's controls a refused click lists. */
+const OVERLAY_CONTROLS_MAX = 12;
+
+/**
+ * Why a click was refused when `hitObjectId` (what it would land on) is not the
+ * target. When that belongs to an overlay, the overlay's controls are listed
+ * with refs from the tab's own table, saved, so the next command can use them:
+ * which one to press — accepting tracking, refusing it, closing — is the user's.
+ */
+async function coveredError(page: CdpSession, targetId: string, ref: string, hitObjectId: string, where: string, at: string): Promise<ActionError> {
+  const root = await overlayRootOf(page, hitObjectId);
+  if (!root) return new ActionError(`${ref} is covered by ${where} at ${at}: close or move it out of the way, then retry`);
+  let controls: string[] = [];
+  try {
+    const table = readRefs(targetId);
+    if (table) {
+      await page.send("Accessibility.enable");
+      const { nodes = [] } = await page.send<{ nodes?: AXNode[] }>("Accessibility.getFullAXTree", {});
+      const r = renderSnapshot(nodes, { refs: table, rootBackendId: root.backendNodeId, interactive: true });
+      writeRefs(targetId, r.refs);
+      controls = r.text ? r.text.split("\n") : [];
+    }
+  } catch {
+    /* named without its controls */
+  }
+  const shown = controls.slice(0, OVERLAY_CONTROLS_MAX);
+  const more = controls.length - shown.length;
+  const list = shown.length
+    ? ["its controls:", ...shown, ...(more > 0 ? [`… ${more} more — take a snapshot to see them`] : [])].join("\n")
+    : "none of its controls is in the accessibility tree — take a snapshot";
+  return new ActionError(
+    `${ref} is covered by an overlay (${root.what}) at ${at}; ${list}\naccepting tracking/consent or closing it is the user's choice — ask before choosing`,
+  );
+}
+
 /**
  * Throw unless a click at x,y lands on the element or inside it. Returns the
  * node it lands on when that is a descendant (a button inside a card): the
  * control the click really activates, for the guard to look at.
  */
-async function hitTarget(page: CdpSession, node: ResolvedRef, x: number, y: number): Promise<number | undefined> {
+async function hitTarget(page: CdpSession, targetId: string, node: ResolvedRef, x: number, y: number): Promise<number | undefined> {
   const at = `(${Math.round(x)}, ${Math.round(y)})`;
   const unreachable = () =>
     new ActionError(`${node.ref} is not reachable at its centre ${at}: the browser finds nothing there to click; scroll, or take a new snapshot`);
@@ -500,7 +530,7 @@ async function hitTarget(page: CdpSession, node: ResolvedRef, x: number, y: numb
     const where = await callOn<string | true | null>(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
     // The target itself, reached through its own text or user-agent shadow tree: its guard has run already.
     if (where === true) return undefined;
-    if (where) throw new ActionError(`${node.ref} is covered by ${where} at ${at}: close or move it out of the way, then retry`);
+    if (where) throw await coveredError(page, targetId, node.ref, objectId, where, at);
   } finally {
     release(page, objectId);
   }
@@ -526,7 +556,7 @@ export async function click(session: ActionSession, ref: string, opts: ClickOpti
     await guardAction(page, { backendNodeId: node.backendNodeId, action: "click", ...(opts.confirm ? { confirm: true } : {}) });
     const { x, y } = await centreOf(page, node);
     // The ref may name a container (a card, a row) whose centre is a "Delete" button: that button is what acts.
-    const inner = await hitTarget(page, node, x, y);
+    const inner = await hitTarget(page, session.targetId, node, x, y);
     if (inner !== undefined && !opts.confirm) await guardAction(page, { backendNodeId: inner, action: "click" });
     const p = await perform(session, opts, async (pg) => {
       await pg.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0 });

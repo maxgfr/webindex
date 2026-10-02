@@ -24,7 +24,7 @@ import type { BrowserDeps } from "../src/browser/deps.js";
 import { COLLECT_SOURCE, RiskRefusedError } from "../src/browser/risk.js";
 import type { NavigationResult } from "../src/browser/session.js";
 import { StaleRefError } from "../src/browser/snapshot.js";
-import { writeRefs } from "../src/browser/state.js";
+import { readRefs, writeRefs } from "../src/browser/state.js";
 import { UsageError } from "../src/cli-kit.js";
 import { FakePage, fakeClock } from "./helpers/fake-page.js";
 
@@ -109,6 +109,8 @@ class World {
       this.dialogOpen = false;
     });
     p.handle("Page.captureScreenshot", () => ({ data: Buffer.from("PNGDATA").toString("base64") }));
+    p.handle("DOM.describeNode", ({ objectId }) => ({ node: { backendNodeId: Number(String(objectId).slice(1)) } }));
+    p.handle("Accessibility.getFullAXTree", () => ({ nodes: this.ax }));
     p.handle("Page.getLayoutMetrics", () => ({
       cssLayoutViewport: { pageX: 0, pageY: 500, clientWidth: 1280, clientHeight: 800 },
       cssContentSize: { x: 0, y: 0, width: 1280, height: 4000 },
@@ -117,6 +119,10 @@ class World {
 
   /** The node at the centre of the element being hit-tested. */
   hitFor: number | undefined;
+  /** The overlay root the page finds for a node a click landed on instead of its target. */
+  overlayRoot: number | undefined;
+  /** The accessibility tree, for the controls of an overlay. */
+  ax: unknown[] = [];
 
   el(id: number): El {
     const el = this.els.get(id);
@@ -190,6 +196,12 @@ class World {
         el.value = String((value as string[])[0] ?? "");
         return { result: { value } };
       }
+      case "overlayRoot":
+        return this.overlayRoot === undefined
+          ? { result: { type: "object", subtype: "null", value: null } }
+          : { result: { type: "object", subtype: "node", objectId: `o${this.overlayRoot}` } };
+      case "describeOverlay":
+        return { result: { value: run(functionDeclaration, this.node(id), []) } };
       case "selectAll":
         this.events.push(`select-all ${id}`);
         return { result: {} };
@@ -392,6 +404,58 @@ describe("click", () => {
     expect(err).toBeInstanceOf(ActionError);
     expect(err.message).toMatch(/e1 is covered by <div#consent role="dialog"> "We use cookies to improve your experience"/);
     expect(mouse()).toEqual([]);
+  });
+
+  /** A consent wall (300) with these buttons (301…), as the accessibility tree has it. */
+  const wall = (labels: string[]) => {
+    w.add(300, { tag: "DIV", id: "consent", role: "dialog", text: "We use cookies to improve your experience and for ads, with our 812 partners" });
+    w.add(310, { tag: "BUTTON", parent: 300 });
+    w.ax = [
+      { nodeId: "1", role: { value: "RootWebArea" }, childIds: ["2", "3"], backendDOMNodeId: 1 },
+      { nodeId: "2", role: { value: "button" }, name: { value: "Buy" }, backendDOMNodeId: 101, parentId: "1" },
+      { nodeId: "3", role: { value: "dialog" }, name: { value: "Cookies" }, backendDOMNodeId: 300, parentId: "1", childIds: labels.map((_, i) => `b${i}`) },
+      ...labels.map((l, i) => ({ nodeId: `b${i}`, role: { value: "button" }, name: { value: l }, backendDOMNodeId: 301 + i, parentId: "3" })),
+    ];
+    w.overlayRoot = 300;
+    w.hitFor = 310;
+  };
+
+  it("lists the controls of the overlay a click lands on, with refs it can use at once, and leaves the choice to the user", async () => {
+    w.add(101, { tag: "BUTTON" });
+    wall(["Accept all", "Refuse"]);
+    const err = await click(session, "e1", { deps }).catch((e) => e);
+    expect(err).toBeInstanceOf(ActionError);
+    expect(err.message).toBe(
+      [
+        'e1 is covered by an overlay (<div#consent role="dialog"> "We use cookies to improve your experience and for ads, wi...") at (50, 20); its controls:',
+        '- button "Accept all" [ref=e10]',
+        '- button "Refuse" [ref=e11]',
+        "accepting tracking/consent or closing it is the user's choice — ask before choosing",
+      ].join("\n"),
+    );
+    // The refs are the tab's own, saved: the next command can click them.
+    expect(readRefs("T1")?.refs).toMatchObject({ e1: 101, e10: 301, e11: 302 });
+    expect(readRefs("T1")?.next).toBe(12);
+    expect(mouse()).toEqual([]);
+  });
+
+  it("caps the controls it lists, and says how many more there are", async () => {
+    w.add(101, { tag: "BUTTON" });
+    wall(Array.from({ length: 20 }, (_, i) => `Partner ${i + 1}`));
+    const err = await click(session, "e1", { deps }).catch((e) => e);
+    const lines = String(err.message).split("\n");
+    expect(lines.filter((l) => l.startsWith("- button"))).toHaveLength(12);
+    expect(lines).toContain("… 8 more — take a snapshot to see them");
+  });
+
+  it("names the overlay without controls when the accessibility tree has none of it", async () => {
+    w.add(101, { tag: "BUTTON" });
+    wall([]);
+    w.ax = [];
+    const err = await click(session, "e1", { deps }).catch((e) => e);
+    expect(err.message).toMatch(
+      /^e1 is covered by an overlay \(<div#consent role="dialog">.*\) at \(50, 20\); none of its controls is in the accessibility tree — take a snapshot\naccepting tracking/,
+    );
   });
 
   it("calls an element without a box not visible", async () => {

@@ -311,6 +311,80 @@ describe("renderSnapshot", () => {
     expect(renderSnapshot([], { refs: fresh() }).text).toBe("");
   });
 
+  // A page whose consent wall comes last in the document, as lemonde.fr's does.
+  const walled = (): AXNode[] => {
+    const article = node(2, "article", undefined, { parentId: "0", childIds: ["3", "4"] });
+    const heading = node(3, "heading", "The news", { parentId: "2", properties: [prop("level", 1)] });
+    const para = node(4, "paragraph", "A long paragraph of the article", { parentId: "2" });
+    const wall = node(5, "dialog", "Cookies", { parentId: "0", childIds: ["6", "7"] });
+    const accept = node(6, "button", "Accepter et continuer", { parentId: "5" });
+    const refuse = node(7, "button", "Refuser", { parentId: "5" });
+    return [
+      { nodeId: "0", role: { type: "role", value: "RootWebArea" }, childIds: ["2", "5"], backendDOMNodeId: 1 },
+      ...article,
+      ...heading,
+      ...para,
+      ...wall,
+      ...accept,
+      ...refuse,
+    ];
+  };
+
+  it("renders the overlays first, under their own header, and not again in the tree", () => {
+    const r = renderSnapshot(walled(), { refs: fresh(), overlays: [50] });
+    expect(r.text).toBe(
+      lines(
+        "- overlay (covers the page):",
+        '  - dialog "Cookies"',
+        '    - button "Accepter et continuer" [ref=e1]',
+        '    - button "Refuser" [ref=e2]',
+        "- article",
+        '  - heading "The news" [level=1] [ref=e3]',
+        '  - paragraph "A long paragraph of the article"',
+      ),
+    );
+    expect(r.refCount).toBe(3);
+  });
+
+  it("keeps the overlay when --max-chars cuts the page: the tree gets what the overlay leaves", () => {
+    const r = renderSnapshot(walled(), { refs: fresh(), overlays: [50], maxChars: 130 });
+    expect(r.text.split("\n").slice(0, 4)).toEqual([
+      "- overlay (covers the page):",
+      '  - dialog "Cookies"',
+      '    - button "Accepter et continuer" [ref=e1]',
+      '    - button "Refuser" [ref=e2]',
+    ]);
+    expect(r.truncated).toBe(true);
+    expect(r.text).not.toContain("The news");
+  });
+
+  it("lists an overlay's controls flat, indented under the header, in interactive mode", () => {
+    const r = renderSnapshot(walled(), { refs: fresh(), overlays: [50], interactive: true });
+    expect(r.text).toBe(
+      lines(
+        "- overlay (covers the page):",
+        '  - button "Accepter et continuer" [ref=e1]',
+        '  - button "Refuser" [ref=e2]',
+        '- heading "The news" [level=1] [ref=e3]',
+      ),
+    );
+  });
+
+  it("skips an overlay that is not in the tree or renders nothing, and ignores overlays for a subtree", () => {
+    const empty = renderSnapshot(walled(), { refs: fresh(), overlays: [999] });
+    expect(empty.text).not.toContain("overlay");
+    expect(empty.text).toContain('- dialog "Cookies"');
+    const nothing = [
+      { nodeId: "0", role: { value: "RootWebArea" }, childIds: ["1", "2"], backendDOMNodeId: 1 },
+      { nodeId: "1", role: { value: "generic" }, childIds: [], backendDOMNodeId: 10, parentId: "0" },
+      ...node(2, "button", "Go", { parentId: "0" }),
+    ] as AXNode[];
+    expect(renderSnapshot(nothing, { refs: fresh(), overlays: [10] }).text).toBe('- button "Go" [ref=e1]');
+    const sub = renderSnapshot(walled(), { refs: fresh(), overlays: [50], rootBackendId: 20 });
+    expect(sub.text).not.toContain("overlay");
+    expect(sub.text).not.toContain("Accepter");
+  });
+
   it("parses the url property only for links and tolerates a url that is not a string", () => {
     const r = renderSnapshot(tree(node(1, "link", "x", { properties: [prop("url", 5)] }), node(2, "link", "y", { properties: [prop("url", "")] })), {
       refs: fresh(),
@@ -447,6 +521,75 @@ describe("takeSnapshot", () => {
     expect(getFull).toEqual([{}, { frameId: "F30" }]);
     // ref into the frame
     expect((await takeSnapshot(s, { ref: "e3" })).text).toContain('- textbox "Search" [ref=e3]');
+  });
+
+  /** The overlay probe's answers: these backendNodeIds are what it finds on top. */
+  const scriptOverlays = (ids: number[]) => {
+    fake.handle("Runtime.evaluate", (p: { expression: string }) =>
+      p.expression.includes("findOverlays") ? { result: { type: "object", subtype: "array", objectId: "arr" } } : { result: { type: "undefined" } },
+    );
+    fake.handle("Runtime.getProperties", () => ({
+      result: ids.map((_, i) => ({ name: String(i), value: { type: "object", subtype: "node", objectId: `ov${i}` } })),
+    }));
+    const describe = fake.handlerOf("DOM.describeNode");
+    fake.handle("DOM.describeNode", (p: { objectId?: string; backendNodeId?: number }, sid) => {
+      if (p.objectId?.startsWith("ov")) return { node: { nodeId: 0, backendNodeId: ids[Number(p.objectId.slice(2))] } };
+      return describe?.(p, sid);
+    });
+  };
+
+  it("shows the overlays the probe finds first, and they survive a small --max-chars", async () => {
+    fake.addTarget("https://a.test/", "T");
+    const main: AXNode[] = [
+      { nodeId: "0", role: { value: "RootWebArea" }, childIds: ["1", "2"], backendDOMNodeId: 1 },
+      ...node(1, "link", "x".repeat(200), { parentId: "0" }),
+      ...node(2, "dialog", "Consent", { parentId: "0", childIds: ["3"] }),
+      ...node(3, "button", "Accept all", { parentId: "2" }),
+    ];
+    scriptAx({ main });
+    scriptOverlays([20]);
+    const s = await attach();
+    const r = await takeSnapshot(s, { maxChars: 120 });
+    expect(r.text.split("\n").slice(2, 5)).toEqual(["- overlay (covers the page):", '  - dialog "Consent"', '    - button "Accept all" [ref=e1]']);
+    expect(r.truncated).toBe(true);
+    expect(readRefs("T1")?.refs.e1).toBe(30);
+    expect(getFull).toEqual([{}]);
+  });
+
+  it("fetches the tree once more when the probe sees an overlay the tree does not have yet", async () => {
+    fake.addTarget("https://a.test/", "T");
+    const before: AXNode[] = [
+      { nodeId: "0", role: { value: "RootWebArea" }, childIds: ["1"], backendDOMNodeId: 1 },
+      ...node(1, "link", "Home", { parentId: "0" }),
+    ];
+    const after: AXNode[] = [
+      { nodeId: "0", role: { value: "RootWebArea" }, childIds: ["1", "2"], backendDOMNodeId: 1 },
+      ...node(1, "link", "Home", { parentId: "0" }),
+      ...node(2, "dialog", "Cookies", { parentId: "0", childIds: ["3"] }),
+      ...node(3, "button", "Refuse", { parentId: "2" }),
+    ];
+    scriptAx({ main: before });
+    let calls = 0;
+    fake.handle("Accessibility.getFullAXTree", (p: { frameId?: string }) => {
+      getFull.push(p);
+      return { nodes: calls++ === 0 ? before : after };
+    });
+    scriptOverlays([20]);
+    const s = await attach();
+    const r = await takeSnapshot(s, {});
+    expect(getFull).toEqual([{}, {}]);
+    expect(r.text).toContain(lines("- overlay (covers the page):", '  - dialog "Cookies"', '    - button "Refuse" [ref=e1]', '- link "Home" [ref=e2]'));
+  });
+
+  it("does not look for overlays in a ref's subtree", async () => {
+    fake.addTarget("https://a.test/", "T");
+    scriptAx({ main: fixture("login-form") });
+    scriptOverlays([20]);
+    const s = await attach();
+    await takeSnapshot(s, {});
+    const before = fake.calls.filter((c) => c.method === "Runtime.getProperties").length;
+    await takeSnapshot(s, { ref: "e5" });
+    expect(fake.calls.filter((c) => c.method === "Runtime.getProperties").length).toBe(before);
   });
 
   it("leaves a frame unexpanded when describeNode or the frame fetch fails", async () => {

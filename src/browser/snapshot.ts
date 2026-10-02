@@ -1,3 +1,4 @@
+import { findOverlays } from "./overlay.js";
 import type { BrowserSession } from "./session.js";
 import { type RefTable, readRefs, writeRefs } from "./state.js";
 
@@ -8,6 +9,10 @@ import { type RefTable, readRefs, writeRefs } from "./state.js";
 // and hands out stable refs (`e<N>`, backed by the node's backendDOMNodeId) that
 // later actions pass back. takeSnapshot fetches the tree from a live session
 // and keeps the ref table on disk, so a ref survives from one CLI call to the next.
+//
+// What covers the page (a cookie wall, a modal: see overlay.ts) is rendered
+// first, under an `overlay` header, and not again in the tree: a wall that comes
+// last in the document is never what a --max-chars cut drops.
 
 /** A CDP Accessibility.AXValue, reduced to what we read. */
 export interface AXValue {
@@ -39,6 +44,8 @@ export interface RenderOptions {
   refs: RefTable;
   /** Same-process iframe trees, keyed by the iframe's backendDOMNodeId as a string. */
   frames?: Record<string, AXNode[]>;
+  /** The backendDOMNodeIds of the overlays over the page: rendered first, each under its own header. Ignored with rootBackendId. */
+  overlays?: number[];
 }
 
 export interface RenderResult {
@@ -58,6 +65,9 @@ export class StaleRefError extends Error {
 }
 
 const NAME_MAX = 120;
+const OVERLAY_HEADER = "- overlay (covers the page):";
+/** How long a tree that lacks an overlay the probe saw is given to catch up, once. */
+const OVERLAY_RETRY_MS = 300;
 const FRAME_MAX = 10;
 const COLLAPSIBLE = new Set(["generic", "none", "presentation", "GenericContainer"]);
 const HOISTED = new Set(["RootWebArea", "WebArea"]);
@@ -275,13 +285,26 @@ function flat(items: Item[], out: Line[]): void {
 export function renderSnapshot(nodes: AXNode[], opts: RenderOptions): RenderResult {
   const r = new Renderer(opts.refs, opts.frames ?? {});
   const main = buildTree(nodes);
+  const all: Line[] = [];
   let items: Item[] = [];
   if (opts.rootBackendId !== undefined) {
     const hit = r.find(main, opts.rootBackendId);
     if (hit) items = merge(r.collect(hit.tree, hit.node));
-  } else if (main.root) items = merge(r.collect(main, main.root));
+  } else {
+    // Collected first, so the tree below finds them seen and leaves them out.
+    for (const id of opts.overlays ?? []) {
+      const hit = r.find(main, id);
+      if (!hit) continue;
+      const lines: Line[] = [];
+      const over = merge(r.collect(hit.tree, hit.node));
+      if (opts.interactive) flat(over, lines);
+      else nested(over, 1, lines);
+      if (lines.length === 0) continue;
+      all.push({ text: OVERLAY_HEADER, ref: false }, ...(opts.interactive ? lines.map((l) => ({ ...l, text: `  ${l.text}` })) : lines));
+    }
+    if (main.root) items = merge(r.collect(main, main.root));
+  }
 
-  const all: Line[] = [];
   if (opts.interactive) flat(items, all);
   else nested(items, 0, all);
 
@@ -393,7 +416,14 @@ export async function takeSnapshot(session: BrowserSession, opts: SnapshotOption
   }
 
   await session.page.send("Accessibility.enable");
-  const { nodes } = await session.page.send<{ nodes: AXNode[] }>("Accessibility.getFullAXTree", {});
+  const fetchTree = async () => (await session.page.send<{ nodes: AXNode[] }>("Accessibility.getFullAXTree", {})).nodes;
+  let nodes = await fetchTree();
+  const overlays = rootBackendId === undefined ? await findOverlays(session.page) : [];
+  // An overlay injected while the tree was taken may not be in it yet: one more look, a moment later.
+  if (overlays.some((id) => !nodes.some((n) => n.backendDOMNodeId === id))) {
+    await new Promise((r) => setTimeout(r, OVERLAY_RETRY_MS));
+    nodes = await fetchTree();
+  }
   const frames = await collectFrames(session, nodes);
   const hasRoot = rootBackendId === undefined || [nodes, ...Object.values(frames)].some((l) => l.some((n) => n.backendDOMNodeId === rootBackendId));
   if (!hasRoot) throw new StaleRefError(opts.ref as string);
@@ -404,6 +434,7 @@ export async function takeSnapshot(session: BrowserSession, opts: SnapshotOption
     ...(opts.interactive !== undefined ? { interactive: opts.interactive } : {}),
     ...(opts.maxChars !== undefined ? { maxChars: opts.maxChars } : {}),
     ...(rootBackendId !== undefined ? { rootBackendId } : {}),
+    ...(overlays.length ? { overlays } : {}),
   });
   writeRefs(session.targetId, r.refs);
   return { text: `url: ${url}\ntitle: ${title}\n${r.text}`, url, title, loaderId, refCount: r.refCount, truncated: r.truncated };
