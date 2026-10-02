@@ -178,15 +178,35 @@ export const FOCUS_SOURCE = `function (doc) {
 }`;
 
 /**
+ * Runs in the page: the element a node stands for. A text node is its parent
+ * element's, a shadow root its host's, and anything inside the user-agent
+ * shadow tree of a form control (the editor of a text field, the label of an
+ * `<input type=submit>`) the control's: Chrome's hit test lands in there
+ * (DOM.getNodeForLocation with includeUserAgentShadowDOM), and none of it is a
+ * control of its own. Null when nothing is found (a detached node, a document).
+ */
+export const OWNER_SOURCE = `(node) => {
+  let el = node;
+  for (let i = 0; el && el.nodeType !== 1 && i < 64; i++) el = el.nodeType === 11 ? el.host : el.parentElement || el.parentNode;
+  for (let i = 0; el && el.nodeType === 1 && i < 8; i++) {
+    const root = el.getRootNode ? el.getRootNode() : null;
+    const host = root && root.nodeType === 11 ? root.host : null;
+    if (!host || !/^(input|textarea|select)$/i.test(host.tagName || "")) break;
+    el = host;
+  }
+  return el && el.nodeType === 1 ? el : null;
+}`;
+
+/**
  * Runs in the page with `this` the target (or the focused element) and the
- * action as its argument. Returns null if there is no element, and
+ * action as its argument. Starts from the element the node stands for
+ * (OWNER_SOURCE). Returns null if there is no element, and
  * `{ frame, readable }` for a frame: what a click or a key does in there is not
  * this element's to say.
  */
 export const COLLECT_SOURCE = `function (action) {
-  let el = this;
-  if (el && el.nodeType === 3) el = el.parentElement;
-  if (!el || el.nodeType !== 1) return null;
+  const el = (${OWNER_SOURCE})(this);
+  if (!el) return null;
   if (/^i?frame$/i.test(el.tagName || "")) {
     let inner = null;
     try { inner = el.contentDocument; } catch (e) { inner = null; }

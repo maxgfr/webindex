@@ -48,6 +48,10 @@ const PAGES: Record<string, string> = {
 <button type="button" onclick="document.getElementById('out').textContent = 'Deleted'"><img alt="Supprimer" src="${GIF}"></button>
 <button type="button" onclick="alert('hello from the page')">Notify</button>
 <button type="button" onclick="document.getElementById('out').textContent = 'Answered: ' + confirm('Go on?')">Ask</button>
+<form id="inputs" onsubmit="event.preventDefault(); document.getElementById('out').textContent = 'Continued'">
+  <input type="submit" value="Continue">
+  <input type="button" value="Supprimer le brouillon" onclick="document.getElementById('out').textContent = 'Draft deleted'">
+</form>
 <form id="login" onsubmit="event.preventDefault(); document.getElementById('out').textContent = 'Logged in'">
   <label>User <input id="user"></label>
   <label>Password <input type="password" id="pw"></label>
@@ -290,6 +294,8 @@ describe.runIf(live)("a real browser, driven command by command", () => {
       }
       // The same-origin iframe is expanded into the tree.
       expect(snap).toContain("Frame heading");
+      // A text field is one ref: the editor inside it gets none of its own.
+      expect(snap).not.toMatch(/- generic \[ref=/);
     },
     STEP_MS,
   );
@@ -355,6 +361,22 @@ describe.runIf(live)("a real browser, driven command by command", () => {
       // With the user's yes, the click goes through.
       await ok("click", [refOf(snap, "button", "Payer")], { confirm: true });
       expect((await ok("eval", ["document.getElementById('out').textContent"])).json).toMatchObject({ value: "Paid" });
+    },
+    STEP_MS,
+  );
+
+  it(
+    "clicks an <input type=submit>, whose hit test lands in its user-agent shadow tree, and still refuses an <input type=button> that deletes",
+    async () => {
+      await snapshot();
+      const out = async () => (await ok("eval", ["document.getElementById('out').textContent"])).json;
+      const del = await run("click", [refOf(snap, "button", "Supprimer le brouillon")]);
+      expect(del.exitCode).toBe(1);
+      expect(del.text).toMatch(/refused to click on "Supprimer le brouillon".*matches "supprimer"/);
+      expect(await out()).toMatchObject({ value: expect.not.stringMatching(/Draft deleted/) });
+      const go = await ok("click", [refOf(snap, "button", "Continue")]);
+      expect(go.json).toMatchObject({ ok: true, action: "click" });
+      expect(await out()).toMatchObject({ value: "Continued" });
     },
     STEP_MS,
   );

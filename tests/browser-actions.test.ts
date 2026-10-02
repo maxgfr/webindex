@@ -52,6 +52,10 @@ interface El {
   stubborn?: boolean;
   /** Reverts whatever it is given. */
   frozen?: boolean;
+  /** 11 for a shadow root (3 for a text node); an element by default. */
+  nodeType?: number;
+  /** A shadow root's host. */
+  host?: number;
 }
 
 const BOX = [[0, 0, 100, 0, 100, 40, 0, 40]];
@@ -131,7 +135,7 @@ class World {
     const el = this.el(id);
     const world = this;
     const n: any = {
-      nodeType: 1,
+      nodeType: el.nodeType ?? 1,
       tagName: el.tag,
       id: el.id ?? "",
       ownerDocument: this.doc,
@@ -149,6 +153,9 @@ class World {
       get parentNode() {
         return el.parent === undefined ? null : world.node(el.parent);
       },
+      get host() {
+        return el.host === undefined ? undefined : world.node(el.host);
+      },
       getAttribute: (name: string) => (name === "role" ? (el.role ?? null) : name === "type" ? (el.type ?? null) : null),
       options: (el.options ?? []).map((o) => ({ value: o.value, label: o.label, text: o.label, selected: false })),
       selectedIndex: -1,
@@ -165,8 +172,8 @@ class World {
     const id = Number(String(objectId).slice(1));
     const el = this.el(id);
     if (functionDeclaration === COLLECT_SOURCE) {
-      // A frame is told apart by the real collector (it has no contentDocument here: another origin's).
-      if (el.tag === "IFRAME") return { result: { value: run(COLLECT_SOURCE, this.node(id), ["click"]) } };
+      // A frame is told apart by the real collector (it has no contentDocument here: another origin's), and so is a node that is no element.
+      if (el.tag === "IFRAME" || (el.nodeType ?? 1) !== 1) return { result: { value: run(COLLECT_SOURCE, this.node(id), ["click"]) } };
       return { result: { value: { role: el.role ?? "button", label: el.label ?? el.text ?? "", isSubmit: false, formHasPassword: false, submitLabel: "" } } };
     }
     const name = /^function (\w+)/.exec(functionDeclaration)?.[1];
@@ -341,6 +348,28 @@ describe("click", () => {
     await click(session, "e1", { deps });
     expect(fnCalls()).toContain("hitTest");
     expect(mouse()).toHaveLength(3);
+  });
+
+  it("clicks an <input type=submit>: the hit on its user-agent shadow root is the input itself", async () => {
+    // What Chrome answers on the-internet.herokuapp.com/upload: the hit test lands on the input's shadow root, no element.
+    w.add(101, { tag: "INPUT", type: "submit", label: "Upload" });
+    w.add(151, { tag: "#document-fragment", nodeType: 11, host: 101 });
+    w.hitFor = 151;
+    const r = await click(session, "e1", { deps });
+    expect(r).toMatchObject({ ok: true, action: "click", ref: "e1" });
+    expect(mouse()).toHaveLength(3);
+    // Guarded once, on the input: its shadow root is no control of its own.
+    expect(fnCalls().filter((f) => f === "collect")).toHaveLength(1);
+  });
+
+  it("still refuses an <input type=button> that deletes, and does not click", async () => {
+    w.add(101, { tag: "INPUT", type: "button", label: "Supprimer" });
+    w.add(151, { tag: "#document-fragment", nodeType: 11, host: 101 });
+    w.hitFor = 151;
+    const err = await click(session, "e1", { deps }).catch((e) => e);
+    expect(err).toBeInstanceOf(RiskRefusedError);
+    expect(err.message).toMatch(/refused to click on "Supprimer"/);
+    expect(mouse()).toEqual([]);
   });
 
   it("refuses to click through something covering the target, and names it", async () => {
@@ -906,6 +935,25 @@ describe("page functions", () => {
     const root: any = { nodeType: 11, parentNode: null, host };
     const inner: any = { nodeType: 1, tagName: "SPAN", parentNode: root };
     expect(run(PAGE_FUNCTIONS.hitTest, host, [inner])).toBeNull();
+  });
+
+  it("hitTest calls the target's own text and user-agent shadow tree the target, and an element inside it a descendant", () => {
+    const input: any = { nodeType: 1, tagName: "INPUT", parentNode: null };
+    const uaRoot: any = { nodeType: 11, parentNode: null, host: input };
+    expect(run(PAGE_FUNCTIONS.hitTest, input, [uaRoot])).toBe(true);
+    expect(run(PAGE_FUNCTIONS.hitTest, input, [{ nodeType: 3, parentNode: uaRoot, parentElement: null }])).toBe(true);
+    // A text field's editor: an element, but of the field's user-agent tree.
+    const editor: any = { nodeType: 1, tagName: "DIV", parentNode: uaRoot, getRootNode: () => uaRoot };
+    expect(run(PAGE_FUNCTIONS.hitTest, input, [editor])).toBe(true);
+    const button: any = { nodeType: 1, tagName: "BUTTON", parentNode: null };
+    expect(run(PAGE_FUNCTIONS.hitTest, button, [{ nodeType: 3, parentNode: button, parentElement: button }])).toBe(true);
+    // A control inside a web component's own shadow tree (a Delete button in a card) is what acts: the guard looks at it.
+    const card: any = { nodeType: 1, tagName: "MY-CARD", parentNode: null };
+    const open: any = { nodeType: 11, parentNode: null, host: card };
+    card.shadowRoot = open;
+    const del: any = { nodeType: 1, tagName: "BUTTON", parentNode: open, getRootNode: () => open };
+    expect(run(PAGE_FUNCTIONS.hitTest, card, [del])).toBeNull();
+    expect(run(PAGE_FUNCTIONS.hitTest, card, [{ nodeType: 3, parentNode: open, parentElement: null }])).toBe(true);
   });
 
   it("hitTest lets a click into a frame through: the hit test stops at the frame element", () => {

@@ -24,7 +24,7 @@ import { CdpError, type CdpHandler, type CdpSession } from "./cdp.js";
 import { type Challenge, detectChallenge } from "./challenge.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
 import { type KeySpec, keyEventsFor, keyName, parseKey } from "./keys.js";
-import { guardAction } from "./risk.js";
+import { guardAction, OWNER_SOURCE } from "./risk.js";
 import type { NavigationResult } from "./session.js";
 import { StaleRefError } from "./snapshot.js";
 import { readRefs } from "./state.js";
@@ -138,11 +138,18 @@ const DESCRIBE = `const describe = (el) => {
   };`;
 
 export const PAGE_FUNCTIONS = {
-  /** null when `hit` (the node under the click point) is the target or inside it; else a description of what covers it. */
+  /**
+   * Where `hit` (the node under the click point) is: true when it stands for the
+   * target itself (its text, its user-agent shadow tree: see OWNER_SOURCE), null
+   * when it is inside the target (a button in a card, which the guard then looks
+   * at), else a description of what covers the target.
+   */
   hitTest: `function hitTest(hit) {
   ${DESCRIBE}
+  const owner = ${OWNER_SOURCE};
+  const el = hit ? owner(hit) : null;
+  if (el === this) return true;
   for (let n = hit; n; n = n.parentNode || n.host) if (n === this) return null;
-  const el = hit && hit.nodeType !== 1 ? hit.parentElement : hit;
   if (!el) return "nothing";
   // A target inside a frame: the top document's hit test stops at the frame element.
   if (el.ownerDocument !== this.ownerDocument && /^i?frame$/i.test(el.tagName)) return null;
@@ -486,8 +493,10 @@ async function hitTarget(page: CdpSession, node: ResolvedRef, x: number, y: numb
   const objectId = (await ask<{ object?: { objectId?: string } }>("DOM.resolveNode", { backendNodeId: hit })).object?.objectId;
   if (!objectId) throw unreachable();
   try {
-    const cover = await callOn<string | null>(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
-    if (cover) throw new ActionError(`${node.ref} is covered by ${cover} at ${at}: close or move it out of the way, then retry`);
+    const where = await callOn<string | true | null>(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
+    // The target itself, reached through its own text or user-agent shadow tree: its guard has run already.
+    if (where === true) return undefined;
+    if (where) throw new ActionError(`${node.ref} is covered by ${where} at ${at}: close or move it out of the way, then retry`);
   } finally {
     release(page, objectId);
   }
