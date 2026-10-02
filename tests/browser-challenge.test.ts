@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { classifyChallenge, detectChallenge } from "../src/browser/challenge.js";
+import { runInNewContext } from "node:vm";
+import { classifyChallenge, detectChallenge, probeChallenge } from "../src/browser/challenge.js";
 import { FakePage } from "./helpers/fake-page.js";
 
 const page = (over: Partial<Parameters<typeof classifyChallenge>[0]> = {}) => ({
@@ -229,5 +230,81 @@ describe("detectChallenge", () => {
     const p = new FakePage();
     p.handle("Runtime.evaluate", () => ({ result: { value: { url: "u", title: "Just a moment..." } } }));
     expect((await detectChallenge({ page: p }))?.kind).toBe("cloudflare");
+  });
+});
+
+describe("probeChallenge", () => {
+  it("tells a probe that could not run (unknown) from a page without a challenge", async () => {
+    const clean = new FakePage();
+    clean.handle("Runtime.evaluate", () => ({ result: { value: { url: "u", title: "Shop", text: "y".repeat(3000), status: 200 } } }));
+    expect(await probeChallenge({ page: clean })).toEqual({ ok: true, challenge: null });
+    const boom = new FakePage();
+    boom.handle("Runtime.evaluate", () => {
+      throw new Error("CDP command timed out: Runtime.evaluate (3000 ms)");
+    });
+    expect(await probeChallenge({ page: boom })).toEqual({ ok: false });
+    const exc = new FakePage();
+    exc.handle("Runtime.evaluate", () => ({ exceptionDetails: { text: "Uncaught", exception: { description: "SecurityError" } } }));
+    expect(await probeChallenge({ page: exc })).toEqual({ ok: false });
+    const junk = new FakePage();
+    junk.handle("Runtime.evaluate", () => ({ result: { value: "nope" } }));
+    expect(await probeChallenge({ page: junk })).toEqual({ ok: false });
+  });
+
+  it("runs on a page whose cookies script may not read (a sandboxed or opaque origin)", async () => {
+    const p = new FakePage();
+    p.handle("Runtime.evaluate", () => ({ result: { value: { url: "u", title: "Shop" } } }));
+    await detectChallenge({ page: p });
+    const expression = String(p.calls[0]?.params.expression);
+    const document = {
+      title: "Just a moment...",
+      body: { innerText: "Checking your browser" },
+      scripts: [],
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      get cookie(): string {
+        throw new Error("SecurityError: The document is sandboxed and lacks the 'allow-same-origin' flag.");
+      },
+    };
+    const value = runInNewContext(expression, {
+      document,
+      location: { href: "https://shop.test/" },
+      performance: { getEntriesByType: () => [] },
+    });
+    expect(value).toMatchObject({ title: "Just a moment...", cookieNames: [] });
+  });
+});
+
+describe("Cloudflare's challenge-platform scripts", () => {
+  const long = "A real product page with plenty of text. ".repeat(60);
+  it("does not take the bot-management script an ordinary page loads for a challenge", () => {
+    for (const src of [
+      "https://shop.test/cdn-cgi/challenge-platform/scripts/jsd/main.js",
+      "https://shop.test/cdn-cgi/challenge-platform/h/b/scripts/jsd/1a2b3c/main.js",
+    ]) {
+      expect(classifyChallenge({ url: "https://shop.test/", title: "Shop", text: long, scriptUrls: [src], status: 200 }), src).toBeNull();
+    }
+  });
+
+  it("still counts the bot-management script on a page that looks blocked", () => {
+    const c = classifyChallenge({
+      url: "u",
+      title: "",
+      text: "",
+      scriptUrls: ["https://shop.test/cdn-cgi/challenge-platform/scripts/jsd/main.js"],
+      status: 403,
+    });
+    expect(c).toMatchObject({ kind: "cloudflare", blocking: true });
+  });
+
+  it("takes the interstitial's own orchestrate script for a block", () => {
+    const c = classifyChallenge({
+      url: "u",
+      title: "shop.test",
+      text: long,
+      scriptUrls: ["https://shop.test/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1?ray=8a1b"],
+      status: 200,
+    });
+    expect(c).toMatchObject({ kind: "cloudflare", blocking: true });
   });
 });

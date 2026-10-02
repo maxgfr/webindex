@@ -3,7 +3,7 @@
 // on a fake clock.
 
 import type { CdpHandler, CdpSession } from "./cdp.js";
-import { detectChallenge } from "./challenge.js";
+import { probeChallenge } from "./challenge.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
 
 export type WaitCondition =
@@ -157,11 +157,13 @@ function checker(page: CdpSession, cond: WaitCondition, now: () => number, net: 
       return now() - quietSince >= IDLE_MS;
     };
   }
-  // clear: no blocking challenge on two polls in a row
+  // clear: no blocking challenge on two polls in a row. A probe that could not
+  // run (a timeout, a page mid-navigation, a page error) says nothing: it breaks
+  // the streak, or a wall still up would end the human's turn.
   let streak = 0;
   return async () => {
-    const c = await detectChallenge({ page });
-    streak = c?.blocking ? 0 : streak + 1;
+    const probe = await probeChallenge({ page });
+    streak = probe.ok && !probe.challenge?.blocking ? streak + 1 : 0;
     return streak >= 2;
   };
 }

@@ -94,6 +94,9 @@ const datadome: Rule = (h) => {
   return out;
 };
 
+/** The interstitial's challenge flow: `/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1`, `…/orchestrate/jsch/v1`. */
+const CF_ORCHESTRATE = /\/cdn-cgi\/challenge-platform\/(?:h\/[a-z]\/)?orchestrate\//;
+
 const cloudflare: Rule = (h) => {
   const out: Evidence[] = [];
   const t = h.title.trim();
@@ -103,7 +106,19 @@ const cloudflare: Rule = (h) => {
   });
   add(out, selHas(h, "#challenge-form"), { signal: "#challenge-form", interstitial: true });
   add(out, urlHas(h, "cf-chl") || urlHas(h, "__cf_chl"), { signal: "cf-chl", interstitial: true });
-  add(out, urlHas(h, "/cdn-cgi/challenge-platform/") && !urlHas(h, "turnstile"), { signal: "/cdn-cgi/challenge-platform/", interstitial: true });
+  // The interstitial's own script runs an "orchestrate" flow; the rest of challenge-platform (the bot-management
+  // script, scripts/jsd) is loaded by ordinary pages of a protected site too, and Turnstile's frame is a widget.
+  const platform = h.urls.filter((u) => u.includes("/cdn-cgi/challenge-platform/") && !u.includes("turnstile"));
+  add(
+    out,
+    platform.some((u) => CF_ORCHESTRATE.test(u)),
+    { signal: "/cdn-cgi/challenge-platform/ orchestrate", interstitial: true },
+  );
+  add(
+    out,
+    platform.some((u) => !CF_ORCHESTRATE.test(u)),
+    { signal: "/cdn-cgi/challenge-platform/", weak: true },
+  );
   add(
     out,
     h.cookies.some((c) => c.startsWith("cf-chl") || c.startsWith("__cf_chl")),
@@ -270,7 +285,7 @@ const PROBE = `(() => {
     text: (document.body ? document.body.innerText : "").slice(0, 4096),
     scriptUrls: Array.from(document.scripts, (s) => s.src).filter(Boolean),
     iframeSrcs: Array.from(document.querySelectorAll("iframe"), (f) => f.src).filter(Boolean),
-    cookieNames: document.cookie.split(";").map((c) => c.split("=")[0].trim()).filter(Boolean),
+    cookieNames: (() => { try { return document.cookie.split(";").map((c) => c.split("=")[0].trim()).filter(Boolean); } catch (e) { return []; } })(),
     selectors: sel,
     status: nav && nav.responseStatus > 0 ? nav.responseStatus : undefined,
   };
@@ -290,8 +305,14 @@ function frameUrls(node: FrameNode | undefined, out: string[] = []): string[] {
 
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
 
-/** Look at the current page for a challenge. Never throws: a page that cannot be inspected reports none. */
-export async function detectChallenge(session: { page: CdpSession }): Promise<Challenge | null> {
+/** What one look at the page found; `ok: false` when the probe could not run (timed out, mid-navigation, a page error). */
+export type ChallengeProbe = { ok: true; challenge: Challenge | null } | { ok: false };
+
+/**
+ * Look at the current page for a challenge, telling a page without one from a
+ * probe that could not run: "unknown" is not "clear". Never throws.
+ */
+export async function probeChallenge(session: { page: CdpSession }): Promise<ChallengeProbe> {
   try {
     const r = await session.page.send<{ result?: { value?: unknown } }>(
       "Runtime.evaluate",
@@ -299,7 +320,7 @@ export async function detectChallenge(session: { page: CdpSession }): Promise<Ch
       { timeoutMs: PROBE_TIMEOUT_MS },
     );
     const v = r.result?.value;
-    if (typeof v !== "object" || v === null) return null;
+    if (typeof v !== "object" || v === null) return { ok: false };
     const p = v as Record<string, unknown>;
     let tree: string[] = [];
     try {
@@ -307,7 +328,7 @@ export async function detectChallenge(session: { page: CdpSession }): Promise<Ch
     } catch {
       /* the iframes the probe saw still count */
     }
-    return classifyChallenge({
+    const challenge = classifyChallenge({
       url: typeof p.url === "string" ? p.url : "",
       title: typeof p.title === "string" ? p.title : "",
       text: typeof p.text === "string" ? p.text : undefined,
@@ -317,7 +338,14 @@ export async function detectChallenge(session: { page: CdpSession }): Promise<Ch
       selectors: strings(p.selectors),
       status: typeof p.status === "number" ? p.status : undefined,
     });
+    return { ok: true, challenge };
   } catch {
-    return null;
+    return { ok: false };
   }
+}
+
+/** Look at the current page for a challenge. Never throws: a page that cannot be inspected reports none. */
+export async function detectChallenge(session: { page: CdpSession }): Promise<Challenge | null> {
+  const probe = await probeChallenge(session);
+  return probe.ok ? probe.challenge : null;
 }

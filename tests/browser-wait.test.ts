@@ -181,6 +181,24 @@ describe("waitFor { clear }", () => {
     expect(r.waitedMs).toBe(1250);
   });
 
+  it("never counts a probe that could not run as clear: it breaks the streak", async () => {
+    // A wall, then probes that time out, throw (mid-navigation) or hit a page error, then two real clears.
+    const polls: ("wall" | "throw" | "exception" | "clear")[] = ["wall", "throw", "exception", "clear", "throw", "clear", "clear"];
+    let i = 0;
+    const p = new FakePage();
+    p.handle("Runtime.evaluate", () => {
+      const step = polls[Math.min(i++, polls.length - 1)];
+      if (step === "throw") throw new Error("CDP command timed out: Runtime.evaluate (3000 ms)");
+      if (step === "exception") return { exceptionDetails: { text: "Uncaught", exception: { description: "SecurityError" } } };
+      return {
+        result: { value: { url: "u", title: step === "wall" ? "Just a moment..." : "Shop", text: "x".repeat(2000), status: step === "wall" ? 503 : 200 } },
+      };
+    });
+    const r = await waitFor({ page: p }, { clear: true }, { deps: fakeClock() });
+    expect(i).toBe(7);
+    expect(r.waitedMs).toBe(1500);
+  });
+
   it("counts a non blocking widget as clear", async () => {
     const p = new FakePage();
     p.handle("Runtime.evaluate", () => ({ result: { value: { url: "u", title: "Login", text: "x".repeat(2000), status: 200, selectors: [".g-recaptcha"] } } }));
