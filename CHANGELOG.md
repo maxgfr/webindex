@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.27.1](https://github.com/maxgfr/webindex/compare/v1.27.0...v1.27.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **browser:** click an <input type=submit> instead of refusing it ([05a9433](https://github.com/maxgfr/webindex/commit/05a94337e6697db6c20ee0b944700269670e2b34))
+* **browser:** cut a first snapshot line longer than --max-chars instead of dropping it ([fc63e87](https://github.com/maxgfr/webindex/commit/fc63e87dcbcff5102eb6f0b4dd7d9f32836d1e59))
+* **browser:** give Page.navigate and history moves the navigation's own timeout ([d29252f](https://github.com/maxgfr/webindex/commit/d29252f350e6d3277ca59469b07038d7a77a3e4c))
+* **browser:** hide only an editable node inside a text field, not any unnamed focusable one ([61a55f6](https://github.com/maxgfr/webindex/commit/61a55f6aaa4f7869f4f7359582f2e005536ce213))
+* **browser:** never take an author shadow tree's text for its host ([c0b1288](https://github.com/maxgfr/webindex/commit/c0b1288c3d7230c5d97102c2d0be2d16b8eacddd))
+* **browser:** no ref for the editor inside a text field ([b5103d0](https://github.com/maxgfr/webindex/commit/b5103d058ab3fca9257101a8a650dc5fbf4e13d7))
+* **browser:** open a page that is shown but still loading, with a note ([f61cc7f](https://github.com/maxgfr/webindex/commit/f61cc7f5b00749453e5bcf8d4b9e9308ff0f4c36))
+* **browser:** treat a committed navigation that has not loaded as opened, on every path ([b069cb4](https://github.com/maxgfr/webindex/commit/b069cb4ebe7268af2b6f4884172fc8eead018a7f))
+* **cache:** retry a thin cached read in the browser when the fallback is on ([d92eb16](https://github.com/maxgfr/webindex/commit/d92eb167890dc4f8d096444e08d819faeaa5b688))
+* **cache:** serve a read the browser could not better until its TTL ([97a2b76](https://github.com/maxgfr/webindex/commit/97a2b764d5e97750f8e402c994e1707dd6284afc))
+
 # [1.27.0](https://github.com/maxgfr/webindex/compare/v1.26.1...v1.27.0) (2026-10-02)
 
 
