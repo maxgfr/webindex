@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { envName } from "../src/brand.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
+import * as discovery from "../src/browser/discovery.js";
 import { type BrowserSession, browserStatus, closeBrowser, openBrowserSession, withPage } from "../src/browser/session.js";
 import { appendNetwork, readNetwork, readRefs, readSession, type Session, writeRefs, writeSession } from "../src/browser/state.js";
 import { profileDir } from "../src/browser/profile.js";
@@ -57,6 +58,30 @@ const ours = (over: Partial<Session> = {}): Session => ({
 const table = { loaderId: "L0", url: "about:blank", next: 2, refs: { e1: 5 } };
 
 describe("openBrowserSession", () => {
+  it("never dials a browser socket the loopback endpoint points elsewhere: the WebSocket hop is checked too", async () => {
+    let dialled = 0;
+    const deps: Partial<BrowserDeps> = {
+      discovery: { ...discovery, getVersion: async () => ({ webSocketDebuggerUrl: "ws://10.0.0.5:9222/devtools/browser/x" }) },
+      connectCdp: async () => {
+        dialled++;
+        throw new Error("dialled");
+      },
+    };
+    await expect(openBrowserSession({ cdp: fake.port, deps })).rejects.toThrow(/refusing non-loopback DevTools host "10\.0\.0\.5"/);
+    writeSession({
+      version: 1,
+      port: fake.port,
+      launchedByUs: true,
+      wsBrowserUrl: "ws://10.0.0.5:9222/devtools/browser/x",
+      profile: "default",
+      headless: false,
+      targetId: "T1",
+      updatedAt: 1,
+    });
+    await closeBrowser({ deps }).catch(() => {});
+    expect(dialled).toBe(0);
+  });
+
   it("attaches to the first page in flat mode, enables the page domains and persists the session", async () => {
     fake.addTarget("https://a.test/", "A");
     fake.addTarget("https://x.test/sw.js", "sw", "service_worker");

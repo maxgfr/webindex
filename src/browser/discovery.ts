@@ -35,6 +35,23 @@ export function assertLoopback(host: string): string {
   return bare;
 }
 
+/**
+ * A browser socket URL a DevTools endpoint handed back (/json/version, /json/new),
+ * refused unless it is ws:// on loopback too: the HTTP hop being local says
+ * nothing of where its answer points. Returned as given.
+ */
+export function loopbackSocketUrl(wsUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(wsUrl);
+  } catch {
+    throw new Error(`invalid DevTools WebSocket URL "${wsUrl}"`);
+  }
+  if (url.protocol !== "ws:") throw new Error(`refusing DevTools WebSocket URL "${wsUrl}": only ws:// on loopback is dialled`);
+  assertLoopback(url.hostname);
+  return wsUrl;
+}
+
 /** Accepts `9222`, `127.0.0.1:9222`, `http://localhost:9222`, `ws://[::1]:9222/devtools/browser/x`. */
 export function parseCdpEndpoint(input: string): CdpEndpoint {
   const text = input.trim();

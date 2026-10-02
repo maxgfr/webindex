@@ -9,6 +9,7 @@ import {
   isPortAlive,
   listPages,
   listTargets,
+  loopbackSocketUrl,
   newTarget,
   parseCdpEndpoint,
 } from "../src/browser/discovery.js";
@@ -174,5 +175,16 @@ describe("loopback parsing", () => {
     expect(assertLoopback("[::1]")).toBe("::1");
     expect(assertLoopback("localhost")).toBe("localhost");
     expect(() => assertLoopback("0.0.0.0")).toThrow(/non-loopback/);
+  });
+});
+
+describe("loopbackSocketUrl", () => {
+  it("passes a ws:// URL on loopback, and refuses any other host or scheme", () => {
+    for (const ok of ["ws://127.0.0.1:9222/devtools/browser/a", "ws://[::1]:9222/devtools/page/b", "ws://localhost:9222/devtools/browser/c"])
+      expect(loopbackSocketUrl(ok)).toBe(ok);
+    expect(() => loopbackSocketUrl("ws://10.0.0.5:9222/devtools/browser/x")).toThrow(/non-loopback/);
+    expect(() => loopbackSocketUrl("ws://evil.test:9222/devtools/browser/x")).toThrow(/non-loopback/);
+    expect(() => loopbackSocketUrl("wss://127.0.0.1:9222/devtools/browser/x")).toThrow(/ws:\/\//);
+    expect(() => loopbackSocketUrl("not a url")).toThrow(/invalid/);
   });
 });

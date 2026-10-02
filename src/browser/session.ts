@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { brand } from "../brand.js";
 import { CdpError, type CdpClient, type CdpHandler, type CdpSession } from "./cdp.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
-import type { TargetInfo } from "./discovery.js";
+import { loopbackSocketUrl, type TargetInfo } from "./discovery.js";
 import { type Endpoint, isSameBrowser, type LaunchOptions, readActivePort, resolveEndpoint } from "./launch.js";
 import { profileDir } from "./profile.js";
 import { clearNetwork, clearRefs, clearSession, readSession, withBrowserLock, writeSession } from "./state.js";
@@ -613,7 +613,7 @@ export async function openBrowserSession(opts: OpenOptions = {}): Promise<Browse
   const saved = readSession();
   const same = saved !== null && saved.port === endpoint.port && (saved.host ?? "127.0.0.1") === endpoint.host ? saved : null;
   const { webSocketDebuggerUrl } = await deps.discovery.getVersion(endpoint.port, endpoint.host);
-  const cdp = await deps.connectCdp(webSocketDebuggerUrl);
+  const cdp = await deps.connectCdp(loopbackSocketUrl(webSocketDebuggerUrl));
   let created: string | undefined;
   try {
     const pages = await deps.discovery.listPages(endpoint.port, endpoint.host);
@@ -677,7 +677,7 @@ export async function browserStatus(opts: { deps?: Partial<BrowserDeps> } = {}):
 
 /** Connect to the browser-level socket on `port` and ask it to quit (SIGTERM to `pid` if it refuses). */
 async function closeAt(deps: BrowserDeps, port: number, host: string, pid: number | undefined): Promise<void> {
-  const cdp = await deps.connectCdp((await deps.discovery.getVersion(port, host)).webSocketDebuggerUrl);
+  const cdp = await deps.connectCdp(loopbackSocketUrl((await deps.discovery.getVersion(port, host)).webSocketDebuggerUrl));
   try {
     await closeLaunched(cdp, pid, deps);
   } finally {
