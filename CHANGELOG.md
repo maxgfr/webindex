@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.29.3](https://github.com/maxgfr/webindex/compare/v1.29.2...v1.29.3) (2026-10-02)
+
+
+### Bug Fixes
+
+* **extract:** prefer the prose under the <h1> over rows of link cards ([f75e6cd](https://github.com/maxgfr/webindex/commit/f75e6cdba10fbe3036c67d73806ce27a0ddc153a))
+
 ## [1.29.2](https://github.com/maxgfr/webindex/compare/v1.29.1...v1.29.2) (2026-10-02)
 
 
