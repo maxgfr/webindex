@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assessRisk, COLLECT_SOURCE, FOCUS_SOURCE, guardAction, RiskRefusedError, riskContext } from "../src/browser/risk.js";
+import { assessDialog, assessRisk, COLLECT_SOURCE, FOCUS_SOURCE, guardAction, RiskRefusedError, riskContext } from "../src/browser/risk.js";
 import { FakePage } from "./helpers/fake-page.js";
 
 const run = (src: string, self: unknown, args: unknown[]): unknown => new Function(`return (${src});`)().apply(self, args);
@@ -420,5 +420,14 @@ describe("frames and shadow roots", () => {
     const inner = await guardAction(same, { backendNodeId: 3, action: "click" }).catch((e) => e);
     expect(inner).toBeInstanceOf(RiskRefusedError);
     expect(inner.message).toMatch(/click the element inside it/);
+  });
+});
+
+describe("assessDialog", () => {
+  it("finds the irreversible word in a confirm or a prompt, never in an alert", () => {
+    expect(assessDialog("confirm", "Supprimer définitivement ?")).toEqual({ risky: true, reason: 'it looks irreversible (matches "supprimer")' });
+    expect(assessDialog("prompt", "Type DELETE to remove your account").risky).toBe(true);
+    expect(assessDialog("confirm", "Go on?").risky).toBe(false);
+    expect(assessDialog("alert", "Your order was deleted").risky).toBe(false);
   });
 });

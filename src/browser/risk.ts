@@ -131,6 +131,18 @@ export function assessRisk(ctx: RiskContext): Risk {
   return { risky: false };
 }
 
+/**
+ * Would accepting this JavaScript dialog do something that cannot be taken
+ * back? A `confirm("Supprimer définitivement ?")` is the clearest sign a page
+ * gives, often behind an icon-only button the click guard could not read. An
+ * alert has nothing to accept; dismissing is never risky.
+ */
+export function assessDialog(type: string, message: string): Risk {
+  if (type === "alert") return { risky: false };
+  const word = matchLabel(message);
+  return word ? { risky: true, reason: `it looks irreversible (matches "${word}")` } : { risky: false };
+}
+
 // --- collector ---------------------------------------------------------------
 
 /** What riskContext reports about the target element. */

@@ -319,6 +319,36 @@ describe("dialogs", () => {
     expect((await h.call("webindex_browser_status", { show: "tabs" })).text).not.toContain("dialog");
   });
 
+  it("refuses to accept a confirm that looks irreversible unless confirmed; dismissing never needs it", async () => {
+    const h = await host();
+    await h.call("webindex_browser_snapshot", { mode: "full" });
+    world.dialogOnClick = { type: "confirm", message: "Supprimer définitivement cette annonce ?" };
+    await h.call("webindex_browser_click", { ref: "e1" });
+    fake.handle("Page.handleJavaScriptDialog", () => ({}));
+    const before = sent("Page.handleJavaScriptDialog").length;
+    const err = await h.call("webindex_browser_dialog", { action: "accept" }).catch((e) => e);
+    expect(err).toBeInstanceOf(ToolError);
+    expect(err.message).toMatch(/refused to accept the confirm dialog "Supprimer définitivement cette annonce \?".*matches "supprim/);
+    expect(err.message).toMatch(/ask the user, then retry with confirm: true/);
+    expect(sent("Page.handleJavaScriptDialog")).toHaveLength(before);
+    await h.call("webindex_browser_dialog", { action: "accept", confirm: true });
+    expect(sent("Page.handleJavaScriptDialog").at(-1)?.params).toEqual({ accept: true });
+
+    world.dialogOnClick = { type: "confirm", message: "Delete this item?" };
+    await h.call("webindex_browser_click", { ref: "e1" });
+    await h.call("webindex_browser_dialog", { action: "dismiss" });
+    expect(sent("Page.handleJavaScriptDialog").at(-1)?.params).toEqual({ accept: false });
+
+    // A harmless question is accepted as before.
+    world.dialogOnClick = { type: "confirm", message: "Go on?" };
+    await h.call("webindex_browser_click", { ref: "e1" });
+    await h.call("webindex_browser_dialog", { action: "accept" });
+    expect(sent("Page.handleJavaScriptDialog").at(-1)?.params).toEqual({ accept: true });
+    const decl = browserToolDecls().find((t) => t.name === "webindex_browser_dialog")!;
+    expect(decl.inputSchema.properties.confirm).toBeDefined();
+    expect(decl.description).toMatch(/confirm: true/);
+  });
+
   it("forgets a dialog the browser says is not showing", async () => {
     const h = await host();
     await h.call("webindex_browser_snapshot", { mode: "full" });

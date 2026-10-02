@@ -29,6 +29,7 @@ import type { CdpHandler, CdpSession } from "./cdp.js";
 import { type BrowserCliDeps, type BrowserCliFlags, type BrowserFollowUps, dialogLine, runBrowserCommand, statusText } from "./cli.js";
 import { browserDeps } from "./deps.js";
 import { NetworkRecorder } from "./network.js";
+import { assessDialog } from "./risk.js";
 import { type BrowserSession, browserStatus, openBrowserSession } from "./session.js";
 import { withBrowserLock } from "./state.js";
 
@@ -281,10 +282,13 @@ export function browserToolDecls(): ToolDecl[] {
       "Answer a JavaScript dialog",
       COMMITS,
       "Answer the JavaScript dialog the page shows (alert, confirm, prompt, beforeunload): accept, with promptText for a prompt, or dismiss. While one " +
-        `is open the page is frozen: every result says so, and the tools that read or act on the page are refused until it is answered.${RETURNS}`,
+        "is open the page is frozen: every result says so, and the tools that read or act on the page are refused until it is answered. " +
+        "Accepting a dialog whose message looks irreversible (delete, pay, send…) is refused unless confirm: true, which you set only after " +
+        `asking the user; dismissing never needs it.${RETURNS}`,
       {
         action: { type: "string", enum: ["accept", "dismiss"], description: "How to answer." },
         promptText: { type: "string", description: "The answer typed into a prompt, with accept." },
+        confirm: CONFIRM,
         ...AFTER,
       },
       ["action"],
@@ -599,6 +603,13 @@ class Host implements BrowserToolHost {
     dialog: async (a) => {
       const answer = oneOf(a, "action", ["accept", "dismiss"] as const);
       const prompt = answer === "accept" && typeof a.promptText === "string" ? [a.promptText] : [];
+      // The guard that refuses the click also refuses the "Yes, delete" it leads to.
+      const risk = answer === "accept" && a.confirm !== true && this.dialog ? assessDialog(this.dialog.type, this.dialog.message) : undefined;
+      if (risk?.risky && this.dialog) {
+        throw new ToolError(
+          `refused to accept the ${this.dialog.type} dialog ${JSON.stringify(this.dialog.message)}: ${risk.reason}; ask the user, then retry with confirm: true (or dismiss it)`,
+        );
+      }
       try {
         const out = await this.cli("dialog", [answer, ...prompt], after(a));
         this.dialog = undefined;
