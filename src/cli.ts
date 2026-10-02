@@ -154,7 +154,7 @@ USAGE
   webindex video     frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]
   webindex video     list <playlist|channel> [--limit <n>] [--out <dir>] [--refresh] [--json]
   webindex browser   open <url> [--new-tab] [--headless] [--profile <n>] [--cdp <port|url>]
-                     [--capture] [--snapshot]
+                     [--capture] [--snapshot] [--timeout <ms>]
   webindex browser   attach <port|url> | status | close [--all]
   webindex browser   snapshot [<ref>] [--interactive] [--max-chars <n>]
   webindex browser   click|hover <ref> [--confirm] | type <ref> <text> [--submit]

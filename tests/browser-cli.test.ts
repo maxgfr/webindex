@@ -228,6 +228,21 @@ describe("open", () => {
     expect(j.json).toMatchObject({ snapshot: { refCount: 5, truncated: false } });
   });
 
+  it("succeeds with a note when the page is shown but its load does not come within --timeout", async () => {
+    const script = scriptBrowser(fake, { lifecycle: "dcl" });
+    await cli("attach", [String(fake.port)]);
+    const r = await cli("open", ["https://slow.test/"], { timeout: 50, json: true });
+    expect(r.exitCode).toBe(0);
+    const note = "still loading after 50 ms: the page is shown (DOMContentLoaded) but has not fired load";
+    expect(r.json).toMatchObject({ ok: true, url: "https://slow.test/", note });
+    expect(r.text.split("\n")).toContain(`note: ${note}`);
+    // A page that never even reached DOMContentLoaded still fails.
+    script.options.lifecycle = "never";
+    const never = await cli("open", ["https://slower.test/"], { timeout: 50 });
+    expect(never.exitCode).toBe(1);
+    expect(never.text).toMatch(/did not reach load within 50 ms/);
+  });
+
   it("fails with exit 1 when the navigation fails", async () => {
     await cli("attach", [String(fake.port)]);
     const r = await cli("open", ["https://unreachable.test/"]);

@@ -62,6 +62,8 @@ export interface NavigationResult {
   loaderId: string;
   /** The HTTP status of the document, when the page exposes it. */
   status?: number;
+  /** The page is shown but did not finish loading in time (see navigate). */
+  note?: string;
 }
 
 export interface BrowserTab {
@@ -104,6 +106,9 @@ interface NavEvent {
 }
 
 const LIFECYCLE: Record<Exclude<WaitUntil, "none">, string> = { load: "load", domcontentloaded: "DOMContentLoaded" };
+
+/** The event waited for did not come in time; any other failure (a cancelled navigation, a closed connection) is not this. */
+class NavigationTimeoutError extends Error {}
 
 // --- tab ids -----------------------------------------------------------------
 
@@ -389,11 +394,13 @@ export class BrowserSession {
         for (const [method, h] of handlers) page.off(method, h);
         offClose();
       },
+      /** Whether such an event has come, whatever was waited for. */
+      saw: (match: (e: NavEvent) => boolean): boolean => seen.some(match),
       until: (match: (e: NavEvent) => boolean, timeoutMs: number, what: string, cancelledWhat: string) =>
         new Promise<NavEvent>((resolve, reject) => {
           const timer = setTimeout(() => {
             wake = undefined;
-            reject(new Error(`${what} within ${timeoutMs} ms`));
+            reject(new NavigationTimeoutError(`${what} within ${timeoutMs} ms`));
           }, timeoutMs);
           wake = () => {
             const hit = seen.find(match);
@@ -413,7 +420,10 @@ export class BrowserSession {
    * Load `url` in the current tab and wait for the new document's `load` (or
    * `DOMContentLoaded`, or nothing). The tab's refs are cleared: they named
    * nodes of the document that is going away. A navigation the browser refuses
-   * (`errorText`: DNS failure, refused connection…) rejects.
+   * (`errorText`: DNS failure, refused connection…) rejects, and so does one
+   * that did not even reach DOMContentLoaded in time. One that did, but whose
+   * `load` has not come (a cold server, a script that never finishes), is the
+   * page: it is shown, and a snapshot works. It resolves, with a `note`.
    */
   async navigate(url: string, opts: NavigateOptions = {}): Promise<NavigationResult> {
     const waitUntil = opts.waitUntil ?? "load";
@@ -430,12 +440,13 @@ export class BrowserSession {
       clearRefs(this.targetId);
       if (waitUntil === "none") return { url, loaderId: r.loaderId };
       const name = LIFECYCLE[waitUntil];
-      await nav.until(
-        (e) => e.kind === "lifecycle" && e.name === name && e.loaderId === r.loaderId,
-        timeoutMs,
-        `navigation to ${url} did not reach ${name}`,
-        `navigation to ${url}`,
-      );
+      const reached = (event: string) => (e: NavEvent) => e.kind === "lifecycle" && e.name === event && e.loaderId === r.loaderId;
+      try {
+        await nav.until(reached(name), timeoutMs, `navigation to ${url} did not reach ${name}`, `navigation to ${url}`);
+      } catch (e) {
+        if (!(e instanceof NavigationTimeoutError) || !nav.saw(reached(LIFECYCLE.domcontentloaded))) throw e;
+        return { ...(await this.loaded()), note: `still loading after ${timeoutMs} ms: the page is shown (DOMContentLoaded) but has not fired load` };
+      }
       return await this.loaded();
     } finally {
       nav.stop();

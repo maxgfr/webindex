@@ -21,7 +21,10 @@ Use plain `fetch` everywhere else: it is faster and needs no browser.
 ## The loop
 
 1. `webindex browser open <url> --snapshot` loads the page, launching the browser
-   on first use, and prints the tree.
+   on first use, and prints the tree. A page that is shown (DOMContentLoaded)
+   but whose `load` has not come within 30 s (`--timeout <ms>`: a cold server, a
+   script that never finishes) is opened all the same, with
+   `note: still loading after … ms`; one that never got that far fails.
 2. Read the snapshot. Each element you can act on carries a ref: `button "Search" [ref=e12]`.
 3. Act on one ref: `click e12`, `fill e7 "text"`, `select e9 Beta`, `upload e11 cv.pdf`,
    `press Escape`. Add `--snapshot` to get the new tree in the same call.

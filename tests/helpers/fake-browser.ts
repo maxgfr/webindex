@@ -11,8 +11,12 @@ export interface FakePage {
 }
 
 export interface ScriptOptions {
-  /** When the lifecycle events of a navigation are sent: before the command's answer (a race), after it, or never. */
-  lifecycle?: "before" | "after" | "never";
+  /**
+   * When the lifecycle events of a navigation are sent: before the command's
+   * answer (a race), after it, or never; `dcl` sends them after it but stops at
+   * DOMContentLoaded, as a page whose load never comes (a cold server, a hung script).
+   */
+  lifecycle?: "before" | "after" | "never" | "dcl";
   /** The value `performance…responseStatus` evaluates to. */
   status?: number;
 }
@@ -37,8 +41,8 @@ export function scriptBrowser(fake: FakeCdp, opts: ScriptOptions = {}) {
     if (!id) throw { code: -32001, message: `Session with given id not found: ${sessionId}` };
     return id;
   };
-  const events = (frameId: string, loaderId: string, sessionId: string) => {
-    for (const name of ["init", "DOMContentLoaded", "load"]) fake.emit("Page.lifecycleEvent", { frameId, loaderId, name, timestamp: 1 }, sessionId);
+  const events = (frameId: string, loaderId: string, sessionId: string, names = ["init", "DOMContentLoaded", "load"]) => {
+    for (const name of names) fake.emit("Page.lifecycleEvent", { frameId, loaderId, name, timestamp: 1 }, sessionId);
   };
   /** A new document commits in the target behind `sessionId`. */
   const commit = (sessionId: string, url: string): { frameId: string; loaderId: string } => {
@@ -52,6 +56,7 @@ export function scriptBrowser(fake: FakeCdp, opts: ScriptOptions = {}) {
     const mode = opts.lifecycle ?? "after";
     if (mode === "before") events(id, loaderId, sessionId);
     else if (mode === "after") setTimeout(() => events(id, loaderId, sessionId), 5);
+    else if (mode === "dcl") setTimeout(() => events(id, loaderId, sessionId, ["init", "commit", "DOMContentLoaded"]), 5);
     return { frameId: id, loaderId };
   };
 

@@ -313,6 +313,38 @@ describe("navigation", () => {
     await expect(s.navigate("https://slow.test/", { timeoutMs: 50 })).rejects.toThrow(/did not reach load within 50 ms/);
   });
 
+  it("returns with a note when the page committed and reached DOMContentLoaded but not load in time", async () => {
+    // A cold Heroku dyno: the page is there (the next snapshot works), its load just has not come yet.
+    fake.addTarget();
+    script.options.lifecycle = "dcl";
+    const s = await attach();
+    writeRefs(s.targetId, table);
+    const r = await s.navigate("https://slow.test/", { timeoutMs: 50 });
+    expect(r).toEqual({
+      url: "https://slow.test/",
+      loaderId: "L2",
+      status: 200,
+      note: "still loading after 50 ms: the page is shown (DOMContentLoaded) but has not fired load",
+    });
+    expect(readRefs(s.targetId)).toBeNull();
+    // Waiting for DOMContentLoaded itself is met, with no note.
+    expect(await s.navigate("https://dcl.test/", { waitUntil: "domcontentloaded", timeoutMs: 50 })).not.toHaveProperty("note");
+  });
+
+  it("still fails a navigation that never reached DOMContentLoaded, or whose DOMContentLoaded was another document's", async () => {
+    fake.addTarget();
+    script.options.lifecycle = "never";
+    const s = await attach();
+    await expect(s.navigate("https://slow.test/", { timeoutMs: 50 })).rejects.toThrow(/did not reach load within 50 ms/);
+    const nav = fake.handlerOf("Page.navigate");
+    fake.handle("Page.navigate", (p, sessionId) => {
+      const r = nav?.(p, sessionId) as { frameId: string };
+      fake.emit("Page.lifecycleEvent", { frameId: r.frameId, loaderId: "L-old", name: "DOMContentLoaded", timestamp: 1 }, sessionId);
+      return r;
+    });
+    await expect(s.navigate("https://other.test/", { timeoutMs: 50 })).rejects.toThrow(/did not reach load within 50 ms/);
+  });
+
   it("returns at once on a same-document navigation and keeps the refs", async () => {
     fake.addTarget("https://h.test/");
     script.options.lifecycle = "never";
