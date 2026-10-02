@@ -171,7 +171,7 @@ everything.
   not guarded. Ask first when one of those would send or commit something.
 - **The human logs in and solves challenges** in the visible window. When
   `open` reports `challenge: cloudflare (blocking)` it exits 3 (so does `back`,
-  `forward`, `reload`, a `click`, `press` or `type --submit` that lands on one),
+  `forward`, `reload`, a `click`, `press`, `type --submit` or `tabs new <url>` that lands on one),
   with the result printed as on success and `challenge` in its JSON. Tell the
   user, then run `wait --clear`, which waits up to 5 minutes for the wall to go
   and holds the browser all that time. **Unattended** (no one at the window, a
@@ -193,10 +193,10 @@ everything.
 | 0 | done |
 | 1 | ran and failed: a stale ref, a timeout, a guard refusal, a selector that matches nothing, a page error |
 | 2 | the invocation was wrong: a missing argument, an unknown flag, a CSS selector where a ref goes |
-| 3 | done, and a human is needed: a navigation (`open`, `back`, `forward`, `reload`, a `click`, `press`, `type --submit`) ended on a blocking challenge |
+| 3 | done, and a human is needed: a navigation (`open`, `back`, `forward`, `reload`, a `click`, `press`, `type --submit`, `tabs new <url>`) ended on a blocking challenge |
 
-Over MCP there are no exit codes: the same result is no error, and its line
-after the first says `challenge: … (blocking)`.
+Over MCP there are no exit codes: the same result is no error, and a
+`challenge: … (blocking)` line follows the result line.
 
 ## Profiles and the launch policy
 

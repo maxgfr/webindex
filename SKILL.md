@@ -108,7 +108,7 @@ Exit codes:
 | 0 | The command did what was asked. |
 | 1 | It ran and the answer is a failure: nothing found, a page unreadable, robots.txt saying no, a gate refusing, a stale ref. |
 | 2 | The invocation itself was wrong: an unknown command or flag, a missing or out-of-range value, a stray argument. |
-| 3 | `browser` only: done, but a human is needed. `open`, `back`, `forward`, `reload`, a `click`, `press` or `type --submit` landed on a blocking challenge (captcha, bot check). The result is printed as on success, `challenge` in its JSON. |
+| 3 | `browser` only: done, but a human is needed. `open`, `back`, `forward`, `reload`, a `click`, `press`, `type --submit` or `tabs new <url>` landed on a blocking challenge (captcha, bot check). The result is printed as on success, `challenge` in its JSON. |
 
 ## What it will and will not do
 
