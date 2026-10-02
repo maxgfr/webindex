@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { CONSENT_SELECTORS, findOverlays, OVERLAY_ROOT_SOURCE, OVERLAYS_SOURCE, overlayRootOf, READ_DOCUMENT } from "../src/browser/overlay.js";
+import {
+  CONSENT_SELECTORS,
+  findOverlays,
+  OVERLAY_INFO_SOURCE,
+  OVERLAY_ROOT_SOURCE,
+  OVERLAYS_SOURCE,
+  overlayRootOf,
+  READ_DOCUMENT,
+} from "../src/browser/overlay.js";
 import { FakePage } from "./helpers/fake-page.js";
 
 // The overlay probe runs in the page. Here it runs against a tiny stand-in DOM:
@@ -42,6 +50,10 @@ class El {
   ) {}
   getAttribute(n: string): string | null {
     return this.attrs[n] ?? null;
+  }
+  /** Only `#id` selectors, in a list: enough for the consent vendors' ids. */
+  matches(sel: string): boolean {
+    return sel.split(",").some((s) => s.trim() === `#${this.attrs.id ?? "\u0000"}`);
   }
   querySelectorAll(sel: string): El[] {
     if (sel !== "*") throw new Error(`unexpected selector ${sel}`);
@@ -134,9 +146,13 @@ describe("the in-page overlay probe", () => {
     expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([wall]);
   });
 
-  it("counts an element whose ancestor (up to the body's child) is fixed or sticky", () => {
+  it("counts an element whose ancestor (up to the body's child) is fixed, never one only sticky", () => {
     const { doc, body } = page();
-    const shell = el("DIV", { style: { position: "sticky" }, rect: { left: 0, top: 0, width: 0, height: 0 } });
+    const sticky = el("DIV", { style: { position: "sticky" }, rect: { left: 0, top: 0, width: VW, height: VH } });
+    body.add(sticky);
+    doc.top = sticky;
+    expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([]);
+    const shell = el("DIV", { style: { position: "fixed" }, rect: { left: 0, top: 0, width: 0, height: 0 } });
     const panel = el("DIV", { rect: { left: 0, top: 300, width: VW, height: 500 } });
     shell.add(panel);
     body.add(shell);
@@ -148,7 +164,7 @@ describe("the in-page overlay probe", () => {
     const { doc, body } = page();
     const under = el("DIV", { style: { position: "fixed" }, rect: FULL });
     const small = el("DIV", { style: { position: "fixed" }, rect: { left: 0, top: 700, width: VW, height: 100 } });
-    const sidebar = el("NAV", { style: { position: "sticky" }, rect: { left: 0, top: 0, width: 300, height: VH } });
+    const sidebar = el("NAV", { style: { position: "fixed" }, rect: { left: 0, top: 0, width: 300, height: VH } });
     const app = el("DIV", { style: { position: "fixed" }, rect: FULL });
     app.add(el("MAIN"));
     const other = el("DIV");
@@ -195,6 +211,67 @@ describe("the in-page overlay probe", () => {
     expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([banner]);
   });
 
+  it("does not take a fixed half-screen column for an overlay: over the middle means strictly across it", () => {
+    const { doc, body } = page();
+    const column = el("DIV", { style: { position: "fixed" }, rect: { left: 0, top: 0, width: VW / 2, height: VH } });
+    body.add(column);
+    doc.top = column;
+    expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([]);
+  });
+
+  it("skips what is inside a layer it rejected as the page itself", () => {
+    const { doc, body } = page();
+    const app = el("DIV", { style: { position: "fixed" }, rect: FULL, text: "x".repeat(1000) });
+    const feed = el("DIV", { rect: { left: 350, top: 0, width: 650, height: VH }, text: "x".repeat(550) });
+    app.add(el("NAV", { rect: { left: 0, top: 0, width: 350, height: VH }, text: "x".repeat(450) }), feed);
+    body.add(app);
+    (body as El).textContent = "x".repeat(1000);
+    doc.top = feed;
+    expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([]);
+    // A dialog inside it still counts.
+    const modal = el("DIV", { attrs: { role: "dialog" }, rect: { left: 300, top: 200, width: 400, height: 300 } });
+    feed.add(modal);
+    expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([modal]);
+  });
+
+  it("takes no hidden dialog: under an ancestor at opacity 0, aria-hidden or inert, or off the screen", () => {
+    const { doc, body } = page();
+    const faded = el("DIV", { style: { opacity: "0", position: "fixed" }, rect: FULL });
+    faded.add(el("DIV", { attrs: { role: "dialog" } }));
+    const muted = el("DIV", { attrs: { "aria-hidden": "true" } });
+    muted.add(el("DIV", { attrs: { role: "dialog" } }));
+    const inert = el("DIV", { attrs: { inert: "" } });
+    inert.add(el("DIV", { attrs: { role: "dialog" } }));
+    const drawer = el("DIV", {
+      attrs: { role: "dialog", "aria-modal": "true" },
+      style: { position: "fixed" },
+      rect: { left: VW, top: 0, width: 300, height: VH },
+    });
+    body.add(faded, muted, inert, drawer);
+    doc.top = null;
+    expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([]);
+  });
+
+  it("looks past a presentational root (not in the accessibility tree) to the dialog inside it", () => {
+    const { doc, body } = page();
+    const root = el("DIV", { attrs: { role: "presentation" }, style: { position: "fixed" }, rect: FULL });
+    const backdrop = el("DIV", { attrs: { "aria-hidden": "true" }, style: { position: "fixed" }, rect: FULL });
+    const dialog = el("DIV", { attrs: { role: "dialog" }, rect: { left: 300, top: 240, width: 400, height: 240 } });
+    root.add(backdrop, dialog);
+    body.add(root);
+    doc.top = dialog;
+    expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([dialog]);
+  });
+
+  it("takes a consent vendor's visible container for an overlay whatever its size", () => {
+    const { doc, body } = page();
+    const bar = el("DIV", { attrs: { id: "onetrust-banner-sdk" }, style: { position: "fixed" }, rect: { left: 0, top: 680, width: VW, height: 120 } });
+    const gone = el("DIV", { attrs: { id: "CybotCookiebotDialog" }, style: { display: "none" } });
+    body.add(el("P"), bar, gone);
+    doc.top = null;
+    expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([bar]);
+  });
+
   it("finds nothing without a body or a viewport, and at most five overlays", () => {
     expect(inPage(OVERLAYS_SOURCE, { body: null })).toEqual([]);
     const { doc, body } = page();
@@ -239,6 +316,30 @@ describe("the in-page overlay root of a node", () => {
     body.add(host);
     doc.top = null;
     expect(inPage(OVERLAY_ROOT_SOURCE, doc, btn)).toBe(host);
+  });
+});
+
+describe("what the overlay root is", () => {
+  const info = (doc: unknown, self: El) => inPage(OVERLAY_INFO_SOURCE, doc, self);
+
+  it("is an overlay when the probe finds it, when it is a dialog, or a consent vendor's", () => {
+    const { doc, body } = page();
+    const wall = el("DIV", { style: { position: "fixed" }, rect: FULL, text: "Cookies" });
+    const dialog = el("DIV", { attrs: { role: "dialog" }, rect: { width: 0, height: 0 } });
+    const vendor = el("DIV", { attrs: { id: "usercentrics-root" }, rect: { width: 0, height: 0 } });
+    body.add(wall, dialog, vendor);
+    doc.top = wall;
+    expect(info(doc, wall)).toEqual({ what: '<div> "Cookies"', overlay: true });
+    expect(info(doc, dialog).overlay).toBe(true);
+    expect(info(doc, vendor).overlay).toBe(true);
+  });
+
+  it("is no overlay when it is only a fixed bar, a sticky header or a chat bubble", () => {
+    const { doc, body } = page();
+    const header = el("HEADER", { style: { position: "sticky" }, rect: { left: 0, top: 0, width: VW, height: 80 }, text: "Shop" });
+    body.add(header);
+    doc.top = header;
+    expect(info(doc, header)).toEqual({ what: '<header> "Shop"', overlay: false });
   });
 });
 
@@ -291,10 +392,11 @@ describe("overlayRootOf", () => {
         expect(functionDeclaration).toBe(OVERLAY_ROOT_SOURCE);
         return { result: { type: "object", subtype: "node", objectId: "root" } };
       }
-      return { result: { type: "string", value: '<div#cmp role="dialog"> "We use cookies"' } };
+      expect(functionDeclaration).toBe(OVERLAY_INFO_SOURCE);
+      return { result: { type: "object", value: { what: '<div#cmp role="dialog"> "We use cookies"', overlay: true } } };
     });
     p.handle("DOM.describeNode", ({ objectId }) => ({ node: { backendNodeId: objectId === "root" ? 77 : 0 } }));
-    expect(await overlayRootOf(p, "hit")).toEqual({ backendNodeId: 77, what: '<div#cmp role="dialog"> "We use cookies"' });
+    expect(await overlayRootOf(p, "hit")).toEqual({ backendNodeId: 77, what: '<div#cmp role="dialog"> "We use cookies"', overlay: true });
     expect(p.methods().at(-1)).toBe("Runtime.releaseObjectGroup");
   });
 
@@ -316,6 +418,8 @@ describe("the consent-free document", () => {
       "#onetrust-consent-sdk",
       "#onetrust-banner-sdk",
       "#didomi-host",
+      'div[class^="didomi-"]',
+      'div[class^="truste_"]',
       '[id^="sp_message_container"]',
       ".qc-cmp2-container",
       "#CybotCookiebotDialog",
@@ -327,10 +431,17 @@ describe("the consent-free document", () => {
     }
   });
 
-  it("reads a copy of the document with the overlays, dialogs and vendor containers dropped, and unmarks the live page", () => {
-    expect(READ_DOCUMENT).toContain("cloneNode(true)");
+  it("never names <body> or <html> by a class prefix (a scroll lock such as didomi-popup-open)", () => {
+    for (const s of CONSENT_SELECTORS) expect(s, s).not.toMatch(/^\[class/);
+  });
+
+  it("reads an inert copy of the document (parsed, never cloned in the live page) with the overlays, dialogs and vendor containers dropped, and unmarks the live page", () => {
+    expect(READ_DOCUMENT).not.toContain("cloneNode");
+    expect(READ_DOCUMENT).toContain("new DOMParser()");
     expect(READ_DOCUMENT).toContain("outerHTML");
-    expect(READ_DOCUMENT).toContain("removeAttribute");
+    expect(READ_DOCUMENT).toMatch(/finally \{[^}]*removeAttribute/);
+    // body and html are never dropped, whatever matches them.
+    expect(READ_DOCUMENT).toMatch(/el === parsed\.body \|\| el === parsed\.documentElement/);
     expect(READ_DOCUMENT).toContain(OVERLAYS_SOURCE);
     for (const s of CONSENT_SELECTORS) expect(READ_DOCUMENT).toContain(JSON.stringify(s));
   });

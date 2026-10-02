@@ -6,12 +6,9 @@
 // lands on one (which lists the overlay's controls instead of only naming it),
 // and the browser read (which drops them from the copy it reads).
 //
-// An overlay is a visible element that is a dialog (role dialog or alertdialog,
-// aria-modal, an open <dialog>), or that is fixed or sticky (itself or an
-// ancestor) and covers at least 30% of the viewport, wide or over its middle,
-// with nothing else on top at its centre. A layer that holds the page's main
-// landmark or most of its text is the page itself (an app shell), not
-// something over it. Only the outermost of nested overlays counts.
+// What an overlay is, exactly, is said where OVERLAYS_SOURCE is defined: a
+// shown dialog or consent vendor's container, or a fixed layer over a large part
+// of the screen that is not the page itself. Only the outermost counts.
 //
 // Nothing here is specific to a site: the consent vendors' containers are
 // listed the way challenge.ts lists the challenge vendors.
@@ -27,7 +24,7 @@ export const CONSENT_SELECTORS: readonly string[] = [
   // Didomi
   "#didomi-host",
   "#didomi-notice",
-  '[class^="didomi-"]',
+  'div[class^="didomi-"]',
   // Sourcepoint
   '[id^="sp_message_container"]',
   // Quantcast Choice
@@ -42,7 +39,7 @@ export const CONSENT_SELECTORS: readonly string[] = [
   // TrustArc
   "#truste-consent-track",
   "#consent_blackbar",
-  '[class^="truste_"]',
+  'div[class^="truste_"]',
   // consentmanager.net, Commanders Act, Axeptio, Iubenda, Complianz, CookieYes, Osano, Borlabs, Google Funding Choices
   "#cmpbox",
   "#cmpbox2",
@@ -65,7 +62,7 @@ export const CONSENT_SELECTORS: readonly string[] = [
 // Strings (src has no DOM lib), run in the page. Keep `${` out of the parts in
 // backquotes: only the TypeScript splices below may use it.
 
-/** Helpers both page functions share: up (out of shadow roots too), dialog, pinned. */
+/** Helpers the page functions share: up (out of shadow roots too), dialog, consent vendor, pinned. */
 const HELPERS = `const up = (n) => n.parentElement || (n.parentNode && n.parentNode.host) || n.host || null;
   const body = document.body;
   const roleOf = (el) => String((el.getAttribute && el.getAttribute("role")) || "").toLowerCase();
@@ -74,6 +71,15 @@ const HELPERS = `const up = (n) => n.parentElement || (n.parentNode && n.parentN
     roleOf(el) === "alertdialog" ||
     (!!el.getAttribute && el.getAttribute("aria-modal") === "true") ||
     (String(el.tagName || "").toUpperCase() === "DIALOG" && el.open === true);
+  const CONSENT = ${JSON.stringify(CONSENT_SELECTORS.join(", "))};
+  const isConsent = (el) => {
+    try {
+      return !!el.matches && el.matches(CONSENT);
+    } catch (e) {
+      return false;
+    }
+  };
+  /** Fixed or sticky, itself or an ancestor up to the body: what a click's covering node belongs to. */
   const pinned = (el) => {
     for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) {
       const p = getComputedStyle(n).position;
@@ -83,23 +89,49 @@ const HELPERS = `const up = (n) => n.parentElement || (n.parentNode && n.parentN
   };`;
 
 /**
- * In the page: the visible overlays of the document, outermost first in document
- * order, at most five. Elements, so the caller can name them by backendNodeId.
+ * In the page: the visible overlays of the document, outermost only, in
+ * document order, at most five. Elements, so the caller can name them by
+ * backendNodeId.
+ *
+ * A dialog or a consent vendor's container counts when it is shown: on screen,
+ * with no ancestor hidden, transparent, aria-hidden or inert. Any other element
+ * counts when it is fixed (itself or an ancestor; sticky is layout, not an
+ * overlay), covers 30% of the viewport, is wide (60%) or strictly across its
+ * middle, and is on top at its centre. Such a layer that holds the main landmark
+ * or most of the page's text is the page itself (an app shell): neither it nor
+ * anything in it is taken for an overlay, a dialog apart. A presentational root
+ * (role none or presentation, absent from the accessibility tree) is looked
+ * through, to the dialog inside it.
  */
 export const OVERLAYS_SOURCE = `function findOverlays() {
   ${HELPERS}
-  const out = [];
+  const found = [];
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  if (!body || !(vw > 0) || !(vh > 0)) return out;
+  if (!body || !(vw > 0) || !(vh > 0)) return found;
   const isMain = (el) => String(el.tagName || "").toUpperCase() === "MAIN" || roleOf(el) === "main";
   const holdsMain = (el) => isMain(el) || Array.prototype.some.call(el.querySelectorAll("*"), isMain);
-  const pageText = String(body.textContent || "").length;
+  const textOf = (el) => String(el.textContent || "").length;
+  const pageText = textOf(body);
+  const fixed = (el) => {
+    for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) if (getComputedStyle(n).position === "fixed") return true;
+    return false;
+  };
+  const hiddenUp = (el) => {
+    for (let n = el; n && n.nodeType === 1; n = up(n)) {
+      if (n.getAttribute && (n.getAttribute("aria-hidden") === "true" || n.getAttribute("inert") !== null)) return true;
+      const cs = getComputedStyle(n);
+      if (cs.display === "none" || Number(cs.opacity) === 0) return true;
+    }
+    return false;
+  };
   const shown = (el) => {
+    if (el.checkVisibility && !el.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
     const cs = getComputedStyle(el);
-    if (cs.display === "none" || cs.visibility === "hidden" || cs.visibility === "collapse" || Number(cs.opacity) === 0) return false;
+    if (cs.visibility === "hidden" || cs.visibility === "collapse") return false;
     const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
+    if (!(r.width > 0 && r.height > 0) || r.right <= 0 || r.bottom <= 0 || r.left >= vw || r.top >= vh) return false;
+    return !hiddenUp(el);
   };
   /** The part of the viewport the element covers, or null when it is under 30%. */
   const area = (el) => {
@@ -111,42 +143,44 @@ export const OVERLAYS_SOURCE = `function findOverlays() {
     return w > 0 && h > 0 && w * h >= 0.3 * vw * vh ? { left, top, w, h } : null;
   };
   const covers = (el, a) => {
-    // A side column is no overlay: one is wide, or over the middle of the screen.
-    const middle = a.left <= vw / 2 && a.left + a.w >= vw / 2 && a.top <= vh / 2 && a.top + a.h >= vh / 2;
+    // A side column is no overlay: one is wide, or strictly across the middle of the screen.
+    const middle = a.left < vw / 2 && a.left + a.w > vw / 2 && a.top < vh / 2 && a.top + a.h > vh / 2;
     if (a.w < 0.6 * vw && !middle) return false;
     const root = el.getRootNode ? el.getRootNode() : document;
     const at = (root && root.elementFromPoint ? root : document).elementFromPoint(a.left + a.w / 2, a.top + a.h / 2);
     for (let n = at; n; n = up(n)) if (n === el) return true;
     return false;
   };
-  const found = [];
-  const walk = (root) => {
-    const els = root.querySelectorAll("*");
-    for (let i = 0; i < els.length; i++) {
-      const el = els[i];
-      let hit = false;
-      if (isDialog(el)) hit = shown(el);
-      else {
-        const a = area(el);
-        hit = !!a && shown(el) && pinned(el) && covers(el, a) && !(pageText > 0 && String(el.textContent || "").length > 0.6 * pageText);
+  const kids = (n) => Array.from((n && n.children) || []);
+  const visit = (el, inShell) => {
+    let shell = inShell;
+    let take = false;
+    const role = roleOf(el);
+    if (isDialog(el) || isConsent(el)) take = shown(el) && !holdsMain(el);
+    else if (!inShell && role !== "presentation" && role !== "none") {
+      const a = area(el);
+      if (a && fixed(el) && shown(el) && covers(el, a)) {
+        if (holdsMain(el) || (pageText > 0 && textOf(el) > 0.6 * pageText)) shell = true;
+        else take = true;
       }
-      if (hit && !holdsMain(el)) found.push(el);
-      if (el.shadowRoot) walk(el.shadowRoot);
     }
+    // An overlay is taken whole: what is inside it is its own.
+    if (take) {
+      found.push(el);
+      return;
+    }
+    for (const k of kids(el)) visit(k, shell);
+    if (el.shadowRoot) for (const k of kids(el.shadowRoot)) visit(k, shell);
   };
-  walk(body);
-  const inside = (el, other) => {
-    for (let n = up(el); n; n = up(n)) if (n === other) return true;
-    return false;
-  };
-  for (const el of found) if (!found.some((o) => o !== el && inside(el, o))) out.push(el);
-  return out.slice(0, 5);
+  for (const k of kids(body)) visit(k, false);
+  return found.slice(0, 5);
 }`;
 
 /**
  * In the page, with `this` the node a click landed on instead of its target:
- * the overlay it belongs to. The probe's overlay holding it; else its nearest
- * dialog; else its outermost fixed or sticky ancestor; else null.
+ * what covers the target. The probe's overlay holding it; else its nearest
+ * dialog; else its outermost fixed or sticky ancestor; else null. Whether that
+ * is an overlay is OVERLAY_INFO_SOURCE's to say.
  */
 export const OVERLAY_ROOT_SOURCE = `function overlayRoot() {
   ${HELPERS}
@@ -172,43 +206,60 @@ export const DESCRIBE_SOURCE = `const describe = (el) => {
     return "<" + tag + (el.id ? "#" + el.id : "") + (role ? ' role="' + role + '"' : "") + (type ? ' type="' + type + '"' : "") + ">" + (shown ? ' "' + shown + '"' : "");
   };`;
 
-const DESCRIBE_THIS = `function describeOverlay() {
+/**
+ * In the page, with `this` what covers a click's target: its description, and
+ * whether it is an overlay (one the probe finds, a dialog, a consent vendor's
+ * container) or only something fixed in the way: a sticky header, a chat bubble.
+ */
+export const OVERLAY_INFO_SOURCE = `function overlayInfo() {
+  ${HELPERS}
   ${DESCRIBE_SOURCE}
-  return describe(this);
+  const overlays = (${OVERLAYS_SOURCE})();
+  return { what: describe(this), overlay: overlays.indexOf(this) >= 0 || isDialog(this) || isConsent(this) };
 }`;
 
 /**
- * One evaluate: the document as rendered, read from a copy with the overlays,
- * the dialogs and the consent vendors' containers taken out. The live page is
- * only marked for the time of the copy (an attribute of a random name, removed
- * at once), never changed. A dropped element that holds the main landmark stays.
+ * One evaluate: the document as rendered, read from an inert copy with the
+ * overlays, the dialogs and the consent vendors' containers taken out. The live
+ * page is only marked for the time it takes to serialise it (an attribute of a
+ * random name, removed in a finally); the copy is parsed by DOMParser, where no
+ * script, custom element or image load runs. <body>, <html> and anything that
+ * holds the main landmark are never dropped. Where the page forbids parsing
+ * (Trusted Types), the serialised page is read as it is.
  */
 export const READ_DOCUMENT = `(() => {
   const findOverlays = ${OVERLAYS_SOURCE};
   const root = document.documentElement;
   if (!root) return { html: "", url: location.href };
-  let overlays = [];
-  try {
-    overlays = findOverlays();
-  } catch (e) {}
   const mark = "data-overlay-" + Math.random().toString(36).slice(2, 10);
-  for (const el of overlays) if (el.getRootNode && el.getRootNode() === document) el.setAttribute(mark, "");
-  let copy;
+  let overlays = [];
+  let html = "";
   try {
-    copy = root.cloneNode(true);
+    try {
+      overlays = findOverlays();
+    } catch (e) {}
+    for (const el of overlays) if (el.getRootNode && el.getRootNode() === document) el.setAttribute(mark, "");
+    html = root.outerHTML;
   } finally {
     for (const el of overlays) if (el.removeAttribute) el.removeAttribute(mark);
   }
+  let parsed;
+  try {
+    parsed = new DOMParser().parseFromString(html, "text/html");
+  } catch (e) {
+    return { html, url: location.href };
+  }
   const drop = ["[" + mark + "]", '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', "dialog", ${CONSENT_SELECTORS.map((s) => JSON.stringify(s)).join(", ")}];
-  const main = (el) => el.tagName === "MAIN" || el.getAttribute("role") === "main" || !!el.querySelector("main, [role=main]");
+  const keep = (el) =>
+    el === parsed.body || el === parsed.documentElement || el.tagName === "MAIN" || el.getAttribute("role") === "main" || !!el.querySelector("main, [role=main]");
   for (const sel of drop) {
     let els = [];
     try {
-      els = Array.from(copy.querySelectorAll(sel));
+      els = Array.from(parsed.querySelectorAll(sel));
     } catch (e) {}
-    for (const el of els) if (!main(el)) el.remove();
+    for (const el of els) if (!keep(el)) el.remove();
   }
-  return { html: copy.outerHTML, url: location.href };
+  return { html: parsed.documentElement.outerHTML, url: location.href };
 })()`;
 
 // --- collectors ----------------------------------------------------------------
@@ -242,12 +293,8 @@ export async function findOverlays(page: CdpSession): Promise<number[]> {
       { objectId: r.result.objectId, ownProperties: true },
       { timeoutMs: PROBE_TIMEOUT_MS },
     );
-    const ids: number[] = [];
-    for (const p of result) {
-      if (!/^\d+$/.test(p.name) || !p.value?.objectId) continue;
-      const id = await backendIdOf(page, p.value.objectId);
-      if (id !== undefined) ids.push(id);
-    }
+    const elements = result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId).map((p) => p.value?.objectId as string);
+    const ids = (await Promise.all(elements.map((id) => backendIdOf(page, id)))).filter((id): id is number => id !== undefined);
     return ids;
   } catch {
     return [];
@@ -256,8 +303,8 @@ export async function findOverlays(page: CdpSession): Promise<number[]> {
   }
 }
 
-/** The overlay the node `objectId` (what a click landed on) belongs to, named; undefined when none or when the page cannot say. */
-export async function overlayRootOf(page: CdpSession, objectId: string): Promise<{ backendNodeId: number; what: string } | undefined> {
+/** What covers a click's target, given the node it landed on: named, and whether it is an overlay. Undefined when nothing does, or when the page cannot say. */
+export async function overlayRootOf(page: CdpSession, objectId: string): Promise<{ backendNodeId: number; what: string; overlay: boolean } | undefined> {
   try {
     const call = (id: string, fn: string, byValue: boolean) =>
       page.send<{ result?: Remote; exceptionDetails?: unknown }>(
@@ -270,9 +317,8 @@ export async function overlayRootOf(page: CdpSession, objectId: string): Promise
     if (root.exceptionDetails || !rootId) return undefined;
     const backendNodeId = await backendIdOf(page, rootId);
     if (backendNodeId === undefined) return undefined;
-    const named = await call(rootId, DESCRIBE_THIS, true);
-    const what = typeof named.result?.value === "string" ? named.result.value : "an element";
-    return { backendNodeId, what };
+    const info = (await call(rootId, OVERLAY_INFO_SOURCE, true)).result?.value as { what?: unknown; overlay?: unknown } | undefined;
+    return { backendNodeId, what: typeof info?.what === "string" ? info.what : "an element", overlay: info?.overlay === true };
   } catch {
     return undefined;
   } finally {

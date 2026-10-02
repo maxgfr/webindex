@@ -21,6 +21,7 @@ import {
 } from "../src/browser/actions.js";
 import { CdpError } from "../src/browser/cdp.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
+import { DESCRIBE_SOURCE } from "../src/browser/overlay.js";
 import { COLLECT_SOURCE, RiskRefusedError } from "../src/browser/risk.js";
 import type { NavigationResult } from "../src/browser/session.js";
 import { StaleRefError } from "../src/browser/snapshot.js";
@@ -121,6 +122,8 @@ class World {
   hitFor: number | undefined;
   /** The overlay root the page finds for a node a click landed on instead of its target. */
   overlayRoot: number | undefined;
+  /** Whether the page calls that root an overlay, or only something fixed in the way. */
+  rootIsOverlay = true;
   /** The accessibility tree, for the controls of an overlay. */
   ax: unknown[] = [];
 
@@ -200,8 +203,10 @@ class World {
         return this.overlayRoot === undefined
           ? { result: { type: "object", subtype: "null", value: null } }
           : { result: { type: "object", subtype: "node", objectId: `o${this.overlayRoot}` } };
-      case "describeOverlay":
-        return { result: { value: run(functionDeclaration, this.node(id), []) } };
+      case "overlayInfo":
+        return {
+          result: { value: { what: run(`function () { ${DESCRIBE_SOURCE} return describe(this); }`, this.node(id), []), overlay: this.rootIsOverlay } },
+        };
       case "selectAll":
         this.events.push(`select-all ${id}`);
         return { result: {} };
@@ -446,6 +451,18 @@ describe("click", () => {
     const lines = String(err.message).split("\n");
     expect(lines.filter((l) => l.startsWith("- button"))).toHaveLength(12);
     expect(lines).toContain("… 8 more — take a snapshot to see them");
+  });
+
+  it("does not call a sticky header or a chat bubble an overlay, nor speak of consent: it says what is in the way, with its controls", async () => {
+    w.add(101, { tag: "BUTTON" });
+    wall(["Cart"]);
+    w.add(300, { tag: "HEADER", text: "Shop" });
+    w.rootIsOverlay = false;
+    const err = await click(session, "e1", { deps }).catch((e) => e);
+    expect(err.message).toBe(
+      ['e1 is covered by <header> "Shop" at (50, 20): close or move it out of the way, then retry; its controls:', '- button "Cart" [ref=e10]'].join("\n"),
+    );
+    expect(err.message).not.toMatch(/overlay|consent/);
   });
 
   it("names the overlay without controls when the accessibility tree has none of it", async () => {

@@ -470,9 +470,10 @@ const OVERLAY_CONTROLS_MAX = 12;
 
 /**
  * Why a click was refused when `hitObjectId` (what it would land on) is not the
- * target. When that belongs to an overlay, the overlay's controls are listed
- * with refs from the tab's own table, saved, so the next command can use them:
- * which one to press — accepting tracking, refusing it, closing — is the user's.
+ * target. What covers it is named, and its controls are listed with refs from
+ * the tab's own table, saved, so the next command can use them. When it is an
+ * overlay (a cookie wall, a dialog), which one to press — accepting tracking,
+ * refusing it, closing — is the user's; a sticky header is only in the way.
  */
 async function coveredError(page: CdpSession, targetId: string, ref: string, hitObjectId: string, where: string, at: string): Promise<ActionError> {
   const root = await overlayRootOf(page, hitObjectId);
@@ -492,9 +493,11 @@ async function coveredError(page: CdpSession, targetId: string, ref: string, hit
   }
   const shown = controls.slice(0, OVERLAY_CONTROLS_MAX);
   const more = controls.length - shown.length;
-  const list = shown.length
-    ? ["its controls:", ...shown, ...(more > 0 ? [`… ${more} more — take a snapshot to see them`] : [])].join("\n")
-    : "none of its controls is in the accessibility tree — take a snapshot";
+  const listed = ["its controls:", ...shown, ...(more > 0 ? [`… ${more} more — take a snapshot to see them`] : [])].join("\n");
+  // Only a real overlay (a cookie wall, a dialog) is a choice to put to the user; a sticky header or a chat bubble is only in the way.
+  if (!root.overlay)
+    return new ActionError(`${ref} is covered by ${root.what} at ${at}: close or move it out of the way, then retry${shown.length ? `; ${listed}` : ""}`);
+  const list = shown.length ? listed : "none of its controls is in the accessibility tree — take a snapshot";
   return new ActionError(
     `${ref} is covered by an overlay (${root.what}) at ${at}; ${list}\naccepting tracking/consent or closing it is the user's choice — ask before choosing`,
   );
