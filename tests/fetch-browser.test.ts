@@ -292,6 +292,22 @@ describe("cachedFetchAndExtract and the browser rung", () => {
     expect(read).toHaveBeenCalledTimes(1);
   });
 
+  it("does not render the same thin page again on every call: a read the browser could not better is served until its TTL", async () => {
+    process.env[envName("CACHE_TTL_MS")] = "10000";
+    const spy = installFetchMock(routes([["x.test", { body: SHORT }]]));
+    read.mockResolvedValue(rendered("https://x.test/a", { text: "  " }));
+    const first = await cachedFetchAndExtract("https://x.test/a", { browser: "fallback" }, true, 1000);
+    expect(first.text).toBe("Loading…");
+    expect(read).toHaveBeenCalledTimes(1);
+    const again = await cachedFetchAndExtract("https://x.test/a", { browser: "fallback" }, true, 2000);
+    expect(again).toMatchObject({ text: "Loading…", cached: true });
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledTimes(1);
+    // Once stale, the page is tried again, browser included.
+    await cachedFetchAndExtract("https://x.test/a", { browser: "fallback" }, true, 20_000);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
   it("still serves the thin cached read offline: no network, no browser", async () => {
     installFetchMock(routes([["x.test", { body: SHORT }]]));
     await cachedFetchAndExtract("https://x.test/a", {}, true, 1000);
