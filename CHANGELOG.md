@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.30.0](https://github.com/maxgfr/webindex/compare/v1.29.3...v1.30.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **browser:** review fixes for container refs, selectors and bare overlays ([b0c9c10](https://github.com/maxgfr/webindex/commit/b0c9c106f98dd4989cbf75250c4449e899b8a55d))
+
+
+### Features
+
+* **browser:** container refs, --selector, bare overlays, value echo ([059ec00](https://github.com/maxgfr/webindex/commit/059ec00d686235b3a153228c34305a63ede0363a))
+
 ## [1.29.3](https://github.com/maxgfr/webindex/compare/v1.29.2...v1.29.3) (2026-10-02)
 
 
