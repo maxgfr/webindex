@@ -154,6 +154,7 @@ USAGE
   webindex video     frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]
   webindex video     list <playlist|channel> [--limit <n>] [--out <dir>] [--refresh] [--json]
   webindex browser   open <url> [--new-tab] [--headless] [--profile <n>] [--cdp <port|url>]
+                     [--browser-kind chrome|brave|chromium|edge]
                      [--capture] [--snapshot] [--timeout <ms>]
   webindex browser   attach <port|url> | status | close [--all]
   webindex browser   snapshot [<ref>] [--interactive] [--max-chars <n>]
@@ -424,6 +425,10 @@ ENVIRONMENT
   WEBINDEX_UA            override the browser User-Agent
   WEBINDEX_BROWSER_DIR   where \`browser\` keeps its profiles and session (default ~/.webindex/browser)
   WEBINDEX_BROWSER_BIN   the browser it drives (default the first Chrome, Brave, Chromium or Edge found)
+  WEBINDEX_BROWSER_KIND  the kind it launches when no binary is named: chrome, brave, chromium or edge
+                         (brave blocks ads and trackers on its own); --browser-kind on open wins
+  WEBINDEX_BROWSER_EXTENSIONS  unpacked extensions it loads when it launches the browser, absolute
+                         paths, comma separated (an ad blocker); branded Chrome ≥ 137 ignores them
   WEBINDEX_BROWSER_FETCH fetch renders pages in that browser: always, fallback or off (default)
   GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, GITEA_TOKEN
                          optional forge tokens (WEBINDEX_GITHUB_TOKEN and its kin win over
@@ -480,6 +485,7 @@ export const VALUE_FLAGS = [
   "effort",
   "profile",
   "cdp",
+  "browser-kind",
   "max-chars",
   "text",
   "gone",
@@ -2694,6 +2700,7 @@ async function dispatch(argv: string[]): Promise<void> {
         headless: argBool(args, "headless"),
         profile: argValue(args, "profile"),
         cdp: argValue(args, "cdp"),
+        browserKind: argValue(args, "browser-kind"),
         capture: argBool(args, "capture"),
         snapshot: argBool(args, "snapshot"),
         interactive: argBool(args, "interactive"),
@@ -3045,6 +3052,13 @@ async function dispatch(argv: string[]): Promise<void> {
       `              home ${browser.home}${browser.profiles.length ? ` (profiles: ${browser.profiles.join(", ")})` : ""}`,
       `              session ${sess.state === "none" ? "none" : `port ${sess.port}, profile ${sess.profile}, ${sess.launchedByUs ? "launched by webindex" : "attached"}, ${sess.state === "alive" ? "answering" : "not answering"}`}`,
       `              fetch ${browser.fetch.mode === "off" ? `off (${envName("BROWSER_FETCH")}=always|fallback turns it on)` : browser.fetch.mode}, concurrency ${browser.fetch.concurrency}`,
+      ...(browser.kind ? [`              prefers ${browser.kind} (${envName("BROWSER_KIND")})`] : []),
+      ...(browser.extensions
+        ? [
+            `              extensions ${browser.extensions.error ?? browser.extensions.paths.join(", ")}`,
+            ...(browser.extensions.note ? [`              note: ${browser.extensions.note}`] : []),
+          ]
+        : []),
     ];
     const lines = [
       `webindex ${ENGINE_VERSION}`,

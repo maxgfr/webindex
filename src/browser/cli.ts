@@ -23,6 +23,7 @@ import type { Challenge } from "./challenge.js";
 import { detectChallenge } from "./challenge.js";
 import { CdpError } from "./cdp.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
+import { BROWSER_KINDS, isBrowserKind } from "./detect.js";
 import { parseKey } from "./keys.js";
 import { isSameBrowser, readActivePort } from "./launch.js";
 import { clearNetworkLog, getNetworkEntry, listNetwork, NetworkRecorder } from "./network.js";
@@ -42,6 +43,8 @@ export interface BrowserCliFlags {
   profile?: string;
   /** An already-running browser: port, host:port or URL, loopback only. */
   cdp?: string;
+  /** The kind of browser to launch: chrome, brave, chromium or edge. */
+  browserKind?: string;
   /** Record the JSON the page fetches while the command runs. */
   capture?: boolean;
   /** Append the snapshot taken after the command. */
@@ -115,7 +118,7 @@ export interface BrowserCliResult {
 }
 
 const USAGE = {
-  open: "open <url> [--new-tab] [--headless] [--profile <n>] [--capture] [--snapshot] [--timeout <ms>]",
+  open: "open <url> [--new-tab] [--headless] [--profile <n>] [--browser-kind chrome|brave|chromium|edge] [--capture] [--snapshot] [--timeout <ms>]",
   attach: "attach <port|url>",
   status: "status",
   close: "close [--all]",
@@ -275,11 +278,15 @@ async function handled<R extends { dialog?: DialogInfo }>(ctx: Ctx, r: R): Promi
 
 function onPage<T>(ctx: Ctx, fn: (s: BrowserSession) => Promise<T>, extra: { newTab?: boolean } = {}): Promise<T> {
   if (ctx.deps.page) return ctx.deps.page(fn, extra);
-  const { cdp, profile, headless } = ctx.flags;
+  const { cdp, profile, headless, browserKind } = ctx.flags;
+  const kind = browserKind?.trim().toLowerCase();
+  if (kind !== undefined && !isBrowserKind(kind))
+    throw new UsageError(`--browser-kind is one of ${BROWSER_KINDS.join(", ")}, not ${JSON.stringify(browserKind)}`);
   const opts: OpenOptions = {
     ...(cdp !== undefined ? { cdp } : {}),
     ...(profile !== undefined ? { profile } : {}),
     ...(headless ? { headless } : {}),
+    ...(kind !== undefined ? { kind } : {}),
     ...(ctx.deps.browser ? { deps: ctx.deps.browser } : {}),
     ...extra,
   };
@@ -433,7 +440,9 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
         const title = await s.title();
         const challenge = await detectChallenge(s);
         const snap = ctx.flags.snapshot ? await takeSnapshot(s, snapOpts(ctx)) : undefined;
+        const notes = s.takeNotes();
         const lines = [`${where(nav.url, title)}${nav.status !== undefined ? ` (HTTP ${nav.status})` : ""}`];
+        for (const n of notes) lines.push(`note: ${n}`);
         if (nav.note) lines.push(`note: ${nav.note}`);
         if (challenge) lines.push(challengeLine(ctx, challenge));
         if (captured !== undefined) lines.push(capturedLine(ctx, captured));
@@ -445,6 +454,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
             title,
             ...(nav.status !== undefined ? { status: nav.status } : {}),
             ...(nav.note ? { note: nav.note } : {}),
+            ...(notes.length ? { notes } : {}),
             tab: s.targetId,
             challenge,
             ...(captured !== undefined ? { captured } : {}),

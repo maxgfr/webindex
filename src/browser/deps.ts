@@ -2,7 +2,7 @@ import { type ChildProcess, type SpawnOptions, spawn as nodeSpawn } from "node:c
 import { type FileHandle, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { env as brandEnv } from "../brand.js";
 import { CdpClient } from "./cdp.js";
-import { type BrowserBinary, detectBrowserBinary } from "./detect.js";
+import { type BrowserBinary, type BrowserKind, detectBrowserBinary } from "./detect.js";
 import * as discovery from "./discovery.js";
 
 // The seams later tasks fake in tests. Everything here is resolved lazily, in
@@ -37,8 +37,8 @@ export interface BrowserDeps {
   sleep(ms: number): Promise<void>;
   connectCdp(wsUrl: string): Promise<CdpClient>;
   discovery: typeof discovery;
-  /** Which browser to launch when none is named (`detectBrowserBinary`). */
-  detectBrowser(): BrowserBinary | null;
+  /** Which browser to launch when none is named (`detectBrowserBinary`), trying `prefer` first. */
+  detectBrowser(prefer?: BrowserKind): BrowserBinary | null;
   /** Signal a process we launched in an earlier call, known only by its pid. */
   kill(pid: number, signal: NodeJS.Signals): void;
   /** Reads `WEBINDEX_<name>` (brand-aware), like the rest of the library. */
@@ -54,7 +54,7 @@ export function defaultBrowserDeps(): BrowserDeps {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     connectCdp: (wsUrl) => CdpClient.connect(wsUrl),
     discovery,
-    detectBrowser: () => detectBrowserBinary(),
+    detectBrowser: (prefer) => detectBrowserBinary(prefer ? { prefer } : {}),
     kill: (pid, signal) => void process.kill(pid, signal),
     env: (name) => brandEnv(name),
     platform: process.platform,

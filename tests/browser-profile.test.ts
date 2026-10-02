@@ -3,7 +3,17 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { configure } from "../src/brand.js";
-import { assertInsideHome, browserHome, ensurePrivateDir, importProfile, profileDir, resetProfile } from "../src/browser/profile.js";
+import {
+  assertInsideHome,
+  browserHome,
+  ensurePrivateDir,
+  importProfile,
+  profileDir,
+  profileKindFile,
+  readProfileKind,
+  resetProfile,
+  writeProfileKind,
+} from "../src/browser/profile.js";
 import { UsageError } from "../src/cli-kit.js";
 
 const posix = process.platform !== "win32";
@@ -148,6 +158,8 @@ describe("importProfile", () => {
       expect(existsSync(join(to, ...skipped.split("/"))), skipped).toBe(false);
     }
     expect(r.files).toBe(5);
+    // From a path, which browser made it is not known: the first launch says.
+    expect(readProfileKind("t")).toBeUndefined();
     expect(r.bytes).toBe(23);
   });
 
@@ -259,6 +271,8 @@ describe("importProfile", () => {
       put(home, `${parts.join("/")}/Local State`, "{}");
       const r = importProfile(kind, { name: "n", platform, homeDir: home });
       expect(r.from).toBe(join(home, ...parts));
+      // Its logins are encrypted for that browser: the profile is that browser's from now on.
+      expect(readProfileKind("n")).toBe(kind);
     });
 
     it.each([
@@ -280,6 +294,16 @@ describe("importProfile", () => {
     it("refuses an unsupported platform", () => {
       expect(() => importProfile("chrome", { name: "n", platform: "freebsd" as NodeJS.Platform })).toThrow(/unsupported platform/);
     });
+  });
+});
+
+describe("the profile's browser kind", () => {
+  it("is what writeProfileKind recorded, and nothing for a profile without one or with junk", () => {
+    expect(readProfileKind("k")).toBeUndefined();
+    writeProfileKind("k", "edge");
+    expect(readProfileKind("k")).toBe("edge");
+    writeFileSync(profileKindFile("k"), "netscape\n");
+    expect(readProfileKind("k")).toBeUndefined();
   });
 });
 

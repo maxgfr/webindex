@@ -6,7 +6,8 @@ import { envName } from "../src/brand.js";
 import { UsageError } from "../src/cli-kit.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
 import { resolveEndpoint } from "../src/browser/launch.js";
-import { profileDir } from "../src/browser/profile.js";
+import * as discovery from "../src/browser/discovery.js";
+import { profileDir, readProfileKind } from "../src/browser/profile.js";
 import { readSession, type Session, writeSession } from "../src/browser/state.js";
 import { FakeCdp } from "./helpers/fake-cdp.js";
 import { fakeSpawn } from "./helpers/fake-spawn.js";
@@ -267,5 +268,144 @@ describe("spawning a separate browser", () => {
     }
     const notLive = fakeSpawn({ port: await deadPort(), immediate: true });
     await expect(resolveEndpoint({ deps: launchDeps(notLive.spawn, fakeClock()) })).rejects.toThrow(/within 20 s/);
+  });
+});
+
+describe("unpacked extensions and the browser kind", () => {
+  /** An unpacked extension: a directory holding a manifest.json. */
+  const extension = (name: string): string => {
+    const dir = join(home, "ext", name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "manifest.json"), '{"manifest_version":3,"name":"x","version":"1"}');
+    return dir;
+  };
+  const envOf =
+    (vars: Record<string, string>) =>
+    (k: string): string | undefined =>
+      vars[k];
+  const branded = { kind: "chrome" as const, path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" };
+  const versioned = (browser: string) => ({ ...discovery, getVersion: async () => ({ Browser: browser, webSocketDebuggerUrl: fake.browserWsUrl }) });
+
+  it("loads the extensions BROWSER_EXTENSIONS lists, and keeps every other extension off", async () => {
+    const a = extension("ubol");
+    const b = extension("other");
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    const ep = await resolveEndpoint({ deps: launchDeps(spawn, { env: envOf({ BROWSER_EXTENSIONS: ` ${a} , ${b}` }) }) });
+    expect(calls[0]?.args).toEqual([
+      "--remote-debugging-port=0",
+      `--user-data-dir=${profileDir("default")}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      `--load-extension=${a},${b}`,
+      `--disable-extensions-except=${a},${b}`,
+      "about:blank",
+    ]);
+    // The fake browser is no branded Chrome: nothing to say.
+    expect(ep.notes).toBeUndefined();
+  });
+
+  it.each([
+    ["a relative path", "ext/ubol", /absolute paths, not "ext\/ubol"/],
+    ["a directory that does not exist", "/nowhere/ubol", /no such directory: \/nowhere\/ubol/],
+  ])("refuses %s as a usage error, before anything is started", async (_what, value, message) => {
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    const err = await resolveEndpoint({ deps: launchDeps(spawn, { env: envOf({ BROWSER_EXTENSIONS: value }) }) }).catch((e) => e);
+    expect(err).toBeInstanceOf(UsageError);
+    expect(err.message).toMatch(/WEBINDEX_TEST_BROWSER_EXTENSIONS/);
+    expect(err.message).toMatch(message);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refuses a directory that holds no manifest.json", async () => {
+    const dir = join(home, "ext", "empty");
+    mkdirSync(dir, { recursive: true });
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    const err = await resolveEndpoint({ deps: launchDeps(spawn, { env: envOf({ BROWSER_EXTENSIONS: dir }) }) }).catch((e) => e);
+    expect(err).toBeInstanceOf(UsageError);
+    expect(err.message).toMatch(/has no manifest\.json/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("says when the browser is a branded Google Chrome that ignores them, and points at the browsers that do not", async () => {
+    const a = extension("ubol");
+    const { spawn } = fakeSpawn({ port: fake.port });
+    const ep = await resolveEndpoint({
+      deps: launchDeps(spawn, { detectBrowser: () => branded, env: envOf({ BROWSER_EXTENSIONS: a }), discovery: versioned("Chrome/140.0.7339.80") }),
+    });
+    expect(ep.notes).toEqual([
+      "Google Chrome ≥ 137 ignores unpacked extensions — use Brave (built-in ad/tracker blocking: WEBINDEX_TEST_BROWSER_KIND=brave), Chromium, Chrome for Testing or Edge",
+    ]);
+    // An older Chrome still loads them; and with no extension asked for there is nothing to say.
+    const old = await resolveEndpoint({
+      profile: "old",
+      deps: launchDeps(fakeSpawn({ port: fake.port }).spawn, {
+        detectBrowser: () => branded,
+        env: envOf({ BROWSER_EXTENSIONS: a }),
+        discovery: versioned("Chrome/136.0.1"),
+      }),
+    });
+    expect(old.notes).toBeUndefined();
+    const none = await resolveEndpoint({
+      profile: "none",
+      deps: launchDeps(fakeSpawn({ port: fake.port }).spawn, { detectBrowser: () => branded, env: envOf({}), discovery: versioned("Chrome/140.0.1") }),
+    });
+    expect(none.notes).toBeUndefined();
+  });
+
+  it("asks detection for the kind the caller names, else BROWSER_KIND, else the profile's own", async () => {
+    const asked: (string | undefined)[] = [];
+    const detectBrowser = (prefer?: string) => {
+      asked.push(prefer);
+      return { kind: (prefer ?? "chrome") as "chrome", path: `/fake/${prefer ?? "chrome"}` };
+    };
+    await resolveEndpoint({
+      profile: "a",
+      kind: "edge",
+      deps: launchDeps(fakeSpawn({ port: fake.port }).spawn, { detectBrowser, env: envOf({ BROWSER_KIND: "brave" }) }),
+    });
+    await resolveEndpoint({ profile: "b", deps: launchDeps(fakeSpawn({ port: fake.port }).spawn, { detectBrowser, env: envOf({ BROWSER_KIND: "brave" }) }) });
+    // Profile "a" was made with Edge: launched again with nothing named, it asks for Edge.
+    await resolveEndpoint({ profile: "a", deps: launchDeps(fakeSpawn({ port: fake.port }).spawn, { detectBrowser, env: envOf({}) }) });
+    expect(asked).toEqual(["edge", "brave", "edge"]);
+  });
+
+  it("refuses a BROWSER_KIND it does not know as a usage error", async () => {
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    const err = await resolveEndpoint({ deps: launchDeps(spawn, { env: envOf({ BROWSER_KIND: "netscape" }) }) }).catch((e) => e);
+    expect(err).toBeInstanceOf(UsageError);
+    expect(err.message).toMatch(/WEBINDEX_TEST_BROWSER_KIND is "netscape"/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("records the kind a profile was first launched with, and refuses another kind on it", async () => {
+    await resolveEndpoint({
+      profile: "work",
+      deps: launchDeps(fakeSpawn({ port: fake.port }).spawn, { detectBrowser: () => ({ kind: "brave", path: "/fake/brave" }) }),
+    });
+    expect(readProfileKind("work")).toBe("brave");
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    rmSync(join(profileDir("work"), "DevToolsActivePort"), { force: true });
+    const err = await resolveEndpoint({ profile: "work", deps: launchDeps(spawn, { detectBrowser: () => chrome }) }).catch((e) => e);
+    expect(err).toBeInstanceOf(UsageError);
+    expect(err.message).toMatch(/the profile "work" belongs to brave/);
+    expect(err.message).toMatch(/--profile chrome/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("lets a profile made before the kind was recorded adopt the first kind launched on it", async () => {
+    mkdirSync(profileDir("old"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(profileDir("old"), "Local State"), "{}");
+    expect(readProfileKind("old")).toBeUndefined();
+    await resolveEndpoint({ profile: "old", deps: launchDeps(fakeSpawn({ port: fake.port }).spawn) });
+    expect(readProfileKind("old")).toBe("chrome");
+  });
+
+  it("takes the kind of an explicit binary from its name", async () => {
+    await resolveEndpoint({
+      profile: "bin",
+      binary: "/opt/brave-browser",
+      deps: launchDeps(fakeSpawn({ port: fake.port }).spawn, { detectBrowser: () => null }),
+    });
+    expect(readProfileKind("bin")).toBe("brave");
   });
 });

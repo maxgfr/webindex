@@ -288,6 +288,12 @@ export class BrowserSession {
   get headless(): boolean {
     return this.endpoint.headless;
   }
+  /** What the launch had to say (extensions the browser will not load), once: the next call gets nothing. */
+  takeNotes(): string[] {
+    const notes = this.endpoint.notes ?? [];
+    this.endpoint.notes = undefined;
+    return notes;
+  }
   get targetId(): string {
     return this.current.targetId;
   }

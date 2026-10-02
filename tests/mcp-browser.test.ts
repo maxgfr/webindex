@@ -532,6 +532,18 @@ describe("the other tools", () => {
     expect((await h.call("webindex_browser_open", { url: "https://b.test/", profile: "default" })).text).not.toMatch(/launches the browser/);
   });
 
+  it("launches the browser kind open names, refuses one it does not know, and says it is moot once a browser runs", async () => {
+    const decl = browserToolDecls().find((t) => t.name === "webindex_browser_open")!;
+    expect(JSON.stringify(decl.inputSchema)).toContain('"browserKind":{"type":"string","enum":["chrome","brave","chromium","edge"]');
+    const h = await host();
+    await expect(h.call("webindex_browser_open", { url: "https://b.test/", browserKind: "netscape" })).rejects.toThrow(
+      /`browserKind` must be one of chrome, brave, chromium, edge/,
+    );
+    await h.call("webindex_browser_snapshot", { mode: "full" });
+    const r = await h.call("webindex_browser_open", { url: "https://b.test/", browserKind: "brave" });
+    expect(r.text).toMatch(/browserKind apply only when this call launches the browser/);
+  });
+
   it("says what eval must not be used for", () => {
     const desc = browserToolDecls().find((t) => t.name === "webindex_browser_eval")!.description;
     expect(desc).toMatch(/form\.submit\(\)/);

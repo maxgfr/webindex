@@ -33,6 +33,11 @@ export interface DetectOptions {
 
 const ORDER: readonly BrowserKind[] = ["chrome", "brave", "chromium", "edge"];
 
+/** Every kind of browser webindex drives, in the order it looks for them. */
+export const BROWSER_KINDS: readonly BrowserKind[] = ORDER;
+
+export const isBrowserKind = (v: string): v is BrowserKind => (ORDER as readonly string[]).includes(v);
+
 const MAC_APPS: Record<BrowserKind, string> = {
   chrome: "Google Chrome",
   brave: "Brave Browser",
@@ -79,7 +84,7 @@ function candidates(kind: BrowserKind, platform: NodeJS.Platform, sys: Record<st
 }
 
 /** Which family a binary belongs to, by its file name alone (a directory called "knowledge" is not Edge). */
-function kindOf(path: string): BrowserKind {
+export function kindOf(path: string): BrowserKind {
   const name = (path.split(/[\\/]/).pop() ?? "").toLowerCase();
   if (name.includes("brave")) return "brave";
   if (name.includes("edge")) return "edge";
@@ -88,8 +93,9 @@ function kindOf(path: string): BrowserKind {
 }
 
 /**
- * The browser to launch: `<PREFIX>_BROWSER_BIN` if set, then `prefer`, then
- * Chrome, Brave, Chromium, Edge. `null` when none is installed.
+ * The browser to launch: `<PREFIX>_BROWSER_BIN` if set, then `prefer` (else
+ * `<PREFIX>_BROWSER_KIND`), then Chrome, Brave, Chromium, Edge. `null` when
+ * none is installed.
  *
  * An explicit path that does not exist throws rather than falling through: a
  * user who named a binary and was handed a different one would drive the wrong
@@ -115,10 +121,29 @@ export function detectBrowserBinary(opts: DetectOptions = {}): BrowserBinary | n
     return { kind: kindOf(found), path: found };
   }
 
-  const kinds = opts.prefer ? [opts.prefer, ...ORDER.filter((k) => k !== opts.prefer)] : ORDER;
+  let prefer = opts.prefer;
+  if (!prefer) {
+    const asked = (opts.env ? opts.env("BROWSER_KIND") : env("BROWSER_KIND"))?.trim().toLowerCase();
+    if (asked && !isBrowserKind(asked)) throw new Error(`BROWSER_KIND is "${asked}", not one of ${ORDER.join(", ")}`);
+    if (asked && isBrowserKind(asked)) prefer = asked;
+  }
+  const kinds = prefer ? [prefer, ...ORDER.filter((k) => k !== prefer)] : ORDER;
   for (const kind of kinds) {
     const path = candidates(kind, platform, sys, home).find(exists);
     if (path) return { kind, path };
   }
   return null;
+}
+
+/**
+ * Whether this browser drops `--load-extension`: branded Google Chrome does from
+ * version 137 (Chrome for Testing, Chromium, Brave and Edge still load unpacked
+ * extensions). `browserVersion` is /json/version's `Browser` ("Chrome/140.0…");
+ * unknown, a branded Chrome is taken to be a recent one.
+ */
+export function ignoresUnpackedExtensions(bin: BrowserBinary, browserVersion?: string): boolean {
+  if (bin.kind !== "chrome" || /for testing/i.test(bin.path.split(/[\\/]/).pop() ?? "")) return false;
+  if (browserVersion === undefined) return true;
+  const major = /^(?:Headless)?Chrome\/(\d+)\./.exec(browserVersion)?.[1];
+  return major !== undefined && Number(major) >= 137;
 }

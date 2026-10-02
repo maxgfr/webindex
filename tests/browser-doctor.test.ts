@@ -16,10 +16,35 @@ const deps = (over: Partial<BrowserDoctorDeps> = {}): BrowserDoctorDeps => ({
   alive: async () => false,
   fetchMode: () => "off",
   concurrency: () => 1,
+  env: () => undefined,
   ...over,
 });
 
 describe("browserDoctor", () => {
+  it("shows the browser kind asked for and the extensions to load, with the note branded Chrome needs", async () => {
+    const ext = mkdtempSync(join(tmpdir(), "wi-doctor-ext-"));
+    writeFileSync(join(ext, "manifest.json"), "{}");
+    try {
+      const vars: Record<string, string> = { BROWSER_KIND: "chrome", BROWSER_EXTENSIONS: ext };
+      const b = await browserDoctor(
+        deps({ detect: () => ({ kind: "chrome", path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" }), env: (k) => vars[k] }),
+      );
+      expect(b.kind).toBe("chrome");
+      expect(b.extensions).toEqual({
+        paths: [ext],
+        note: "Google Chrome ≥ 137 ignores unpacked extensions — use Brave (built-in ad/tracker blocking: WEBINDEX_TEST_BROWSER_KIND=brave), Chromium, Chrome for Testing or Edge",
+      });
+      // Brave loads them: no note.
+      expect((await browserDoctor(deps({ detect: () => ({ kind: "brave", path: "/b/brave" }), env: (k) => vars[k] }))).extensions).toEqual({ paths: [ext] });
+      // A path that is no extension is a problem shown, not a throw.
+      const bad = await browserDoctor(deps({ env: (k) => (k === "BROWSER_EXTENSIONS" ? "/nowhere/x" : undefined) }));
+      expect(bad.extensions).toMatchObject({ paths: [], error: expect.stringMatching(/no such directory: \/nowhere\/x/) });
+      expect(bad.kind).toBeUndefined();
+    } finally {
+      rmSync(ext, { recursive: true, force: true });
+    }
+  });
+
   it("reports the binary, home, profiles and the fetch rung", async () => {
     const b = await browserDoctor(deps());
     expect(b).toEqual({

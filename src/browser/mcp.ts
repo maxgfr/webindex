@@ -28,6 +28,7 @@ import * as actions from "./actions.js";
 import type { CdpHandler, CdpSession } from "./cdp.js";
 import { type BrowserCliDeps, type BrowserCliFlags, type BrowserFollowUps, dialogLine, runBrowserCommand, statusText } from "./cli.js";
 import { browserDeps } from "./deps.js";
+import { BROWSER_KINDS, type BrowserKind } from "./detect.js";
 import { NetworkRecorder } from "./network.js";
 import { assessDialog } from "./risk.js";
 import { type BrowserSession, browserStatus, openBrowserSession } from "./session.js";
@@ -106,6 +107,12 @@ export function browserToolDecls(): ToolDecl[] {
         capture: { type: "boolean", description: "Record the JSON responses pages fetch from now on, until network clear or close." },
         profile: { type: "string", description: "The dedicated profile (default `default`), used when this call launches the browser." },
         headless: { type: "boolean", description: "No window, when this call launches the browser. A human cannot solve a challenge in it." },
+        browserKind: {
+          type: "string",
+          enum: ["chrome", "brave", "chromium", "edge"],
+          description:
+            "Which browser to launch, when this call launches it (brave blocks ads and trackers on its own). A profile stays with the kind it was first launched with.",
+        },
         ...AFTER,
       },
       ["url"],
@@ -363,7 +370,7 @@ export interface BrowserToolHost {
 
 /** How the call that may open the session opens it (`launch`), and whether it records (`capture`). */
 interface RunOptions {
-  launch?: { profile?: string; headless?: boolean };
+  launch?: { profile?: string; headless?: boolean; kind?: BrowserKind };
   capture?: boolean;
 }
 
@@ -553,17 +560,18 @@ class Host implements BrowserToolHost {
   private readonly handlers: Record<string, (a: Record<string, unknown>) => Promise<Answer>> = {
     open: async (a) => {
       const profile = str(a.profile);
-      const launch = { ...(profile ? { profile } : {}), ...(a.headless === true ? { headless: true } : {}) };
-      // A browser already running keeps its profile and window: say so rather than ignore the ask.
+      const kind = a.browserKind === undefined ? undefined : oneOf(a, "browserKind", BROWSER_KINDS);
+      const launch = { ...(profile ? { profile } : {}), ...(a.headless === true ? { headless: true } : {}), ...(kind ? { kind } : {}) };
+      // A browser already running keeps its profile, kind and window: say so rather than ignore the ask.
       const running = this.live();
-      const moot = running && ((profile !== undefined && profile !== running.profile) || (a.headless === true && !running.headless));
+      const moot = running && ((profile !== undefined && profile !== running.profile) || (a.headless === true && !running.headless) || kind !== undefined);
       const capture = a.capture === true;
       const out = await this.cli("open", [String(a.url ?? "")], { ...after(a), ...(a.newTab === true ? { newTab: true } : {}) }, { launch, capture });
       if (capture) this.capture = true;
       const notes = [
         ...(moot
           ? [
-              `profile and headless apply only when this call launches the browser; one is already running on profile ${running.profile}${running.headless ? ", headless" : ""} (webindex_browser_close first to change them)`,
+              `profile, headless and browserKind apply only when this call launches the browser; one is already running on profile ${running.profile}${running.headless ? ", headless" : ""} (webindex_browser_close first to change them)`,
             ]
           : []),
         ...(capture ? [`recording the JSON pages fetch — ${FOLLOW_UPS.networkList}`] : []),
