@@ -33,6 +33,8 @@ export class BrowserWorld {
   dialogOnClick: { type: string; message: string } | undefined;
   /** Network events the first Network.enable sends, as a page's own XHR would. */
   xhr = false;
+  /** What document.querySelector finds: a CSS selector to a backendNodeId. */
+  selectors: Record<string, number> = {};
 
   constructor(readonly fake: FakeCdp) {
     const ax = (id: string, role: string, name: string, backendDOMNodeId: number) => ({
@@ -87,6 +89,12 @@ export class BrowserWorld {
       if (name === "fileInput") return { result: { value: { ok: true, multiple: true, what: "<input>" } } };
       return { result: {} };
     });
+    fake.handle("DOM.getDocument", () => ({ root: { nodeId: 1 } }));
+    // nodeId = backendNodeId + 1000.
+    fake.handle("DOM.querySelector", ({ selector }) => ({ nodeId: this.selectors[selector] === undefined ? 0 : (this.selectors[selector] as number) + 1000 }));
+    fake.handle("DOM.describeNode", ({ objectId, nodeId }) => ({
+      node: { nodeId: 0, backendNodeId: nodeId !== undefined ? nodeId - 1000 : Number(String(objectId).slice(1)) },
+    }));
     fake.handle("Runtime.evaluate", ({ expression }) => {
       const e = String(expression);
       if (e.includes(COLLECT_SOURCE)) return { result: { value: this.active } };

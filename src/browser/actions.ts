@@ -29,7 +29,7 @@ import { type KeySpec, keyEventsFor, keyName, parseKey } from "./keys.js";
 import { DESCRIBE_SOURCE, overlayRootOf } from "./overlay.js";
 import { guardAction, OWNER_SOURCE } from "./risk.js";
 import type { NavigationResult } from "./session.js";
-import { type AXNode, renderSnapshot, StaleRefError } from "./snapshot.js";
+import { type AXNode, checkRef, elementBySelector, renderSnapshot, StaleRefError } from "./snapshot.js";
 import { readRefs, writeRefs } from "./state.js";
 import { armSettle, type SettleOptions, settle } from "./wait.js";
 
@@ -72,7 +72,10 @@ export interface ActionResult {
   dialog?: DialogInfo;
   /** An anti-bot challenge on the page after the action; null when none. */
   challenge?: Challenge | null;
+  /** What the action yields: the value a field holds after fill or type, the options select chose, the scroll position. */
   value?: unknown;
+  /** fill or type on a password field: its value is never echoed. */
+  valueHidden?: true;
   /** The page the move landed on committed but was still loading when the wait ran out. */
   note?: string;
 }
@@ -111,6 +114,8 @@ export interface HistoryOptions extends ActionOptions {
 export interface ScreenshotOptions {
   /** Only this element, clipped to its box. */
   ref?: string;
+  /** Only the first element this CSS selector matches, clipped to its box. */
+  selector?: string;
   /** The whole page, beyond the viewport. */
   full?: boolean;
   format?: "png" | "jpeg";
@@ -242,12 +247,14 @@ export interface ResolvedRef {
 }
 
 /**
- * Turn a ref into the node it names. Stale (StaleRefError) when the ref is not
- * in the tab's table, when the table belongs to a document the tab has since
- * left, or when the node is gone from the document. A transport failure is not
- * staleness and goes through unchanged.
+ * Turn a ref into the node it names. What is not shaped like a ref (a CSS
+ * selector) is a UsageError, before anything is asked. Stale (StaleRefError)
+ * when the ref is not in the tab's table, when the table belongs to a document
+ * the tab has since left, or when the node is gone from the document. A
+ * transport failure is not staleness and goes through unchanged.
  */
 export async function resolveRef(session: ActionSession, ref: string): Promise<ResolvedRef> {
+  checkRef(ref);
   const table = readRefs(session.targetId);
   const backendNodeId = table && Object.hasOwn(table.refs, ref) ? table.refs[ref] : undefined;
   if (!table || backendNodeId === undefined) throw new StaleRefError(ref);
@@ -311,6 +318,7 @@ interface Performed {
   /** The url of the frame that opened the dialog, from the event: known without asking the frozen page. */
   dialogUrl?: string;
   value?: unknown;
+  valueHidden?: true;
   note?: string;
 }
 
@@ -427,6 +435,7 @@ async function finish(session: ActionSession, action: string, ref: string | unde
     ...(p.dialog ? { dialog: p.dialog } : {}),
     challenge,
     ...(p.value !== undefined ? { value: p.value } : {}),
+    ...(p.valueHidden ? { valueHidden: true } : {}),
     ...(p.note ? { note: p.note } : {}),
   };
 }
@@ -442,7 +451,7 @@ const area = (q: Quad): number => {
 };
 
 /** Scroll the element into view and return its boxes on screen (viewport coordinates); none → not visible. */
-async function visibleQuads(page: CdpSession, node: ResolvedRef): Promise<Quad[]> {
+async function visibleQuads(page: CdpSession, node: { ref: string; backendNodeId: number }): Promise<Quad[]> {
   await page.send("DOM.scrollIntoViewIfNeeded", { backendNodeId: node.backendNodeId });
   let quads: Quad[] = [];
   try {
@@ -556,6 +565,9 @@ export async function click(session: ActionSession, ref: string, opts: ClickOpti
   if (count !== 1 && count !== 2) throw new UsageError(`clickCount is 1 or 2, not ${count}`);
   const page = session.page;
   return withRef(session, ref, async (node) => {
+    // A table or a figure is no control: its centre is whatever sits there, which no --confirm was given for.
+    if (readRefs(session.targetId)?.containers?.includes(ref))
+      throw new UsageError(`${ref} is a container — click a control inside it (take a snapshot of ${ref})`);
     await guardAction(page, { backendNodeId: node.backendNodeId, action: "click", ...(opts.confirm ? { confirm: true } : {}) });
     const { x, y } = await centreOf(page, node);
     // The ref may name a container (a card, a row) whose centre is a "Delete" button: that button is what acts.
@@ -610,7 +622,7 @@ export async function typeText(session: ActionSession, ref: string, text: string
   const page = session.page;
   const confirm = opts.confirm ? { confirm: true } : {};
   return withRef(session, ref, async (node) => {
-    await textField(page, node);
+    const field = await textField(page, node);
     await page.send("DOM.focus", { backendNodeId: node.backendNodeId });
     if (opts.submit || chars.includes("\n")) await guardAction(page, { action: "press", key: "Enter", ...confirm });
     const p = await perform(session, opts, async (pg) => {
@@ -623,7 +635,7 @@ export async function typeText(session: ActionSession, ref: string, text: string
       for (const c of chars) await type(parseKey(c));
       if (opts.submit) await type(parseKey("Enter"));
     });
-    return finish(session, "type", ref, p);
+    return finish(session, "type", ref, { ...p, ...(await echo(page, node, field, p)) });
   });
 }
 
@@ -643,6 +655,21 @@ function holds(actual: unknown, want: string): boolean {
 }
 
 /**
+ * What a text field holds after fill or type, to echo: never a password's, and
+ * nothing when it cannot be read any more (an Enter that left the page, a dialog).
+ */
+async function echo(page: CdpSession, node: ResolvedRef, field: FieldKind, p: Performed): Promise<{ value?: unknown; valueHidden?: true }> {
+  if (field.secret) return { valueHidden: true };
+  if (p.dialog || p.navigated) return {};
+  try {
+    const value = await callOn<unknown>(page, node.objectId, PAGE_FUNCTIONS.readValue, [{ value: field.kind }]);
+    return typeof value === "string" ? { value } : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Replace the content of a text field (input, textarea, contenteditable) with
  * `text` in one insertion, as a paste would. If the value does not take — a
  * controlled input that did not hear it — set it through the native setter and
@@ -659,14 +686,16 @@ export async function fill(session: ActionSession, ref: string, text: string, op
       await callOn(pg, node.objectId, PAGE_FUNCTIONS.selectAll, [kind]);
       if (text === "") await dispatchKeys(pg, parseKey("Delete"));
       else await pg.send("Input.insertText", { text });
-      if (holds(await read(), text)) return;
+      const first = await read();
+      if (holds(first, text)) return first;
       await callOn(pg, node.objectId, PAGE_FUNCTIONS.setValue, [{ value: text }, kind]);
       const now = await read();
-      if (holds(now, text)) return;
+      if (holds(now, text)) return now;
       const shown = field.secret ? "something else" : JSON.stringify(typeof now === "string" && now.length > 80 ? `${now.slice(0, 77)}...` : now);
       throw new ActionError(`could not fill ${ref}: it holds ${shown} (an input mask, a maxlength or a script rewrites it); try typeText`);
     });
-    return finish(session, "fill", ref, p);
+    // The value the field ended with (a mask may have reformatted it); never a password's.
+    return finish(session, "fill", ref, field.secret ? { ...p, value: undefined, valueHidden: true } : p);
   });
 }
 
@@ -781,8 +810,8 @@ export async function scroll(session: ActionSession, target: string, opts: Actio
 
 type Rect = { x: number; y: number; width: number; height: number };
 type LayoutMetrics = {
-  cssLayoutViewport?: { pageX: number; pageY: number };
-  layoutViewport?: { pageX: number; pageY: number };
+  cssLayoutViewport?: { pageX: number; pageY: number; clientWidth?: number; clientHeight?: number };
+  layoutViewport?: { pageX: number; pageY: number; clientWidth?: number; clientHeight?: number };
   cssContentSize?: Rect;
   contentSize?: Rect;
 };
@@ -792,15 +821,21 @@ type LayoutMetrics = {
  * Not an action: nothing on the page changes, so there is no settle.
  */
 export async function screenshot(session: ActionSession, opts: ScreenshotOptions = {}): Promise<Buffer> {
-  if (opts.ref !== undefined && opts.full) throw new UsageError("a screenshot is of one element (a ref) or of the full page, not both");
+  if (opts.ref !== undefined && opts.selector !== undefined) throw new UsageError("a screenshot is of the element a ref or a selector names, not both");
+  if ((opts.ref !== undefined || opts.selector !== undefined) && opts.full)
+    throw new UsageError("a screenshot is of one element (a ref or a selector) or of the full page, not both");
+  if (opts.ref !== undefined) checkRef(opts.ref);
   const format = opts.format ?? "png";
   if (format !== "png" && format !== "jpeg") throw new UsageError(`screenshot format is png or jpeg, not ${JSON.stringify(format)}`);
   if (opts.quality !== undefined && !(Number.isInteger(opts.quality) && opts.quality >= 0 && opts.quality <= 100))
     throw new UsageError(`screenshot quality is a whole number from 0 to 100, not ${opts.quality}`);
   const page = session.page;
   const params: Record<string, unknown> = { format, ...(format === "jpeg" && opts.quality !== undefined ? { quality: opts.quality } : {}) };
-  if (opts.ref !== undefined) {
-    const quads = await withRef(session, opts.ref, (node) => visibleQuads(page, node));
+  if (opts.ref !== undefined || opts.selector !== undefined) {
+    const quads =
+      opts.ref !== undefined
+        ? await withRef(session, opts.ref, (node) => visibleQuads(page, node))
+        : await visibleQuads(page, { ref: opts.selector as string, backendNodeId: await elementBySelector(page, opts.selector as string) });
     const xs = quads.flatMap((q) => q.filter((_, i) => i % 2 === 0));
     const ys = quads.flatMap((q) => q.filter((_, i) => i % 2 === 1));
     // Quads are in viewport coordinates, the clip in page coordinates.
@@ -808,7 +843,13 @@ export async function screenshot(session: ActionSession, opts: ScreenshotOptions
     const vp = m.cssLayoutViewport ?? m.layoutViewport ?? { pageX: 0, pageY: 0 };
     const x = Math.min(...xs);
     const y = Math.min(...ys);
-    params.clip = { x: x + vp.pageX, y: y + vp.pageY, width: Math.max(...xs) - x, height: Math.max(...ys) - y, scale: 1 };
+    const right = Math.max(...xs);
+    const bottom = Math.max(...ys);
+    // Past the viewport the browser paints nothing unless asked: an infobox taller than the window would come out blank below its edge.
+    const w = "clientWidth" in vp ? vp.clientWidth : undefined;
+    const h = "clientHeight" in vp ? vp.clientHeight : undefined;
+    if (x < 0 || y < 0 || (w !== undefined && right > w) || (h !== undefined && bottom > h)) params.captureBeyondViewport = true;
+    params.clip = { x: x + vp.pageX, y: y + vp.pageY, width: right - x, height: bottom - y, scale: 1 };
   } else if (opts.full) {
     const m = await page.send<LayoutMetrics>("Page.getLayoutMetrics");
     const size = m.cssContentSize ?? m.contentSize ?? { x: 0, y: 0, width: 0, height: 0 };

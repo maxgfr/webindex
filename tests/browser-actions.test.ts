@@ -285,12 +285,21 @@ describe("resolveRef", () => {
     expect(w.page.calls).toEqual([]);
   });
 
-  it("calls every ref stale once the page has navigated since the snapshot", async () => {
+  it("calls every ref stale once the page has navigated since the snapshot, in English only", async () => {
     w.add(101, { tag: "BUTTON" });
     w.loader = "L2";
     const err = await resolveRef(session, "e1").catch((e) => e);
     expect(err).toBeInstanceOf(StaleRefError);
-    expect(err.message).toMatch(/take a new snapshot/);
+    expect(err.message).toBe('ref "e1" is unknown or stale: take a new snapshot and use the refs it returns');
+  });
+
+  it("refuses what is not a ref (a CSS selector) as a usage error, before asking the page anything", async () => {
+    for (const bad of ["table.infobox", "#main", "E12", "e", "e1 ", ""]) {
+      const err = await resolveRef(session, bad).catch((e) => e);
+      expect(err, bad).toBeInstanceOf(UsageError);
+      expect(err.message).toBe("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)");
+    }
+    expect(w.page.calls).toEqual([]);
   });
 
   it("calls a ref stale when its node is gone from the document", async () => {
@@ -505,6 +514,19 @@ describe("click", () => {
     expect(mouse()).toHaveLength(3);
   });
 
+  it("refuses a container's ref, even confirmed: what it would press is whatever control sits at its centre", async () => {
+    writeRefs("T1", { loaderId: "L1", url: "https://a.test/", next: 10, refs: { e1: 101, e2: 102 }, containers: ["e1"] });
+    w.add(101, { tag: "TABLE" });
+    w.add(102, { tag: "BUTTON", text: "Go" });
+    const err = await click(session, "e1", { deps, confirm: true }).catch((e) => e);
+    expect(err).toBeInstanceOf(UsageError);
+    expect(err.message).toBe("e1 is a container — click a control inside it (take a snapshot of e1)");
+    expect(mouse()).toEqual([]);
+    w.hitFor = 102;
+    await click(session, "e2", { deps });
+    expect(mouse()).toHaveLength(3);
+  });
+
   it("reports a stale ref as stale, not as a guard refusal", async () => {
     w.add(101, { tag: "BUTTON", label: "Delete account" });
     w.loader = "L2";
@@ -625,8 +647,30 @@ describe("typeText", () => {
   it("submits with Enter after the text, when asked and confirmed", async () => {
     w.add(102, { tag: "INPUT", type: "password", value: "" });
     w.active = { ...w.active, formHasPassword: true };
-    await typeText(session, "e2", "pw", { deps, submit: true, confirm: true });
+    const r = await typeText(session, "e2", "pw", { deps, submit: true, confirm: true });
     expect(keys().map((k) => `${k.type} ${k.key}`)).toEqual(["keyDown p", "keyUp p", "keyDown w", "keyUp w", "keyDown Enter", "keyUp Enter"]);
+    // A password field's value is never echoed.
+    expect(r.value).toBeUndefined();
+    expect(r.valueHidden).toBe(true);
+  });
+
+  it("echoes what the field holds afterwards", async () => {
+    w.add(102, { tag: "INPUT", value: "Jane " });
+    const r = await typeText(session, "e2", "Doe", { deps });
+    expect(r.value).toBe("Jane Doe");
+    expect(r.valueHidden).toBeUndefined();
+  });
+
+  it("echoes nothing when the field can no longer be read (the Enter left the page)", async () => {
+    w.add(102, { tag: "INPUT", value: "" });
+    const base = w.page.handlerOf("Runtime.callFunctionOn");
+    w.page.handle("Runtime.callFunctionOn", (p: any) => {
+      if (/^function readValue/.test(p.functionDeclaration)) throw new CdpError("Runtime.callFunctionOn", -32000, "Cannot find context with specified id");
+      return base?.(p);
+    });
+    const r = await typeText(session, "e2", "x", { deps });
+    expect(r.value).toBeUndefined();
+    expect(r.valueHidden).toBeUndefined();
   });
 });
 
@@ -637,7 +681,24 @@ describe("fill", () => {
     expect(fnCalls()).toEqual(["fieldKind", "selectAll", "readValue"]);
     expect(w.page.calls.find((c) => c.method === "Input.insertText")?.params).toEqual({ text: "new value" });
     expect(w.el(102).value).toBe("new value");
-    expect(r).toMatchObject({ action: "fill", ref: "e2" });
+    expect(r).toMatchObject({ action: "fill", ref: "e2", value: "new value" });
+  });
+
+  it("echoes the value the field ended with, as the page reformatted it, but never a password's", async () => {
+    w.add(102, { tag: "INPUT", value: "" });
+    w.page.handle("Input.insertText", () => {
+      w.el(102).value = "06 12 34 56 78";
+    });
+    expect((await fill(session, "e2", "0612345678", { deps })).value).toBe("06 12 34 56 78");
+    w.add(103, { tag: "INPUT", type: "password", value: "" });
+    w.page.handle("Input.insertText", ({ text }) => {
+      w.el(103).value = text;
+    });
+    const secret = await fill(session, "e3", "hunter2", { deps });
+    expect(w.el(103).value).toBe("hunter2");
+    expect(secret.value).toBeUndefined();
+    expect(secret.valueHidden).toBe(true);
+    expect(JSON.stringify(secret)).not.toContain("hunter2");
   });
 
   it("falls back to the native value setter when the inserted text does not stick", async () => {
@@ -888,6 +949,13 @@ describe("screenshot", () => {
     expect(shot()).toEqual({ format: "png", clip: { x: 10, y: 520, width: 100, height: 70, scale: 1 } });
   });
 
+  it("renders beyond the viewport an element taller than it (an infobox), so its lower part is not blank", async () => {
+    // The viewport is 1280 by 800: the element runs 1100 px past its top.
+    w.add(101, { tag: "TABLE", quads: [[900, 0, 1210, 0, 1210, 1100, 900, 1100]] });
+    await screenshot(session, { ref: "e1" });
+    expect(shot()).toEqual({ format: "png", captureBeyondViewport: true, clip: { x: 900, y: 500, width: 310, height: 1100, scale: 1 } });
+  });
+
   it("captures the whole page beyond the viewport", async () => {
     await screenshot(session, { full: true });
     expect(shot()).toEqual({ format: "png", captureBeyondViewport: true, clip: { x: 0, y: 0, width: 1280, height: 4000, scale: 1 } });
@@ -898,6 +966,46 @@ describe("screenshot", () => {
     await expect(screenshot(session, { ref: "e1" })).rejects.toThrow(/element is not visible/);
     await expect(screenshot(session, { ref: "e77" })).rejects.toBeInstanceOf(StaleRefError);
     await expect(screenshot(session, { ref: "e1", full: true })).rejects.toBeInstanceOf(UsageError);
+  });
+
+  /** document.querySelector in the page: these selectors match these elements. */
+  /** DOM.querySelector on the document: these selectors match these elements (nodeId = backendNodeId + 1000). */
+  const selectors = (found: Record<string, number>) => {
+    w.page.handle("DOM.getDocument", () => ({ root: { nodeId: 1 } }));
+    w.page.handle("DOM.querySelector", ({ selector }) => {
+      if (selector.endsWith("[")) throw new CdpError("DOM.querySelector", -32000, "DOM Error while querying");
+      const id = found[selector];
+      return { nodeId: id === undefined ? 0 : id + 1000 };
+    });
+    w.page.handle("DOM.describeNode", ({ objectId, nodeId }) => ({
+      node: { backendNodeId: nodeId !== undefined ? nodeId - 1000 : Number(String(objectId).slice(1)) },
+    }));
+  };
+
+  it("clips to the element a CSS selector matches, and lets the handle it took go", async () => {
+    w.add(150, { tag: "TABLE", quads: [[10, 20, 310, 20, 310, 420, 10, 420]] });
+    selectors({ "table.infobox": 150 });
+    await screenshot(session, { selector: "table.infobox" });
+    expect(shot()).toEqual({ format: "png", clip: { x: 10, y: 520, width: 300, height: 400, scale: 1 } });
+    // The DOM domain, not the page's own document.querySelector, which a page can replace.
+    expect(w.page.methods()).toEqual(expect.arrayContaining(["DOM.getDocument", "DOM.querySelector"]));
+    expect(w.page.methods()).not.toContain("Runtime.evaluate");
+  });
+
+  it("fails on a selector that matches nothing (exit 1), and refuses a bad one, or one with a ref or --full (usage)", async () => {
+    selectors({});
+    const none = await screenshot(session, { selector: "table.nope" }).catch((e) => e);
+    expect(none).toBeInstanceOf(Error);
+    expect(none).not.toBeInstanceOf(UsageError);
+    expect(none.message).toBe("no element matches table.nope");
+    await expect(screenshot(session, { selector: "div[" })).rejects.toBeInstanceOf(UsageError);
+    await expect(screenshot(session, { selector: "table", ref: "e1" })).rejects.toBeInstanceOf(UsageError);
+    await expect(screenshot(session, { selector: "table", full: true })).rejects.toBeInstanceOf(UsageError);
+    expect(w.page.methods()).not.toContain("Page.captureScreenshot");
+  });
+
+  it("refuses a CSS selector given as a ref, pointing at --selector", async () => {
+    await expect(screenshot(session, { ref: "table.infobox" })).rejects.toThrow(/expected a ref like e12.*use --selector/);
   });
 });
 

@@ -15,6 +15,11 @@ export class FakePage implements CdpSession {
     this.handlers.set(method, handler);
   }
 
+  /** The handler scripted for a method, to wrap it. */
+  handlerOf(method: string): PageHandler | undefined {
+    return this.handlers.get(method);
+  }
+
   async send<T = unknown>(method: string, params?: object): Promise<T> {
     this.calls.push({ method, params });
     const h = this.handlers.get(method);

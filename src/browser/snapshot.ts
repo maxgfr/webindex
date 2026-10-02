@@ -1,3 +1,5 @@
+import { UsageError } from "../cli-kit.js";
+import { CdpError, type CdpSession } from "./cdp.js";
 import { findOverlays } from "./overlay.js";
 import type { BrowserSession } from "./session.js";
 import { type RefTable, readRefs, writeRefs } from "./state.js";
@@ -9,6 +11,11 @@ import { type RefTable, readRefs, writeRefs } from "./state.js";
 // and hands out stable refs (`e<N>`, backed by the node's backendDOMNodeId) that
 // later actions pass back. takeSnapshot fetches the tree from a live session
 // and keeps the ref table on disk, so a ref survives from one CLI call to the next.
+//
+// Refs go to what an agent acts on (controls, headings, iframes, anything
+// focusable or editable) and to the structural containers it may want to scope
+// a snapshot or an element screenshot to (a table, a figure, an article…).
+// --interactive lists only the first kind.
 //
 // What covers the page (a cookie wall, a modal: see overlay.ts) is rendered
 // first, under an `overlay` header, and not again in the tree: a wall that comes
@@ -34,7 +41,7 @@ export interface AXNode {
 }
 
 export interface RenderOptions {
-  /** Only nodes that have a ref, flat (no indentation, no text, no `/url` lines). */
+  /** Only the nodes an agent acts on, flat (no indentation, no text, no `/url` lines, no containers). */
   interactive?: boolean;
   /** Cut the tree at a line boundary once it is longer than this (a first line longer than all of it is cut itself). No limit by default. */
   maxChars?: number;
@@ -52,16 +59,53 @@ export interface RenderResult {
   text: string;
   refs: RefTable;
   truncated: boolean;
-  /** Refs visible in `text`. */
+  /** Refs visible in `text`: the controls', and in a full snapshot the containers' too. */
   refCount: number;
 }
 
 /** A ref the table does not know, or that belongs to a document that is gone. */
 export class StaleRefError extends Error {
   constructor(readonly ref: string) {
-    super(`ref ${JSON.stringify(ref)} is unknown or stale: take a new snapshot (refais un snapshot) and use the refs it returns`);
+    super(`ref ${JSON.stringify(ref)} is unknown or stale: take a new snapshot and use the refs it returns`);
     this.name = "StaleRefError";
   }
+}
+
+const REF_SHAPE = /^e\d+$/;
+
+/** Refuse what cannot be a ref at all (a CSS selector, a typo) as a usage error, before anything looks it up. */
+export function checkRef(ref: string): void {
+  if (!REF_SHAPE.test(ref))
+    throw new UsageError("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)");
+}
+
+/** No element of the document matches a CSS selector: the page as it is, not the invocation (exit 1). */
+export class NoMatchError extends Error {
+  constructor(readonly selector: string) {
+    super(`no element matches ${selector}`);
+    this.name = "NoMatchError";
+  }
+}
+
+/**
+ * The backendNodeId of the first element of the main document a CSS selector
+ * matches, through the DOM domain: the page's own document.querySelector,
+ * which a page may replace, is never called. NoMatchError when none matches;
+ * a UsageError when the browser calls it no selector at all.
+ */
+export async function elementBySelector(page: CdpSession, selector: string): Promise<number> {
+  const { root } = await page.send<{ root: { nodeId: number } }>("DOM.getDocument", { depth: 0 });
+  let nodeId: number | undefined;
+  try {
+    ({ nodeId } = await page.send<{ nodeId?: number }>("DOM.querySelector", { nodeId: root.nodeId, selector }));
+  } catch (e) {
+    if (e instanceof CdpError) throw new UsageError(`${JSON.stringify(selector)} is not a valid CSS selector`);
+    throw e;
+  }
+  if (!nodeId) throw new NoMatchError(selector);
+  const { node } = await page.send<{ node?: { backendNodeId?: number } }>("DOM.describeNode", { nodeId });
+  if (typeof node?.backendNodeId !== "number" || node.backendNodeId <= 0) throw new NoMatchError(selector);
+  return node.backendNodeId;
 }
 
 const NAME_MAX = 120;
@@ -93,13 +137,20 @@ const REF_ROLES = new Set([
   "iframe",
   "heading",
 ]);
+/** Containers worth naming, to scope a snapshot or an element screenshot to: always, or only when they have a name. */
+const CONTAINER_ROLES = new Set(["table", "figure", "article", "main", "complementary", "form"]);
+const NAMED_CONTAINER_ROLES = new Set(["region", "image", "img"]);
 const VALUE_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider"]);
 /** Fields whose editor (a node in the input's user-agent shadow tree) is the field itself, not a control of its own. */
 const FIELD_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
 
 /** The nearest ancestor printed as a line: its role, and whether it has a ref. */
 type Parent = { role: string; ref: boolean } | undefined;
-type Item = { t: "text"; text: string } | { t: "break" } | { t: "node"; head: string; ref: boolean; url?: string; note: string; children: Item[] };
+/** A node line: `ref` when it carries one, `act` when it is something to act on (what --interactive lists). */
+type Item =
+  | { t: "text"; text: string }
+  | { t: "break" }
+  | { t: "node"; head: string; ref: boolean; act: boolean; url?: string; note: string; children: Item[] };
 interface Tree {
   byId: Map<string, AXNode>;
   root: AXNode | undefined;
@@ -158,6 +209,8 @@ function states(n: AXNode): string[] {
 
 class Renderer {
   readonly refs: Record<string, number>;
+  /** The refs that name a container only, never a control. */
+  readonly containers: Set<string>;
   next: number;
   private readonly seen = new Set<AXNode>();
   private readonly trees = new Map<string, Tree>();
@@ -167,6 +220,7 @@ class Renderer {
     private readonly frames: Record<string, AXNode[]>,
   ) {
     this.refs = { ...table.refs };
+    this.containers = new Set(table.containers ?? []);
     this.next = table.next;
   }
 
@@ -218,9 +272,11 @@ class Renderer {
 
     const name = squash(str(n.name));
     const hasRole = REF_ROLES.has(role.toLowerCase());
-    const wantsRef = n.backendDOMNodeId !== undefined && (hasRole || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
+    const acts = n.backendDOMNodeId !== undefined && (hasRole || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
+    const container = CONTAINER_ROLES.has(role) || (NAMED_CONTAINER_ROLES.has(role) && name !== "");
+    const wantsRef = acts || (n.backendDOMNodeId !== undefined && container);
     // The editor inside a text field's user-agent shadow tree: the field's ref already acts on it.
-    const editor = wantsRef && !hasRole && !name && truthy(prop(n, "editable")) && parent?.ref === true && FIELD_ROLES.has(parent.role);
+    const editor = acts && !hasRole && !name && truthy(prop(n, "editable")) && parent?.ref === true && FIELD_ROLES.has(parent.role);
     if ((COLLAPSIBLE.has(role) && !name && !wantsRef) || editor) return [{ t: "break" }, ...this.children(tree, n, parent), { t: "break" }];
 
     const isFrame = role.toLowerCase() === "iframe";
@@ -229,7 +285,12 @@ class Renderer {
     if (name) head += ` "${(name.length > NAME_MAX ? `${name.slice(0, NAME_MAX)}…` : name).replace(/"/g, '\\"')}"`;
     const level = prop(n, "level");
     if (level !== undefined && role === "heading") head += ` [level=${String(level)}]`;
-    if (wantsRef) head += ` [ref=${this.refFor(n.backendDOMNodeId as number)}]`;
+    if (wantsRef) {
+      const ref = this.refFor(n.backendDOMNodeId as number);
+      if (acts) this.containers.delete(ref);
+      else this.containers.add(ref);
+      head += ` [ref=${ref}]`;
+    }
     for (const s of states(n)) head += ` ${s}`;
 
     let kids: Item[];
@@ -248,7 +309,9 @@ class Renderer {
 
     const rawUrl = role === "link" ? prop(n, "url") : undefined;
     const url = typeof rawUrl === "string" ? rawUrl : "";
-    return [{ t: "node", head: value ? `${head}${note}: ${value}` : `${head}${note}`, ref: wantsRef, ...(url ? { url } : {}), note, children: kids }];
+    return [
+      { t: "node", head: value ? `${head}${note}: ${value}` : `${head}${note}`, ref: wantsRef, act: acts, ...(url ? { url } : {}), note, children: kids },
+    ];
   }
 }
 
@@ -272,15 +335,16 @@ function nested(items: Item[], depth: number, out: Line[]): void {
 function flat(items: Item[], out: Line[]): void {
   for (const it of items) {
     if (it.t !== "node") continue;
-    if (it.ref) out.push({ text: it.head, ref: true });
+    if (it.act) out.push({ text: it.head, ref: true });
     flat(it.children, out);
   }
 }
 
 /**
  * Render AX nodes as a compact text tree (2 spaces per level, one node per line),
- * giving refs to what an agent can act on. In `interactive` mode only the nodes
- * with refs are printed, flat; no landmark context is added, to keep it cheap.
+ * giving refs to what an agent can act on and to the structural containers. In
+ * `interactive` mode only the nodes to act on are printed, flat; no landmark
+ * context is added, to keep it cheap.
  */
 export function renderSnapshot(nodes: AXNode[], opts: RenderOptions): RenderResult {
   const r = new Renderer(opts.refs, opts.frames ?? {});
@@ -336,7 +400,13 @@ export function renderSnapshot(nodes: AXNode[], opts: RenderOptions): RenderResu
   const text = [...kept.map((l) => l.text), ...(tail ? [tail] : [])].join("\n");
   return {
     text,
-    refs: { loaderId: opts.refs.loaderId, url: opts.refs.url, next: r.next, refs: r.refs },
+    refs: {
+      loaderId: opts.refs.loaderId,
+      url: opts.refs.url,
+      next: r.next,
+      refs: r.refs,
+      ...(r.containers.size ? { containers: [...r.containers].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))) } : {}),
+    },
     truncated: tail !== "",
     refCount: kept.filter((l) => l.ref).length,
   };
@@ -349,6 +419,8 @@ export interface SnapshotOptions {
   maxChars?: number;
   /** Render only this ref's subtree. */
   ref?: string;
+  /** Render only the subtree of the first element this CSS selector matches. */
+  selector?: string;
 }
 
 export interface SnapshotResult {
@@ -401,8 +473,13 @@ async function collectFrames(session: BrowserSession, main: AXNode[]): Promise<R
   return out;
 }
 
-/** Snapshot the current tab and persist its ref table. Throws StaleRefError for a ref that is not in it. */
+/**
+ * Snapshot the current tab and persist its ref table. Throws StaleRefError for
+ * a ref that is not in it, NoMatchError for a selector that matches nothing.
+ */
 export async function takeSnapshot(session: BrowserSession, opts: SnapshotOptions = {}): Promise<SnapshotResult> {
+  if (opts.ref !== undefined && opts.selector !== undefined) throw new UsageError("a snapshot is scoped to a ref or to a selector, not both");
+  if (opts.ref !== undefined) checkRef(opts.ref);
   const loaderId = await session.loaderId();
   const url = await session.currentUrl();
   const title = await session.title();
@@ -413,7 +490,7 @@ export async function takeSnapshot(session: BrowserSession, opts: SnapshotOption
   if (opts.ref !== undefined) {
     rootBackendId = Object.hasOwn(table.refs, opts.ref) ? table.refs[opts.ref] : undefined;
     if (rootBackendId === undefined) throw new StaleRefError(opts.ref);
-  }
+  } else if (opts.selector !== undefined) rootBackendId = await elementBySelector(session.page, opts.selector);
 
   await session.page.send("Accessibility.enable");
   const fetchTree = async () => (await session.page.send<{ nodes: AXNode[] }>("Accessibility.getFullAXTree", {})).nodes;
@@ -426,7 +503,10 @@ export async function takeSnapshot(session: BrowserSession, opts: SnapshotOption
   }
   const frames = await collectFrames(session, nodes);
   const hasRoot = rootBackendId === undefined || [nodes, ...Object.values(frames)].some((l) => l.some((n) => n.backendDOMNodeId === rootBackendId));
-  if (!hasRoot) throw new StaleRefError(opts.ref as string);
+  if (!hasRoot) {
+    if (opts.ref !== undefined) throw new StaleRefError(opts.ref);
+    throw new Error(`the element ${opts.selector} matches is not in the accessibility tree: scope to an ancestor, or take the whole snapshot`);
+  }
 
   const r = renderSnapshot(nodes, {
     refs: table,

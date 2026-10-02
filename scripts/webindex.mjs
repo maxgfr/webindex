@@ -7223,7 +7223,7 @@ async function overlayRootOf(page, objectId) {
     releaseGroup(page);
   }
 }
-var CONSENT_SELECTORS, HELPERS, OVERLAYS_SOURCE, OVERLAY_ROOT_SOURCE, DESCRIBE_SOURCE, OVERLAY_INFO_SOURCE, READ_DOCUMENT, GROUP, PROBE_TIMEOUT_MS4;
+var CONSENT_SELECTORS, BARE_TEXT_MAX, CONTROL_TAGS, CONTROL_ROLES, HELPERS, OVERLAYS_SOURCE, OVERLAY_ROOT_SOURCE, DESCRIBE_SOURCE, OVERLAY_INFO_SOURCE, READ_DOCUMENT, GROUP, PROBE_TIMEOUT_MS4;
 var init_overlay = __esm({
   "src/browser/overlay.ts"() {
     "use strict";
@@ -7267,6 +7267,25 @@ var init_overlay = __esm({
       'iframe[name="__cmpLocator"]',
       'iframe[name="__gppLocator"]'
     ];
+    BARE_TEXT_MAX = 40;
+    CONTROL_TAGS = ["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "IFRAME", "SUMMARY", "DETAILS"];
+    CONTROL_ROLES = [
+      "button",
+      "link",
+      "checkbox",
+      "radio",
+      "switch",
+      "tab",
+      "menuitem",
+      "menuitemcheckbox",
+      "menuitemradio",
+      "option",
+      "textbox",
+      "searchbox",
+      "combobox",
+      "slider",
+      "spinbutton"
+    ];
     HELPERS = `const up = (n) => n.parentElement || (n.parentNode && n.parentNode.host) || n.host || null;
   const body = document.body;
   const roleOf = (el) => String((el.getAttribute && el.getAttribute("role")) || "").toLowerCase();
@@ -7282,6 +7301,48 @@ var init_overlay = __esm({
     } catch (e) {
       return false;
     }
+  };
+  const CONTROL_TAGS = ${JSON.stringify(CONTROL_TAGS)};
+  const CONTROL_ROLES = ${JSON.stringify(CONTROL_ROLES)};
+  /** Something to act on: a native control, a control role, a focusable (tabindex >= 0) or editable element. */
+  const isControl = (el) => {
+    const attr = (n) => (el.getAttribute ? el.getAttribute(n) : null);
+    const tag = String(el.tagName || "").toUpperCase();
+    if (tag === "A") return attr("href") !== null;
+    if (tag === "INPUT") return String(attr("type") || "").toLowerCase() !== "hidden";
+    if (CONTROL_TAGS.indexOf(tag) >= 0 || CONTROL_ROLES.indexOf(roleOf(el)) >= 0) return true;
+    const tab = attr("tabindex");
+    if (tab !== null && tab !== "" && Number(tab) >= 0) return true;
+    const edit = attr("contenteditable");
+    return edit === "" || edit === "true" || edit === "plaintext-only";
+  };
+  const textLength = (n) => String((typeof n.innerText === "string" ? n.innerText : n.textContent) || "").replace(/\\s+/g, " ").trim().length;
+  /**
+   * Nothing to answer in it: no control, itself or inside (open shadow roots
+   * included), and under ${BARE_TEXT_MAX} characters of text. An ad slot holding
+   * an image is one; a cookie wall, a login dialog, a notice to read are not.
+   * Never bare: a consent vendor's container (its buttons may be plain divs),
+   * nor anything holding a custom element with no open shadow root (a closed
+   * one hides its text and controls from here).
+   */
+  const bare = (el) => {
+    let text = textLength(el);
+    const stack = [el];
+    for (let seen = 0; stack.length > 0; seen++) {
+      // Too big to look through: whatever it is, it is no empty layer.
+      if (text >= ${BARE_TEXT_MAX} || seen > 5000) return false;
+      const n = stack.pop();
+      if (n.nodeType === 1 && (isControl(n) || isConsent(n))) return false;
+      if (n.nodeType === 1 && String(n.tagName || "").indexOf("-") >= 0 && !n.shadowRoot) return false;
+      for (const k of Array.from(n.children || [])) stack.push(k);
+      if (n.shadowRoot) {
+        for (const k of Array.from(n.shadowRoot.children || [])) {
+          text += textLength(k);
+          stack.push(k);
+        }
+      }
+    }
+    return text < ${BARE_TEXT_MAX};
   };
   /** Fixed or sticky, itself or an ancestor up to the body: what a click's covering node belongs to. */
   const pinned = (el) => {
@@ -7361,7 +7422,8 @@ var init_overlay = __esm({
         else take = true;
       }
     }
-    // An overlay is taken whole: what is inside it is its own.
+    // An overlay is taken whole: what is inside it is its own. A bare one is none, nor is anything inside it.
+    if (take && bare(el)) return;
     if (take) {
       found.push(el);
       return;
@@ -7397,7 +7459,7 @@ var init_overlay = __esm({
   ${HELPERS}
   ${DESCRIBE_SOURCE}
   const overlays = (${OVERLAYS_SOURCE})();
-  return { what: describe(this), overlay: overlays.indexOf(this) >= 0 || isDialog(this) || isConsent(this) };
+  return { what: describe(this), overlay: (overlays.indexOf(this) >= 0 || isDialog(this) || isConsent(this)) && !bare(this) };
 }`;
     READ_DOCUMENT = `(() => {
   const findOverlays = ${OVERLAYS_SOURCE};
@@ -9854,6 +9916,24 @@ var init_risk = __esm({
 });
 
 // src/browser/snapshot.ts
+function checkRef(ref2) {
+  if (!REF_SHAPE.test(ref2))
+    throw new UsageError("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)");
+}
+async function elementBySelector(page, selector) {
+  const { root } = await page.send("DOM.getDocument", { depth: 0 });
+  let nodeId;
+  try {
+    ({ nodeId } = await page.send("DOM.querySelector", { nodeId: root.nodeId, selector }));
+  } catch (e) {
+    if (e instanceof CdpError) throw new UsageError(`${JSON.stringify(selector)} is not a valid CSS selector`);
+    throw e;
+  }
+  if (!nodeId) throw new NoMatchError(selector);
+  const { node } = await page.send("DOM.describeNode", { nodeId });
+  if (typeof node?.backendNodeId !== "number" || node.backendNodeId <= 0) throw new NoMatchError(selector);
+  return node.backendNodeId;
+}
 function buildTree(nodes) {
   const byId = /* @__PURE__ */ new Map();
   for (const n of nodes) byId.set(n.nodeId, n);
@@ -9910,7 +9990,7 @@ function nested(items, depth, out) {
 function flat(items, out) {
   for (const it of items) {
     if (it.t !== "node") continue;
-    if (it.ref) out.push({ text: it.head, ref: true });
+    if (it.act) out.push({ text: it.head, ref: true });
     flat(it.children, out);
   }
 }
@@ -9964,7 +10044,13 @@ function renderSnapshot(nodes, opts) {
   const text = [...kept.map((l) => l.text), ...tail ? [tail] : []].join("\n");
   return {
     text,
-    refs: { loaderId: opts.refs.loaderId, url: opts.refs.url, next: r.next, refs: r.refs },
+    refs: {
+      loaderId: opts.refs.loaderId,
+      url: opts.refs.url,
+      next: r.next,
+      refs: r.refs,
+      ...r.containers.size ? { containers: [...r.containers].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))) } : {}
+    },
     truncated: tail !== "",
     refCount: kept.filter((l) => l.ref).length
   };
@@ -10002,6 +10088,8 @@ async function collectFrames(session, main2) {
   return out;
 }
 async function takeSnapshot(session, opts = {}) {
+  if (opts.ref !== void 0 && opts.selector !== void 0) throw new UsageError("a snapshot is scoped to a ref or to a selector, not both");
+  if (opts.ref !== void 0) checkRef(opts.ref);
   const loaderId = await session.loaderId();
   const url = await session.currentUrl();
   const title = await session.title();
@@ -10011,7 +10099,7 @@ async function takeSnapshot(session, opts = {}) {
   if (opts.ref !== void 0) {
     rootBackendId = Object.hasOwn(table.refs, opts.ref) ? table.refs[opts.ref] : void 0;
     if (rootBackendId === void 0) throw new StaleRefError(opts.ref);
-  }
+  } else if (opts.selector !== void 0) rootBackendId = await elementBySelector(session.page, opts.selector);
   await session.page.send("Accessibility.enable");
   const fetchTree = async () => (await session.page.send("Accessibility.getFullAXTree", {})).nodes;
   let nodes = await fetchTree();
@@ -10022,7 +10110,10 @@ async function takeSnapshot(session, opts = {}) {
   }
   const frames = await collectFrames(session, nodes);
   const hasRoot = rootBackendId === void 0 || [nodes, ...Object.values(frames)].some((l) => l.some((n) => n.backendDOMNodeId === rootBackendId));
-  if (!hasRoot) throw new StaleRefError(opts.ref);
+  if (!hasRoot) {
+    if (opts.ref !== void 0) throw new StaleRefError(opts.ref);
+    throw new Error(`the element ${opts.selector} matches is not in the accessibility tree: scope to an ancestor, or take the whole snapshot`);
+  }
   const r = renderSnapshot(nodes, {
     refs: table,
     frames,
@@ -10036,19 +10127,30 @@ async function takeSnapshot(session, opts = {}) {
 title: ${title}
 ${r.text}`, url, title, loaderId, refCount: r.refCount, truncated: r.truncated };
 }
-var StaleRefError, NAME_MAX, OVERLAY_HEADER, OVERLAY_RETRY_MS, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, VALUE_ROLES, FIELD_ROLES, str4, squash, truthy, Renderer;
+var StaleRefError, REF_SHAPE, NoMatchError, NAME_MAX, OVERLAY_HEADER, OVERLAY_RETRY_MS, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, CONTAINER_ROLES, NAMED_CONTAINER_ROLES, VALUE_ROLES, FIELD_ROLES, str4, squash, truthy, Renderer;
 var init_snapshot = __esm({
   "src/browser/snapshot.ts"() {
     "use strict";
+    init_cli_kit();
+    init_cdp();
     init_overlay();
     init_state();
     StaleRefError = class extends Error {
       constructor(ref2) {
-        super(`ref ${JSON.stringify(ref2)} is unknown or stale: take a new snapshot (refais un snapshot) and use the refs it returns`);
+        super(`ref ${JSON.stringify(ref2)} is unknown or stale: take a new snapshot and use the refs it returns`);
         this.ref = ref2;
         this.name = "StaleRefError";
       }
       ref;
+    };
+    REF_SHAPE = /^e\d+$/;
+    NoMatchError = class extends Error {
+      constructor(selector) {
+        super(`no element matches ${selector}`);
+        this.selector = selector;
+        this.name = "NoMatchError";
+      }
+      selector;
     };
     NAME_MAX = 120;
     OVERLAY_HEADER = "- overlay (covers the page):";
@@ -10078,6 +10180,8 @@ var init_snapshot = __esm({
       "iframe",
       "heading"
     ]);
+    CONTAINER_ROLES = /* @__PURE__ */ new Set(["table", "figure", "article", "main", "complementary", "form"]);
+    NAMED_CONTAINER_ROLES = /* @__PURE__ */ new Set(["region", "image", "img"]);
     VALUE_ROLES = /* @__PURE__ */ new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider"]);
     FIELD_ROLES = /* @__PURE__ */ new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
     str4 = (v) => typeof v?.value === "string" ? v.value : typeof v?.value === "number" ? String(v.value) : "";
@@ -10087,10 +10191,13 @@ var init_snapshot = __esm({
       constructor(table, frames) {
         this.frames = frames;
         this.refs = { ...table.refs };
+        this.containers = new Set(table.containers ?? []);
         this.next = table.next;
       }
       frames;
       refs;
+      /** The refs that name a container only, never a control. */
+      containers;
       next;
       seen = /* @__PURE__ */ new Set();
       trees = /* @__PURE__ */ new Map();
@@ -10137,8 +10244,10 @@ var init_snapshot = __esm({
         if (HOISTED.has(role)) return this.children(tree, n, parent);
         const name2 = squash(str4(n.name));
         const hasRole = REF_ROLES.has(role.toLowerCase());
-        const wantsRef = n.backendDOMNodeId !== void 0 && (hasRole || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
-        const editor = wantsRef && !hasRole && !name2 && truthy(prop(n, "editable")) && parent?.ref === true && FIELD_ROLES.has(parent.role);
+        const acts = n.backendDOMNodeId !== void 0 && (hasRole || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
+        const container = CONTAINER_ROLES.has(role) || NAMED_CONTAINER_ROLES.has(role) && name2 !== "";
+        const wantsRef = acts || n.backendDOMNodeId !== void 0 && container;
+        const editor = acts && !hasRole && !name2 && truthy(prop(n, "editable")) && parent?.ref === true && FIELD_ROLES.has(parent.role);
         if (COLLAPSIBLE.has(role) && !name2 && !wantsRef || editor) return [{ t: "break" }, ...this.children(tree, n, parent), { t: "break" }];
         const isFrame = role.toLowerCase() === "iframe";
         const shown2 = isFrame ? "iframe" : role;
@@ -10146,7 +10255,12 @@ var init_snapshot = __esm({
         if (name2) head += ` "${(name2.length > NAME_MAX ? `${name2.slice(0, NAME_MAX)}\u2026` : name2).replace(/"/g, '\\"')}"`;
         const level = prop(n, "level");
         if (level !== void 0 && role === "heading") head += ` [level=${String(level)}]`;
-        if (wantsRef) head += ` [ref=${this.refFor(n.backendDOMNodeId)}]`;
+        if (wantsRef) {
+          const ref2 = this.refFor(n.backendDOMNodeId);
+          if (acts) this.containers.delete(ref2);
+          else this.containers.add(ref2);
+          head += ` [ref=${ref2}]`;
+        }
         for (const s of states(n)) head += ` ${s}`;
         let kids;
         let note = "";
@@ -10162,7 +10276,9 @@ var init_snapshot = __esm({
         kids = kids.filter((k) => !(k.t === "text" && (name2 && k.text === name2 || value && k.text === value)));
         const rawUrl = role === "link" ? prop(n, "url") : void 0;
         const url = typeof rawUrl === "string" ? rawUrl : "";
-        return [{ t: "node", head: value ? `${head}${note}: ${value}` : `${head}${note}`, ref: wantsRef, ...url ? { url } : {}, note, children: kids }];
+        return [
+          { t: "node", head: value ? `${head}${note}: ${value}` : `${head}${note}`, ref: wantsRef, act: acts, ...url ? { url } : {}, note, children: kids }
+        ];
       }
     };
   }
@@ -10171,6 +10287,7 @@ var init_snapshot = __esm({
 // src/browser/actions.ts
 import { isAbsolute as isAbsolute4 } from "path";
 async function resolveRef(session, ref2) {
+  checkRef(ref2);
   const table = readRefs(session.targetId);
   const backendNodeId = table && Object.hasOwn(table.refs, ref2) ? table.refs[ref2] : void 0;
   if (!table || backendNodeId === void 0) throw new StaleRefError(ref2);
@@ -10294,6 +10411,7 @@ async function finish(session, action, ref2, p) {
     ...p.dialog ? { dialog: p.dialog } : {},
     challenge,
     ...p.value !== void 0 ? { value: p.value } : {},
+    ...p.valueHidden ? { valueHidden: true } : {},
     ...p.note ? { note: p.note } : {}
   };
 }
@@ -10376,6 +10494,8 @@ async function click(session, ref2, opts = {}) {
   if (count !== 1 && count !== 2) throw new UsageError(`clickCount is 1 or 2, not ${count}`);
   const page = session.page;
   return withRef(session, ref2, async (node) => {
+    if (readRefs(session.targetId)?.containers?.includes(ref2))
+      throw new UsageError(`${ref2} is a container \u2014 click a control inside it (take a snapshot of ${ref2})`);
     await guardAction(page, { backendNodeId: node.backendNodeId, action: "click", ...opts.confirm ? { confirm: true } : {} });
     const { x, y } = await centreOf(page, node);
     const inner = await hitTarget(page, session.targetId, node, x, y);
@@ -10414,7 +10534,7 @@ async function typeText(session, ref2, text, opts = {}) {
   const page = session.page;
   const confirm2 = opts.confirm ? { confirm: true } : {};
   return withRef(session, ref2, async (node) => {
-    await textField(page, node);
+    const field = await textField(page, node);
     await page.send("DOM.focus", { backendNodeId: node.backendNodeId });
     if (opts.submit || chars.includes("\n")) await guardAction(page, { action: "press", key: "Enter", ...confirm2 });
     const p = await perform(session, opts, async (pg) => {
@@ -10427,7 +10547,7 @@ async function typeText(session, ref2, text, opts = {}) {
       for (const c of chars) await type(parseKey(c));
       if (opts.submit) await type(parseKey("Enter"));
     });
-    return finish(session, "type", ref2, p);
+    return finish(session, "type", ref2, { ...p, ...await echo(page, node, field, p) });
   });
 }
 function holds2(actual, want) {
@@ -10435,6 +10555,16 @@ function holds2(actual, want) {
   if (actual === want || squash2(actual) === squash2(want)) return true;
   const a = alnum(want);
   return a !== "" && alnum(actual) === a;
+}
+async function echo(page, node, field, p) {
+  if (field.secret) return { valueHidden: true };
+  if (p.dialog || p.navigated) return {};
+  try {
+    const value = await callOn(page, node.objectId, PAGE_FUNCTIONS.readValue, [{ value: field.kind }]);
+    return typeof value === "string" ? { value } : {};
+  } catch {
+    return {};
+  }
 }
 async function fill(session, ref2, text, opts = {}) {
   const page = session.page;
@@ -10447,14 +10577,15 @@ async function fill(session, ref2, text, opts = {}) {
       await callOn(pg, node.objectId, PAGE_FUNCTIONS.selectAll, [kind]);
       if (text === "") await dispatchKeys(pg, parseKey("Delete"));
       else await pg.send("Input.insertText", { text });
-      if (holds2(await read3(), text)) return;
+      const first = await read3();
+      if (holds2(first, text)) return first;
       await callOn(pg, node.objectId, PAGE_FUNCTIONS.setValue, [{ value: text }, kind]);
       const now = await read3();
-      if (holds2(now, text)) return;
+      if (holds2(now, text)) return now;
       const shown2 = field.secret ? "something else" : JSON.stringify(typeof now === "string" && now.length > 80 ? `${now.slice(0, 77)}...` : now);
       throw new ActionError(`could not fill ${ref2}: it holds ${shown2} (an input mask, a maxlength or a script rewrites it); try typeText`);
     });
-    return finish(session, "fill", ref2, p);
+    return finish(session, "fill", ref2, field.secret ? { ...p, value: void 0, valueHidden: true } : p);
   });
 }
 async function select(session, ref2, values, opts = {}) {
@@ -10531,22 +10662,30 @@ async function scroll(session, target, opts = {}) {
   });
 }
 async function screenshot(session, opts = {}) {
-  if (opts.ref !== void 0 && opts.full) throw new UsageError("a screenshot is of one element (a ref) or of the full page, not both");
+  if (opts.ref !== void 0 && opts.selector !== void 0) throw new UsageError("a screenshot is of the element a ref or a selector names, not both");
+  if ((opts.ref !== void 0 || opts.selector !== void 0) && opts.full)
+    throw new UsageError("a screenshot is of one element (a ref or a selector) or of the full page, not both");
+  if (opts.ref !== void 0) checkRef(opts.ref);
   const format = opts.format ?? "png";
   if (format !== "png" && format !== "jpeg") throw new UsageError(`screenshot format is png or jpeg, not ${JSON.stringify(format)}`);
   if (opts.quality !== void 0 && !(Number.isInteger(opts.quality) && opts.quality >= 0 && opts.quality <= 100))
     throw new UsageError(`screenshot quality is a whole number from 0 to 100, not ${opts.quality}`);
   const page = session.page;
   const params = { format, ...format === "jpeg" && opts.quality !== void 0 ? { quality: opts.quality } : {} };
-  if (opts.ref !== void 0) {
-    const quads = await withRef(session, opts.ref, (node) => visibleQuads(page, node));
+  if (opts.ref !== void 0 || opts.selector !== void 0) {
+    const quads = opts.ref !== void 0 ? await withRef(session, opts.ref, (node) => visibleQuads(page, node)) : await visibleQuads(page, { ref: opts.selector, backendNodeId: await elementBySelector(page, opts.selector) });
     const xs = quads.flatMap((q) => q.filter((_, i) => i % 2 === 0));
     const ys = quads.flatMap((q) => q.filter((_, i) => i % 2 === 1));
     const m = await page.send("Page.getLayoutMetrics");
     const vp = m.cssLayoutViewport ?? m.layoutViewport ?? { pageX: 0, pageY: 0 };
     const x = Math.min(...xs);
     const y = Math.min(...ys);
-    params.clip = { x: x + vp.pageX, y: y + vp.pageY, width: Math.max(...xs) - x, height: Math.max(...ys) - y, scale: 1 };
+    const right = Math.max(...xs);
+    const bottom = Math.max(...ys);
+    const w = "clientWidth" in vp ? vp.clientWidth : void 0;
+    const h = "clientHeight" in vp ? vp.clientHeight : void 0;
+    if (x < 0 || y < 0 || w !== void 0 && right > w || h !== void 0 && bottom > h) params.captureBeyondViewport = true;
+    params.clip = { x: x + vp.pageX, y: y + vp.pageY, width: right - x, height: bottom - y, scale: 1 };
   } else if (opts.full) {
     const m = await page.send("Page.getLayoutMetrics");
     const size = m.cssContentSize ?? m.contentSize ?? { x: 0, y: 0, width: 0, height: 0 };
@@ -10970,6 +11109,7 @@ async function runBrowserCommand(action, args, flags = {}, deps = {}) {
   const ctx = { action, args, flags, deps };
   try {
     if (!Object.hasOwn(HANDLERS, action)) throw new UsageError(`usage: ${cliName()} browser ${BROWSER_ACTIONS.join("|")}`);
+    if (flags.selector !== void 0 && !SELECTOR_ACTIONS.has(action)) throw new UsageError("--selector goes with snapshot, screenshot and wait only");
     const out = await HANDLERS[action](ctx);
     const dialogs = unreported(ctx);
     return {
@@ -11071,35 +11211,47 @@ async function capturing(ctx, s, fn) {
   try {
     const value = await fn();
     stopped = true;
-    return { value, captured: (await rec.stop()).length };
+    const captured = (await rec.stop()).length;
+    return { value, capture: { captured, ...isNoWrite() ? {} : { logged: listNetwork(s.targetId).length } } };
   } finally {
     if (!stopped) await rec.stop().catch(() => {
     });
   }
 }
-function actionText(ctx, r, captured, snap) {
+function valueText(v) {
+  if (typeof v !== "string") return show(v);
+  return JSON.stringify(v.length > VALUE_SHOWN ? `${v.slice(0, VALUE_SHOWN - 1)}\u2026` : v);
+}
+function actionText(ctx, r, capture, snap) {
   const lines = [`${r.action}${r.ref !== void 0 ? ` ${r.ref}` : ""}: ${r.navigated ? "navigated to " : ""}${where(r.url, r.title)}`];
-  if (r.value !== void 0 && !(typeof r.value === "object" && r.value !== null && Object.keys(r.value).length === 0)) lines.push(`  value: ${show(r.value)}`);
+  if (r.valueHidden) lines.push("  value: (hidden)");
+  else if (r.value !== void 0 && !(typeof r.value === "object" && r.value !== null && Object.keys(r.value).length === 0))
+    lines.push(`  value: ${valueText(r.value)}`);
   if (r.note) lines.push(`note: ${r.note}`);
   if (r.dialog) lines.push(dialogLine(r.dialog, follow(ctx)));
   if (r.challenge) lines.push(challengeLine(ctx, r.challenge));
-  if (captured !== void 0) lines.push(capturedLine(ctx, captured));
+  if (capture) lines.push(capturedLine(ctx, capture));
   if (snap) lines.push("", snap.text);
   return lines.join("\n");
 }
 function mutate(ctx, run) {
   return onPage(ctx, async (s) => {
-    const { value: r, captured } = await capturing(ctx, s, async () => handled(ctx, await run(s, actOpts(ctx))));
+    const { value: r, capture } = await capturing(ctx, s, async () => handled(ctx, await run(s, actOpts(ctx))));
     const snap = ctx.flags.snapshot && !frozen(r.dialog) ? await takeSnapshot(s, snapOpts(ctx)) : void 0;
     return {
-      json: { ...r, ...captured !== void 0 ? { captured } : {}, ...snap ? { snapshot: snap } : {} },
-      text: actionText(ctx, r, captured, snap)
+      json: { ...r, ...capturedJson(capture), ...snap ? { snapshot: snap } : {} },
+      text: actionText(ctx, r, capture, snap)
     };
   });
 }
+function refArg(ctx) {
+  const ref2 = ctx.args[0];
+  checkRef(ref2);
+  return ref2;
+}
 function refAndText(ctx) {
   if (ctx.args.length < 2) throw usageError(ctx.action);
-  return [ctx.args[0], ctx.args.slice(1).join(" ")];
+  return [refArg(ctx), ctx.args.slice(1).join(" ")];
 }
 function tabLines(tabs) {
   return tabs.map((t) => `${t.active ? "*" : " "} ${t.id}  ${where(t.url, t.title)}`).join("\n");
@@ -11122,7 +11274,7 @@ function currentTarget(ctx) {
   if (!saved) throw new Error(`no browser session: record what a page fetches with ${follow(ctx).capture}`);
   return saved.targetId;
 }
-var cliFollowUps, USAGE, BROWSER_ACTIONS, SNAPSHOT_MAX_CHARS, cliName, usageError, dialogsJson, unreported, actOpts, snapOpts, show, pretty, where, follow, dialogLine, frozen, challengeLine, capturedLine, confirm, timeoutOpts, HANDLERS;
+var cliFollowUps, USAGE, BROWSER_ACTIONS, SNAPSHOT_MAX_CHARS, SELECTOR_ACTIONS, cliName, usageError, dialogsJson, unreported, actOpts, snapOpts, show, pretty, where, follow, dialogLine, frozen, challengeLine, capturedLine, capturedJson, VALUE_SHOWN, confirm, timeoutOpts, HANDLERS;
 var init_cli = __esm({
   "src/browser/cli.ts"() {
     "use strict";
@@ -11153,7 +11305,7 @@ var init_cli = __esm({
       attach: "attach <port|url>",
       status: "status",
       close: "close [--all]",
-      snapshot: "snapshot [<ref>] [--interactive] [--max-chars <n>]",
+      snapshot: "snapshot [<ref> | --selector <css>] [--interactive] [--max-chars <n>]",
       click: "click <ref> [--confirm]",
       hover: "hover <ref>",
       type: "type <ref> <text> [--submit] [--confirm]",
@@ -11164,7 +11316,7 @@ var init_cli = __esm({
       scroll: "scroll <ref|up|down|top|bottom>",
       wait: "wait --text <s> | --gone <s> | --selector <css> | --url <pattern> | --idle | --load | --clear | --ms <n> [--timeout <ms>]",
       eval: "eval <expr|->",
-      screenshot: "screenshot [<ref>] [--full] [--out <file>]",
+      screenshot: "screenshot [<ref> | --selector <css>] [--full] [--out <file>]",
       network: "network [list|get <n>|clear]",
       tabs: "tabs [list|new [<url>]|select <tN>|close <tN>]",
       back: "back [--timeout <ms>]",
@@ -11175,6 +11327,7 @@ var init_cli = __esm({
     };
     BROWSER_ACTIONS = Object.keys(USAGE);
     SNAPSHOT_MAX_CHARS = 2e4;
+    SELECTOR_ACTIONS = /* @__PURE__ */ new Set(["snapshot", "screenshot", "wait"]);
     cliName = () => brand().cli;
     usageError = (action) => new UsageError(`usage: ${cliName()} browser ${USAGE[action]}`);
     dialogsJson = (dialogs) => dialogs.length ? { dialogs } : {};
@@ -11197,7 +11350,9 @@ var init_cli = __esm({
     };
     frozen = (d) => d !== void 0 && !d.dismissed && !d.closed;
     challengeLine = (ctx, c) => `challenge: ${c.kind}${c.blocking ? " (blocking)" : ""} \u2014 let the human solve it, then ${follow(ctx).waitClear}`;
-    capturedLine = (ctx, n) => `captured ${n} JSON response${n === 1 ? "" : "s"} \u2014 ${follow(ctx).networkList}`;
+    capturedLine = (ctx, c) => `captured ${c.captured} JSON response${c.captured === 1 ? "" : "s"}${c.logged !== void 0 ? ` (${c.logged} in the log)` : ""} \u2014 ${follow(ctx).networkList}`;
+    capturedJson = (c) => c ? { captured: c.captured, ...c.logged !== void 0 ? { logged: c.logged } : {} } : {};
+    VALUE_SHOWN = 200;
     confirm = (ctx) => ctx.flags.confirm ? { confirm: true } : {};
     timeoutOpts = (ctx) => ctx.flags.timeout !== void 0 ? { timeoutMs: ctx.flags.timeout } : {};
     HANDLERS = {
@@ -11207,7 +11362,7 @@ var init_cli = __esm({
         return onPage(
           ctx,
           async (s) => {
-            const { value: nav, captured } = await capturing(ctx, s, async () => {
+            const { value: nav, capture } = await capturing(ctx, s, async () => {
               const nav2 = await s.navigate(url, timeoutOpts(ctx));
               await settle(s, actOpts(ctx));
               return nav2;
@@ -11220,7 +11375,7 @@ var init_cli = __esm({
             for (const n of notes) lines.push(`note: ${n}`);
             if (nav.note) lines.push(`note: ${nav.note}`);
             if (challenge) lines.push(challengeLine(ctx, challenge));
-            if (captured !== void 0) lines.push(capturedLine(ctx, captured));
+            if (capture) lines.push(capturedLine(ctx, capture));
             if (snap) lines.push("", snap.text);
             return {
               json: {
@@ -11232,7 +11387,7 @@ var init_cli = __esm({
                 ...notes.length ? { notes } : {},
                 tab: s.targetId,
                 challenge,
-                ...captured !== void 0 ? { captured } : {},
+                ...capturedJson(capture),
                 ...snap ? { snapshot: snap } : {}
               },
               text: lines.join("\n")
@@ -11264,16 +11419,21 @@ var init_cli = __esm({
       },
       async snapshot(ctx) {
         arity(ctx, 0, 1);
-        const r = await onPage(ctx, (s) => takeSnapshot(s, snapOpts(ctx, ctx.args[0])));
+        const { selector } = ctx.flags;
+        if (ctx.args[0] !== void 0 && selector !== void 0) throw new UsageError("a snapshot is scoped to a ref or to a selector, not both");
+        if (ctx.args[0] !== void 0) refArg(ctx);
+        const r = await onPage(ctx, (s) => takeSnapshot(s, { ...snapOpts(ctx, ctx.args[0]), ...selector !== void 0 ? { selector } : {} }));
         return { json: r, text: r.text };
       },
       async click(ctx) {
         arity(ctx, 1);
-        return mutate(ctx, (s, o) => click(s, ctx.args[0], { ...o, ...confirm(ctx) }));
+        const ref2 = refArg(ctx);
+        return mutate(ctx, (s, o) => click(s, ref2, { ...o, ...confirm(ctx) }));
       },
       async hover(ctx) {
         arity(ctx, 1);
-        return mutate(ctx, (s, o) => hover(s, ctx.args[0], o));
+        const ref2 = refArg(ctx);
+        return mutate(ctx, (s, o) => hover(s, ref2, o));
       },
       async type(ctx) {
         const [ref2, text] = refAndText(ctx);
@@ -11285,7 +11445,8 @@ var init_cli = __esm({
       },
       async select(ctx) {
         arity(ctx, 2, Number.POSITIVE_INFINITY);
-        return mutate(ctx, (s, o) => select(s, ctx.args[0], ctx.args.slice(1), o));
+        const ref2 = refArg(ctx);
+        return mutate(ctx, (s, o) => select(s, ref2, ctx.args.slice(1), o));
       },
       async press(ctx) {
         arity(ctx, 1);
@@ -11294,13 +11455,14 @@ var init_cli = __esm({
       },
       async upload(ctx) {
         arity(ctx, 2, Number.POSITIVE_INFINITY);
+        const ref2 = refArg(ctx);
         const cwd = ctx.deps.cwd ?? process.cwd();
         const files = ctx.args.slice(1).map((f) => {
           const path = resolve9(cwd, f);
           if (!existsSync13(path) || !statSync11(path).isFile()) throw new UsageError(`no such file: ${path}`);
           return path;
         });
-        return mutate(ctx, (s, o) => upload(s, ctx.args[0], files, o));
+        return mutate(ctx, (s, o) => upload(s, ref2, files, o));
       },
       async scroll(ctx) {
         arity(ctx, 1);
@@ -11377,7 +11539,20 @@ var init_cli = __esm({
         const path = ctx.flags.out !== void 0 ? resolve9(ctx.deps.cwd ?? process.cwd(), ctx.flags.out) : join26(shots, `shot-${stamp}.png`);
         const format = /\.jpe?g$/i.test(path) ? "jpeg" : "png";
         const ref2 = ctx.args[0];
-        const bytes = await onPage(ctx, (s) => screenshot(s, { format, ...ref2 !== void 0 ? { ref: ref2 } : {}, ...ctx.flags.full ? { full: true } : {} }));
+        const { selector, full } = ctx.flags;
+        if (ref2 !== void 0 && selector !== void 0) throw new UsageError("a screenshot is of the element a ref or a selector names, not both");
+        if ((ref2 !== void 0 || selector !== void 0) && full)
+          throw new UsageError("a screenshot is of one element (a ref or a selector) or of the full page, not both");
+        if (ref2 !== void 0) refArg(ctx);
+        const bytes = await onPage(
+          ctx,
+          (s) => screenshot(s, {
+            format,
+            ...ref2 !== void 0 ? { ref: ref2 } : {},
+            ...selector !== void 0 ? { selector } : {},
+            ...full ? { full: true } : {}
+          })
+        );
         if (ctx.flags.out === void 0) ensurePrivateDir(shots);
         else mkdirSync7(dirname5(path), { recursive: true });
         writeFileAtomic(path, bytes, 384);
@@ -16653,10 +16828,11 @@ function browserToolDecls() {
       "webindex_browser_snapshot",
       "Read the page as an accessibility tree",
       READS,
-      "The current page as an accessibility tree with a ref (e1, e2\u2026) on each element: the refs every other tool takes. Refs hold until the page loads another document; a stale one is refused with a request for a new snapshot. mode interactive keeps only what can be clicked or typed into (much shorter); a ref scopes it to one element's subtree. Cut at maxChars (default 20000).",
+      "The current page as an accessibility tree with a ref (e1, e2\u2026) on each control, and on the containers worth scoping to (a table, a figure, an article, main, a form, a named region or image): the refs every other tool takes. A ref holds while its element lives; a stale one, or one of a document the tab has left, is refused with a request for a new snapshot. mode interactive keeps only what can be clicked or typed into (much shorter); a ref, or a CSS selector, scopes it to one element's subtree. Cut at maxChars (default 20000).",
       {
         mode: { type: "string", enum: ["full", "interactive"], description: "full: every element; interactive: only controls." },
         ref: ref("the element whose subtree to show"),
+        selector: { type: "string", description: "A CSS selector: show the subtree of the first element it matches (not with ref)." },
         maxChars: { type: "number", description: "Cut at this many characters (default 20000)." }
       },
       ["mode"]
@@ -16752,10 +16928,11 @@ function browserToolDecls() {
       "webindex_browser_screenshot",
       "Take a screenshot",
       READS,
-      "A picture of the page, returned as an image (JPEG): the viewport, the full page, or one element (area element, with its ref). An image over 4 MB is withheld: take one element, or the viewport.",
+      "A picture of the page, returned as an image (JPEG): the viewport, the full page, or one element (area element, with its ref or a CSS selector). An image over 4 MB is withheld: take one element, or the viewport.",
       {
         area: { type: "string", enum: ["viewport", "full", "element"], description: "What to capture." },
-        ref: ref("the element to capture, with area element")
+        ref: ref("the element to capture, with area element"),
+        selector: { type: "string", description: "With area element and no ref: the first element this CSS selector matches." }
       },
       ["area"]
     ),
@@ -16772,7 +16949,7 @@ function browserToolDecls() {
       "Read what the page fetched",
       // Its clear deletes the log.
       COMMITS,
-      "The JSON responses pages fetched (XHR/fetch) since webindex_browser_open with capture: true \u2014 often the cleanest data a JS-heavy site has. list: number, method, status, URL of each; get: one body, by n; clear: empty the log and stop recording. Headers are never recorded.",
+      "The JSON responses pages fetched (XHR/fetch) since webindex_browser_open with capture: true \u2014 often the cleanest data a JS-heavy site has. The tab's log keeps growing across calls until clear. list: number, method, status, URL of each; get: one body, by n; clear: empty the log and stop recording. Headers are never recorded.",
       {
         action: { type: "string", enum: ["list", "get", "clear"], description: "What to do with the log." },
         n: { type: "number", description: "The entry to get, from list." }
@@ -16837,7 +17014,7 @@ function browserToolDecls() {
 var SNAPSHOT_ADVICE = "pass `interactive: true`, or a smaller `maxChars`, for the snapshot it returns";
 var BROWSER_CAP_ADVICE = {
   webindex_browser_open: SNAPSHOT_ADVICE,
-  webindex_browser_snapshot: "pass mode `interactive`, a `ref` to scope it, or a smaller `maxChars`",
+  webindex_browser_snapshot: "pass mode `interactive`, a `ref` or a `selector` to scope it, or a smaller `maxChars`",
   webindex_browser_click: SNAPSHOT_ADVICE,
   webindex_browser_hover: SNAPSHOT_ADVICE,
   webindex_browser_type: SNAPSHOT_ADVICE,
@@ -16849,7 +17026,7 @@ var BROWSER_CAP_ADVICE = {
   webindex_browser_history: SNAPSHOT_ADVICE,
   webindex_browser_dialog: SNAPSHOT_ADVICE,
   webindex_browser_wait: "nothing to narrow: a wait answers in one line",
-  webindex_browser_screenshot: 'the text is one line; for a smaller image, `area: "element"` with a `ref`',
+  webindex_browser_screenshot: 'the text is one line; for a smaller image, `area: "element"` with a `ref` or a `selector`',
   webindex_browser_eval: "return less from the expression: only the fields you need",
   webindex_browser_network: "get one entry by `n` instead of the list",
   webindex_browser_tabs: "close the tabs you no longer need",
@@ -16864,6 +17041,15 @@ var after = (a) => ({
   ...a.interactive === true ? { interactive: true } : {},
   ...num3(a.maxChars) !== void 0 ? { maxChars: num3(a.maxChars) } : {}
 });
+function refArg2(a) {
+  const v = String(a.ref ?? "");
+  if (!/^e\d+$/.test(v)) {
+    throw new ToolError(
+      "expected a ref like e12 from the latest snapshot; CSS selectors: pass `selector` to webindex_browser_screenshot or webindex_browser_snapshot, or wait with condition selector"
+    );
+  }
+  return v;
+}
 var confirmed = (a) => a.confirm === true ? { confirm: true } : {};
 function annotate(text, notes) {
   if (notes.length === 0) return text;
@@ -17036,17 +17222,20 @@ var Host = class {
     },
     snapshot: (a) => {
       const mode2 = oneOf(a, "mode", ["full", "interactive"]);
-      const r = str5(a.ref);
+      const r = a.ref === void 0 ? void 0 : refArg2(a);
+      const selector = str5(a.selector);
+      if (r !== void 0 && selector !== void 0) throw new ToolError("a snapshot is scoped to a `ref` or to a `selector`, not both");
       return this.cli("snapshot", r ? [r] : [], {
         interactive: mode2 === "interactive",
+        ...selector !== void 0 ? { selector } : {},
         ...num3(a.maxChars) !== void 0 ? { maxChars: num3(a.maxChars) } : {}
       });
     },
-    click: (a) => this.cli("click", [String(a.ref ?? "")], { ...after(a), ...confirmed(a) }),
-    hover: (a) => this.cli("hover", [String(a.ref ?? "")], after(a)),
-    type: (a) => this.cli("type", [String(a.ref ?? ""), String(a.text ?? "")], { ...after(a), ...confirmed(a), ...a.submit === true ? { submit: true } : {} }),
-    fill: (a) => this.cli("fill", [String(a.ref ?? ""), String(a.text ?? "")], after(a)),
-    select: (a) => this.cli("select", [String(a.ref ?? ""), ...strings2(a.values)], after(a)),
+    click: (a) => this.cli("click", [refArg2(a)], { ...after(a), ...confirmed(a) }),
+    hover: (a) => this.cli("hover", [refArg2(a)], after(a)),
+    type: (a) => this.cli("type", [refArg2(a), String(a.text ?? "")], { ...after(a), ...confirmed(a), ...a.submit === true ? { submit: true } : {} }),
+    fill: (a) => this.cli("fill", [refArg2(a), String(a.text ?? "")], after(a)),
+    select: (a) => this.cli("select", [refArg2(a), ...strings2(a.values)], after(a)),
     press: (a) => this.cli("press", [String(a.key ?? "")], { ...after(a), ...confirmed(a) }),
     upload: (a) => {
       const files = strings2(a.files).map((f) => this.localFile(f));
@@ -17055,7 +17244,7 @@ var Host = class {
           `uploading ${files.join(", ")} needs confirm: true: with no extract root, any file of this machine could go \u2014 ask the user, naming the files, then retry with confirm: true`
         );
       }
-      return this.cli("upload", [String(a.ref ?? ""), ...files], after(a));
+      return this.cli("upload", [refArg2(a), ...files], after(a));
     },
     scroll: (a) => this.cli("scroll", [String(a.target ?? "")], after(a)),
     history: (a) => {
@@ -17117,17 +17306,22 @@ var Host = class {
     },
     screenshot: async (a) => {
       const area2 = oneOf(a, "area", ["viewport", "full", "element"]);
-      const r = str5(a.ref);
-      if (area2 === "element" && r === void 0) throw new ToolError('`ref` is required with area "element": the element to capture, from the latest snapshot');
+      const r = a.ref === void 0 ? void 0 : refArg2(a);
+      const selector = str5(a.selector);
+      if (area2 !== "element" && (r !== void 0 || selector !== void 0)) throw new ToolError('`ref` and `selector` go with area "element"');
+      if (area2 === "element" && r !== void 0 && selector !== void 0) throw new ToolError('area "element" takes a `ref` or a `selector`, not both');
+      if (area2 === "element" && r === void 0 && selector === void 0)
+        throw new ToolError('`ref` is required with area "element": the element to capture, from the latest snapshot (or a CSS `selector`)');
+      const element2 = r !== void 0 ? { ref: r } : { selector };
       const bytes = await this.onPage(
-        (s) => screenshot(s, { format: "jpeg", quality: JPEG_QUALITY, ...area2 === "element" ? { ref: r } : area2 === "full" ? { full: true } : {} }),
+        (s) => screenshot(s, { format: "jpeg", quality: JPEG_QUALITY, ...area2 === "element" ? element2 : area2 === "full" ? { full: true } : {} }),
         {}
       );
       const size = bytes.length >= 1024 * 1024 ? `${(bytes.length / (1024 * 1024)).toFixed(1)} MB` : `${Math.ceil(bytes.length / 1024)} KB`;
       if (bytes.length > MAX_IMAGE_BYTES) {
         throw new ToolError(`the screenshot is ${size}, over the 4 MB an answer may carry: take one element (area: "element" with a ref), or the viewport`);
       }
-      const what = area2 === "element" ? r : area2 === "full" ? "the full page" : "the viewport";
+      const what = area2 === "element" ? r ?? selector : area2 === "full" ? "the full page" : "the viewport";
       return { text: `screenshot of ${what} (JPEG, ${size})`, images: [{ data: bytes.toString("base64"), mimeType: "image/jpeg" }] };
     },
     status: async (a) => {
@@ -17205,14 +17399,14 @@ USAGE
   webindex browser   open <url> [--new-tab] [--headless] [--profile <n>] [--cdp <port|url>]
                      [--browser-kind chrome|brave|chromium|edge]
                      [--capture] [--snapshot] [--timeout <ms>]
-  webindex browser   attach <port|url> | status | close [--all]
-  webindex browser   snapshot [<ref>] [--interactive] [--max-chars <n>]
+  webindex browser   attach <port|url> | status | close [--all] | eval <expr|->
+  webindex browser   snapshot [<ref> | --selector <css>] [--interactive] [--max-chars <n>]
   webindex browser   click|hover <ref> [--confirm] | type <ref> <text> [--submit]
   webindex browser   fill <ref> <text> | select <ref> <val\u2026> | press <key> [--confirm]
   webindex browser   upload <ref> <file\u2026> | scroll <ref|up|down|top|bottom>
   webindex browser   wait --text|--gone|--selector|--url <s> | --idle | --load | --clear
                      | --ms <n> [--timeout <ms>]
-  webindex browser   eval <expr|-> | screenshot [<ref>] [--full] [--out <file>]
+  webindex browser   screenshot [<ref> | --selector <css>] [--full] [--out <file>]
   webindex browser   network [list|get <n>|clear] | tabs [list|new|select <tN>|close <tN>]
   webindex browser   back|forward|reload | dialog accept|dismiss (MCP only)
   webindex browser   profile import <chrome|brave|chromium|edge|path> [--force]
@@ -17394,21 +17588,21 @@ COMMANDS
              else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
   browser    Drive a real Chrome, Brave, Chromium or Edge for an agent: a
              SEPARATE browser on a dedicated profile, never your own, launched
-             on first use (headed unless --headless) and picked up again by
-             every later call \u2014 the tab, its refs and the session last between
-             commands. attach <port|url> (or --cdp) drives one already running
-             on a loopback port instead; close shuts down only a browser it
-             launched. snapshot prints the accessibility tree with refs (e12)
-             that click, type, fill, select, upload, scroll and screenshot take;
-             a ref from before a navigation is refused: take a new snapshot. A
-             click or an Enter that looks irreversible (pay, order, delete,
-             send, publish\u2026) or submits a password is refused unless --confirm:
-             ask the user first. A challenge (captcha, anti-bot wall) is named,
-             never bypassed: the human solves it, then wait --clear. --capture
-             records the JSON the page fetches (network list|get). A dialog
-             the page opens is dismissed before the command ends; only the
-             MCP tools (mcp --browser) can answer one. Exit 1 is a stale ref,
-             a timeout or a refusal; --json on every action.
+             on first use (headed unless --headless) and reused by every later
+             call, its tab and refs included. attach <port|url> (or --cdp)
+             drives one on a loopback port; close shuts down only a browser it
+             launched. snapshot prints the accessibility tree with refs (e12):
+             controls, for the actions; containers (table, figure\u2026), to scope
+             snapshot and screenshot, as --selector <css> does. A ref from
+             before a navigation is stale. fill and type echo the value (never
+             a password's). A click or an Enter that looks irreversible (pay,
+             delete, send\u2026) or submits a password is refused unless --confirm:
+             ask the user first. A challenge is never bypassed: the human
+             solves it, then wait --clear. --capture records the JSON fetched
+             while its command runs (network list|get; the log grows until
+             network clear). A dialog is dismissed before the command ends; mcp
+             --browser answers them. Exit 1: a stale ref, a timeout, a refusal;
+             --json on every action.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which

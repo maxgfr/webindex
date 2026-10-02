@@ -117,14 +117,16 @@ function inPage(src: string, doc: unknown, self?: unknown, ...args: unknown[]): 
 }
 
 const FULL = { left: 0, top: 0, width: VW, height: VH };
+/** Something to answer in an overlay: one with no control and almost no text is none (an image ad layer). */
+const asking = (e: El): El => e.add(el("BUTTON", { text: "OK" }));
 
 describe("the in-page overlay probe", () => {
   it("finds a visible dialog, alertdialog, aria-modal element and open <dialog>, and skips hidden ones", () => {
     const { doc, body } = page();
-    const dialog = el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" } });
-    const alert = el("DIV", { attrs: { role: "alertdialog" }, style: { position: "absolute" } });
-    const modal = el("SECTION", { attrs: { "aria-modal": "true" }, style: { position: "fixed" } });
-    const native = el("DIALOG", { style: { position: "absolute" } });
+    const dialog = asking(el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" } }));
+    const alert = asking(el("DIV", { attrs: { role: "alertdialog" }, style: { position: "absolute" } }));
+    const modal = asking(el("SECTION", { attrs: { "aria-modal": "true" }, style: { position: "fixed" } }));
+    const native = asking(el("DIALOG", { style: { position: "absolute" } }));
     native.open = true;
     const closed = el("DIALOG");
     const hidden = el("DIV", { attrs: { role: "dialog" }, style: { display: "none" } });
@@ -138,7 +140,7 @@ describe("the in-page overlay probe", () => {
   it("finds a fixed element over a large part of the viewport that is on top", () => {
     const { doc, body } = page();
     const wall = el("DIV", { style: { position: "fixed" }, rect: FULL, text: "We value your privacy" });
-    const box = el("DIV", { rect: { left: 300, top: 200, width: 400, height: 400 } });
+    const box = asking(el("DIV", { rect: { left: 300, top: 200, width: 400, height: 400 } }));
     wall.add(box);
     const article = el("ARTICLE", { rect: { left: 0, top: 0, width: VW, height: 3000 }, text: "A long article ".repeat(100) });
     body.add(article, wall);
@@ -153,7 +155,7 @@ describe("the in-page overlay probe", () => {
     doc.top = sticky;
     expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([]);
     const shell = el("DIV", { style: { position: "fixed" }, rect: { left: 0, top: 0, width: 0, height: 0 } });
-    const panel = el("DIV", { rect: { left: 0, top: 300, width: VW, height: 500 } });
+    const panel = asking(el("DIV", { rect: { left: 0, top: 300, width: VW, height: 500 } }));
     shell.add(panel);
     body.add(shell);
     doc.top = panel;
@@ -193,7 +195,7 @@ describe("the in-page overlay probe", () => {
   it("keeps the outermost overlay only: a dialog inside a fixed backdrop is the backdrop's", () => {
     const { doc, body } = page();
     const backdrop = el("DIV", { style: { position: "fixed" }, rect: FULL });
-    const dialog = el("DIV", { attrs: { role: "dialog" }, rect: { left: 300, top: 200, width: 400, height: 300 } });
+    const dialog = asking(el("DIV", { attrs: { role: "dialog" }, rect: { left: 300, top: 200, width: 400, height: 300 } }));
     backdrop.add(dialog);
     body.add(backdrop);
     doc.top = dialog;
@@ -203,7 +205,7 @@ describe("the in-page overlay probe", () => {
   it("looks into open shadow roots, asking the shadow root what is on top", () => {
     const { doc, body } = page();
     const host = el("CMP-ROOT", { rect: { width: 0, height: 0 } });
-    const banner = el("DIV", { style: { position: "fixed" }, rect: FULL });
+    const banner = asking(el("DIV", { style: { position: "fixed" }, rect: FULL }));
     const root = host.attachShadow(banner);
     body.add(host);
     doc.top = host; // the document only sees the host
@@ -243,7 +245,7 @@ describe("the in-page overlay probe", () => {
     doc.top = feed;
     expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([]);
     // A dialog inside it still counts.
-    const modal = el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" }, rect: { left: 300, top: 200, width: 400, height: 300 } });
+    const modal = asking(el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" }, rect: { left: 300, top: 200, width: 400, height: 300 } }));
     feed.add(modal);
     expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([modal]);
   });
@@ -270,7 +272,7 @@ describe("the in-page overlay probe", () => {
     const { doc, body } = page();
     const root = el("DIV", { attrs: { role: "presentation" }, style: { position: "fixed" }, rect: FULL });
     const backdrop = el("DIV", { attrs: { "aria-hidden": "true" }, style: { position: "fixed" }, rect: FULL });
-    const dialog = el("DIV", { attrs: { role: "dialog" }, style: { position: "absolute" }, rect: { left: 300, top: 240, width: 400, height: 240 } });
+    const dialog = asking(el("DIV", { attrs: { role: "dialog" }, style: { position: "absolute" }, rect: { left: 300, top: 240, width: 400, height: 240 } }));
     root.add(backdrop, dialog);
     body.add(root);
     doc.top = dialog;
@@ -279,17 +281,71 @@ describe("the in-page overlay probe", () => {
 
   it("takes a consent vendor's visible container for an overlay whatever its size", () => {
     const { doc, body } = page();
-    const bar = el("DIV", { attrs: { id: "onetrust-banner-sdk" }, style: { position: "fixed" }, rect: { left: 0, top: 680, width: VW, height: 120 } });
+    const bar = asking(el("DIV", { attrs: { id: "onetrust-banner-sdk" }, style: { position: "fixed" }, rect: { left: 0, top: 680, width: VW, height: 120 } }));
     const gone = el("DIV", { attrs: { id: "CybotCookiebotDialog" }, style: { display: "none" } });
     body.add(el("P"), bar, gone);
     doc.top = null;
     expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([bar]);
   });
 
+  it("takes nothing with no control and almost no text for an overlay: an image ad layer, an empty dialog", () => {
+    const { doc, body } = page();
+    // eurosport.fr: a fixed ad slot over the page, holding one image.
+    const ad = el("DIV", { style: { position: "fixed" }, rect: FULL });
+    const img = el("IMG", { rect: FULL });
+    ad.add(el("DIV").add(img));
+    const empty = el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" }, text: "Loading…" });
+    body.add(ad, empty);
+    doc.top = img;
+    expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([]);
+    // A link (or any control), or some text to read, makes it one.
+    img.parentElement?.add(el("A", { attrs: { href: "/promo" } }));
+    const notice = el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" }, text: "This site is closed for maintenance until Monday morning." });
+    body.add(notice);
+    expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([ad, notice]);
+  });
+
+  it("never calls a consent vendor's container bare, nor a custom element whose shadow root may be closed: a real wall stays a wall", () => {
+    const { doc, body } = page();
+    // consentmanager.net: buttons that are <div onclick>, and little text.
+    const cmp = el("DIV", { attrs: { id: "cmpbox" }, style: { position: "fixed" }, rect: { left: 0, top: 600, width: VW, height: 200 }, text: "Cookies? OK" });
+    cmp.add(el("DIV", { text: "OK" }));
+    // A web component with a closed shadow root: from outside, no text and no control.
+    const wall = el("COOKIE-WALL", { style: { position: "fixed" }, rect: FULL });
+    // One inside a fixed layer counts for the layer.
+    const layer = el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" } });
+    layer.add(el("X-CONSENT"));
+    body.add(cmp, wall, layer);
+    doc.top = wall;
+    expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([cmp, wall, layer]);
+    // An open shadow root is looked into: an empty one is bare.
+    const open = el("AD-SLOT", { style: { position: "fixed" }, rect: FULL });
+    open.attachShadow(el("IMG"));
+    const { doc: doc2, body: body2 } = page();
+    body2.add(open);
+    doc2.top = open;
+    expect(inPage(OVERLAYS_SOURCE, doc2)).toEqual([]);
+  });
+
+  it("sees a control or text inside a shadow root, and counts a focusable or editable element as a control", () => {
+    const { doc, body } = page();
+    const host = el("CMP-ROOT", { style: { position: "fixed" }, rect: FULL });
+    host.attachShadow(el("DIV").add(el("SPAN", { attrs: { role: "button" } })));
+    const tabbable = el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" } });
+    tabbable.add(el("DIV", { attrs: { tabindex: "0" } }));
+    const untabbable = el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" } });
+    untabbable.add(el("DIV", { attrs: { tabindex: "-1" } }), el("INPUT", { attrs: { type: "hidden" } }));
+    const editable = el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" } });
+    editable.add(el("DIV", { attrs: { contenteditable: "true" } }));
+    body.add(host, tabbable, untabbable, editable);
+    doc.top = host;
+    expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([host, tabbable, editable]);
+  });
+
   it("finds nothing without a body or a viewport, and at most five overlays", () => {
     expect(inPage(OVERLAYS_SOURCE, { body: null })).toEqual([]);
     const { doc, body } = page();
-    for (let i = 0; i < 8; i++) body.add(el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" } }));
+    for (let i = 0; i < 8; i++) body.add(asking(el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" } })));
     expect(inPage(OVERLAYS_SOURCE, doc)).toHaveLength(5);
   });
 });
@@ -338,14 +394,35 @@ describe("what the overlay root is", () => {
 
   it("is an overlay when the probe finds it, when it is a dialog, or a consent vendor's", () => {
     const { doc, body } = page();
-    const wall = el("DIV", { style: { position: "fixed" }, rect: FULL, text: "Cookies" });
-    const dialog = el("DIV", { attrs: { role: "dialog" }, rect: { width: 0, height: 0 } });
-    const vendor = el("DIV", { attrs: { id: "usercentrics-root" }, rect: { width: 0, height: 0 } });
+    const wall = asking(el("DIV", { style: { position: "fixed" }, rect: FULL, text: "Cookies" }));
+    const dialog = asking(el("DIV", { attrs: { role: "dialog" }, rect: { width: 0, height: 0 } }));
+    const vendor = asking(el("DIV", { attrs: { id: "usercentrics-root" }, rect: { width: 0, height: 0 } }));
     body.add(wall, dialog, vendor);
     doc.top = wall;
     expect(info(doc, wall)).toEqual({ what: '<div> "Cookies"', overlay: true });
     expect(info(doc, dialog).overlay).toBe(true);
     expect(info(doc, vendor).overlay).toBe(true);
+  });
+
+  it("is no overlay when it has no control and almost no text, dialog or not: a click it covers gets the plain message", () => {
+    const { doc, body } = page();
+    const ad = el("DIV", { style: { position: "fixed" }, rect: FULL });
+    ad.add(el("IMG"));
+    const dialog = el("DIV", { attrs: { role: "dialog" }, rect: { width: 0, height: 0 }, text: "Ad" });
+    body.add(ad, dialog);
+    doc.top = ad;
+    expect(info(doc, ad)).toEqual({ what: "<div>", overlay: false });
+    expect(info(doc, dialog).overlay).toBe(false);
+  });
+
+  it("is an overlay when it is a consent vendor's container or a closed web component, however bare it looks", () => {
+    const { doc, body } = page();
+    const cmp = el("DIV", { attrs: { id: "cmpbox" }, rect: { width: 0, height: 0 }, text: "OK" });
+    const wall = el("COOKIE-WALL", { style: { position: "fixed" }, rect: FULL });
+    body.add(cmp, wall);
+    doc.top = wall;
+    expect(info(doc, cmp).overlay).toBe(true);
+    expect(info(doc, wall).overlay).toBe(true);
   });
 
   it("is no overlay when it is only a fixed bar, a sticky header or a chat bubble", () => {

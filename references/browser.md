@@ -29,11 +29,22 @@ Use plain `fetch` everywhere else: it is faster and needs no browser.
 2. Read the snapshot. Each element you can act on carries a ref: `button "Search" [ref=e12]`.
 3. Act on one ref: `click e12`, `fill e7 "text"`, `select e9 Beta`, `upload e11 cv.pdf`,
    `press Escape`. Add `--snapshot` to get the new tree in the same call.
+   `fill` and `type` echo what the field holds afterwards (`value: "Jane Doe"`,
+   as an input mask may have reformatted it), and `select` the options chosen; a
+   password field's value is never echoed (`value: (hidden)`).
 4. Check the result with `wait --text "Results"`, `wait --url /done` or `wait --idle`,
    then take a new snapshot before the next act.
 
-`snapshot --interactive` lists only the controls and is much shorter.
-`snapshot e40` shows one subtree. Same-origin iframes are expanded.
+`snapshot --interactive` (and `open <url> --snapshot --interactive`) lists only
+the controls and is much shorter. `snapshot e40` shows one subtree, and so does
+`snapshot --selector <css>` for the first element a CSS selector matches.
+Same-origin iframes are expanded.
+
+`screenshot` takes the viewport, the full page (`--full`), one element by its
+ref (`screenshot e40`), or the first element a CSS selector matches
+(`screenshot --selector table.infobox`), captured whole even when it is taller
+than the window. A selector that matches nothing fails with exit 1,
+`no element matches <css>`.
 
 ## Overlays and consent walls
 
@@ -63,6 +74,14 @@ An overlay is one of these, shown on screen (no ancestor hidden, transparent,
   except a dialog. A presentational root (`role="presentation"`) is looked
   through to the dialog inside it.
 
+One that is **bare** is no overlay: no control in it (a link, a button, a
+field, anything focusable or editable, an iframe) and under 40 characters of
+text. A consent vendor's container is never bare (its buttons may be plain
+`div`s), and neither is a layer holding a web component whose shadow root is
+closed (its text and controls cannot be seen from outside). An ad slot fixed over the page with only an image in it
+covers part of the screen but asks nothing: it is not listed under the header,
+and a click it covers is refused as for a sticky header, with no consent wording.
+
 Only the outermost overlay counts. A `--max-chars` cut never drops it, even
 when the page appends it at the end of `<body>`. A click that lands on one is
 refused (exit 1) with the overlay's controls and their refs, which you can use
@@ -80,12 +99,27 @@ everything.
 
 ## Refs
 
+- **What gets a ref**: what you act on (links, buttons, fields, options,
+  headings, iframes, anything focusable or editable), and the structural
+  containers you may want to scope a snapshot or a screenshot to: `table`,
+  `figure`, `article`, `main`, `complementary`, `form`, and a `region` or an
+  `image` that has a name. `--interactive` lists only the first kind. A
+  container's ref is refused by `click` (exit 2): whatever sits at its centre
+  is what would be pressed, so click a control inside it. Anything else (a
+  `div` with a class) is reached with `--selector <css>` on `snapshot` and
+  `screenshot`; any other action refuses `--selector` (exit 2).
 - **`eN` is the element's `backendDOMNodeId`**, kept in `refs/<tab>.json`. A
-  ref stays the same within one document: a later snapshot hands the same
-  element the same `eN`.
+  ref is stable while its element node lives: a later snapshot of the same
+  document hands the same element the same `eN`. A widget the page re-renders
+  (a time input's spinbuttons after a `fill`, a list a framework redraws) is
+  new nodes with new refs, and the old ones go stale. Take a new snapshot after
+  acting on one.
 - **A ref goes stale when the tab loads another document.** An action on it then
-  fails with exit 1: `ref "e12" is unknown or stale: take a new snapshot`. Take
-  one and use its refs. Never guess a ref.
+  fails with exit 1: `ref "e12" is unknown or stale: take a new snapshot and
+  use the refs it returns`. Take one and use its refs. Never guess a ref.
+- **A ref is `e` and a number.** Anything else (a CSS selector such as
+  `table.infobox`) is a usage error, exit 2: `expected a ref like e12 from the
+  latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)`.
 - **A click is a real mouse press** at the element's centre, refused when
   something covers that point (a cookie banner). The error names it, and lists
   the controls of the overlay it belongs to, with refs.
@@ -199,9 +233,14 @@ block them in the dedicated browser:
 ## Network capture
 
 `open <url> --capture` (or `--capture` on any action) records the JSON
-responses the page fetches (XHR and fetch) while that command runs.
-`network list` numbers them, `network get <n>` prints one body as JSON, and
-`network clear` empties the log. Headers are never stored. URLs keep their
+responses the page fetches (XHR and fetch) while that command runs: pass it to
+every command whose fetches you want, such as each `scroll bottom --capture` of
+an infinite list. What is recorded goes to the tab's log, which keeps growing
+across commands until `network clear`. Each command says both counts:
+`captured 10 JSON responses (30 in the log)`; under `WEBINDEX_NO_WRITE` nothing
+reaches the log, and only the first count is said. `network list` numbers the
+entries, `network get <n>` prints one body as JSON, and `network clear` empties
+the log. Headers are never stored. URLs keep their
 query strings, and request bodies (`postData`, up to 4 KiB) are stored raw, so a
 recorded login POST can hold the password. Clear the log after a session where
 that matters.
@@ -209,8 +248,10 @@ that matters.
 ## Accepted limits
 
 - **Cross-origin iframes** (out-of-process) are not expanded in the snapshot.
-- **In the CLI, capture and dialogs last only one command.** The browser hands
-  a dialog only to the connection that saw it open. So a dialog a page opens
+- **In the CLI, recording and dialogs last only one command.** `--capture`
+  records only while the command it is given to runs (the log it writes to
+  stays, see above), and the browser hands a dialog only to the connection
+  that saw it open. So a dialog a page opens
   while a command runs (on a click, on load, a "Leave site?" on reload) is
   dismissed as it opens, never accepted, and the result says so. A dismissed
   beforeunload cancels the reload or navigation, which then fails at once.
@@ -247,10 +288,10 @@ Tools that change the page return the snapshot taken after them.
 | CLI | MCP tool |
 |---|---|
 | `open <url>` (`--new-tab`, `--capture`, `--profile`, `--headless`, `--browser-kind`) | `webindex_browser_open` (`browserKind`) |
-| `snapshot [<ref>]` (`--interactive`) | `webindex_browser_snapshot` (`mode` required) |
+| `snapshot [<ref>]` (`--interactive`, `--selector`) | `webindex_browser_snapshot` (`mode` required, `ref` or `selector`) |
 | `click`, `hover`, `type`, `fill`, `select`, `press`, `upload`, `scroll` | `webindex_browser_<same name>` |
 | `wait --text\|--gone\|--selector\|--url\|--load\|--idle\|--clear\|--ms` | `webindex_browser_wait` (`condition`, `value`) |
-| `screenshot [<ref>]` (`--full`) | `webindex_browser_screenshot` (`area` required; JPEG, 4 MB at most) |
+| `screenshot [<ref>]` (`--full`, `--selector`) | `webindex_browser_screenshot` (`area` required, `ref` or `selector` with `element`; JPEG, 4 MB at most) |
 | `eval <expr>` | `webindex_browser_eval` |
 | `network list\|get <n>\|clear` | `webindex_browser_network` (destructive: `clear` deletes the log) |
 | `tabs list\|new\|select\|close` | `webindex_browser_tabs` |

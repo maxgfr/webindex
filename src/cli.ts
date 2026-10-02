@@ -156,14 +156,14 @@ USAGE
   webindex browser   open <url> [--new-tab] [--headless] [--profile <n>] [--cdp <port|url>]
                      [--browser-kind chrome|brave|chromium|edge]
                      [--capture] [--snapshot] [--timeout <ms>]
-  webindex browser   attach <port|url> | status | close [--all]
-  webindex browser   snapshot [<ref>] [--interactive] [--max-chars <n>]
+  webindex browser   attach <port|url> | status | close [--all] | eval <expr|->
+  webindex browser   snapshot [<ref> | --selector <css>] [--interactive] [--max-chars <n>]
   webindex browser   click|hover <ref> [--confirm] | type <ref> <text> [--submit]
   webindex browser   fill <ref> <text> | select <ref> <val…> | press <key> [--confirm]
   webindex browser   upload <ref> <file…> | scroll <ref|up|down|top|bottom>
   webindex browser   wait --text|--gone|--selector|--url <s> | --idle | --load | --clear
                      | --ms <n> [--timeout <ms>]
-  webindex browser   eval <expr|-> | screenshot [<ref>] [--full] [--out <file>]
+  webindex browser   screenshot [<ref> | --selector <css>] [--full] [--out <file>]
   webindex browser   network [list|get <n>|clear] | tabs [list|new|select <tN>|close <tN>]
   webindex browser   back|forward|reload | dialog accept|dismiss (MCP only)
   webindex browser   profile import <chrome|brave|chromium|edge|path> [--force]
@@ -345,21 +345,21 @@ COMMANDS
              else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
   browser    Drive a real Chrome, Brave, Chromium or Edge for an agent: a
              SEPARATE browser on a dedicated profile, never your own, launched
-             on first use (headed unless --headless) and picked up again by
-             every later call — the tab, its refs and the session last between
-             commands. attach <port|url> (or --cdp) drives one already running
-             on a loopback port instead; close shuts down only a browser it
-             launched. snapshot prints the accessibility tree with refs (e12)
-             that click, type, fill, select, upload, scroll and screenshot take;
-             a ref from before a navigation is refused: take a new snapshot. A
-             click or an Enter that looks irreversible (pay, order, delete,
-             send, publish…) or submits a password is refused unless --confirm:
-             ask the user first. A challenge (captcha, anti-bot wall) is named,
-             never bypassed: the human solves it, then wait --clear. --capture
-             records the JSON the page fetches (network list|get). A dialog
-             the page opens is dismissed before the command ends; only the
-             MCP tools (mcp --browser) can answer one. Exit 1 is a stale ref,
-             a timeout or a refusal; --json on every action.
+             on first use (headed unless --headless) and reused by every later
+             call, its tab and refs included. attach <port|url> (or --cdp)
+             drives one on a loopback port; close shuts down only a browser it
+             launched. snapshot prints the accessibility tree with refs (e12):
+             controls, for the actions; containers (table, figure…), to scope
+             snapshot and screenshot, as --selector <css> does. A ref from
+             before a navigation is stale. fill and type echo the value (never
+             a password's). A click or an Enter that looks irreversible (pay,
+             delete, send…) or submits a password is refused unless --confirm:
+             ask the user first. A challenge is never bypassed: the human
+             solves it, then wait --clear. --capture records the JSON fetched
+             while its command runs (network list|get; the log grows until
+             network clear). A dialog is dismissed before the command ends; mcp
+             --browser answers them. Exit 1: a stale ref, a timeout, a refusal;
+             --json on every action.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which

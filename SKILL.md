@@ -85,11 +85,13 @@ webindex skill check|bundle|vendor|copy|doctor|init|repin|finish|recall
 webindex mcp [--transport http]       # the webindex_* tools over MCP; --public-only, --extract-root <dir> wall it in; --browser adds the browser tools
 webindex doctor [--json]
 webindex browser open <url> --snapshot  # a separate browser on a dedicated profile; the page as a tree with refs (e12)
+webindex browser open <url> --snapshot --interactive  # the same, only the controls: much shorter
 webindex browser click|fill|select|type|upload|scroll <ref> …  # act on a ref; --snapshot returns the new tree
 webindex browser press <key>         # Enter, Escape, Control+A… on the focused element
 webindex browser wait --text <s>|--url <p>|--clear  # check the result; --clear waits for the human to solve a challenge
-webindex browser network list|get <n>  # the JSON the page fetched, recorded with --capture
-webindex browser screenshot|eval|tabs|back|status|close  # close shuts down only a browser webindex launched
+webindex browser network list|get <n>  # the JSON fetched during each command given --capture; the log grows until network clear
+webindex browser screenshot [<ref>|--selector <css>]  # an element by ref (a table, a figure…) or by CSS selector
+webindex browser eval|tabs|back|status|close  # close shuts down only a browser webindex launched
 ```
 
 Every command that answers with data takes `--json` — all but the container
@@ -150,8 +152,11 @@ delete, publish, send, validate) is refused until `--confirm`, which you pass
 only after the user said yes to that very action; so is a click on a frame,
 whose content (a payment button) cannot be inspected. Enter in a textarea, a
 contenteditable or a formless chat box, and a `select` that submits on change,
-are not guarded: ask first. Read
-`references/browser.md` before driving it.
+are not guarded: ask first. Refs go to the controls and to containers (a
+table, a figure, an article, `main`, a form), so `screenshot e40` can capture an
+infobox; `--interactive` lists only the controls. A ref holds while its element
+lives: a widget the page re-renders gets new refs, so snapshot again after
+acting on one. Read `references/browser.md` before driving it.
 
 ## Three rules that constrain every change
 

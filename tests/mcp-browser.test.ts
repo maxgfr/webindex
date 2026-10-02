@@ -489,6 +489,36 @@ describe("the other tools", () => {
     await h.call("webindex_browser_screenshot", { area: "element", ref: "e1" });
     expect(sent("Page.captureScreenshot").at(-1)?.params).toMatchObject({ clip: { width: 100, height: 40 } });
     await expect(h.call("webindex_browser_screenshot", { area: "element" })).rejects.toThrow(/`ref`/);
+    // Or the element a CSS selector matches: one or the other.
+    world.selectors = { "table.infobox": 13 };
+    const box = await h.call("webindex_browser_screenshot", { area: "element", selector: "table.infobox" });
+    expect(box.text).toMatch(/^screenshot of table\.infobox \(JPEG/);
+    expect(sent("Page.captureScreenshot").at(-1)?.params).toMatchObject({ clip: { width: 100, height: 40 } });
+    await expect(h.call("webindex_browser_screenshot", { area: "element", selector: "table.nope" })).rejects.toThrow("no element matches table.nope");
+    await expect(h.call("webindex_browser_screenshot", { area: "element", ref: "e1", selector: "table.infobox" })).rejects.toThrow(/not both/);
+    await expect(h.call("webindex_browser_screenshot", { area: "element", ref: "table.infobox" })).rejects.toThrow(/expected a ref like e12/);
+    const scoped = await h.call("webindex_browser_snapshot", { mode: "full", selector: "table.infobox" });
+    expect(scoped.text).toContain('combobox "Size" [ref=e4]');
+    expect(scoped.text).not.toContain("Search");
+    await expect(h.call("webindex_browser_snapshot", { mode: "full", ref: "e4", selector: "table.infobox" })).rejects.toThrow(/not both/);
+    // In the words of the tools: `selector`, never the CLI's --selector.
+    for (const call of [
+      () => h.call("webindex_browser_snapshot", { mode: "full", ref: "e4", selector: "table.infobox" }),
+      () => h.call("webindex_browser_snapshot", { mode: "full", ref: "table.infobox" }),
+      () => h.call("webindex_browser_screenshot", { area: "element", ref: "table.infobox" }),
+      () => h.call("webindex_browser_click", { ref: "table.infobox" }),
+    ]) {
+      const err = await call().catch((e) => e);
+      expect(err).toBeInstanceOf(ToolError);
+      expect(err.message).not.toContain("--selector");
+    }
+    await expect(h.call("webindex_browser_click", { ref: "table.infobox" })).rejects.toThrow(
+      "expected a ref like e12 from the latest snapshot; CSS selectors: pass `selector` to webindex_browser_screenshot or webindex_browser_snapshot, or wait with condition selector",
+    );
+    // A ref or a selector goes with area element, never ignored.
+    await expect(h.call("webindex_browser_screenshot", { area: "full", selector: "table.infobox" })).rejects.toThrow(/area "element"/);
+    await expect(h.call("webindex_browser_screenshot", { area: "viewport", ref: "e1" })).rejects.toThrow(/area "element"/);
+    expect(browserToolDecls().find((t) => t.name === "webindex_browser_snapshot")?.inputSchema.properties).toHaveProperty("selector");
     fake.handle("Page.captureScreenshot", () => ({ data: Buffer.alloc(4 * 1024 * 1024 + 1).toString("base64") }));
     await expect(h.call("webindex_browser_screenshot", { area: "full" })).rejects.toThrow(/4 MB.*area: "element"/);
   });

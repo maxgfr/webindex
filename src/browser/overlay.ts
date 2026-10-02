@@ -8,7 +8,8 @@
 //
 // What an overlay is, exactly, is said where OVERLAYS_SOURCE is defined: a
 // shown dialog or consent vendor's container, or a fixed layer over a large part
-// of the screen that is not the page itself. Only the outermost counts.
+// of the screen that is not the page itself, holding a control or some text to
+// read (an image ad layer asks nothing of anyone). Only the outermost counts.
 //
 // Nothing here is specific to a site: the consent vendors' containers are
 // listed the way challenge.ts lists the challenge vendors.
@@ -57,6 +58,28 @@ export const CONSENT_SELECTORS: readonly string[] = [
   'iframe[name="__gppLocator"]',
 ];
 
+/** Under this many characters of text, a layer with no control in it says nothing to answer: no overlay. */
+export const BARE_TEXT_MAX = 40;
+/** The tags that are controls in themselves (a link only with an href, an input unless hidden). */
+const CONTROL_TAGS = ["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "IFRAME", "SUMMARY", "DETAILS"];
+const CONTROL_ROLES = [
+  "button",
+  "link",
+  "checkbox",
+  "radio",
+  "switch",
+  "tab",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "textbox",
+  "searchbox",
+  "combobox",
+  "slider",
+  "spinbutton",
+];
+
 // --- page functions ----------------------------------------------------------
 //
 // Strings (src has no DOM lib), run in the page. Keep `${` out of the parts in
@@ -78,6 +101,48 @@ const HELPERS = `const up = (n) => n.parentElement || (n.parentNode && n.parentN
     } catch (e) {
       return false;
     }
+  };
+  const CONTROL_TAGS = ${JSON.stringify(CONTROL_TAGS)};
+  const CONTROL_ROLES = ${JSON.stringify(CONTROL_ROLES)};
+  /** Something to act on: a native control, a control role, a focusable (tabindex >= 0) or editable element. */
+  const isControl = (el) => {
+    const attr = (n) => (el.getAttribute ? el.getAttribute(n) : null);
+    const tag = String(el.tagName || "").toUpperCase();
+    if (tag === "A") return attr("href") !== null;
+    if (tag === "INPUT") return String(attr("type") || "").toLowerCase() !== "hidden";
+    if (CONTROL_TAGS.indexOf(tag) >= 0 || CONTROL_ROLES.indexOf(roleOf(el)) >= 0) return true;
+    const tab = attr("tabindex");
+    if (tab !== null && tab !== "" && Number(tab) >= 0) return true;
+    const edit = attr("contenteditable");
+    return edit === "" || edit === "true" || edit === "plaintext-only";
+  };
+  const textLength = (n) => String((typeof n.innerText === "string" ? n.innerText : n.textContent) || "").replace(/\\s+/g, " ").trim().length;
+  /**
+   * Nothing to answer in it: no control, itself or inside (open shadow roots
+   * included), and under ${BARE_TEXT_MAX} characters of text. An ad slot holding
+   * an image is one; a cookie wall, a login dialog, a notice to read are not.
+   * Never bare: a consent vendor's container (its buttons may be plain divs),
+   * nor anything holding a custom element with no open shadow root (a closed
+   * one hides its text and controls from here).
+   */
+  const bare = (el) => {
+    let text = textLength(el);
+    const stack = [el];
+    for (let seen = 0; stack.length > 0; seen++) {
+      // Too big to look through: whatever it is, it is no empty layer.
+      if (text >= ${BARE_TEXT_MAX} || seen > 5000) return false;
+      const n = stack.pop();
+      if (n.nodeType === 1 && (isControl(n) || isConsent(n))) return false;
+      if (n.nodeType === 1 && String(n.tagName || "").indexOf("-") >= 0 && !n.shadowRoot) return false;
+      for (const k of Array.from(n.children || [])) stack.push(k);
+      if (n.shadowRoot) {
+        for (const k of Array.from(n.shadowRoot.children || [])) {
+          text += textLength(k);
+          stack.push(k);
+        }
+      }
+    }
+    return text < ${BARE_TEXT_MAX};
   };
   /** Fixed or sticky, itself or an ancestor up to the body: what a click's covering node belongs to. */
   const pinned = (el) => {
@@ -104,7 +169,8 @@ const HELPERS = `const up = (n) => n.parentElement || (n.parentNode && n.parentN
  * or most of the page's text is the page itself (an app shell): neither it nor
  * anything in it is taken for an overlay, a dialog apart. A presentational root
  * (role none or presentation, absent from the accessibility tree) is looked
- * through, to the dialog inside it.
+ * through, to the dialog inside it. Whatever it is, one that is bare (no
+ * control in it, almost no text: an image ad layer) is no overlay.
  */
 export const OVERLAYS_SOURCE = `function findOverlays() {
   ${HELPERS}
@@ -176,7 +242,8 @@ export const OVERLAYS_SOURCE = `function findOverlays() {
         else take = true;
       }
     }
-    // An overlay is taken whole: what is inside it is its own.
+    // An overlay is taken whole: what is inside it is its own. A bare one is none, nor is anything inside it.
+    if (take && bare(el)) return;
     if (take) {
       found.push(el);
       return;
@@ -221,13 +288,14 @@ export const DESCRIBE_SOURCE = `const describe = (el) => {
 /**
  * In the page, with `this` what covers a click's target: its description, and
  * whether it is an overlay (one the probe finds, a dialog, a consent vendor's
- * container) or only something fixed in the way: a sticky header, a chat bubble.
+ * container, never a bare one) or only something fixed in the way: a sticky
+ * header, a chat bubble, an image ad layer.
  */
 export const OVERLAY_INFO_SOURCE = `function overlayInfo() {
   ${HELPERS}
   ${DESCRIBE_SOURCE}
   const overlays = (${OVERLAYS_SOURCE})();
-  return { what: describe(this), overlay: overlays.indexOf(this) >= 0 || isDialog(this) || isConsent(this) };
+  return { what: describe(this), overlay: (overlays.indexOf(this) >= 0 || isDialog(this) || isConsent(this)) && !bare(this) };
 }`;
 
 /**
