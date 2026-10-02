@@ -142,7 +142,7 @@ const DESCRIBE = `const describe = (el) => {
 export const PAGE_FUNCTIONS = {
   /**
    * Where `hit` (the node under the click point) is: true when it stands for the
-   * target itself (its text, its user-agent shadow tree: see OWNER_SOURCE), null
+   * target itself (its own text, its user-agent shadow tree: see OWNER_SOURCE), null
    * when it is inside the target (a button in a card, which the guard then looks
    * at), else a description of what covers the target.
    */

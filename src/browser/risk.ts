@@ -179,19 +179,23 @@ export const FOCUS_SOURCE = `function (doc) {
 
 /**
  * Runs in the page: the element a node stands for. A text node is its parent
- * element's, a shadow root its host's, and anything inside the user-agent
- * shadow tree of a form control (the editor of a text field, the label of an
- * `<input type=submit>`) the control's: Chrome's hit test lands in there
+ * element's, and anything inside the user-agent shadow tree of a form control
+ * (the editor of a text field, the label of an `<input type=submit>`, the root
+ * itself) the control's: Chrome's hit test lands in there
  * (DOM.getNodeForLocation with includeUserAgentShadowDOM), and none of it is a
- * control of its own. Null when nothing is found (a detached node, a document).
+ * control of its own. An author's shadow root (open or closed) is not followed
+ * to its host: what it holds is the component's, and the host's own label does
+ * not show it, so it stands for nothing and the guard refuses it. Null when
+ * nothing is found (that, a detached node, a document).
  */
 export const OWNER_SOURCE = `(node) => {
+  const formHost = (h) => !!h && /^(input|textarea|select)$/i.test(h.tagName || "");
   let el = node;
-  for (let i = 0; el && el.nodeType !== 1 && i < 64; i++) el = el.nodeType === 11 ? el.host : el.parentElement || el.parentNode;
+  for (let i = 0; el && el.nodeType !== 1 && i < 64; i++) el = el.nodeType === 11 ? (formHost(el.host) ? el.host : null) : el.parentElement || el.parentNode;
   for (let i = 0; el && el.nodeType === 1 && i < 8; i++) {
     const root = el.getRootNode ? el.getRootNode() : null;
     const host = root && root.nodeType === 11 ? root.host : null;
-    if (!host || !/^(input|textarea|select)$/i.test(host.tagName || "")) break;
+    if (!formHost(host)) break;
     el = host;
   }
   return el && el.nodeType === 1 ? el : null;
@@ -233,7 +237,9 @@ export const COLLECT_SOURCE = `function (action) {
     const alts = Array.from(e.querySelectorAll("img[alt],svg title"), (n) => n.getAttribute("alt") || n.textContent);
     const labels = isBtn && e.labels ? Array.from(e.labels, (l) => l.textContent) : [];
     const value = t === "input" && ["button", "submit", "reset", "image"].includes(ty) ? e.value : "";
-    return norm([e.getAttribute("aria-label"), by, e.getAttribute("title"), e.getAttribute("alt"), value, t === "input" ? "" : e.innerText || e.textContent, ...alts, ...labels].filter(Boolean).join(" "));
+    // A web component's text may live in its open shadow root only: innerText and textContent of the host do not show it.
+    const shadow = t !== "input" && e.shadowRoot ? e.shadowRoot.textContent : "";
+    return norm([e.getAttribute("aria-label"), by, e.getAttribute("title"), e.getAttribute("alt"), value, t === "input" ? "" : e.innerText || e.textContent, shadow, ...alts, ...labels].filter(Boolean).join(" "));
   };
   const explicit = (ctl.getAttribute("role") || "").toLowerCase();
   let role = explicit;

@@ -52,6 +52,19 @@ const PAGES: Record<string, string> = {
   <input type="submit" value="Continue">
   <input type="button" value="Supprimer le brouillon" onclick="document.getElementById('out').textContent = 'Draft deleted'">
 </form>
+<form id="wrapped" onsubmit="event.preventDefault(); document.getElementById('out').textContent = 'Stepped'">
+  <div role="group" aria-label="Next step" tabindex="0" style="display: inline-flex"><input type="submit" value="Go on"></div>
+  <div role="group" aria-label="Note tools" tabindex="0" style="display: inline-flex"><input type="button" value="Supprimer la note" onclick="document.getElementById('out').textContent = 'Note deleted'"></div>
+</form>
+<x-del role="button" tabindex="0" onclick="document.getElementById('out').textContent = 'Deleted'"></x-del>
+<script>
+customElements.define("x-del", class extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" }).textContent = "Delete";
+  }
+});
+</script>
 <form id="login" onsubmit="event.preventDefault(); document.getElementById('out').textContent = 'Logged in'">
   <label>User <input id="user"></label>
   <label>Password <input type="password" id="pw"></label>
@@ -377,6 +390,27 @@ describe.runIf(live)("a real browser, driven command by command", () => {
       const go = await ok("click", [refOf(snap, "button", "Continue")]);
       expect(go.json).toMatchObject({ ok: true, action: "click" });
       expect(await out()).toMatchObject({ value: "Continued" });
+    },
+    STEP_MS,
+  );
+
+  it(
+    "guards a click whose centre lands on a user-agent input button inside a container, and one on a web component labelled by its shadow root",
+    async () => {
+      await snapshot();
+      const out = async () => (await ok("eval", ["document.getElementById('out').textContent"])).json;
+      // The container names nothing irreversible; the input under its centre does.
+      const note = await run("click", [refOf(snap, "group", "Note tools")]);
+      expect(note.exitCode).toBe(1);
+      expect(note.text).toMatch(/refused to click on "Supprimer la note".*matches "supprimer"/);
+      // Its "Delete" is in its open shadow root only.
+      const del = await run("click", [refOf(snap, "button", "Delete")]);
+      expect(del.exitCode).toBe(1);
+      expect(del.text).toMatch(/refused to click on "Delete".*matches "delete"/);
+      expect(await out()).toMatchObject({ value: expect.not.stringMatching(/deleted/i) });
+      // A harmless input under a container's centre is clicked through it.
+      await ok("click", [refOf(snap, "group", "Next step")]);
+      expect(await out()).toMatchObject({ value: "Stepped" });
     },
     STEP_MS,
   );

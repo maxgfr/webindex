@@ -435,18 +435,29 @@ describe("frames and shadow roots", () => {
     expect(run(COLLECT_SOURCE, editor, ["click"])).toMatchObject({ role: "textbox", label: "" });
   });
 
-  it("walks a text node in an open shadow root up to the host, and still finds nothing in a detached node", () => {
-    const host = el("MY-BUTTON", {
+  it("finds no element for a node of an author shadow tree (refused), and labels the host by its open root's text", () => {
+    // <x-del role=button> whose open shadow root holds only "Delete": Chrome's innerText (and textContent) of the host is "".
+    const attrs: Record<string, string> = { role: "button" };
+    const host = el("X-DEL", {
       ownerDocument: { getElementById: () => null },
-      getAttribute: () => null,
-      hasAttribute: () => false,
-      closest: () => null,
+      getAttribute: (n: string) => attrs[n] ?? null,
+      hasAttribute: (n: string) => n in attrs,
+      closest: (sel: string) => (sel.split(",").includes("[role=button]") ? host : null),
       querySelectorAll: () => [],
-      innerText: "Next",
+      innerText: "",
+      textContent: "",
     });
-    const root = { nodeType: 11, parentNode: null, host };
+    const root = { nodeType: 11, parentNode: null, host, textContent: "Delete" };
     host.shadowRoot = root;
-    expect(run(COLLECT_SOURCE, { nodeType: 3, parentNode: root, parentElement: null }, ["click"])).toMatchObject({ role: "my-button", label: "Next" });
+    // Its text, or the root itself, is no control: an author's shadow tree can hold anything, so nothing is called harmless.
+    expect(run(COLLECT_SOURCE, { nodeType: 3, parentNode: root, parentElement: null }, ["click"])).toBeNull();
+    expect(run(COLLECT_SOURCE, root, ["click"])).toBeNull();
+    // The host itself is labelled by what its open root shows.
+    expect(run(COLLECT_SOURCE, host, ["click"])).toMatchObject({ role: "button", label: "Delete" });
+    // A closed root (no shadowRoot to read) leaves the host unlabelled: guarded as before.
+    const closed = el("X-DEL", { ...host, shadowRoot: null });
+    closed.closest = (sel: string) => (sel.split(",").includes("[role=button]") ? closed : null);
+    expect(run(COLLECT_SOURCE, closed, ["click"])).toMatchObject({ role: "button", label: "" });
     expect(run(COLLECT_SOURCE, { nodeType: 3, parentNode: null, parentElement: null }, ["click"])).toBeNull();
     expect(run(COLLECT_SOURCE, { nodeType: 9, parentNode: null }, ["click"])).toBeNull();
   });

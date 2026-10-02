@@ -362,6 +362,18 @@ describe("click", () => {
     expect(fnCalls().filter((f) => f === "collect")).toHaveLength(1);
   });
 
+  it("refuses a click that lands on the text of a web component's own shadow tree: it cannot be read as the host", async () => {
+    // <x-del role=button> with only "Delete" in its open shadow root: the host's own label reads "" in Chrome.
+    w.add(101, { tag: "X-DEL", role: "button", label: "" });
+    w.add(151, { tag: "#document-fragment", nodeType: 11, host: 101 });
+    w.add(152, { tag: "#text", nodeType: 3, parent: 151 });
+    w.hitFor = 152;
+    const err = await click(session, "e1", { deps }).catch((e) => e);
+    expect(err).toBeInstanceOf(RiskRefusedError);
+    expect(err.message).toMatch(/it is not an element/);
+    expect(mouse()).toEqual([]);
+  });
+
   it("still refuses an <input type=button> that deletes, and does not click", async () => {
     w.add(101, { tag: "INPUT", type: "button", label: "Supprimer" });
     w.add(151, { tag: "#document-fragment", nodeType: 11, host: 101 });
@@ -963,7 +975,8 @@ describe("page functions", () => {
     card.shadowRoot = open;
     const del: any = { nodeType: 1, tagName: "BUTTON", parentNode: open, getRootNode: () => open };
     expect(run(PAGE_FUNCTIONS.hitTest, card, [del])).toBeNull();
-    expect(run(PAGE_FUNCTIONS.hitTest, card, [{ nodeType: 3, parentNode: open, parentElement: null }])).toBe(true);
+    // Its text too: an author's shadow tree is guarded as what it is, never taken for the host.
+    expect(run(PAGE_FUNCTIONS.hitTest, card, [{ nodeType: 3, parentNode: open, parentElement: null }])).toBeNull();
   });
 
   it("hitTest lets a click into a frame through: the hit test stops at the frame element", () => {
