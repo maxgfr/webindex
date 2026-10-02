@@ -7,11 +7,12 @@
 // by hand, or copying an existing session in once with importProfile, is what
 // makes later runs authenticated.
 
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
 import { brand, env } from "../brand.js";
 import { UsageError } from "../cli-kit.js";
+import { type BrowserKind, isBrowserKind } from "./detect.js";
 
 /**
  * Where the browser keeps its state: `<PREFIX>_BROWSER_DIR`, then the brand's
@@ -33,6 +34,34 @@ function checkName(name: string): void {
 export function profileDir(name = "default"): string {
   checkName(name);
   return join(browserHome(), "profiles", name);
+}
+
+// --- the kind of browser a profile belongs to ----------------------------------
+//
+// A profile's logins are encrypted with a key of the browser that wrote them
+// (the "Chrome Safe Storage" or "Brave Safe Storage" keychain item): another
+// kind of browser opens it logged out, and may write over it. So the kind is
+// recorded in the profile on its first launch, and another kind is refused.
+
+/** `<profile>/.<name>-kind`: the kind of browser the profile belongs to. */
+export function profileKindFile(name = "default"): string {
+  return join(profileDir(name), `.${brand().name}-kind`);
+}
+
+/** The kind recorded in the profile; undefined for one never launched, or made before the kind was recorded. */
+export function readProfileKind(name = "default"): BrowserKind | undefined {
+  try {
+    const kind = readFileSync(profileKindFile(name), "utf8").trim();
+    return isBrowserKind(kind) ? kind : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Record the kind of browser the profile belongs to. The profile directory must exist. */
+export function writeProfileKind(name: string, kind: BrowserKind): void {
+  ensurePrivateDir(profileDir(name));
+  writeFileSync(profileKindFile(name), `${kind}\n`, { mode: 0o600 });
 }
 
 /**
@@ -232,5 +261,8 @@ export function importProfile(source: ImportSource, opts: ImportOptions = {}): I
     tally.bytes += statSync(join(to, "Local State")).size;
   }
   if (hasDefault) copyTree(join(from, "Default"), join(to, "Default"), "", tally);
+  // Imported from a named browser: its logins are that browser's, and so is the profile now.
+  const kind = String(source);
+  if (Object.hasOwn(USER_DATA[opts.platform ?? process.platform] ?? {}, kind) && isBrowserKind(kind)) writeProfileKind(opts.name ?? "default", kind);
   return { from, to, ...tally };
 }

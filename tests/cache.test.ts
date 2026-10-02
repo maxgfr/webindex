@@ -2,12 +2,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Env names resolve through the brand, exactly as the engine resolves them.
 import { brand, configure, envName } from "../src/brand.js";
 import { chmodSync, chownSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { cacheClean, cacheDir, cacheStats, cachedFetchAndExtract, cachePath, setCacheMode, resetCacheMode } from "../src/cache.js";
 import { ensureComposeMaterialized } from "../src/stack.js";
 import { resetVideoLadderCache, setVideoDeps, type VideoRunner } from "../src/video.js";
 import { installFetchMock } from "./fetchmock.js";
+
+describe("the browser namespace", () => {
+  it("is keyed apart from the reads made before the browser read dropped overlays and consent panels", () => {
+    const before = [
+      "example.org-ef8d4f31b761aeac.json",
+      "example.org-df56b78367beed4e.json",
+      "example.org-76a3edb37023cd09.json",
+      "example.org-12ce4007b6749cbd.json",
+    ];
+    const now = (["", "consent", "full", "md"] as const).map((v) => basename(cachePath("https://www.example.org/a", "", "browser", v)));
+    for (const k of now) expect(before).not.toContain(k);
+  });
+});
 
 describe("cache writes", () => {
   const PAGE = { body: "<html><body><article><p>cached article body about token buckets and windows</p></article></body></html>" };

@@ -6,7 +6,8 @@ import { envName } from "../src/brand.js";
 import { runBrowserCommand } from "../src/browser/cli.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
 import { BROWSER_CAP_ADVICE, type BrowserToolHost, browserToolDecls, createBrowserToolHost } from "../src/browser/mcp.js";
-import { readSession } from "../src/browser/state.js";
+import { writeProfileKind } from "../src/browser/profile.js";
+import { readSession, writeSession } from "../src/browser/state.js";
 import { main, webindexAdapter } from "../src/cli.js";
 import { createServer, type JsonRpcMessage, ToolError } from "../src/mcp/server.js";
 import { BrowserWorld } from "./helpers/browser-world.js";
@@ -530,6 +531,42 @@ describe("the other tools", () => {
     const r = await h.call("webindex_browser_open", { url: "https://b.test/", profile: "work", headless: true });
     expect(r.text).toMatch(/profile.*headless.*only when this call launches the browser.*profile default/);
     expect((await h.call("webindex_browser_open", { url: "https://b.test/", profile: "default" })).text).not.toMatch(/launches the browser/);
+  });
+
+  it("launches the browser kind open names, refuses one it does not know, and says it is moot once a browser runs", async () => {
+    const decl = browserToolDecls().find((t) => t.name === "webindex_browser_open")!;
+    expect(JSON.stringify(decl.inputSchema)).toContain('"browserKind":{"type":"string","enum":["chrome","brave","chromium","edge"]');
+    const h = await host();
+    await expect(h.call("webindex_browser_open", { url: "https://b.test/", browserKind: "netscape" })).rejects.toThrow(
+      /`browserKind` must be one of chrome, brave, chromium, edge/,
+    );
+    await h.call("webindex_browser_snapshot", { mode: "full" });
+    // The browser it attached to is not ours: no kind of ours applies to it.
+    const r = await h.call("webindex_browser_open", { url: "https://b.test/", browserKind: "brave" });
+    expect(r.text).toMatch(/browserKind apply only when this call launches the browser/);
+  });
+
+  it("says nothing of browserKind when the running browser of ours is of that kind already", async () => {
+    // A browser of ours on the default profile, which belongs to brave.
+    writeProfileKind("default", "brave");
+    writeSession({
+      version: 1,
+      port: fake.port,
+      wsBrowserUrl: fake.browserWsUrl,
+      launchedByUs: true,
+      profile: "default",
+      headless: false,
+      targetId: "T1",
+      updatedAt: 1,
+    });
+    const h = createBrowserToolHost({ deps: { browser: browserDeps(), cwd: scratch } });
+    try {
+      await h.call("webindex_browser_snapshot", { mode: "full" });
+      expect((await h.call("webindex_browser_open", { url: "https://b.test/", browserKind: "brave" })).text).not.toMatch(/apply only when/);
+      expect((await h.call("webindex_browser_open", { url: "https://b.test/", browserKind: "chrome" })).text).toMatch(/browserKind apply only when/);
+    } finally {
+      await h.close();
+    }
   });
 
   it("says what eval must not be used for", () => {

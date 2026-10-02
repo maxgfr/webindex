@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
+import { READ_DOCUMENT } from "../src/browser/overlay.js";
 import { readRenderedPage } from "../src/browser/read.js";
 import { closeBrowser } from "../src/browser/session.js";
 import { readSession, type Session, writeSession } from "../src/browser/state.js";
@@ -144,6 +145,15 @@ describe("readRenderedPage", () => {
     expect(r.text).toContain("Home");
     expect(r.text).toContain("[x](https://spa.test/x)");
     expect(r.html).toContain("<article>");
+  });
+
+  it("reads a copy of the page without its overlays, dialogs and consent panels; --full-page reads it all", async () => {
+    pages["https://spa.test/"] = { html: ARTICLE };
+    const reads = () => fake.calls.filter((c) => c.method === "Runtime.evaluate" && String(c.params.expression).includes("outerHTML")).map((c) => c.params);
+    await readRenderedPage("https://spa.test/", { cdp: fake.port, waitUntil: "load", deps: deps() });
+    expect(reads()).toEqual([{ expression: READ_DOCUMENT, returnByValue: true }]);
+    await readRenderedPage("https://spa.test/", { cdp: fake.port, waitUntil: "load", fullPage: true, deps: deps() });
+    expect(reads()[1]?.expression).not.toContain("cloneNode");
   });
 
   it("reports the main document's own status, not a sub-resource's or a child frame's", async () => {

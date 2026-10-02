@@ -15,13 +15,21 @@
 // passed — no --enable-automation, no --remote-allow-origins (our WebSocket
 // client sends no Origin header, so none is needed) — and headless only when
 // asked: the point is a browser a human can also look at and sign in to.
+//
+// Which browser: BROWSER_BIN, else the kind asked for (`--browser-kind`, else
+// BROWSER_KIND, else the kind the profile belongs to), else the first found. A
+// profile belongs to the kind it was first launched with (profile.ts): another
+// kind is refused on it. Unpacked extensions (BROWSER_EXTENSIONS, see
+// extensions.ts) are loaded into a browser we spawn, never into one running.
 
 import { join } from "node:path";
 import { envName } from "../brand.js";
 import { UsageError } from "../cli-kit.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
+import { type BrowserBinary, type BrowserKind, ignoresUnpackedExtensions, isBrowserKind, kindOf } from "./detect.js";
 import { dialHost, parseCdpEndpoint } from "./discovery.js";
-import { browserHome, ensurePrivateDir, profileDir } from "./profile.js";
+import { extensionArgs, extensionDirs, unpackedIgnoredNote } from "./extensions.js";
+import { browserHome, ensurePrivateDir, profileDir, readProfileKind, writeProfileKind } from "./profile.js";
 import { clearSession, readSession } from "./state.js";
 
 const STARTUP_TIMEOUT_MS = 20_000;
@@ -35,6 +43,8 @@ export interface LaunchOptions {
   headless?: boolean;
   /** The browser binary; detected when unset. */
   binary?: string;
+  /** The kind of browser to launch (`--browser-kind`); BROWSER_KIND, then the profile's own kind, when unset. */
+  kind?: BrowserKind;
   /**
    * Never a saved browser this library did not launch (one `attach` or `--cdp`
    * named): the user lent it for the agent's session, not for reads in the
@@ -53,6 +63,8 @@ export interface Endpoint {
   pid?: number;
   profile: string;
   headless: boolean;
+  /** What the launch has to tell the user (extensions the browser will not load); only from the call that spawned it. */
+  notes?: string[];
 }
 
 /** Apply the launch policy and return a port something answers DevTools on. */
@@ -101,14 +113,26 @@ export async function resolveEndpoint(opts: LaunchOptions = {}): Promise<Endpoin
     clearSession(); // its browser is gone (or is someone else's now); the one launched below replaces it
   }
 
-  return launch(deps, opts.binary, profile, headless);
+  return launch(deps, opts.binary, profile, headless, opts.kind);
 }
 
-async function launch(deps: BrowserDeps, binary: string | undefined, profile: string, headless: boolean): Promise<Endpoint> {
-  const bin = binary ?? deps.detectBrowser()?.path;
-  if (!bin) {
+/** The kind to launch: the one asked for, else BROWSER_KIND, else the profile's own; undefined when none is named. */
+function wantedKind(deps: BrowserDeps, kind: BrowserKind | undefined, profile: string): BrowserKind | undefined {
+  if (kind) return kind;
+  const asked = deps.env("BROWSER_KIND")?.trim().toLowerCase();
+  if (asked && !isBrowserKind(asked)) throw new UsageError(`${envName("BROWSER_KIND")} is "${asked}", not one of chrome, brave, chromium, edge`);
+  return asked && isBrowserKind(asked) ? asked : readProfileKind(profile);
+}
+
+async function launch(deps: BrowserDeps, binary: string | undefined, profile: string, headless: boolean, kind?: BrowserKind): Promise<Endpoint> {
+  const wanted = binary ? undefined : wantedKind(deps, kind, profile);
+  const found: BrowserBinary | null = binary ? { kind: kindOf(binary), path: binary } : deps.detectBrowser(wanted);
+  // A kind named (or the profile's own) is that kind or nothing: another one would be locked to the profile.
+  if (!found && wanted) throw new UsageError(`no ${wanted} found: install it, or name its executable with ${envName("BROWSER_BIN")}`);
+  if (!found) {
     throw new Error(`no Chrome, Brave, Chromium or Edge found: install one, or set ${envName("BROWSER_BIN")} to the browser's executable`);
   }
+  const bin = found.path;
   const dir = profileDir(profile);
   ensurePrivateDir(browserHome());
   ensurePrivateDir(join(browserHome(), "profiles"));
@@ -122,11 +146,30 @@ async function launch(deps: BrowserDeps, binary: string | undefined, profile: st
   if (running && (await isSameBrowser(deps, running.port, "127.0.0.1", running.path))) {
     return { host: "127.0.0.1", port: running.port, launchedByUs: true, profile, headless };
   }
+  // A profile is one kind of browser's: another would find its logins unreadable.
+  const owner = readProfileKind(profile);
+  if (owner && owner !== found.kind) {
+    // With BROWSER_BIN set, --browser-kind changes nothing: only another profile does.
+    const named = binary !== undefined || !!deps.env("BROWSER_BIN");
+    const hint = named ? `; ${envName("BROWSER_BIN")} names a ${found.kind} binary` : `, or ${owner} (\`--browser-kind ${owner}\`)`;
+    throw new UsageError(
+      `the profile "${profile}" belongs to ${owner} (its logins are encrypted for that browser), not ${found.kind}: use a profile of its own (\`--profile ${found.kind}\`)${hint}`,
+    );
+  }
+  const extensions = extensionDirs(deps.env("BROWSER_EXTENSIONS"));
+  // Branded Chrome drops them: --disable-extensions-except would only turn off the profile's own.
+  const dropped = extensions.length > 0 && ignoresUnpackedExtensions(found);
   // Otherwise the file is a crashed run's: it must go before the start, or the
   // poll below could read it.
   await deps.fs.rm(portFile, { force: true });
 
-  const args = ["--remote-debugging-port=0", `--user-data-dir=${dir}`, "--no-first-run", "--no-default-browser-check"];
+  const args = [
+    "--remote-debugging-port=0",
+    `--user-data-dir=${dir}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    ...(dropped ? [] : extensionArgs(extensions)),
+  ];
   if (headless) args.push("--headless=new");
   args.push("about:blank");
   // Detached and unreferenced: the browser outlives this CLI call, and the next
@@ -150,7 +193,23 @@ async function launch(deps: BrowserDeps, binary: string | undefined, profile: st
     const active = await readActivePort(deps, portFile);
     if (active && (await isSameBrowser(deps, active.port, "127.0.0.1", active.path))) {
       const port = active.port;
-      return { host: "127.0.0.1", port, launchedByUs: true, ...(child.pid !== undefined ? { pid: child.pid } : {}), profile, headless };
+      if (!owner) {
+        try {
+          writeProfileKind(profile, found.kind);
+        } catch {
+          /* unrecorded: the next launch records it */
+        }
+      }
+      const notes = dropped ? [unpackedIgnoredNote()] : [];
+      return {
+        host: "127.0.0.1",
+        port,
+        launchedByUs: true,
+        ...(child.pid !== undefined ? { pid: child.pid } : {}),
+        profile,
+        headless,
+        ...(notes.length ? { notes } : {}),
+      };
     }
     if (failure) throw new Error(failure);
     if (deps.now() >= deadline) {

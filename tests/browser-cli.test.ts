@@ -6,6 +6,7 @@ import { envName } from "../src/brand.js";
 import { readRenderedPage } from "../src/browser/read.js";
 import { type BrowserCliFlags, runBrowserCommand } from "../src/browser/cli.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
+import * as discovery from "../src/browser/discovery.js";
 import { profileDir } from "../src/browser/profile.js";
 import { appendNetwork, readNetwork, readSession, writeSession } from "../src/browser/state.js";
 import { main } from "../src/cli.js";
@@ -14,6 +15,7 @@ import { BrowserWorld as World } from "./helpers/browser-world.js";
 import { scriptBrowser } from "./helpers/fake-browser.js";
 import { FakeCdp } from "./helpers/fake-cdp.js";
 import { fakeClock } from "./helpers/fake-page.js";
+import { fakeSpawn } from "./helpers/fake-spawn.js";
 
 // `webindex browser …` end to end against a fake DevTools endpoint: the real
 // session, lock, refs and actions, with the page's answers scripted below.
@@ -87,6 +89,7 @@ describe("usage errors exit 2", () => {
     ["profile import without a source", "profile", ["import"], {}],
     ["eval without an expression", "eval", [], {}],
     ["a non-loopback attach", "attach", ["http://10.0.0.1:9222"], {}],
+    ["an unknown browser kind", "open", ["https://b.test/"], { browserKind: "netscape" }],
   ] as [string, string, string[], BrowserCliFlags][])("%s", async (_what, action, args, flags) => {
     const r = await cli(action, args, flags);
     expect(r.exitCode).toBe(2);
@@ -198,6 +201,37 @@ describe("open", () => {
     const r = await cli("open", ["https://b.test/"], { newTab: true, json: true });
     expect(r.json).toMatchObject({ tab: "T2" });
     expect(fake.targets).toHaveLength(2);
+  });
+
+  it("launches the browser kind --browser-kind names, and says when it ignores the extensions asked for", async () => {
+    const ext = join(scratch, "ubol");
+    mkdirSync(ext);
+    writeFileSync(join(ext, "manifest.json"), "{}");
+    process.env[envName("BROWSER_EXTENSIONS")] = ext;
+    const asked: (string | undefined)[] = [];
+    const r = await cli(
+      "open",
+      ["https://b.test/"],
+      { browserKind: "chrome", json: true },
+      {
+        // The fake browser writes its port a few real milliseconds after it starts: the launch waits on a real clock.
+        now: () => Date.now(),
+        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        spawn: fakeSpawn({ port: fake.port }).spawn,
+        detectBrowser: (prefer) => {
+          asked.push(prefer);
+          return { kind: "chrome", path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" };
+        },
+        discovery: { ...discovery, getVersion: async () => ({ Browser: "Chrome/140.0.1", webSocketDebuggerUrl: fake.browserWsUrl }) },
+      },
+    );
+    expect(r.exitCode, r.text).toBe(0);
+    expect(asked).toEqual(["chrome"]);
+    expect(r.text.split("\n")[1]).toMatch(/^note: Google Chrome ≥ 137 ignores unpacked extensions — use Brave/);
+    expect(r.json).toMatchObject({ notes: [expect.stringMatching(/ignores unpacked extensions/)] });
+    // Said once, by the call that launched it.
+    const again = await cli("open", ["https://c.test/"], { json: true });
+    expect(again.json).not.toHaveProperty("notes");
   });
 
   it("names a challenge and tells the agent to let the human solve it", async () => {
