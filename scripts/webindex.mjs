@@ -5543,7 +5543,7 @@ function frameUrls(node, out = []) {
   for (const c of node.childFrames ?? []) frameUrls(c, out);
   return out;
 }
-async function detectChallenge(session) {
+async function probeChallenge(session) {
   try {
     const r = await session.page.send(
       "Runtime.evaluate",
@@ -5551,14 +5551,14 @@ async function detectChallenge(session) {
       { timeoutMs: PROBE_TIMEOUT_MS3 }
     );
     const v = r.result?.value;
-    if (typeof v !== "object" || v === null) return null;
+    if (typeof v !== "object" || v === null) return { ok: false };
     const p = v;
     let tree = [];
     try {
       tree = frameUrls((await session.page.send("Page.getFrameTree")).frameTree);
     } catch {
     }
-    return classifyChallenge({
+    const challenge = classifyChallenge({
       url: typeof p.url === "string" ? p.url : "",
       title: typeof p.title === "string" ? p.title : "",
       text: typeof p.text === "string" ? p.text : void 0,
@@ -5568,11 +5568,16 @@ async function detectChallenge(session) {
       selectors: strings(p.selectors),
       status: typeof p.status === "number" ? p.status : void 0
     });
+    return { ok: true, challenge };
   } catch {
-    return null;
+    return { ok: false };
   }
 }
-var CHALLENGE_SELECTORS, LITTLE_TEXT, PHRASE_TEXT_MAX, BLOCKED_STATUS, norm, urlHas, frameHas, scriptHas, selHas, datadome, cloudflare, perimeterx, akamai, imperva, arkose, hcaptcha, recaptcha, VENDORS, GENERIC_PHRASES, PROBE_TIMEOUT_MS3, PROBE, strings;
+async function detectChallenge(session) {
+  const probe = await probeChallenge(session);
+  return probe.ok ? probe.challenge : null;
+}
+var CHALLENGE_SELECTORS, LITTLE_TEXT, PHRASE_TEXT_MAX, BLOCKED_STATUS, norm, urlHas, frameHas, scriptHas, selHas, datadome, CF_ORCHESTRATE, cloudflare, perimeterx, akamai, imperva, arkose, hcaptcha, recaptcha, VENDORS, GENERIC_PHRASES, PROBE_TIMEOUT_MS3, PROBE, strings;
 var init_challenge = __esm({
   "src/browser/challenge.ts"() {
     "use strict";
@@ -5603,6 +5608,7 @@ var init_challenge = __esm({
       add(out, urlHas(h, "datadome.co"), { signal: "datadome.co script", weak: true });
       return out;
     };
+    CF_ORCHESTRATE = /\/cdn-cgi\/challenge-platform\/(?:h\/[a-z]\/)?orchestrate\//;
     cloudflare = (h) => {
       const out = [];
       const t = h.title.trim();
@@ -5612,7 +5618,17 @@ var init_challenge = __esm({
       });
       add(out, selHas(h, "#challenge-form"), { signal: "#challenge-form", interstitial: true });
       add(out, urlHas(h, "cf-chl") || urlHas(h, "__cf_chl"), { signal: "cf-chl", interstitial: true });
-      add(out, urlHas(h, "/cdn-cgi/challenge-platform/") && !urlHas(h, "turnstile"), { signal: "/cdn-cgi/challenge-platform/", interstitial: true });
+      const platform = h.urls.filter((u) => u.includes("/cdn-cgi/challenge-platform/") && !u.includes("turnstile"));
+      add(
+        out,
+        platform.some((u) => CF_ORCHESTRATE.test(u)),
+        { signal: "/cdn-cgi/challenge-platform/ orchestrate", interstitial: true }
+      );
+      add(
+        out,
+        platform.some((u) => !CF_ORCHESTRATE.test(u)),
+        { signal: "/cdn-cgi/challenge-platform/", weak: true }
+      );
       add(
         out,
         h.cookies.some((c) => c.startsWith("cf-chl") || c.startsWith("__cf_chl")),
@@ -5708,7 +5724,7 @@ var init_challenge = __esm({
     text: (document.body ? document.body.innerText : "").slice(0, 4096),
     scriptUrls: Array.from(document.scripts, (s) => s.src).filter(Boolean),
     iframeSrcs: Array.from(document.querySelectorAll("iframe"), (f) => f.src).filter(Boolean),
-    cookieNames: document.cookie.split(";").map((c) => c.split("=")[0].trim()).filter(Boolean),
+    cookieNames: (() => { try { return document.cookie.split(";").map((c) => c.split("=")[0].trim()).filter(Boolean); } catch (e) { return []; } })(),
     selectors: sel,
     status: nav && nav.responseStatus > 0 ? nav.responseStatus : undefined,
   };
@@ -6246,6 +6262,7 @@ __export(discovery_exports, {
   isPortAlive: () => isPortAlive,
   listPages: () => listPages,
   listTargets: () => listTargets,
+  loopbackSocketUrl: () => loopbackSocketUrl,
   newTarget: () => newTarget,
   parseCdpEndpoint: () => parseCdpEndpoint
 });
@@ -6253,6 +6270,17 @@ function assertLoopback(host) {
   const bare = host.replace(/^\[|\]$/g, "").toLowerCase();
   if (!LOOPBACK.has(bare)) throw new Error(`refusing non-loopback DevTools host "${host}" (only 127.0.0.1, ::1 and localhost are allowed)`);
   return bare;
+}
+function loopbackSocketUrl(wsUrl) {
+  let url;
+  try {
+    url = new URL(wsUrl);
+  } catch {
+    throw new Error(`invalid DevTools WebSocket URL "${wsUrl}"`);
+  }
+  if (url.protocol !== "ws:") throw new Error(`refusing DevTools WebSocket URL "${wsUrl}": only ws:// on loopback is dialled`);
+  assertLoopback(url.hostname);
+  return wsUrl;
 }
 function parseCdpEndpoint(input) {
   const text = input.trim();
@@ -6881,7 +6909,8 @@ async function resolveEndpoint(opts = {}) {
     return { host, port, launchedByUs: false, profile, headless };
   }
   const saved = readSession();
-  if (saved && (opts.profile === void 0 || saved.profile === opts.profile)) {
+  const usable = saved && (saved.launchedByUs ? opts.profile === void 0 || saved.profile === opts.profile : opts.profile === void 0 && !opts.ownOnly);
+  if (saved && usable) {
     const host = saved.host ?? "127.0.0.1";
     const same = saved.wsBrowserUrl ? await isSameBrowser(deps, saved.port, host, saved.wsBrowserUrl) : !saved.launchedByUs && await deps.discovery.isPortAlive(saved.port, host);
     if (same) {
@@ -7073,7 +7102,7 @@ async function openBrowserSession(opts = {}) {
   const saved = readSession();
   const same = saved !== null && saved.port === endpoint.port && (saved.host ?? "127.0.0.1") === endpoint.host ? saved : null;
   const { webSocketDebuggerUrl } = await deps.discovery.getVersion(endpoint.port, endpoint.host);
-  const cdp = await deps.connectCdp(webSocketDebuggerUrl);
+  const cdp = await deps.connectCdp(loopbackSocketUrl(webSocketDebuggerUrl));
   let created;
   try {
     const pages = await deps.discovery.listPages(endpoint.port, endpoint.host);
@@ -7126,7 +7155,7 @@ async function browserStatus(opts = {}) {
   return { alive: true, ...base2, url: cur?.url ?? "", title: cur?.title ?? "", tabs };
 }
 async function closeAt(deps, port, host, pid) {
-  const cdp = await deps.connectCdp((await deps.discovery.getVersion(port, host)).webSocketDebuggerUrl);
+  const cdp = await deps.connectCdp(loopbackSocketUrl((await deps.discovery.getVersion(port, host)).webSocketDebuggerUrl));
   try {
     await closeLaunched(cdp, pid, deps);
   } finally {
@@ -7176,6 +7205,7 @@ var init_session = __esm({
     init_brand();
     init_cdp();
     init_deps();
+    init_discovery();
     init_launch();
     init_profile();
     init_state();
@@ -7602,8 +7632,8 @@ function checker(page, cond, now, net) {
   }
   let streak = 0;
   return async () => {
-    const c = await detectChallenge({ page });
-    streak = c?.blocking ? 0 : streak + 1;
+    const probe = await probeChallenge({ page });
+    streak = probe.ok && !probe.challenge?.blocking ? streak + 1 : 0;
     return streak >= 2;
   };
 }
@@ -7830,7 +7860,7 @@ async function render(url, opts, deps, timeoutMs, run) {
   const session = await withBrowserLock(
     async () => {
       if (run.stopped) throw new Error("stopped");
-      return openBrowserSession({ cdp, profile, headless, binary, deps, scratch: true });
+      return openBrowserSession({ cdp, profile, headless, binary, deps, scratch: true, ownOnly: true });
     },
     { deps }
   );
@@ -8970,18 +9000,27 @@ function assessRisk(ctx) {
   if (word) return { risky: true, reason: `the control "${shown(label)}" looks irreversible (matches "${word}")` };
   return { risky: false };
 }
+function assessDialog(type, message) {
+  if (type === "alert") return { risky: false };
+  const word = matchLabel(message);
+  return word ? { risky: true, reason: `it looks irreversible (matches "${word}")` } : { risky: false };
+}
 function collected2(r) {
   if (r.exceptionDetails)
     throw new UninspectableError(`could not inspect the target: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text ?? "page error"}`);
   const v = r.result?.value;
   if (typeof v !== "object" || v === null) throw new UninspectableError("could not inspect the target: it is not an element");
+  if (v.frame === true) {
+    const readable = v.readable === true;
+    throw new UninspectableError(readable ? `${FRAME_REASON} \u2014 click the element inside it instead, from the snapshot` : FRAME_REASON);
+  }
   return { role: "", label: "", isSubmit: false, formHasPassword: false, submitLabel: "", ...v };
 }
 async function riskContext(page, backendNodeId, action, _key) {
   if (action === "press") {
     return collected2(
       await page.send("Runtime.evaluate", {
-        expression: `(${COLLECT_SOURCE}).call(document.activeElement, ${JSON.stringify(action)})`,
+        expression: `(${COLLECT_SOURCE}).call((${FOCUS_SOURCE})(document), ${JSON.stringify(action)})`,
         returnByValue: true
       })
     );
@@ -9018,7 +9057,7 @@ async function guardAction(page, opts) {
     throw new RiskRefusedError(opts.action, risk.reason ?? "looks irreversible", onTarget ? el.label : el.submitLabel || el.label, opts.key);
   }
 }
-var PASSWORD_REASON, IRREVERSIBLE, SIGN, IRREVERSIBLE_RE, norm2, ENTER, SPACE, lastKey, isEnter, isSpace2, ACTIVATES, SPACE_ACTIVATES, shown, COLLECT_SOURCE, UninspectableError, RiskRefusedError;
+var PASSWORD_REASON, IRREVERSIBLE, SIGN, IRREVERSIBLE_RE, norm2, ENTER, SPACE, lastKey, isEnter, isSpace2, ACTIVATES, SPACE_ACTIVATES, shown, FOCUS_SOURCE, COLLECT_SOURCE, UninspectableError, FRAME_REASON, RiskRefusedError;
 var init_risk = __esm({
   "src/browser/risk.ts"() {
     "use strict";
@@ -9088,10 +9127,32 @@ var init_risk = __esm({
     ACTIVATES = /* @__PURE__ */ new Set(["button", "link", "menuitem"]);
     SPACE_ACTIVATES = /* @__PURE__ */ new Set([...ACTIVATES, "checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio", "option", "tab", "treeitem"]);
     shown = (label) => label.length > 60 ? `${label.slice(0, 57)}...` : label;
+    FOCUS_SOURCE = `function (doc) {
+  let el = doc.activeElement;
+  for (let i = 0; el && i < 32; i++) {
+    if (el.shadowRoot && el.shadowRoot.activeElement) {
+      el = el.shadowRoot.activeElement;
+      continue;
+    }
+    if (!/^i?frame$/i.test(el.tagName || "")) break;
+    let inner = null;
+    try { inner = el.contentDocument; } catch (e) { inner = null; }
+    if (!inner || !inner.activeElement) break;
+    el = inner.activeElement;
+  }
+  return el;
+}`;
     COLLECT_SOURCE = `function (action) {
   let el = this;
   if (el && el.nodeType === 3) el = el.parentElement;
   if (!el || el.nodeType !== 1) return null;
+  if (/^i?frame$/i.test(el.tagName || "")) {
+    let inner = null;
+    try { inner = el.contentDocument; } catch (e) { inner = null; }
+    return { frame: true, readable: !!inner };
+  }
+  // The element's own document: it may sit in a same-origin frame, or a shadow root.
+  const doc = el.ownerDocument || document;
   const BTN = "button,[role=button],input[type=submit],input[type=image],input[type=button]";
   const PW = "input[type=password]";
   const norm = (s) => (s || "").replace(/\\s+/g, " ").trim().slice(0, 200);
@@ -9105,7 +9166,9 @@ var init_risk = __esm({
     const t = e.tagName.toLowerCase();
     const ty = (e.getAttribute("type") || "").toLowerCase();
     const isBtn = t === "button" || (t === "input" && ["button", "submit", "reset", "image"].includes(ty)) || (e.getAttribute("role") || "") === "button";
-    const by = (e.getAttribute("aria-labelledby") || "").split(/\\s+/).map((id) => (document.getElementById(id) || {}).textContent).filter(Boolean).join(" ");
+    const root = e.getRootNode ? e.getRootNode() : doc;
+    const byId = (id) => (root && root.getElementById ? root.getElementById(id) : null) || doc.getElementById(id);
+    const by = (e.getAttribute("aria-labelledby") || "").split(/\\s+/).map((id) => (byId(id) || {}).textContent).filter(Boolean).join(" ");
     const alts = Array.from(e.querySelectorAll("img[alt],svg title"), (n) => n.getAttribute("alt") || n.textContent);
     const labels = isBtn && e.labels ? Array.from(e.labels, (l) => l.textContent) : [];
     const value = t === "input" && ["button", "submit", "reset", "image"].includes(ty) ? e.value : "";
@@ -9125,8 +9188,10 @@ var init_risk = __esm({
   const form = ctl.form || ctl.closest("form");
   let scope = form;
   if (!scope) {
-    let a = ctl.parentElement;
-    for (let i = 0; a && i < 5 && a !== document.body && a !== document.documentElement; i++, a = a.parentElement) {
+    // Out of a shadow root to its host: a login widget's password may sit in its own root.
+    const up = (n) => n.parentElement || (n.getRootNode && n.getRootNode().host) || null;
+    let a = up(ctl);
+    for (let i = 0; a && i < 5 && a !== doc.body && a !== doc.documentElement; i++, a = up(a)) {
       if (a.querySelector(PW)) { scope = a; break; }
     }
   }
@@ -9142,6 +9207,7 @@ var init_risk = __esm({
 }`;
     UninspectableError = class extends Error {
     };
+    FRAME_REASON = "cannot inspect the content of this frame (e.g. a payment button)";
     RiskRefusedError = class extends Error {
       constructor(action, reason, label, key) {
         const what = action === "press" ? `press ${key ?? "a key"}` : "click";
@@ -15789,6 +15855,7 @@ init_actions();
 init_cli();
 init_deps();
 init_network();
+init_risk();
 init_session();
 init_state();
 var PREFIX = "webindex_browser_";
@@ -16004,10 +16071,11 @@ function browserToolDecls() {
       "webindex_browser_dialog",
       "Answer a JavaScript dialog",
       COMMITS,
-      `Answer the JavaScript dialog the page shows (alert, confirm, prompt, beforeunload): accept, with promptText for a prompt, or dismiss. While one is open the page is frozen: every result says so, and the tools that read or act on the page are refused until it is answered.${RETURNS}`,
+      `Answer the JavaScript dialog the page shows (alert, confirm, prompt, beforeunload): accept, with promptText for a prompt, or dismiss. While one is open the page is frozen: every result says so, and the tools that read or act on the page are refused until it is answered. Accepting a dialog whose message looks irreversible (delete, pay, send\u2026) is refused unless confirm: true, which you set only after asking the user; dismissing never needs it.${RETURNS}`,
       {
         action: { type: "string", enum: ["accept", "dismiss"], description: "How to answer." },
         promptText: { type: "string", description: "The answer typed into a prompt, with accept." },
+        confirm: CONFIRM,
         ...AFTER
       },
       ["action"]
@@ -16260,6 +16328,12 @@ var Host = class {
     dialog: async (a) => {
       const answer = oneOf(a, "action", ["accept", "dismiss"]);
       const prompt = answer === "accept" && typeof a.promptText === "string" ? [a.promptText] : [];
+      const risk = answer === "accept" && a.confirm !== true && this.dialog ? assessDialog(this.dialog.type, this.dialog.message) : void 0;
+      if (risk?.risky && this.dialog) {
+        throw new ToolError(
+          `refused to accept the ${this.dialog.type} dialog ${JSON.stringify(this.dialog.message)}: ${risk.reason}; ask the user, then retry with confirm: true (or dismiss it)`
+        );
+      }
       try {
         const out = await this.cli("dialog", [answer, ...prompt], after(a));
         this.dialog = void 0;
@@ -16820,7 +16894,12 @@ function mcpPolicy(args, allowRemote) {
     }
     if (!isDir) usage(`--extract-root ${rootArg} is not a directory`);
   }
-  return { publicOnly, ...extractRoot !== void 0 ? { extractRoot } : allowRemote ? { noLocalFiles: true } : {}, ...browser ? { browser } : {} };
+  return {
+    publicOnly,
+    ...extractRoot !== void 0 ? { extractRoot } : allowRemote ? { noLocalFiles: true } : {},
+    ...browser ? { browser } : {},
+    ...allowRemote ? { remote: true } : {}
+  };
 }
 function mcpPolicyNotice(policy, allowRemote, allowPrivate) {
   const lines = [];
@@ -17500,7 +17579,10 @@ function webindexAdapter(policy = {}) {
           stripConsent: !fullPage,
           format: args.format === "markdown" ? "markdown" : "text",
           timeoutMs: toolTimeoutMs(args.timeoutMs),
-          signal
+          signal,
+          // The same wall that refuses --browser: a browser follows any address
+          // a page leads it to, in a profile that may be logged in.
+          ...policy.remote || policy.publicOnly ? { browser: "off" } : {}
         };
         const r = guard ? await fetchAndExtract(url, { ...fetchOpts, authorizeUrl: guard }) : await cachedFetchAndExtract(url, fetchOpts, args.cache === true);
         if (!r.text) throw new ToolError(`Nothing readable at ${url}${r.note ? ` \u2014 ${r.note}` : ""}.`);
@@ -18828,5 +18910,6 @@ export {
   HELP,
   VALUE_FLAGS,
   main,
+  mcpPolicy,
   webindexAdapter
 };

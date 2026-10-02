@@ -4854,6 +4854,7 @@ __export(discovery_exports, {
   isPortAlive: () => isPortAlive,
   listPages: () => listPages,
   listTargets: () => listTargets,
+  loopbackSocketUrl: () => loopbackSocketUrl,
   newTarget: () => newTarget,
   parseCdpEndpoint: () => parseCdpEndpoint
 });
@@ -4861,6 +4862,17 @@ function assertLoopback(host) {
   const bare = host.replace(/^\[|\]$/g, "").toLowerCase();
   if (!LOOPBACK.has(bare)) throw new Error(`refusing non-loopback DevTools host "${host}" (only 127.0.0.1, ::1 and localhost are allowed)`);
   return bare;
+}
+function loopbackSocketUrl(wsUrl) {
+  let url;
+  try {
+    url = new URL(wsUrl);
+  } catch {
+    throw new Error(`invalid DevTools WebSocket URL "${wsUrl}"`);
+  }
+  if (url.protocol !== "ws:") throw new Error(`refusing DevTools WebSocket URL "${wsUrl}": only ws:// on loopback is dialled`);
+  assertLoopback(url.hostname);
+  return wsUrl;
 }
 function parseCdpEndpoint(input) {
   const text = input.trim();
@@ -5336,7 +5348,8 @@ async function resolveEndpoint(opts = {}) {
     return { host, port, launchedByUs: false, profile, headless };
   }
   const saved = readSession();
-  if (saved && (opts.profile === void 0 || saved.profile === opts.profile)) {
+  const usable = saved && (saved.launchedByUs ? opts.profile === void 0 || saved.profile === opts.profile : opts.profile === void 0 && !opts.ownOnly);
+  if (saved && usable) {
     const host = saved.host ?? "127.0.0.1";
     const same = saved.wsBrowserUrl ? await isSameBrowser(deps, saved.port, host, saved.wsBrowserUrl) : !saved.launchedByUs && await deps.discovery.isPortAlive(saved.port, host);
     if (same) {
@@ -5528,7 +5541,7 @@ async function openBrowserSession(opts = {}) {
   const saved = readSession();
   const same = saved !== null && saved.port === endpoint.port && (saved.host ?? "127.0.0.1") === endpoint.host ? saved : null;
   const { webSocketDebuggerUrl } = await deps.discovery.getVersion(endpoint.port, endpoint.host);
-  const cdp = await deps.connectCdp(webSocketDebuggerUrl);
+  const cdp = await deps.connectCdp(loopbackSocketUrl(webSocketDebuggerUrl));
   let created;
   try {
     const pages = await deps.discovery.listPages(endpoint.port, endpoint.host);
@@ -5555,6 +5568,7 @@ var init_session = __esm({
     init_brand();
     init_cdp();
     init_deps();
+    init_discovery();
     init_launch();
     init_profile();
     init_state();
@@ -8413,7 +8427,7 @@ function frameUrls(node, out = []) {
   for (const c of node.childFrames ?? []) frameUrls(c, out);
   return out;
 }
-async function detectChallenge(session) {
+async function probeChallenge(session) {
   try {
     const r = await session.page.send(
       "Runtime.evaluate",
@@ -8421,14 +8435,14 @@ async function detectChallenge(session) {
       { timeoutMs: PROBE_TIMEOUT_MS3 }
     );
     const v = r.result?.value;
-    if (typeof v !== "object" || v === null) return null;
+    if (typeof v !== "object" || v === null) return { ok: false };
     const p = v;
     let tree = [];
     try {
       tree = frameUrls((await session.page.send("Page.getFrameTree")).frameTree);
     } catch {
     }
-    return classifyChallenge({
+    const challenge = classifyChallenge({
       url: typeof p.url === "string" ? p.url : "",
       title: typeof p.title === "string" ? p.title : "",
       text: typeof p.text === "string" ? p.text : void 0,
@@ -8438,11 +8452,16 @@ async function detectChallenge(session) {
       selectors: strings(p.selectors),
       status: typeof p.status === "number" ? p.status : void 0
     });
+    return { ok: true, challenge };
   } catch {
-    return null;
+    return { ok: false };
   }
 }
-var CHALLENGE_SELECTORS, LITTLE_TEXT, PHRASE_TEXT_MAX, BLOCKED_STATUS, norm, urlHas, frameHas, scriptHas, selHas, datadome, cloudflare, perimeterx, akamai, imperva, arkose, hcaptcha, recaptcha, VENDORS, GENERIC_PHRASES, PROBE_TIMEOUT_MS3, PROBE, strings;
+async function detectChallenge(session) {
+  const probe = await probeChallenge(session);
+  return probe.ok ? probe.challenge : null;
+}
+var CHALLENGE_SELECTORS, LITTLE_TEXT, PHRASE_TEXT_MAX, BLOCKED_STATUS, norm, urlHas, frameHas, scriptHas, selHas, datadome, CF_ORCHESTRATE, cloudflare, perimeterx, akamai, imperva, arkose, hcaptcha, recaptcha, VENDORS, GENERIC_PHRASES, PROBE_TIMEOUT_MS3, PROBE, strings;
 var init_challenge = __esm({
   "src/browser/challenge.ts"() {
     "use strict";
@@ -8473,6 +8492,7 @@ var init_challenge = __esm({
       add(out, urlHas(h, "datadome.co"), { signal: "datadome.co script", weak: true });
       return out;
     };
+    CF_ORCHESTRATE = /\/cdn-cgi\/challenge-platform\/(?:h\/[a-z]\/)?orchestrate\//;
     cloudflare = (h) => {
       const out = [];
       const t = h.title.trim();
@@ -8482,7 +8502,17 @@ var init_challenge = __esm({
       });
       add(out, selHas(h, "#challenge-form"), { signal: "#challenge-form", interstitial: true });
       add(out, urlHas(h, "cf-chl") || urlHas(h, "__cf_chl"), { signal: "cf-chl", interstitial: true });
-      add(out, urlHas(h, "/cdn-cgi/challenge-platform/") && !urlHas(h, "turnstile"), { signal: "/cdn-cgi/challenge-platform/", interstitial: true });
+      const platform = h.urls.filter((u) => u.includes("/cdn-cgi/challenge-platform/") && !u.includes("turnstile"));
+      add(
+        out,
+        platform.some((u) => CF_ORCHESTRATE.test(u)),
+        { signal: "/cdn-cgi/challenge-platform/ orchestrate", interstitial: true }
+      );
+      add(
+        out,
+        platform.some((u) => !CF_ORCHESTRATE.test(u)),
+        { signal: "/cdn-cgi/challenge-platform/", weak: true }
+      );
       add(
         out,
         h.cookies.some((c) => c.startsWith("cf-chl") || c.startsWith("__cf_chl")),
@@ -8578,7 +8608,7 @@ var init_challenge = __esm({
     text: (document.body ? document.body.innerText : "").slice(0, 4096),
     scriptUrls: Array.from(document.scripts, (s) => s.src).filter(Boolean),
     iframeSrcs: Array.from(document.querySelectorAll("iframe"), (f) => f.src).filter(Boolean),
-    cookieNames: document.cookie.split(";").map((c) => c.split("=")[0].trim()).filter(Boolean),
+    cookieNames: (() => { try { return document.cookie.split(";").map((c) => c.split("=")[0].trim()).filter(Boolean); } catch (e) { return []; } })(),
     selectors: sel,
     status: nav && nav.responseStatus > 0 ? nav.responseStatus : undefined,
   };
@@ -8662,8 +8692,8 @@ function checker(page, cond, now, net) {
   }
   let streak = 0;
   return async () => {
-    const c = await detectChallenge({ page });
-    streak = c?.blocking ? 0 : streak + 1;
+    const probe = await probeChallenge({ page });
+    streak = probe.ok && !probe.challenge?.blocking ? streak + 1 : 0;
     return streak >= 2;
   };
 }
@@ -8770,7 +8800,7 @@ async function render(url, opts, deps, timeoutMs, run) {
   const session = await withBrowserLock(
     async () => {
       if (run.stopped) throw new Error("stopped");
-      return openBrowserSession({ cdp, profile, headless, binary, deps, scratch: true });
+      return openBrowserSession({ cdp, profile, headless, binary, deps, scratch: true, ownOnly: true });
     },
     { deps }
   );

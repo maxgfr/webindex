@@ -946,6 +946,12 @@ interface CdpEndpoint {
 }
 /** Throw unless `host` is a loopback name (127.0.0.1, ::1 or localhost). Returns it without brackets. */
 declare function assertLoopback(host: string): string;
+/**
+ * A browser socket URL a DevTools endpoint handed back (/json/version, /json/new),
+ * refused unless it is ws:// on loopback too: the HTTP hop being local says
+ * nothing of where its answer points. Returned as given.
+ */
+declare function loopbackSocketUrl(wsUrl: string): string;
 /** Accepts `9222`, `127.0.0.1:9222`, `http://localhost:9222`, `ws://[::1]:9222/devtools/browser/x`. */
 declare function parseCdpEndpoint(input: string): CdpEndpoint;
 /**
@@ -976,10 +982,11 @@ declare const discovery_getVersion: typeof getVersion;
 declare const discovery_isPortAlive: typeof isPortAlive;
 declare const discovery_listPages: typeof listPages;
 declare const discovery_listTargets: typeof listTargets;
+declare const discovery_loopbackSocketUrl: typeof loopbackSocketUrl;
 declare const discovery_newTarget: typeof newTarget;
 declare const discovery_parseCdpEndpoint: typeof parseCdpEndpoint;
 declare namespace discovery {
-  export { type discovery_BrowserVersion as BrowserVersion, type discovery_CdpEndpoint as CdpEndpoint, type discovery_TargetInfo as TargetInfo, discovery_activateTarget as activateTarget, discovery_assertLoopback as assertLoopback, discovery_closeTarget as closeTarget, discovery_dialHost as dialHost, discovery_getVersion as getVersion, discovery_isPortAlive as isPortAlive, discovery_listPages as listPages, discovery_listTargets as listTargets, discovery_newTarget as newTarget, discovery_parseCdpEndpoint as parseCdpEndpoint };
+  export { type discovery_BrowserVersion as BrowserVersion, type discovery_CdpEndpoint as CdpEndpoint, type discovery_TargetInfo as TargetInfo, discovery_activateTarget as activateTarget, discovery_assertLoopback as assertLoopback, discovery_closeTarget as closeTarget, discovery_dialHost as dialHost, discovery_getVersion as getVersion, discovery_isPortAlive as isPortAlive, discovery_listPages as listPages, discovery_listTargets as listTargets, discovery_loopbackSocketUrl as loopbackSocketUrl, discovery_newTarget as newTarget, discovery_parseCdpEndpoint as parseCdpEndpoint };
 }
 
 /** The slice of a child process the launcher uses. */
@@ -1039,6 +1046,12 @@ interface LaunchOptions {
     headless?: boolean;
     /** The browser binary; detected when unset. */
     binary?: string;
+    /**
+     * Never a saved browser this library did not launch (one `attach` or `--cdp`
+     * named): the user lent it for the agent's session, not for reads in the
+     * background. Ours is used, or launched, instead. An explicit `cdp` still wins.
+     */
+    ownOnly?: boolean;
     deps?: Partial<BrowserDeps>;
 }
 interface Endpoint {
