@@ -11,7 +11,10 @@
 // the middle of an agent's work does not move it to another tab.
 //
 // A full-page anti-bot challenge is not fought: the read comes back empty,
-// saying how a human can solve it in the visible browser.
+// saying how a human can solve it in the visible browser. What covers the page
+// (a cookie wall, a consent panel, a modal) is not read for it: the page is
+// read from a copy without its overlays, dialogs and consent vendors' containers
+// (overlay.ts); --full-page reads the whole document, as it does over HTTP.
 //
 // Reads are rationed per process (BROWSER_CONCURRENCY, one by default): the
 // callers fan out to 4-16 URLs at once, and as many tabs rendering together
@@ -23,6 +26,7 @@ import type { CdpHandler } from "./cdp.js";
 import { detectChallenge } from "./challenge.js";
 import { browserDeps, type BrowserDeps } from "./deps.js";
 import type { LaunchOptions } from "./launch.js";
+import { READ_DOCUMENT } from "./overlay.js";
 import { type BrowserSession, openBrowserSession } from "./session.js";
 import { withBrowserLock } from "./state.js";
 import { waitFor } from "./wait.js";
@@ -94,8 +98,8 @@ async function acquire(limit: number, signal: AbortSignal | undefined, cancelled
 
 // --- the read ----------------------------------------------------------------
 
-/** What one evaluate brings back of the rendered page. */
-const DOCUMENT = "({ html: document.documentElement ? document.documentElement.outerHTML : '', url: location.href })";
+/** What one evaluate brings back of the rendered page, all of it (--full-page). */
+const WHOLE_DOCUMENT = "({ html: document.documentElement ? document.documentElement.outerHTML : '', url: location.href })";
 
 interface Run {
   session?: BrowserSession;
@@ -147,7 +151,7 @@ async function render(url: string, opts: ReadPageOptions, deps: BrowserDeps, tim
     const challenge = await detectChallenge(session);
     const got = await page.send<{ result?: { value?: { html?: unknown; url?: unknown } } }>(
       "Runtime.evaluate",
-      { expression: DOCUMENT, returnByValue: true },
+      { expression: opts.fullPage ? WHOLE_DOCUMENT : READ_DOCUMENT, returnByValue: true },
       { timeoutMs },
     );
     const finalUrl = typeof got.result?.value?.url === "string" ? got.result.value.url : nav.url;
