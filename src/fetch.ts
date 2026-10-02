@@ -33,7 +33,7 @@ import { scrapeViaFirecrawl } from "./firecrawl.js";
 import { knownVideo, transcribeVideo, transcriptMarkdown } from "./video.js";
 // Only the mode is read here; the browser itself (src/browser/read.ts) is
 // imported inside the rung, so nothing of it loads unless a page needs it.
-import { type BrowserFetchMode, browserFetchMode } from "./browser/mode.js";
+import { type BrowserFetchMode, browserFetchMode, worthRendering } from "./browser/mode.js";
 
 // ── Tunables ────────────────────────────────────────────────────────────────
 //
@@ -1284,19 +1284,6 @@ export async function fetchAndExtract(
 }
 
 type FetchOptions = NonNullable<Parameters<typeof fetchAndExtract>[1]>;
-
-/** Statuses a real browser may get past: refused, throttled, or no answer at all. */
-const RENDER_STATUS = new Set([0, 401, 403, 429, 503]);
-
-/** Why a built-in read of a web page deserves a second one in the browser, or undefined when it does not. */
-function worthRendering(res: ExtractResult): string | undefined {
-  if (RENDER_STATUS.has(res.status)) return res.status ? `got HTTP ${res.status}` : "got no answer";
-  // Any other failure (a 404, a 500) would be the same in a browser; so would a 304.
-  if (res.status < 200 || res.status >= 300) return undefined;
-  const junk = looksLikeJunkExtraction(res.text);
-  if (junk) return `read a ${junk}`;
-  return res.text.trim().length < 200 ? "found almost no text" : undefined;
-}
 
 /**
  * The browser rung: its read, or why there is none (with the browser's own

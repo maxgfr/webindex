@@ -8,7 +8,7 @@ import { firecrawlBase, firecrawlIsExplicit, probeFirecrawl } from "./firecrawl.
 import { canonicalizeUrl, domainOf, fnv1a64 } from "./url.js";
 import { isNoWrite, writeFileAtomic } from "./no-write.js";
 import { brand, countFetch, env, envInt, envName } from "./brand.js";
-import { type BrowserFetchMode, browserFetchMode } from "./browser/mode.js";
+import { type BrowserFetchMode, browserFetchMode, worthRendering } from "./browser/mode.js";
 
 // Opt-in on-disk fetch cache (--cache). The in-process hydrate cache only spans
 // ONE gather; the deep tier fans out N separate `gather` processes (one per
@@ -562,12 +562,21 @@ export async function cachedFetchAndExtract(
 // and — when Firecrawl is predicted — the built-in text of a page Firecrawl
 // failed on, which is still the best this page has. With the browser as a
 // fallback, a page that needed it was filed under "browser", which is only
-// ever written for such a page (or by `always`): that copy is as good.
+// ever written for such a page (or by `always`): that copy is as good. And a
+// built-in or Firecrawl read the fallback would have retried (a refusal, a
+// wall, almost no text) is not served at all: fetchAndExtract runs again, with
+// the browser, and the better read is what gets stored. Otherwise a page cached
+// once without the fallback kept its thin read for the whole TTL.
 function lookup(url: string, acceptLanguage: string, ns: CacheNamespace, variant: CacheVariant, browserFallback = false): CacheEntry | undefined {
-  const best = lookupOwn(url, acceptLanguage, ns, variant);
+  const own = lookupOwn(url, acceptLanguage, ns, variant);
+  const best = browserFallback && own && wouldRender(own) ? undefined : own;
   const rendered = browserFallback ? readCache(url, acceptLanguage, "browser", variant) : undefined;
   return rendered && (!best || rendered.cachedAt > best.cachedAt) ? rendered : best;
 }
+
+/** A web page read without the browser that the fallback would send to it (worthRendering). */
+const wouldRender = (entry: CacheEntry): boolean =>
+  !entry.documentType && ["native", "firecrawl"].includes(entry.extractor ?? "native") && worthRendering(entry) !== undefined;
 
 function lookupOwn(url: string, acceptLanguage: string, ns: CacheNamespace, variant: CacheVariant): CacheEntry | undefined {
   const best = readAnyNamespace(url, acceptLanguage, [...new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
