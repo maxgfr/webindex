@@ -36,6 +36,7 @@ import {
   httpGet, fetchAndExtract, search,
   isNoWrite, setNoWrite, writeArtifact, takeArtifacts,
   createServer, runStdioServer, ToolError,
+  renderBrowserSnapshot, classifyBrowserChallenge, detectBrowserBinary, browserHome, readRenderedPage,
 } from "./engine.mjs";
 
 const fail = (m) => { console.error("consumer-smoke: " + m); process.exit(1); };
@@ -63,6 +64,23 @@ ok(docFormatForUrl("https://acme.test/a.pdf") === undefined, "PDFs must not rout
 ok(looksLikePdfUrl("https://acme.test/paper.pdf"), "looksLikePdfUrl");
 ok(htmlToText("<h1>Title</h1><p>Body text.</p>").includes("Body text."), "htmlToText");
 ok(typeof extractMainHtml("<html><body><article><p>x</p></article></body></html>") === "string", "extractMainHtml");
+
+// ── The browser layer: pure parts only (no browser launch, no network) ──────
+const axTree = [
+  { nodeId: "1", role: { value: "RootWebArea" }, name: { value: "Page" }, childIds: ["2"], backendDOMNodeId: 1 },
+  { nodeId: "2", parentId: "1", role: { value: "button" }, name: { value: "X" }, backendDOMNodeId: 2 },
+];
+const snap = renderBrowserSnapshot(axTree, { refs: { loaderId: "L", url: "https://acme.test/", next: 1, refs: {} } });
+ok(snap.text.includes('- button "X" [ref=e1]'), "renderBrowserSnapshot did not render the button with its ref: " + snap.text);
+const wall = classifyBrowserChallenge({ url: "https://acme.test/", title: "Just a moment...", text: "Checking your browser" });
+ok(wall?.kind === "cloudflare", "classifyBrowserChallenge missed a Cloudflare interstitial");
+const chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const bin = detectBrowserBinary({ platform: "darwin", env: () => undefined, processEnv: {}, home: "/home/x", exists: (p) => p === chrome });
+ok(bin?.kind === "chrome" && bin.path === chrome, "detectBrowserBinary did not find the injected Chrome");
+process.env.${PREFIX}_BROWSER_DIR = "/tmp/acme-browser-home";
+ok(browserHome() === "/tmp/acme-browser-home", "browserHome() ignored the consumer's BROWSER_DIR");
+delete process.env.${PREFIX}_BROWSER_DIR;
+ok(typeof readRenderedPage === "function", "readRenderedPage is not exported");
 
 // ── The PDF ladder, pinned to its built-in rung (no npx, no network) ────────
 process.env.${PREFIX}_PDF_ENGINE = "native";

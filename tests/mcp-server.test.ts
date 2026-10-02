@@ -212,6 +212,17 @@ describe("tools/list", () => {
 });
 
 describe("tools/call", () => {
+  it("carries a tool's images as image blocks after its text", async () => {
+    // A screenshot: the model sees the picture, not a path it cannot open.
+    const data = Buffer.from("JPEGDATA").toString("base64");
+    const server = createServer(testAdapter({ callTool: async () => ({ text: "the page", images: [{ data, mimeType: "image/jpeg" }] }) }));
+    const r = await call(rpc("tools/call", { name: "probe_big", arguments: {} }), server);
+    expect((r!.result as any).content).toEqual([
+      { type: "text", text: "the page" },
+      { type: "image", data, mimeType: "image/jpeg" },
+    ]);
+  });
+
   it("runs the tool and returns its text", async () => {
     const r = await call(rpc("tools/call", { name: "probe_echo", arguments: { text: "ab", times: 2 } }));
     expect((r!.result as any).content).toEqual([{ type: "text", text: "abab" }]);

@@ -188,3 +188,18 @@ export function confinePath(root: string, requested: string): string {
   if (!under(rootReal, real)) throw outside;
   return real;
 }
+
+// ── Time ────────────────────────────────────────────────────────────────────
+
+/** The longest any one tool call may be asked to wait, on a server other clients share. */
+export const MAX_TOOL_WAIT_MS = 300_000;
+
+/**
+ * A tool's `timeoutMs` (or any wait an agent names). Clamped rather than
+ * refused: an agent's odd value should cost it a default, not the call — but
+ * never an unbounded wait on a server other clients share.
+ */
+export function toolTimeoutMs(value: unknown): number | undefined {
+  const n = typeof value === "string" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(MAX_TOOL_WAIT_MS, Math.max(1, Math.round(n))) : undefined;
+}

@@ -8,6 +8,7 @@ import { firecrawlBase, firecrawlIsExplicit, probeFirecrawl } from "./firecrawl.
 import { canonicalizeUrl, domainOf, fnv1a64 } from "./url.js";
 import { isNoWrite, writeFileAtomic } from "./no-write.js";
 import { brand, countFetch, env, envInt, envName } from "./brand.js";
+import { type BrowserFetchMode, browserFetchMode } from "./browser/mode.js";
 
 // Opt-in on-disk fetch cache (--cache). The in-process hydrate cache only spans
 // ONE gather; the deep tier fans out N separate `gather` processes (one per
@@ -94,7 +95,8 @@ export function cachePath(url: string, acceptLanguage = "", extractor: CacheName
 
 // Only the built-in reader applies these: Firecrawl's markdown skips both, and a
 // document has no banner to strip — so only the "native" namespace is split by
-// them (see entryPaths), and one PDF entry serves every kind of request.
+// them (see entryPaths), and one PDF entry serves every kind of request. The
+// browser rung extracts with the built-in reader, so "browser" is split too.
 //
 // The output format splits it the same way, and for the same reason: the
 // built-in reader writes the same page as text or as Markdown, while
@@ -137,10 +139,12 @@ const DOC_CACHE_NS = "doc" as const;
 const VIDEO_CACHE_NS = "video" as const;
 type CacheNamespace = ExtractorId | typeof PDF_CACHE_NS | typeof DOC_CACHE_NS | typeof VIDEO_CACHE_NS;
 
-async function currentExtractor(opts: { firecrawl?: string; fullPage?: boolean }, url: string): Promise<CacheNamespace> {
+async function currentExtractor(opts: { firecrawl?: string; fullPage?: boolean; browser?: BrowserFetchMode }, url: string): Promise<CacheNamespace> {
   if (looksLikePdfUrl(url)) return PDF_CACHE_NS;
   if (knownVideo(url)) return VIDEO_CACHE_NS;
   if (docFormatForUrl(url)) return DOC_CACHE_NS;
+  // Every web page goes to the browser then, full-page reads included.
+  if (browserFetchMode(opts.browser) === "always") return "browser";
   // A full-page read never goes to Firecrawl, so it must never be served Firecrawl's text.
   if (opts.fullPage) return "native";
   const base = firecrawlBase(opts);
@@ -151,7 +155,9 @@ async function currentExtractor(opts: { firecrawl?: string; fullPage?: boolean }
 // Keep reading those alongside the format namespaces so upgrading keeps both
 // online and offline caches usable.
 const DOCUMENT_NAMESPACES: CacheNamespace[] = [PDF_CACHE_NS, DOC_CACHE_NS, VIDEO_CACHE_NS, "pdf-inspector", "pdftotext", "anydoc", "ocr"];
-const WRITTEN_NAMESPACES: CacheNamespace[] = ["native", "firecrawl", ...DOCUMENT_NAMESPACES];
+const WRITTEN_NAMESPACES: CacheNamespace[] = ["native", "firecrawl", "browser", ...DOCUMENT_NAMESPACES];
+/** The namespaces whose entries differ by read mode and format (see variantOf). */
+const splitByVariant = (ns: CacheNamespace): boolean => ns === "native" || ns === "browser";
 
 function namespaceFor(result: Extract, predicted: CacheNamespace): CacheNamespace {
   // A video host's page read as a page (no video on it) is a page: filed where
@@ -180,7 +186,7 @@ function readAnyNamespace(
 ): CacheEntry | undefined {
   let best: CacheEntry | undefined;
   for (const ns of namespaces) {
-    for (const variant of ns === "native" ? variants : PLAIN) {
+    for (const variant of splitByVariant(ns) ? variants : PLAIN) {
       const hit = readCache(url, acceptLanguage, ns, variant);
       if (hit && (!best || hit.cachedAt > best.cachedAt)) best = hit;
     }
@@ -281,7 +287,7 @@ export function revalidationHeaders(entry: Pick<CacheEntry, "etag" | "lastModifi
 // network. The text is also the one field nothing ever inspects without wanting
 // all of it, so it gains nothing from living in the structured half.
 function entryPaths(url: string, acceptLanguage: string, extractor: CacheNamespace, variant: CacheVariant): { meta: string; body: string } {
-  const meta = cachePath(url, acceptLanguage, extractor, extractor === "native" ? variant : "");
+  const meta = cachePath(url, acceptLanguage, extractor, splitByVariant(extractor) ? variant : "");
   return { meta, body: meta.replace(/\.json$/, ".body") };
 }
 
@@ -462,6 +468,8 @@ export async function cachedFetchAndExtract(
     format?: "text" | "markdown";
     timeoutMs?: number;
     signal?: AbortSignal;
+    /** The browser rung (see fetchAndExtract); its reads are cached under their own namespace. */
+    browser?: BrowserFetchMode;
   } = {},
   enabled = false,
   now = Date.now(),
@@ -504,7 +512,7 @@ export async function cachedFetchAndExtract(
   };
   // --refresh does not read, but it still writes: the point is to replace what
   // is there, not to stop caching for the run.
-  const hit = refresh ? undefined : lookup(url, lang, ns, variant);
+  const hit = refresh ? undefined : lookup(url, lang, ns, variant, browserFetchMode(opts.browser) === "fallback");
   if (hit && isCacheFresh(hit, now)) return served(hit);
 
   // Stale but revalidatable: ask the origin whether anything changed. A 304
@@ -552,8 +560,16 @@ export async function cachedFetchAndExtract(
 
 // The entry a lookup made now may serve: its own namespace (or a document's),
 // and — when Firecrawl is predicted — the built-in text of a page Firecrawl
-// failed on, which is still the best this page has.
-function lookup(url: string, acceptLanguage: string, ns: CacheNamespace, variant: CacheVariant): CacheEntry | undefined {
+// failed on, which is still the best this page has. With the browser as a
+// fallback, a page that needed it was filed under "browser", which is only
+// ever written for such a page (or by `always`): that copy is as good.
+function lookup(url: string, acceptLanguage: string, ns: CacheNamespace, variant: CacheVariant, browserFallback = false): CacheEntry | undefined {
+  const best = lookupOwn(url, acceptLanguage, ns, variant);
+  const rendered = browserFallback ? readCache(url, acceptLanguage, "browser", variant) : undefined;
+  return rendered && (!best || rendered.cachedAt > best.cachedAt) ? rendered : best;
+}
+
+function lookupOwn(url: string, acceptLanguage: string, ns: CacheNamespace, variant: CacheVariant): CacheEntry | undefined {
   const best = readAnyNamespace(url, acceptLanguage, [...new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
   // ...and found there again, in its own variant.
   if (ns === VIDEO_CACHE_NS && !best) return readCache(url, acceptLanguage, "native", variant);

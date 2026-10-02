@@ -1,0 +1,486 @@
+[
+ {
+  "nodeId": "1",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "RootWebArea"
+  },
+  "name": {
+   "type": "string",
+   "value": "List"
+  },
+  "childIds": [
+   "2"
+  ],
+  "backendDOMNodeId": 1
+ },
+ {
+  "nodeId": "2",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "list"
+  },
+  "childIds": [
+   "12",
+   "14",
+   "16",
+   "18",
+   "20",
+   "22",
+   "24",
+   "26",
+   "28",
+   "30",
+   "32",
+   "34"
+  ],
+  "backendDOMNodeId": 2,
+  "parentId": "1"
+ },
+ {
+  "nodeId": "12",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "listitem"
+  },
+  "childIds": [
+   "13"
+  ],
+  "backendDOMNodeId": 102,
+  "parentId": "2"
+ },
+ {
+  "nodeId": "13",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "link"
+  },
+  "name": {
+   "type": "string",
+   "value": "Item 1"
+  },
+  "properties": [
+   {
+    "name": "focusable",
+    "value": {
+     "type": "boolean",
+     "value": true
+    }
+   }
+  ],
+  "childIds": [],
+  "backendDOMNodeId": 103,
+  "parentId": "12"
+ },
+ {
+  "nodeId": "14",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "listitem"
+  },
+  "childIds": [
+   "15"
+  ],
+  "backendDOMNodeId": 104,
+  "parentId": "2"
+ },
+ {
+  "nodeId": "15",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "link"
+  },
+  "name": {
+   "type": "string",
+   "value": "Item 2"
+  },
+  "properties": [
+   {
+    "name": "focusable",
+    "value": {
+     "type": "boolean",
+     "value": true
+    }
+   }
+  ],
+  "childIds": [],
+  "backendDOMNodeId": 105,
+  "parentId": "14"
+ },
+ {
+  "nodeId": "16",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "listitem"
+  },
+  "childIds": [
+   "17"
+  ],
+  "backendDOMNodeId": 106,
+  "parentId": "2"
+ },
+ {
+  "nodeId": "17",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "link"
+  },
+  "name": {
+   "type": "string",
+   "value": "Item 3"
+  },
+  "properties": [
+   {
+    "name": "focusable",
+    "value": {
+     "type": "boolean",
+     "value": true
+    }
+   }
+  ],
+  "childIds": [],
+  "backendDOMNodeId": 107,
+  "parentId": "16"
+ },
+ {
+  "nodeId": "18",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "listitem"
+  },
+  "childIds": [
+   "19"
+  ],
+  "backendDOMNodeId": 108,
+  "parentId": "2"
+ },
+ {
+  "nodeId": "19",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "link"
+  },
+  "name": {
+   "type": "string",
+   "value": "Item 4"
+  },
+  "properties": [
+   {
+    "name": "focusable",
+    "value": {
+     "type": "boolean",
+     "value": true
+    }
+   }
+  ],
+  "childIds": [],
+  "backendDOMNodeId": 109,
+  "parentId": "18"
+ },
+ {
+  "nodeId": "20",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "listitem"
+  },
+  "childIds": [
+   "21"
+  ],
+  "backendDOMNodeId": 110,
+  "parentId": "2"
+ },
+ {
+  "nodeId": "21",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "link"
+  },
+  "name": {
+   "type": "string",
+   "value": "Item 5"
+  },
+  "properties": [
+   {
+    "name": "focusable",
+    "value": {
+     "type": "boolean",
+     "value": true
+    }
+   }
+  ],
+  "childIds": [],
+  "backendDOMNodeId": 111,
+  "parentId": "20"
+ },
+ {
+  "nodeId": "22",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "listitem"
+  },
+  "childIds": [
+   "23"
+  ],
+  "backendDOMNodeId": 112,
+  "parentId": "2"
+ },
+ {
+  "nodeId": "23",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "link"
+  },
+  "name": {
+   "type": "string",
+   "value": "Item 6"
+  },
+  "properties": [
+   {
+    "name": "focusable",
+    "value": {
+     "type": "boolean",
+     "value": true
+    }
+   }
+  ],
+  "childIds": [],
+  "backendDOMNodeId": 113,
+  "parentId": "22"
+ },
+ {
+  "nodeId": "24",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "listitem"
+  },
+  "childIds": [
+   "25"
+  ],
+  "backendDOMNodeId": 114,
+  "parentId": "2"
+ },
+ {
+  "nodeId": "25",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "link"
+  },
+  "name": {
+   "type": "string",
+   "value": "Item 7"
+  },
+  "properties": [
+   {
+    "name": "focusable",
+    "value": {
+     "type": "boolean",
+     "value": true
+    }
+   }
+  ],
+  "childIds": [],
+  "backendDOMNodeId": 115,
+  "parentId": "24"
+ },
+ {
+  "nodeId": "26",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "listitem"
+  },
+  "childIds": [
+   "27"
+  ],
+  "backendDOMNodeId": 116,
+  "parentId": "2"
+ },
+ {
+  "nodeId": "27",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "link"
+  },
+  "name": {
+   "type": "string",
+   "value": "Item 8"
+  },
+  "properties": [
+   {
+    "name": "focusable",
+    "value": {
+     "type": "boolean",
+     "value": true
+    }
+   }
+  ],
+  "childIds": [],
+  "backendDOMNodeId": 117,
+  "parentId": "26"
+ },
+ {
+  "nodeId": "28",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "listitem"
+  },
+  "childIds": [
+   "29"
+  ],
+  "backendDOMNodeId": 118,
+  "parentId": "2"
+ },
+ {
+  "nodeId": "29",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "link"
+  },
+  "name": {
+   "type": "string",
+   "value": "Item 9"
+  },
+  "properties": [
+   {
+    "name": "focusable",
+    "value": {
+     "type": "boolean",
+     "value": true
+    }
+   }
+  ],
+  "childIds": [],
+  "backendDOMNodeId": 119,
+  "parentId": "28"
+ },
+ {
+  "nodeId": "30",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "listitem"
+  },
+  "childIds": [
+   "31"
+  ],
+  "backendDOMNodeId": 120,
+  "parentId": "2"
+ },
+ {
+  "nodeId": "31",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "link"
+  },
+  "name": {
+   "type": "string",
+   "value": "Item 10"
+  },
+  "properties": [
+   {
+    "name": "focusable",
+    "value": {
+     "type": "boolean",
+     "value": true
+    }
+   }
+  ],
+  "childIds": [],
+  "backendDOMNodeId": 121,
+  "parentId": "30"
+ },
+ {
+  "nodeId": "32",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "listitem"
+  },
+  "childIds": [
+   "33"
+  ],
+  "backendDOMNodeId": 122,
+  "parentId": "2"
+ },
+ {
+  "nodeId": "33",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "link"
+  },
+  "name": {
+   "type": "string",
+   "value": "Item 11"
+  },
+  "properties": [
+   {
+    "name": "focusable",
+    "value": {
+     "type": "boolean",
+     "value": true
+    }
+   }
+  ],
+  "childIds": [],
+  "backendDOMNodeId": 123,
+  "parentId": "32"
+ },
+ {
+  "nodeId": "34",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "listitem"
+  },
+  "childIds": [
+   "35"
+  ],
+  "backendDOMNodeId": 124,
+  "parentId": "2"
+ },
+ {
+  "nodeId": "35",
+  "ignored": false,
+  "role": {
+   "type": "role",
+   "value": "link"
+  },
+  "name": {
+   "type": "string",
+   "value": "Item 12"
+  },
+  "properties": [
+   {
+    "name": "focusable",
+    "value": {
+     "type": "boolean",
+     "value": true
+    }
+   }
+  ],
+  "childIds": [],
+  "backendDOMNodeId": 125,
+  "parentId": "34"
+ }
+]

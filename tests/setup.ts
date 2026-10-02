@@ -22,6 +22,8 @@ import { configure, resetBrand } from "../src/brand.js";
 const TEST_PREFIX = "WEBINDEX_TEST";
 
 export const testCacheDir = mkdtempSync(join(tmpdir(), "webindex-tests-"));
+// The browser home too: profiles hold logins, so no test may ever reach the real one.
+export const testBrowserDir = mkdtempSync(join(tmpdir(), "webindex-tests-browser-"));
 
 function clearTestEnv(): void {
   for (const key of Object.keys(process.env)) {
@@ -50,6 +52,7 @@ beforeEach(() => {
   // Own cache dir, so a run never reads or writes the real one and a second run
   // inside the 24h TTL is not served a page from disk instead of the mock.
   process.env[`${TEST_PREFIX}_CACHE_DIR`] = testCacheDir;
+  process.env[`${TEST_PREFIX}_BROWSER_DIR`] = testBrowserDir;
 
   // Firecrawl and SearXNG default to localhost and are gated by an availability
   // probe. Under a stubbed global fetch that probe SUCCEEDS — the mock answers
@@ -59,6 +62,11 @@ beforeEach(() => {
   // explicit base ({ firecrawl: "http://fc.test" }), which overrides this.
   process.env[`${TEST_PREFIX}_FIRECRAWL`] = "off";
   process.env[`${TEST_PREFIX}_SEARXNG`] = "off";
+
+  // The browser rung of fetchAndExtract would launch a real browser on a thin
+  // page. Off for the whole suite; tests/fetch-browser.test.ts turns it on with
+  // the browser read stubbed.
+  process.env[`${TEST_PREFIX}_BROWSER_FETCH`] = "off";
 
   // The keyless engines are the one discovery rung that talks to the PUBLIC
   // internet rather than to localhost — so with the two above turned off, a

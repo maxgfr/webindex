@@ -17,6 +17,8 @@ const skillMd = readFileSync(join(root, "SKILL.md"), "utf8");
 const frontmatter = (/^---\r?\n([\s\S]*?)\r?\n---/.exec(skillMd)?.[1] ?? "") as string;
 const description = /^description:\s*([\s\S]*?)(?=\n\w+:|$)/m.exec(frontmatter)?.[1]?.trim() ?? "";
 const cli = readFileSync(join(root, "src", "cli.ts"), "utf8");
+// The browser tools (`mcp --browser`) are declared beside the browser code.
+const browserMcp = readFileSync(join(root, "src", "browser", "mcp.ts"), "utf8");
 
 describe("the engine stays out of the skill-matching pool", () => {
   it("has a frontmatter description at all", () => {
@@ -63,10 +65,14 @@ describe("the engine stays out of the skill-matching pool", () => {
 });
 
 describe("the MCP surface stays primitives, not pipelines", () => {
-  const tools = [...cli.matchAll(/name: "(webindex_[a-z_]+)"/g)].map((m) => m[1] as string);
+  const tools = [
+    ...[...cli.matchAll(/name: "(webindex_[a-z_]+)"/g)].map((m) => m[1] as string),
+    ...[...browserMcp.matchAll(/tool\(\s*"(webindex_[a-z_]+)"/g)].map((m) => m[1] as string),
+  ];
 
   it("declares tools", () => {
     expect(tools.length).toBeGreaterThan(10);
+    expect(tools).toContain("webindex_browser_click");
   });
 
   it("exposes no pipeline-shaped tool", () => {

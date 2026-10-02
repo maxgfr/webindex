@@ -86,6 +86,11 @@ export interface PromptResult {
 export interface ToolOutcome {
   text: string;
   artifact?: string;
+  /**
+   * Images sent after the text as `image` content blocks (a screenshot).
+   * The response cap measures the text only: a tool bounds its own images.
+   */
+  images?: { /** base64 */ data: string; mimeType: string }[];
 }
 
 /**
@@ -388,11 +393,12 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
           decl.inputSchema.properties[key]?.type === "number" && typeof value === "string" ? Number(value) : value,
         ]),
       );
-      const { text: raw, artifact } = await adapter.callTool(name, normalized, context);
+      const { text: raw, artifact, images } = await adapter.callTool(name, normalized, context);
       const text = capResponse(raw, name, maxBytes, artifact, adapter.capAdvice);
       const capped = text !== raw;
       const structured = protocol >= RICH_TOOLS_SINCE ? structuredContentFor(text, capped, decl.outputSchema !== undefined) : undefined;
-      reply({ result: { content: [{ type: "text", text }], ...(structured ? { structuredContent: structured } : {}) } });
+      const pictures = (images ?? []).map((i) => ({ type: "image", data: i.data, mimeType: i.mimeType }));
+      reply({ result: { content: [{ type: "text", text }, ...pictures], ...(structured ? { structuredContent: structured } : {}) } });
     } catch (e) {
       // The tool ran and could not finish: a repo that won't clone, a path
       // outside the tree, a dossier that isn't there. The caller can act on all

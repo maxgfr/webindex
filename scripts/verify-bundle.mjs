@@ -127,6 +127,8 @@ const ALLOWED_FOREIGN = new Set([
   // yt-dlp's own option, quoted in references/video.md as the value of
   // WEBINDEX_YTDLP_ARGS — the one way past YouTube's sign-in wall.
   "cookies-from-browser",
+  "remote-debugging-port", // Chrome's own switch, quoted in references/browser.md
+  "user-data-dir", // Chrome's own switch, quoted in references/browser.md
 ]);
 // `--help` and `--version` are answered by the parser rather than declared as
 // flags, so they are legitimately documented and legitimately absent from the
@@ -140,11 +142,22 @@ for (const { f, text } of docs) {
 }
 
 // ── The MCP surface ─────────────────────────────────────────────────────────
+// The browser tools (`mcp --browser`) are declared beside the browser code,
+// with their capAdvice, which the adapter merges into its own.
+const browserMcp = readFileSync(join(root, "src", "browser", "mcp.ts"), "utf8");
 const toolNames = [...cli.matchAll(/name: "(webindex_[a-z_]+)"/g)].map((m) => m[1]);
 check(toolNames.length > 0, `${toolNames.length} MCP tools declared`);
 const advice = /capAdvice: \{([\s\S]*?)\n {4}\}/.exec(cli)?.[1] ?? "";
 for (const t of toolNames) {
   check(advice.includes(`${t}:`), `${t} has capAdvice (a capped response must name what to narrow)`);
+}
+// Each is the first argument of a tool("webindex_browser_…", …) call there.
+const browserTools = [...browserMcp.matchAll(/tool\(\s*"(webindex_[a-z_]+)"/g)].map((m) => m[1]);
+check(browserTools.length > 0, `${browserTools.length} browser MCP tools declared`);
+const browserAdvice = /BROWSER_CAP_ADVICE: CapAdvice = \{([\s\S]*?)\n\}/.exec(browserMcp)?.[1] ?? "";
+check(advice.includes("BROWSER_CAP_ADVICE"), "the adapter's capAdvice merges the browser tools'");
+for (const t of browserTools) {
+  check(browserAdvice.includes(`${t}:`), `${t} has capAdvice (a capped response must name what to narrow)`);
 }
 
 // ── Report ──────────────────────────────────────────────────────────────────

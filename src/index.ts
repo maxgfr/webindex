@@ -37,6 +37,11 @@ export * from "./doc.js";
 // → local whisper, through yt-dlp. fetchAndExtract takes this route by itself.
 export * from "./video.js";
 
+// ── Browser: a real Chrome over CDP ─────────────────────────────────────────
+// For pages that need a rendered, logged-in or interactive browser: a session on
+// a dedicated profile, accessibility snapshots with stable refs, anti-bot detection.
+export * from "./browser.js";
+
 // Running an external converter on stdin. Exported because the ladders' rungs
 // are pinned npx specs that consumers surface in their `doctor` output.
 export { ANYDOC_SPEC, PDF_INSPECTOR_SPEC, runWithInput } from "./pdf/exec.js";

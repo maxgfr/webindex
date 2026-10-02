@@ -97,7 +97,9 @@ import type { JsonSchemaProp } from "./mcp/protocol.js";
 import { InvalidParamsError, ToolError, type McpAdapter, type ToolDecl } from "./mcp/server.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { startHttpServer } from "./mcp/http.js";
-import { confinePath, publicUrlRefusal, publicUrlsOnly } from "./mcp/policy.js";
+import { browserDoctor } from "./browser/doctor.js";
+import { BROWSER_CAP_ADVICE, browserToolDecls, createBrowserToolHost } from "./browser/mcp.js";
+import { confinePath, publicUrlRefusal, publicUrlsOnly, toolTimeoutMs } from "./mcp/policy.js";
 
 configure({ name: "webindex", envPrefix: "WEBINDEX", cli: "webindex", contactUrl: "https://github.com/maxgfr/webindex" });
 
@@ -113,7 +115,7 @@ USAGE
                           [--timeout <ms>]
   webindex fetch <url> [<url> …] [--json] [--format text|markdown]
                        [--firecrawl <base>|off] [--lang <tag>] [--full-page] [--cache]
-                       [--refresh] [--offline] [--timeout <ms>]
+                       [--refresh] [--offline] [--timeout <ms>] [--browser]
   webindex extract <file|-> [--json] [--format text|markdown] [--full-page]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--dense] [--json]
   webindex repo <ref> [--forge github|gitlab|gitea] [--json]
@@ -127,7 +129,7 @@ USAGE
   webindex sitemap <url> [--max <n>] [--json]
   webindex feed <url> [--json]
   webindex mcp [--transport stdio|http] [--port <n>] [--bind <addr>] [--allow-remote]
-               [--public-only] [--allow-private] [--extract-root <dir>]
+               [--public-only] [--allow-private] [--extract-root <dir>] [--browser]
   webindex searxng   up|down|status
   webindex firecrawl up|down|status
   webindex semantic  up|down|status
@@ -151,6 +153,20 @@ USAGE
   webindex video     search <query> [--out <dir>] [--limit <n>] [--json]
   webindex video     frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]
   webindex video     list <playlist|channel> [--limit <n>] [--out <dir>] [--refresh] [--json]
+  webindex browser   open <url> [--new-tab] [--headless] [--profile <n>] [--cdp <port|url>]
+                     [--capture] [--snapshot]
+  webindex browser   attach <port|url> | status | close [--all]
+  webindex browser   snapshot [<ref>] [--interactive] [--max-chars <n>]
+  webindex browser   click|hover <ref> [--confirm] | type <ref> <text> [--submit]
+  webindex browser   fill <ref> <text> | select <ref> <val…> | press <key> [--confirm]
+  webindex browser   upload <ref> <file…> | scroll <ref|up|down|top|bottom>
+  webindex browser   wait --text|--gone|--selector|--url <s> | --idle | --load | --clear
+                     | --ms <n> [--timeout <ms>]
+  webindex browser   eval <expr|-> | screenshot [<ref>] [--full] [--out <file>]
+  webindex browser   network [list|get <n>|clear] | tabs [list|new|select <tN>|close <tN>]
+  webindex browser   back|forward|reload | dialog accept|dismiss (MCP only)
+  webindex browser   profile import <chrome|brave|chromium|edge|path> [--force]
+                     | reset | path
   webindex doctor [--json]
   webindex version
 
@@ -191,6 +207,9 @@ COMMANDS
              auto-captions (never a machine translation), else a local
              whisper transcription — through yt-dlp, which has to be
              installed. A post on such a host with no video is read as a page.
+             --browser renders the page in the dedicated browser (see browser),
+             for a page only JavaScript fills; WEBINDEX_BROWSER_FETCH=fallback
+             does it only when the plain read is refused, walled or near empty.
   extract    Same extraction, on a file already on disk (- reads stdin),
              recognised by its bytes when its name says otherwise. --full-page
              keeps the whole HTML page, navigation and consent banners included;
@@ -250,6 +269,8 @@ COMMANDS
              walls on: no local file at all without --extract-root, and
              --allow-private lifts the address one. With WEBINDEX_MCP_TOKEN
              set, HTTP answers only requests carrying it as a bearer token.
+             --browser adds the webindex_browser_* tools (see browser), for
+             this machine only: never with --allow-remote or --public-only.
   searxng    Bring the keyless SearXNG container up or down, or show it.
   firecrawl  Same for Firecrawl, which cleans a page with a real browser. It
              delegates its own search to SearXNG, so this starts both.
@@ -321,6 +342,23 @@ COMMANDS
              site, two at a time, and writes CORPUS.md naming them V1…Vn;
              'search' on that directory then labels its hits V1…Vn. The directory is --out,
              else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
+  browser    Drive a real Chrome, Brave, Chromium or Edge for an agent: a
+             SEPARATE browser on a dedicated profile, never your own, launched
+             on first use (headed unless --headless) and picked up again by
+             every later call — the tab, its refs and the session last between
+             commands. attach <port|url> (or --cdp) drives one already running
+             on a loopback port instead; close shuts down only a browser it
+             launched. snapshot prints the accessibility tree with refs (e12)
+             that click, type, fill, select, upload, scroll and screenshot take;
+             a ref from before a navigation is refused: take a new snapshot. A
+             click or an Enter that looks irreversible (pay, order, delete,
+             send, publish…) or submits a password is refused unless --confirm:
+             ask the user first. A challenge (captcha, anti-bot wall) is named,
+             never bypassed: the human solves it, then wait --clear. --capture
+             records the JSON the page fetches (network list|get). A dialog
+             the page opens is dismissed before the command ends; only the
+             MCP tools (mcp --browser) can answer one. Exit 1 is a stale ref,
+             a timeout or a refusal; --json on every action.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which
@@ -384,6 +422,9 @@ ENVIRONMENT
   WEBINDEX_EXTRACT_ROOT  the directory \`mcp\` confines webindex_extract to (--extract-root)
   WEBINDEX_MCP_TOKEN     the bearer token \`mcp --transport http\` then requires
   WEBINDEX_UA            override the browser User-Agent
+  WEBINDEX_BROWSER_DIR   where \`browser\` keeps its profiles and session (default ~/.webindex/browser)
+  WEBINDEX_BROWSER_BIN   the browser it drives (default the first Chrome, Brave, Chromium or Edge found)
+  WEBINDEX_BROWSER_FETCH fetch renders pages in that browser: always, fallback or off (default)
   GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, GITEA_TOKEN
                          optional forge tokens (WEBINDEX_GITHUB_TOKEN and its kin win over
                          them); each goes only to github.com, gitlab.com, or a host listed
@@ -437,6 +478,14 @@ export const VALUE_FLAGS = [
   "format",
   "out",
   "effort",
+  "profile",
+  "cdp",
+  "max-chars",
+  "text",
+  "gone",
+  "selector",
+  "url",
+  "ms",
 ];
 export const BOOL_FLAGS = [
   "json",
@@ -454,6 +503,19 @@ export const BOOL_FLAGS = [
   "lines",
   "public-only",
   "allow-private",
+  "new-tab",
+  "headless",
+  "capture",
+  "snapshot",
+  "interactive",
+  "confirm",
+  "submit",
+  "idle",
+  "load",
+  "clear",
+  "full",
+  "browser",
+  "force",
 ];
 export const COMMANDS = [
   "search",
@@ -480,6 +542,7 @@ export const COMMANDS = [
   "hybrid",
   "changed",
   "video",
+  "browser",
   ...STACK_SERVICES.filter((s) => s !== "all"),
   "stack",
 ];
@@ -539,12 +602,22 @@ function argTimeout(args: CommandArgs): number | undefined {
  * local file (unless --extract-root names the one directory it may). Keyed on
  * the flag rather than on the bind address, because "others can reach this" is
  * what the flag says — a loopback server behind a reverse proxy is reachable
- * too, and its operator can say so.
+ * too, and its operator can say so. Exported for the suite.
  */
-function mcpPolicy(args: CommandArgs, allowRemote: boolean): WebindexToolPolicy {
+export function mcpPolicy(args: CommandArgs, allowRemote: boolean): WebindexToolPolicy {
   const allowPrivate = argBool(args, "allow-private");
   if (allowPrivate && argBool(args, "public-only")) usage("--public-only and --allow-private contradict each other");
   const publicOnly = !allowPrivate && (argBool(args, "public-only") || envFlag("PUBLIC_ONLY") || allowRemote);
+  // The browser tools drive a real browser, logins included, that goes wherever
+  // a page sends it: no address wall holds it, and it is not for others to use.
+  const browser = argBool(args, "browser");
+  if (browser && allowRemote)
+    usage("--browser and --allow-remote contradict each other: the browser tools drive a logged-in browser on this machine, for it alone");
+  if (browser && publicOnly) {
+    usage(
+      `--browser and --public-only (or ${envName("PUBLIC_ONLY")}) contradict each other: a browser follows any address a page leads it to, private ones included`,
+    );
+  }
   const rootArg = argValue(args, "extract-root") ?? env("EXTRACT_ROOT");
   let extractRoot: string | undefined;
   if (rootArg !== undefined) {
@@ -557,7 +630,12 @@ function mcpPolicy(args: CommandArgs, allowRemote: boolean): WebindexToolPolicy 
     }
     if (!isDir) usage(`--extract-root ${rootArg} is not a directory`);
   }
-  return { publicOnly, ...(extractRoot !== undefined ? { extractRoot } : allowRemote ? { noLocalFiles: true } : {}) };
+  return {
+    publicOnly,
+    ...(extractRoot !== undefined ? { extractRoot } : allowRemote ? { noLocalFiles: true } : {}),
+    ...(browser ? { browser } : {}),
+    ...(allowRemote ? { remote: true } : {}),
+  };
 }
 
 /** What the policy is, said once at startup — nothing when there is none. */
@@ -567,17 +645,8 @@ function mcpPolicyNotice(policy: WebindexToolPolicy, allowRemote: boolean, allow
   else if (allowRemote && allowPrivate) lines.push("fetches: any address, this machine's own network included (--allow-private).");
   if (policy.extractRoot !== undefined) lines.push(`local files: only under ${policy.extractRoot}.`);
   else if (policy.noLocalFiles) lines.push("local files: none, and webindex_extract is off (--extract-root <dir> offers one directory).");
+  if (policy.browser) lines.push("browser: the webindex_browser_* tools drive a separate browser on this machine; irreversible actions need confirm: true.");
   return lines;
-}
-
-/**
- * The MCP fetch tool's `timeoutMs`. Clamped rather than refused: an agent's
- * odd value should cost it a default, not the call — but never an unbounded
- * wait on a server other clients share.
- */
-function toolTimeoutMs(value: unknown): number | undefined {
-  const n = typeof value === "string" ? Number(value) : value;
-  return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(300_000, Math.max(1, Math.round(n))) : undefined;
 }
 
 // The whole webindex_search cascade's budget: every rung and page within it.
@@ -955,7 +1024,8 @@ const REPLACING_TOOLS = new Set(["webindex_video_frames", "webindex_video_list"]
 function withHints(tools: ToolDecl[]): ToolDecl[] {
   return tools.map((t) => ({
     ...t,
-    annotations: {
+    // A tool that brings its own hints keeps them: the browser tools act on a page, and say how.
+    annotations: t.annotations ?? {
       // The video tools write their run directory. A transcript is only ever
       // added; frames replace the video's earlier frames, and a corpus the
       // directory's earlier CORPUS.md — so those two say they may destroy.
@@ -1013,6 +1083,14 @@ export interface WebindexToolPolicy {
   extractRoot?: string;
   /** Read no local file at all: webindex_extract is not offered. `extractRoot` wins over it. */
   noLocalFiles?: boolean;
+  /** Offer the webindex_browser_* tools (`mcp --browser`), over one browser session kept for the adapter's life. */
+  browser?: boolean;
+  /**
+   * Reachable beyond this machine (`mcp --allow-remote`). webindex_fetch then
+   * never renders in the browser, whatever `<PREFIX>_BROWSER_FETCH` says: that
+   * browser is this machine's, logins included, and not for others to drive.
+   */
+  remote?: boolean;
 }
 
 // The host name a public-only check had to resolve, or undefined when it
@@ -1036,7 +1114,9 @@ function resolvedHost(url: string): string | undefined {
  * without a subprocess, and a host embedding several engines can mount these
  * tools inside its own server rather than spawning `webindex mcp`.
  */
-export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
+export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & { close(): Promise<void> } {
+  // Nothing starts until a browser tool is called.
+  const browserHost = policy.browser ? createBrowserToolHost({ policy }) : undefined;
   // One authorizer for the adapter's life: fetchRobots keys its cache by it.
   const guard = policy.publicOnly ? publicUrlsOnly() : undefined;
   const refuseUrl = async (url: string): Promise<void> => {
@@ -1496,6 +1576,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
             required: ["url"],
           },
         },
+        ...(policy.browser ? browserToolDecls() : []),
       ]),
     capAdvice: {
       webindex_search: "lower `limit`",
@@ -1518,12 +1599,14 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
       webindex_video_search: "lower `limit`",
       webindex_video_frames: "lower `effort`",
       webindex_video_list: "lower `limit`",
+      ...(policy.browser ? BROWSER_CAP_ADVICE : {}),
     },
     async callTool(name, args, ctx) {
       // What the server hands every call: the client's cancel, and a way to
       // report progress. Passed on to whatever takes it — a cancelled call must
       // stop fetching, not only have its answer dropped.
       const signal = ctx?.signal;
+      if (browserHost && name.startsWith("webindex_browser_")) return browserHost.call(name, args, ctx);
       if (name === "webindex_fetch") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
@@ -1536,6 +1619,9 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
           format: args.format === "markdown" ? ("markdown" as const) : ("text" as const),
           timeoutMs: toolTimeoutMs(args.timeoutMs),
           signal,
+          // The same wall that refuses --browser: a browser follows any address
+          // a page leads it to, in a profile that may be logged in.
+          ...(policy.remote || policy.publicOnly ? { browser: "off" as const } : {}),
         };
         // Guarded, every hop is checked (which also keeps Firecrawl — a fetcher
         // no hook reaches — out of it), and the cache is not read: it holds what
@@ -1794,6 +1880,8 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter {
       }
       throw new ToolError(`unknown tool: ${name}`);
     },
+    /** Let go of the browser session, if one was opened; the browser keeps running. */
+    close: async () => browserHost?.close(),
   };
 }
 
@@ -1906,6 +1994,8 @@ function positionalLimit(args: CommandArgs): { max: number; hint?: string } {
   if (cmd === "doctor" || cmd === "mcp") return { max: 0 };
   if (cmd === "skill") return { max: args.positional[0] === "init" ? 2 : 1 };
   if (cmd === "video") return args.positional[0] === "search" ? { max: Number.POSITIVE_INFINITY } : { max: 2 };
+  // Each action checks its own arguments: type and fill take a text, select and upload a list.
+  if (cmd === "browser") return { max: Number.POSITIVE_INFINITY };
   if (cmd === "issues" || cmd === "prs") return { max: 1, hint: 'search words go in --terms "<words>"' };
   if (cmd === "repo" || cmd === "releases" || cmd === "tags") return { max: 1, hint: "quote a path that contains spaces" };
   return { max: 1 };
@@ -1985,6 +2075,8 @@ async function dispatch(argv: string[]): Promise<void> {
       stripConsent: !fullPage,
       format,
       timeoutMs: argTimeout(args),
+      // A flag, not a value: `--browser` is a switch on mcp too. Fallback mode is WEBINDEX_BROWSER_FETCH's.
+      ...(argBool(args, "browser") ? { browser: "always" as const } : {}),
     };
     const cache = argBool(args, "cache") || refresh;
     const json = argBool(args, "json");
@@ -2058,7 +2150,10 @@ async function dispatch(argv: string[]): Promise<void> {
     const notice = mcpPolicyNotice(policy, allowRemote, argBool(args, "allow-private"));
     if (transport === "stdio") {
       for (const line of notice) process.stderr.write(`webindex: ${line}\n`);
-      await runStdioServer(webindexAdapter(policy));
+      const adapter = webindexAdapter(policy);
+      await runStdioServer(adapter);
+      // A browser session's socket would keep the process alive once stdin has closed.
+      await adapter.close();
       return;
     }
     if (transport !== "http") usage(`unknown transport "${transport}" — expected stdio or http`);
@@ -2585,6 +2680,57 @@ async function dispatch(argv: string[]): Promise<void> {
     return;
   }
 
+  // A real browser, driven one action per call; see src/browser/cli.ts.
+  if (cmd === "browser") {
+    const action = args.positional[0] ?? "";
+    const asJson = argBool(args, "json");
+    const { runBrowserCommand } = await import("./browser/cli.js");
+    const r = await runBrowserCommand(
+      action,
+      args.positional.slice(1),
+      {
+        json: asJson,
+        newTab: argBool(args, "new-tab"),
+        headless: argBool(args, "headless"),
+        profile: argValue(args, "profile"),
+        cdp: argValue(args, "cdp"),
+        capture: argBool(args, "capture"),
+        snapshot: argBool(args, "snapshot"),
+        interactive: argBool(args, "interactive"),
+        maxChars: argInt(args, "max-chars", { min: 1 }),
+        confirm: argBool(args, "confirm"),
+        submit: argBool(args, "submit"),
+        text: argValue(args, "text"),
+        gone: argValue(args, "gone"),
+        selector: argValue(args, "selector"),
+        url: argValue(args, "url"),
+        idle: argBool(args, "idle"),
+        load: argBool(args, "load"),
+        clear: argBool(args, "clear"),
+        ms: argInt(args, "ms", { min: 0 }),
+        timeout: argTimeout(args),
+        full: argBool(args, "full"),
+        out: argValue(args, "out"),
+        all: argBool(args, "all"),
+        force: argBool(args, "force"),
+      },
+      {
+        // A UsageError, not usage(): runBrowserCommand turns it into exit 2 with its JSON.
+        stdin: () => {
+          if (process.stdin.isTTY) throw new UsageError("usage: webindex browser eval <expr|-> — `-` reads the expression from a pipe, not a terminal");
+          return readFileSync(0, "utf8");
+        },
+      },
+    );
+    if (r.exitCode === 0) {
+      process.stdout.write(asJson ? jsonLine(r.json) : `${r.text}\n`);
+      return;
+    }
+    if (asJson) process.stdout.write(jsonLine(r.json));
+    if (r.exitCode === EXIT_USAGE) usage(r.text);
+    fail(r.text);
+  }
+
   // The packaging toolchain for a repo built ON this engine. Dev-time: it reads
   // a repository, it never runs inside one — which is exactly why it can serve
   // the skills that do not vendor this engine at all.
@@ -2870,6 +3016,7 @@ async function dispatch(argv: string[]): Promise<void> {
     const pdf = rungRows(PDF_EXTRACTORS, pdfRungs, "PDF_ENGINE");
     const doc = rungRows(DOC_EXTRACTORS, docRungs, "DOC_ENGINE");
     const video = rungRows(VIDEO_TRANSCRIBERS, enabledTranscribers(), "VIDEO_ENGINES");
+    const browser = await browserDoctor();
     if (argBool(args, "json")) {
       const service = (base: string | null | undefined, up: boolean, extra: Record<string, string> = {}) =>
         base ? { state: up ? "answering" : "unreachable", base, ...(up ? extra : {}) } : { state: "disabled" };
@@ -2884,12 +3031,21 @@ async function dispatch(argv: string[]): Promise<void> {
           },
           rungs: { pdf, doc, video },
           ytdlp: ytdlp ? { ...ytdlp, stale: ytdlpStale } : { state: "not installed" },
+          browser,
         }),
       );
       return;
     }
     const rungLines = (label: string, rows: { id: string; state: string }[]) =>
       rows.map(({ id, state }, i) => `  ${(i ? "" : label).padEnd(12)}${id.padEnd(15)}${state}`);
+    const bin = browser.binary;
+    const sess = browser.session;
+    const browserLines = [
+      `  browser     ${bin.state === "found" ? `${bin.kind} at ${bin.path}` : bin.state === "error" ? bin.error : `not found — ${bin.hint}`}`,
+      `              home ${browser.home}${browser.profiles.length ? ` (profiles: ${browser.profiles.join(", ")})` : ""}`,
+      `              session ${sess.state === "none" ? "none" : `port ${sess.port}, profile ${sess.profile}, ${sess.launchedByUs ? "launched by webindex" : "attached"}, ${sess.state === "alive" ? "answering" : "not answering"}`}`,
+      `              fetch ${browser.fetch.mode === "off" ? `off (${envName("BROWSER_FETCH")}=always|fallback turns it on)` : browser.fetch.mode}, concurrency ${browser.fetch.concurrency}`,
+    ];
     const lines = [
       `webindex ${ENGINE_VERSION}`,
       `  searxng     ${sx ? (sxUp ? `answering at ${sx}` : `not reachable at ${sx} — \`webindex searxng up\` starts it`) : "disabled"}`,
@@ -2899,6 +3055,7 @@ async function dispatch(argv: string[]): Promise<void> {
       ...rungLines("pdf rungs", pdf),
       ...rungLines("doc rungs", doc),
       ...rungLines("video rungs", video),
+      ...browserLines,
       "",
       "  Everything optional degrades to a note — nothing above is required, and none of it needs a key.",
     ];

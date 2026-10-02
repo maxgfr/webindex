@@ -31,6 +31,9 @@ import { extractDocument, docFormatForUrl, docFormatForContentType, sniffDocumen
 // other at module-evaluation time — only from inside function bodies.
 import { scrapeViaFirecrawl } from "./firecrawl.js";
 import { knownVideo, transcribeVideo, transcriptMarkdown } from "./video.js";
+// Only the mode is read here; the browser itself (src/browser/read.ts) is
+// imported inside the rung, so nothing of it loads unless a page needs it.
+import { type BrowserFetchMode, browserFetchMode } from "./browser/mode.js";
 
 // ── Tunables ────────────────────────────────────────────────────────────────
 //
@@ -1074,7 +1077,22 @@ const DOC_FETCH_OPTS = { accept: "*/*", binary: true, maxBytes: 16 * 1024 * 1024
 //
 // `manual-subs`, `auto-subs` and `whisper` are the video transcript rungs
 // (src/video/ladder.ts); a YouTube video never reaches the other extractors.
-export type ExtractorId = "native" | "firecrawl" | "pdf-inspector" | "pdftotext" | "anydoc" | "ocr" | "builtin" | "manual-subs" | "auto-subs" | "whisper";
+//
+// `browser` is a page rendered in the dedicated browser (src/browser/read.ts)
+// and read by the same extraction as a fetched one; it has its own cache
+// namespace, split by read mode and format like `native`'s.
+export type ExtractorId =
+  | "native"
+  | "firecrawl"
+  | "pdf-inspector"
+  | "pdftotext"
+  | "anydoc"
+  | "ocr"
+  | "builtin"
+  | "manual-subs"
+  | "auto-subs"
+  | "whisper"
+  | "browser";
 
 export interface ExtractResult {
   text: string;
@@ -1185,6 +1203,15 @@ export async function fetchAndExtract(
     /** Passed to httpGet: told before a transient answer is waited out and retried. */
     onBackOff?: (url: string, waitMs: number) => void;
     /**
+     * Render the page in the dedicated browser (see src/browser/read.ts):
+     * `always` for every web page, ahead of Firecrawl; `fallback` only when the
+     * built-in read was refused (HTTP 0/401/403/429/503), came back a consent
+     * or anti-bot wall, or found almost no text — the better read is kept.
+     * `<PREFIX>_BROWSER_FETCH` by default; off unless set. Never with
+     * `authorizeUrl`, and never for a PDF, an office document or a video.
+     */
+    browser?: BrowserFetchMode;
+    /**
      * Abandons the fetch: the built-in request is aborted, and no extraction
      * ladder starts after it. A Firecrawl request already sent finishes — it is
      * short, and an aborted one would read to the probe as a Firecrawl that is
@@ -1234,6 +1261,77 @@ export async function fetchAndExtract(
   // silently bypass the document ladder's preferred rung whenever a container
   // happens to be up. Firecrawl is still reachable — as rung 2, via callback.
   const wantsDoc = wantsPdf ? undefined : docFormatForUrl(url);
+  // A public-only caller vets every address the fetch goes to; a browser
+  // follows redirects and loads subresources nobody vets, so it never runs.
+  // Nor for a revalidation: conditional headers are the cache's question to
+  // the origin, which only the fetch can ask.
+  const browser = opts.authorizeUrl || opts.headers || wantsPdf || wantsDoc ? "off" : browserFetchMode(opts.browser);
+  if (browser === "always") {
+    const got = await renderInBrowser(url, opts);
+    if (got.result) return got.result;
+    const res = await readWithoutBrowser(url, opts, wantsPdf, wantsDoc, { page: false });
+    return { ...res, note: [`${got.note}; read without it.`, got.detail, res.note].filter(Boolean).join(" ") };
+  }
+  const seen = { page: false };
+  const res = await readWithoutBrowser(url, opts, wantsPdf, wantsDoc, seen);
+  const why = browser === "fallback" && seen.page && !opts.signal?.aborted ? worthRendering(res) : undefined;
+  if (!why) return res;
+  const got = await renderInBrowser(url, opts);
+  // The browser's read, unless it is no better: empty, or a challenge it was not let through.
+  if (got.result?.text.trim())
+    return { ...got.result, note: [`Read ${url} in the browser: the built-in fetch ${why}.`, got.result.note].filter(Boolean).join(" ") };
+  return { ...res, note: [res.note, got.result ? got.result.note : `${got.note}.`, got.detail].filter(Boolean).join(" ") || undefined };
+}
+
+type FetchOptions = NonNullable<Parameters<typeof fetchAndExtract>[1]>;
+
+/** Statuses a real browser may get past: refused, throttled, or no answer at all. */
+const RENDER_STATUS = new Set([0, 401, 403, 429, 503]);
+
+/** Why a built-in read of a web page deserves a second one in the browser, or undefined when it does not. */
+function worthRendering(res: ExtractResult): string | undefined {
+  if (RENDER_STATUS.has(res.status)) return res.status ? `got HTTP ${res.status}` : "got no answer";
+  // Any other failure (a 404, a 500) would be the same in a browser; so would a 304.
+  if (res.status < 200 || res.status >= 300) return undefined;
+  const junk = looksLikeJunkExtraction(res.text);
+  if (junk) return `read a ${junk}`;
+  return res.text.trim().length < 200 ? "found almost no text" : undefined;
+}
+
+/**
+ * The browser rung: its read, or why there is none (with the browser's own
+ * note in `detail`). Loaded on first use. An error page is no read: the fetch
+ * returns no text with a failed status, and a rendered 404 or 503 must not
+ * pass for the page — nor be cached over a good copy of it.
+ */
+async function renderInBrowser(
+  url: string,
+  opts: FetchOptions,
+): Promise<{ result: ExtractResult; note?: undefined; detail?: undefined } | { result?: undefined; note: string; detail?: string }> {
+  try {
+    const { readRenderedPage } = await import("./browser/read.js");
+    const { format, fullPage, stripConsent, keepHtml, signal, timeoutMs } = opts;
+    const result = await readRenderedPage(url, { format, fullPage, stripConsent, keepHtml, signal, timeoutMs });
+    if (result.status >= 400) return { note: `The browser got HTTP ${result.status} for ${url}`, detail: result.note };
+    return { result };
+  } catch (e) {
+    return { note: `The browser could not read ${url} (${e instanceof Error ? e.message : String(e)})` };
+  }
+}
+
+/**
+ * Firecrawl, then the built-in fetch and its document ladders: everything but
+ * the browser. `seen.page` is set when the answer was a web page or a refusal
+ * — what a browser could read better; never for a document or a non-text answer.
+ */
+async function readWithoutBrowser(
+  url: string,
+  opts: FetchOptions,
+  wantsPdf: boolean,
+  wantsDoc: DocFormat | undefined,
+  seen: { page: boolean },
+): Promise<ExtractResult> {
+  const cancelled = (): ExtractResult => ({ text: "", finalUrl: url, status: 0, note: `Fetching ${url} was cancelled.` });
   let firecrawlNote: string | undefined;
   // Firecrawl's cleaned markdown cannot recover navigation or consent text.
   if (!wantsPdf && !wantsDoc && !opts.authorizeUrl && !opts.fullPage) {
@@ -1243,6 +1341,7 @@ export async function fetchAndExtract(
     // has to fall through to the built-in path so the caller sees the real
     // status and the dead-link (Wayback) rescue still fires.
     if (fc.data && (fc.data.statusCode ?? 200) < 400) {
+      seen.page = true;
       return {
         text: fc.data.markdown,
         title: fc.data.title,
@@ -1283,6 +1382,7 @@ export async function fetchAndExtract(
     return { text: "", finalUrl: res.url, status: 304, etag: res.etag ?? opts.headers?.["if-none-match"], lastModified: res.lastModified };
   }
   if (!res.ok) {
+    seen.page = true;
     const wait = res.retryAfterMs !== undefined ? `, retry after ${Math.ceil(res.retryAfterMs / 1000)} s` : "";
     const why = res.status === 429 ? `rate-limited (HTTP 429${wait})` : `status ${res.status}${res.error ? ", " + res.error : ""}${wait}`;
     return {
@@ -1405,17 +1505,10 @@ export async function fetchAndExtract(
   // A document URL's fetch asked for bytes and got a web page instead.
   const body = !res.body && res.bytes ? decodeBody(res.bytes, res.contentType) : res.body;
   const isHtml = HTML_TYPE_RE.test(mime) || (ambiguousType && /^\s*<(?:!doctype\s+html\b|html\b|head\b|body\b|article\b|main\b|p\b|h[1-6]\b)/i.test(body));
-  const markdown = opts.format === "markdown";
-  const main = isHtml ? (opts.fullPage ? body : extractMainHtml(body)) : body;
-  // The base is read off the whole page: its <base href> sits in the <head>
-  // that main-content isolation has just cut away. It is applied once — with
-  // fullPage, or when isolation keeps the whole document, the <base> is still
-  // in `main`, and a relative one (`docs/`) applied twice is a directory off.
-  const stripped = !isHtml ? body : markdown ? markdownAgainst(main, documentBaseUrl(body, res.url), opts.fullPage) : htmlToText(main, opts);
-  const consent = isHtml && opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped, { markdown }) : { text: stripped, dropped: 0 };
-  const title = isHtml ? pageTitle(body) : undefined;
-  const canonical = isHtml ? absoluteCanonical(htmlCanonicalUrl(body), res.url) : undefined;
-  const metaDescription = isHtml ? metaDescriptionOf(body) : undefined;
+  seen.page = isHtml;
+  const extracted = isHtml
+    ? extractFromHtml(body, res.url, opts)
+    : { text: body, consentDropped: 0, title: undefined, canonical: undefined, metaDescription: undefined };
   const notDocument = answeredHtml
     ? `${url} looked like ${claimsPdf ? "a PDF" : "an office document"} but the server returned HTML (a login wall or landing page?), so it was read as a web page.`
     : undefined;
@@ -1423,17 +1516,43 @@ export async function fetchAndExtract(
   // caller quoting the page must be able to tell it did not see the rest.
   const cut = res.truncated ? `Read only the first ${res.bytesRead} bytes of ${url} (the response size cap), so this text is a prefix.` : undefined;
   return {
-    text: consent.text,
-    consentDropped: consent.dropped,
-    title,
-    canonical,
-    metaDescription,
-    ...(opts.keepHtml && isHtml ? { html: body } : {}),
+    ...extracted,
     finalUrl: res.url,
     status: res.status,
     note: [firecrawlNote, notDocument, cut].filter(Boolean).join(" ") || undefined,
     ...(res.truncated ? { truncated: true } : {}),
     ...validators,
+  };
+}
+
+/**
+ * Read an HTML page the way fetchAndExtract reads one: main-content isolation
+ * (unless `fullPage`), text or Markdown, consent lines dropped on request, and
+ * the title, canonical URL and description off the whole page. `finalUrl` is
+ * the address the HTML came from, which relative links and the canonical are
+ * resolved against. For a caller that already holds the HTML — a page a
+ * browser rendered — and wants the same text a fetch would have given.
+ */
+export function extractFromHtml(
+  html: string,
+  finalUrl: string,
+  opts: { format?: "text" | "markdown"; fullPage?: boolean; stripConsent?: boolean; keepHtml?: boolean } = {},
+): Pick<ExtractResult, "text" | "consentDropped" | "title" | "canonical" | "metaDescription" | "html"> {
+  const markdown = opts.format === "markdown";
+  const main = opts.fullPage ? html : extractMainHtml(html);
+  // The base is read off the whole page: its <base href> sits in the <head>
+  // that main-content isolation has just cut away. It is applied once — with
+  // fullPage, or when isolation keeps the whole document, the <base> is still
+  // in `main`, and a relative one (`docs/`) applied twice is a directory off.
+  const stripped = markdown ? markdownAgainst(main, documentBaseUrl(html, finalUrl), opts.fullPage) : htmlToText(main, opts);
+  const consent = opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped, { markdown }) : { text: stripped, dropped: 0 };
+  return {
+    text: consent.text,
+    consentDropped: consent.dropped,
+    title: pageTitle(html),
+    canonical: absoluteCanonical(htmlCanonicalUrl(html), finalUrl),
+    metaDescription: metaDescriptionOf(html),
+    ...(opts.keepHtml ? { html } : {}),
   };
 }
 
