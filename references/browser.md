@@ -49,19 +49,31 @@ not repeated in the tree below it:
   ...
 ```
 
-An overlay is a visible dialog (`role="dialog"`, `alertdialog`, `aria-modal`,
-an open `<dialog>`) or a fixed or sticky layer over at least 30% of the
-viewport with nothing on top of it. A `--max-chars` cut never drops it, even
+An overlay is one of these, shown on screen (no ancestor hidden, transparent,
+`aria-hidden` or `inert`):
+
+- a dialog: `role="dialog"` or `alertdialog`, `aria-modal`, an open `<dialog>`;
+- a consent vendor's container (OneTrust, Didomi, Cookiebot…), whatever its size;
+- a **fixed** layer (itself or an ancestor; sticky is layout) over at least 30%
+  of the viewport, wide (60%) or strictly across its middle, and on top at its
+  centre. A layer that holds the `main` landmark or most of the page's text is
+  the page itself (an app shell): neither it nor anything inside it counts,
+  except a dialog. A presentational root (`role="presentation"`) is looked
+  through to the dialog inside it.
+
+Only the outermost overlay counts. A `--max-chars` cut never drops it, even
 when the page appends it at the end of `<body>`. A click that lands on one is
 refused (exit 1) with the overlay's controls and their refs, which you can use
-in the next command.
+in the next command. A click blocked by something that is no overlay (a sticky
+header, a chat bubble) is refused with what is in the way and its controls.
 
 **Ask the user before accepting tracking or consent.** "Accept", "Refuse",
 "Customise" and "Close" are the user's choices, not yours, even though the guard
 does not stop them. Tell the user what the overlay asks, and click the answer they
 pick. `fetch --browser` never needs an answer: it reads a copy of the page
 without its overlays, dialogs and consent panels (OneTrust, Didomi, Sourcepoint,
-Quantcast, Cookiebot, Usercentrics, TrustArc and the like). `--full-page` reads
+Quantcast, Cookiebot, Usercentrics, TrustArc and the like). The copy is parsed
+apart from the page, so nothing on the page runs or changes. `--full-page` reads
 everything.
 
 ## Refs
@@ -132,7 +144,8 @@ Each command finds its browser in this order:
    nowhere for a human to solve a challenge. Which browser: `WEBINDEX_BROWSER_BIN`,
    else the kind `open --browser-kind chrome|brave|chromium|edge` names, else
    `WEBINDEX_BROWSER_KIND`, else the profile's own kind, else the first of Chrome,
-   Brave, Chromium and Edge found.
+   Brave, Chromium and Edge found. A kind named (or the profile's own) is that
+   kind or an error saying it is not installed, never another browser.
 
 There is no daemon: each command reconnects through `session.json`, so the tab
 and its refs carry over. A cross-process lock runs commands one at a time, and
@@ -169,9 +182,10 @@ block them in the dedicated browser:
   zip of a release on github.com/uBlockOrigin/uBOL-home, unzip it, and name the folder that holds
   `manifest.json`: `WEBINDEX_BROWSER_EXTENSIONS=/abs/path/uBOLite`. Several are
   comma separated. They are loaded, and every other extension kept off, only when
-  webindex launches the browser: `close` a running one first. Chromium, Brave,
-  Edge and Chrome for Testing load them. **Branded Google Chrome 137 and later
-  ignores them**: `open` and `doctor` say so and point at the others.
+  webindex launches the browser: `close` a running one first. Chromium, Brave
+  and Chrome for Testing load them. **Branded Google Chrome 137 and later
+  ignores them**, so none is passed to it: `open` says so in a `note:` line (and
+  in `notes` with `--json`), `doctor` too, and both point at the others.
 
 `doctor` shows the kind asked for and the extensions it would load.
 
@@ -208,7 +222,7 @@ that matters.
 |---|---|
 | `WEBINDEX_BROWSER_DIR` | the browser home (default `~/.webindex/browser`) |
 | `WEBINDEX_BROWSER_BIN` | the browser binary, instead of the first one found |
-| `WEBINDEX_BROWSER_KIND` | `chrome`, `brave`, `chromium` or `edge`: the kind launched when no binary is named (`open --browser-kind` wins) |
+| `WEBINDEX_BROWSER_KIND` | `chrome`, `brave`, `chromium` or `edge`: the kind launched when no binary is named, and no other (`open --browser-kind` wins) |
 | `WEBINDEX_BROWSER_EXTENSIONS` | unpacked extensions to load when webindex launches the browser: absolute folders holding a `manifest.json`, comma separated |
 | `WEBINDEX_BROWSER_FETCH` | `always`, `fallback` or `off` (default): whether `fetch` renders pages in the browser |
 | `WEBINDEX_BROWSER_CONCURRENCY` | pages the fetch rung renders at once (default 1, at most 4) |
