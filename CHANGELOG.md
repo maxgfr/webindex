@@ -2,6 +2,49 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.27.0](https://github.com/maxgfr/webindex/compare/v1.26.1...v1.27.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **browser:** bound and cancel MCP browser waits, confirm unconfined uploads ([66eed06](https://github.com/maxgfr/webindex/commit/66eed06999b29c1c9227a9a548aca4f663060513))
+* **browser:** check the WebSocket hop for loopback too ([83859d2](https://github.com/maxgfr/webindex/commit/83859d269206a7587a0dfdcf45e2241017255b85))
+* **browser:** close only the very browser we started, and keep tab ids fixed ([35201f2](https://github.com/maxgfr/webindex/commit/35201f2f8e715d318f9ad02e72be2220e2cd11e2))
+* **browser:** deliver messages before a close frame from the same chunk ([f4bcb9c](https://github.com/maxgfr/webindex/commit/f4bcb9c5bcfd458c0a255c0b320f6f6cbb47ad58))
+* **browser:** dismiss every dialog a CLI command meets, refuse CLI dialog answers, name a frozen tab ([4ac921f](https://github.com/maxgfr/webindex/commit/4ac921f2733d8d60c01fd2a4a076e81709643ec8))
+* **browser:** fail closed in the risk guard, match French verbs by stem, arm settle before the action ([c6ce6a9](https://github.com/maxgfr/webindex/commit/c6ce6a9c891e51441ef37301edaaa189d90f5acc))
+* **browser:** guard accepting an irreversible JavaScript dialog over MCP ([93a92d6](https://github.com/maxgfr/webindex/commit/93a92d6e5109b99f09767f46b0a1dbf470bfbe98))
+* **browser:** guard Enter and Space inside frames and shadow roots, refuse clicks on frames ([6c62b36](https://github.com/maxgfr/webindex/commit/6c62b36f515fc2c680a713b47b0db4eeb1bc8133))
+* **browser:** guard the key and the control that really act, and stop an action a dialog cut short ([436bc98](https://github.com/maxgfr/webindex/commit/436bc98ad3de6eee8dffc77991534ab1a8497393))
+* **browser:** hit-test in document coordinates, answer dialogs first, never leave one open across CLI commands ([2a18984](https://github.com/maxgfr/webindex/commit/2a189840a157131f76cc21433dd55225f5184110))
+* **browser:** keep an attached browser out of profile requests and fetch reads ([45d292e](https://github.com/maxgfr/webindex/commit/45d292e1695eafd2af3a1fa0a7cbbbee0a9a9452))
+* **browser:** keep the browser lock alive while its holder works, guard profiles in use ([213bb4a](https://github.com/maxgfr/webindex/commit/213bb4a5d0dde85c91d58addc0c3642ee657994d))
+* **browser:** keep the connection open when a message listener throws ([7f123c8](https://github.com/maxgfr/webindex/commit/7f123c8336589ca3e53117d7b8065d4fb48b77e9))
+* **browser:** no browser rung for webindex_fetch on a remote-reachable MCP server ([5450e88](https://github.com/maxgfr/webindex/commit/5450e88732b0cfd3fdecd0e7da3907a39a0801c8))
+* **browser:** refuse error pages and downloads in fetch reads, close the browser a read launched ([ac54b01](https://github.com/maxgfr/webindex/commit/ac54b01a287f04291063990a31a858a3129a066a))
+* **browser:** refuse overlapping profile import, classify browsers by file name, detect Windows lockfile ([1b1ee96](https://github.com/maxgfr/webindex/commit/1b1ee9689a919f440532b0255a0823df75675607))
+* **browser:** settle waits for the navigating document's own load, not the old one's ([d60044d](https://github.com/maxgfr/webindex/commit/d60044d8c148164fa7a61a42e970ecde804cc33b))
+* **browser:** trust load events over the old document's readyState, add settle cancel, let transport errors through the guard ([b503198](https://github.com/maxgfr/webindex/commit/b503198ecdff25b080f4a8d3d53d17629d685214))
+* **browser:** wait --clear never counts a failed probe as clear; narrow the Cloudflare platform match ([5f60890](https://github.com/maxgfr/webindex/commit/5f6089048ccf0a9fd30389a8bb01e157a48d2977))
+
+
+### Features
+
+* **browser:** accessibility snapshot with stable refs ([50c8168](https://github.com/maxgfr/webindex/commit/50c81684e353d395adfef1a48bd03289844a6715))
+* **browser:** browser detection and dedicated profiles ([f8b79f5](https://github.com/maxgfr/webindex/commit/f8b79f58af4a8ca7fe30c7d0c22956a93238f174))
+* **browser:** browser rung for fetch (always | fallback) ([d2860af](https://github.com/maxgfr/webindex/commit/d2860af795a3966a024208d47ad40ee038114bb9))
+* **browser:** CDP client and DevTools discovery ([0907c8b](https://github.com/maxgfr/webindex/commit/0907c8b190835bdbfad1ea038458b009b8762f6c))
+* **browser:** challenge detection, irreversibility guard and waits ([f0339ee](https://github.com/maxgfr/webindex/commit/f0339eef034c1b3a4a1e59a9e242383cdd60ba83))
+* **browser:** doctor reports browser readiness ([393b633](https://github.com/maxgfr/webindex/commit/393b63308f461d56e612e33e12cb69e41822b40b))
+* **browser:** in-house WebSocket client for CDP ([c3f6129](https://github.com/maxgfr/webindex/commit/c3f61293d1baf17851b6e069fee65ac01aec56ee))
+* **browser:** JSON network recorder ([a432e6f](https://github.com/maxgfr/webindex/commit/a432e6f50cdb89dc068e4c31e17d59e589ab6203))
+* **browser:** launch policy and reconnectable browser session ([905809b](https://github.com/maxgfr/webindex/commit/905809b6ec47d815d3115a0be9ee0da50726d919))
+* **browser:** MCP browser tools behind mcp --browser ([aefde02](https://github.com/maxgfr/webindex/commit/aefde02ef7adcf188897961d03453402c4edfd07))
+* **browser:** public façade and library exports ([375aa00](https://github.com/maxgfr/webindex/commit/375aa00bab65665fec52cdf22ae90e8542c6501e))
+* **browser:** ref-based page actions ([1e2c183](https://github.com/maxgfr/webindex/commit/1e2c1835753ddc6eeff189fcd2f2c50350c71898))
+* **browser:** session state, refs store and injectable deps ([83c1d01](https://github.com/maxgfr/webindex/commit/83c1d01a0048396ef08ab0aee426396e122ce0fa))
+* **browser:** webindex browser command and fetch --browser ([58e23bc](https://github.com/maxgfr/webindex/commit/58e23bc02639782f959335c1d2dc5094acbfa526))
+
 ## [1.26.1](https://github.com/maxgfr/webindex/compare/v1.26.0...v1.26.1) (2026-09-30)
 
 
