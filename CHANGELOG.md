@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.29.0](https://github.com/maxgfr/webindex/compare/v1.28.0...v1.29.0) (2026-10-02)
+
+
+### Features
+
+* **browser:** closeBrowserReads closes the browser this process's reads launched ([c871b33](https://github.com/maxgfr/webindex/commit/c871b339d7eb35d7d52a69ab8fd34edf36a31e42))
+
 # [1.28.0](https://github.com/maxgfr/webindex/compare/v1.27.1...v1.28.0) (2026-10-02)
 
 
