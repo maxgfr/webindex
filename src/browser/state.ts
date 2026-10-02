@@ -43,6 +43,8 @@ export interface RefTable {
   /** The number the next new ref gets (`e<next>`). */
   next: number;
   refs: Record<string, number>;
+  /** The refs that name a container only (a table, a figure…): to scope a snapshot or a screenshot to, never to click. */
+  containers?: string[];
 }
 
 /** Test seam: where the state lives. Defaults to the browser home. */

@@ -74,9 +74,11 @@ An overlay is one of these, shown on screen (no ancestor hidden, transparent,
   except a dialog. A presentational root (`role="presentation"`) is looked
   through to the dialog inside it.
 
-One that is **bare** is no overlay, whatever it is: no control in it (a link, a
-button, a field, anything focusable or editable, an iframe) and under 40
-characters of text. An ad slot fixed over the page with only an image in it
+One that is **bare** is no overlay: no control in it (a link, a button, a
+field, anything focusable or editable, an iframe) and under 40 characters of
+text. A consent vendor's container is never bare (its buttons may be plain
+`div`s), and neither is a layer holding a web component whose shadow root is
+closed (its text and controls cannot be seen from outside). An ad slot fixed over the page with only an image in it
 covers part of the screen but asks nothing: it is not listed under the header,
 and a click it covers is refused as for a sticky header, with no consent wording.
 
@@ -101,9 +103,11 @@ everything.
   headings, iframes, anything focusable or editable), and the structural
   containers you may want to scope a snapshot or a screenshot to: `table`,
   `figure`, `article`, `main`, `complementary`, `form`, and a `region` or an
-  `image` that has a name. `--interactive` lists only the first kind. Anything
-  else (a `div` with a class) is reached with `--selector <css>` on `snapshot`
-  and `screenshot`.
+  `image` that has a name. `--interactive` lists only the first kind. A
+  container's ref is refused by `click` (exit 2): whatever sits at its centre
+  is what would be pressed, so click a control inside it. Anything else (a
+  `div` with a class) is reached with `--selector <css>` on `snapshot` and
+  `screenshot`; any other action refuses `--selector` (exit 2).
 - **`eN` is the element's `backendDOMNodeId`**, kept in `refs/<tab>.json`. A
   ref is stable while its element node lives: a later snapshot of the same
   document hands the same element the same `eN`. A widget the page re-renders
@@ -233,7 +237,8 @@ responses the page fetches (XHR and fetch) while that command runs: pass it to
 every command whose fetches you want, such as each `scroll bottom --capture` of
 an infinite list. What is recorded goes to the tab's log, which keeps growing
 across commands until `network clear`. Each command says both counts:
-`captured 10 JSON responses (30 in the log)`. `network list` numbers the
+`captured 10 JSON responses (30 in the log)`; under `WEBINDEX_NO_WRITE` nothing
+reaches the log, and only the first count is said. `network list` numbers the
 entries, `network get <n>` prints one body as JSON, and `network clear` empties
 the log. Headers are never stored. URLs keep their
 query strings, and request bodies (`postData`, up to 4 KiB) are stored raw, so a

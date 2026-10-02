@@ -113,6 +113,18 @@ describe("usage errors exit 2", () => {
     expect(fake.requests).toEqual([]);
   });
 
+  it.each([
+    ["click", ["e1"]],
+    ["fill", ["e3", "x"]],
+    ["open", ["https://b.test/"]],
+    ["eval", ["1"]],
+  ])("refuses --selector on %s, which ignores it, before reaching for the browser", async (action, args) => {
+    const r = await cli(action, args, { selector: "table" });
+    expect(r.exitCode).toBe(2);
+    expect(r.text).toBe("--selector goes with snapshot, screenshot and wait only");
+    expect(fake.calls).toEqual([]);
+  });
+
   it("checks an upload's files before reaching for the browser", async () => {
     const r = await cli("upload", ["e5", "missing.pdf"]);
     expect(r.exitCode).toBe(2);
@@ -250,6 +262,14 @@ describe("open", () => {
     expect(r.exitCode).toBe(0);
     expect(r.json).toMatchObject({ captured: 1, logged: 1 });
     expect(readNetwork("T1")).toMatchObject([{ n: 1, url: "https://a.test/api.json", json: { a: 1 } }]);
+    // Under no-write nothing reaches the log: no total is claimed.
+    setNoWrite(true);
+    world.xhr = false;
+    const unsaved = await cli("open", ["https://d.test/"], { capture: true, json: true });
+    expect(unsaved.text).toMatch(/^captured \d+ JSON responses? — /m);
+    expect(unsaved.text).not.toContain("in the log");
+    expect(unsaved.json).not.toHaveProperty("logged");
+    resetNoWrite();
     // What this command caught, and what the tab's log holds: it keeps growing until `network clear`.
     const text = await cli("open", ["https://c.test/"], { capture: true });
     expect(text.text).toContain("captured 0 JSON responses (1 in the log) — `webindex-tests browser network list`");

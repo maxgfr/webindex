@@ -565,6 +565,9 @@ export async function click(session: ActionSession, ref: string, opts: ClickOpti
   if (count !== 1 && count !== 2) throw new UsageError(`clickCount is 1 or 2, not ${count}`);
   const page = session.page;
   return withRef(session, ref, async (node) => {
+    // A table or a figure is no control: its centre is whatever sits there, which no --confirm was given for.
+    if (readRefs(session.targetId)?.containers?.includes(ref))
+      throw new UsageError(`${ref} is a container — click a control inside it (take a snapshot of ${ref})`);
     await guardAction(page, { backendNodeId: node.backendNodeId, action: "click", ...(opts.confirm ? { confirm: true } : {}) });
     const { x, y } = await centreOf(page, node);
     // The ref may name a container (a card, a row) whose centre is a "Delete" button: that button is what acts.
@@ -818,9 +821,9 @@ type LayoutMetrics = {
  * Not an action: nothing on the page changes, so there is no settle.
  */
 export async function screenshot(session: ActionSession, opts: ScreenshotOptions = {}): Promise<Buffer> {
-  if (opts.ref !== undefined && opts.selector !== undefined) throw new UsageError("a screenshot is of the element a ref or a --selector names, not both");
+  if (opts.ref !== undefined && opts.selector !== undefined) throw new UsageError("a screenshot is of the element a ref or a selector names, not both");
   if ((opts.ref !== undefined || opts.selector !== undefined) && opts.full)
-    throw new UsageError("a screenshot is of one element (a ref or a --selector) or of the full page, not both");
+    throw new UsageError("a screenshot is of one element (a ref or a selector) or of the full page, not both");
   if (opts.ref !== undefined) checkRef(opts.ref);
   const format = opts.format ?? "png";
   if (format !== "png" && format !== "jpeg") throw new UsageError(`screenshot format is png or jpeg, not ${JSON.stringify(format)}`);

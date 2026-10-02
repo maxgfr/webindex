@@ -288,15 +288,14 @@ describe("the in-page overlay probe", () => {
     expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([bar]);
   });
 
-  it("takes nothing with no control and almost no text for an overlay: an image ad layer, an empty dialog, a blank consent box", () => {
+  it("takes nothing with no control and almost no text for an overlay: an image ad layer, an empty dialog", () => {
     const { doc, body } = page();
     // eurosport.fr: a fixed ad slot over the page, holding one image.
     const ad = el("DIV", { style: { position: "fixed" }, rect: FULL });
     const img = el("IMG", { rect: FULL });
     ad.add(el("DIV").add(img));
     const empty = el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" }, text: "Loading…" });
-    const blank = el("DIV", { attrs: { id: "didomi-host" }, style: { position: "fixed" } });
-    body.add(ad, empty, blank);
+    body.add(ad, empty);
     doc.top = img;
     expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([]);
     // A link (or any control), or some text to read, makes it one.
@@ -304,6 +303,28 @@ describe("the in-page overlay probe", () => {
     const notice = el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" }, text: "This site is closed for maintenance until Monday morning." });
     body.add(notice);
     expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([ad, notice]);
+  });
+
+  it("never calls a consent vendor's container bare, nor a custom element whose shadow root may be closed: a real wall stays a wall", () => {
+    const { doc, body } = page();
+    // consentmanager.net: buttons that are <div onclick>, and little text.
+    const cmp = el("DIV", { attrs: { id: "cmpbox" }, style: { position: "fixed" }, rect: { left: 0, top: 600, width: VW, height: 200 }, text: "Cookies? OK" });
+    cmp.add(el("DIV", { text: "OK" }));
+    // A web component with a closed shadow root: from outside, no text and no control.
+    const wall = el("COOKIE-WALL", { style: { position: "fixed" }, rect: FULL });
+    // One inside a fixed layer counts for the layer.
+    const layer = el("DIV", { attrs: { role: "dialog" }, style: { position: "fixed" } });
+    layer.add(el("X-CONSENT"));
+    body.add(cmp, wall, layer);
+    doc.top = wall;
+    expect(inPage(OVERLAYS_SOURCE, doc)).toEqual([cmp, wall, layer]);
+    // An open shadow root is looked into: an empty one is bare.
+    const open = el("AD-SLOT", { style: { position: "fixed" }, rect: FULL });
+    open.attachShadow(el("IMG"));
+    const { doc: doc2, body: body2 } = page();
+    body2.add(open);
+    doc2.top = open;
+    expect(inPage(OVERLAYS_SOURCE, doc2)).toEqual([]);
   });
 
   it("sees a control or text inside a shadow root, and counts a focusable or editable element as a control", () => {
@@ -388,12 +409,20 @@ describe("what the overlay root is", () => {
     const ad = el("DIV", { style: { position: "fixed" }, rect: FULL });
     ad.add(el("IMG"));
     const dialog = el("DIV", { attrs: { role: "dialog" }, rect: { width: 0, height: 0 }, text: "Ad" });
-    const vendor = el("DIV", { attrs: { id: "usercentrics-root" }, rect: { width: 0, height: 0 } });
-    body.add(ad, dialog, vendor);
+    body.add(ad, dialog);
     doc.top = ad;
     expect(info(doc, ad)).toEqual({ what: "<div>", overlay: false });
     expect(info(doc, dialog).overlay).toBe(false);
-    expect(info(doc, vendor).overlay).toBe(false);
+  });
+
+  it("is an overlay when it is a consent vendor's container or a closed web component, however bare it looks", () => {
+    const { doc, body } = page();
+    const cmp = el("DIV", { attrs: { id: "cmpbox" }, rect: { width: 0, height: 0 }, text: "OK" });
+    const wall = el("COOKIE-WALL", { style: { position: "fixed" }, rect: FULL });
+    body.add(cmp, wall);
+    doc.top = wall;
+    expect(info(doc, cmp).overlay).toBe(true);
+    expect(info(doc, wall).overlay).toBe(true);
   });
 
   it("is no overlay when it is only a fixed bar, a sticky header or a chat bubble", () => {

@@ -514,6 +514,19 @@ describe("click", () => {
     expect(mouse()).toHaveLength(3);
   });
 
+  it("refuses a container's ref, even confirmed: what it would press is whatever control sits at its centre", async () => {
+    writeRefs("T1", { loaderId: "L1", url: "https://a.test/", next: 10, refs: { e1: 101, e2: 102 }, containers: ["e1"] });
+    w.add(101, { tag: "TABLE" });
+    w.add(102, { tag: "BUTTON", text: "Go" });
+    const err = await click(session, "e1", { deps, confirm: true }).catch((e) => e);
+    expect(err).toBeInstanceOf(UsageError);
+    expect(err.message).toBe("e1 is a container — click a control inside it (take a snapshot of e1)");
+    expect(mouse()).toEqual([]);
+    w.hitFor = 102;
+    await click(session, "e2", { deps });
+    expect(mouse()).toHaveLength(3);
+  });
+
   it("reports a stale ref as stale, not as a guard refusal", async () => {
     w.add(101, { tag: "BUTTON", label: "Delete account" });
     w.loader = "L2";
@@ -956,24 +969,27 @@ describe("screenshot", () => {
   });
 
   /** document.querySelector in the page: these selectors match these elements. */
-  const selectors = (found: Record<string, number>) =>
-    w.page.handle("Runtime.evaluate", ({ expression }) => {
-      const m = /^document\.querySelector\((".*")\)$/.exec(expression);
-      if (!m) return {};
-      const css = JSON.parse(m[1] as string) as string;
-      if (css.endsWith("[")) return { exceptionDetails: { text: "Uncaught", exception: { description: "SyntaxError: not a valid selector" } }, result: {} };
-      const id = found[css];
-      return id === undefined
-        ? { result: { type: "object", subtype: "null", value: null } }
-        : { result: { type: "object", subtype: "node", objectId: `o${id}` } };
+  /** DOM.querySelector on the document: these selectors match these elements (nodeId = backendNodeId + 1000). */
+  const selectors = (found: Record<string, number>) => {
+    w.page.handle("DOM.getDocument", () => ({ root: { nodeId: 1 } }));
+    w.page.handle("DOM.querySelector", ({ selector }) => {
+      if (selector.endsWith("[")) throw new CdpError("DOM.querySelector", -32000, "DOM Error while querying");
+      const id = found[selector];
+      return { nodeId: id === undefined ? 0 : id + 1000 };
     });
+    w.page.handle("DOM.describeNode", ({ objectId, nodeId }) => ({
+      node: { backendNodeId: nodeId !== undefined ? nodeId - 1000 : Number(String(objectId).slice(1)) },
+    }));
+  };
 
   it("clips to the element a CSS selector matches, and lets the handle it took go", async () => {
     w.add(150, { tag: "TABLE", quads: [[10, 20, 310, 20, 310, 420, 10, 420]] });
     selectors({ "table.infobox": 150 });
     await screenshot(session, { selector: "table.infobox" });
     expect(shot()).toEqual({ format: "png", clip: { x: 10, y: 520, width: 300, height: 400, scale: 1 } });
-    expect(w.page.methods()).toContain("Runtime.releaseObjectGroup");
+    // The DOM domain, not the page's own document.querySelector, which a page can replace.
+    expect(w.page.methods()).toEqual(expect.arrayContaining(["DOM.getDocument", "DOM.querySelector"]));
+    expect(w.page.methods()).not.toContain("Runtime.evaluate");
   });
 
   it("fails on a selector that matches nothing (exit 1), and refuses a bad one, or one with a ref or --full (usage)", async () => {

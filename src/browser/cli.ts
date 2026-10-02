@@ -149,6 +149,8 @@ type Action = keyof typeof USAGE;
 export const BROWSER_ACTIONS = Object.keys(USAGE) as Action[];
 
 const SNAPSHOT_MAX_CHARS = 20_000;
+/** The actions --selector means something to. */
+const SELECTOR_ACTIONS = new Set(["snapshot", "screenshot", "wait"]);
 
 interface Ctx {
   action: Action;
@@ -177,6 +179,8 @@ export async function runBrowserCommand(action: string, args: string[], flags: B
   const ctx: Ctx = { action: action as Action, args, flags, deps };
   try {
     if (!Object.hasOwn(HANDLERS, action)) throw new UsageError(`usage: ${cliName()} browser ${BROWSER_ACTIONS.join("|")}`);
+    // Any other action would ignore it, and act on something the agent did not mean.
+    if (flags.selector !== undefined && !SELECTOR_ACTIONS.has(action)) throw new UsageError("--selector goes with snapshot, screenshot and wait only");
     const out = await HANDLERS[action as Action](ctx);
     const dialogs = unreported(ctx);
     // Every success says so in its JSON, as every failure does with `ok: false`.
@@ -316,7 +320,8 @@ const snapOpts = (ctx: Ctx, ref?: string): SnapshotOptions => ({
 /** What --capture recorded: during this command, and in the tab's log, which keeps every command's until `network clear`. */
 interface Captured {
   captured: number;
-  logged: number;
+  /** Unknown under no-write: nothing reaches the log. */
+  logged?: number;
 }
 
 /** Run `fn` with a NetworkRecorder on the page when --capture asks; how many JSON responses it kept, and how many the log holds now. */
@@ -329,7 +334,7 @@ async function capturing<T>(ctx: Ctx, s: BrowserSession, fn: () => Promise<T>): 
     const value = await fn();
     stopped = true;
     const captured = (await rec.stop()).length;
-    return { value, capture: { captured, logged: listNetwork(s.targetId).length } };
+    return { value, capture: { captured, ...(isNoWrite() ? {} : { logged: listNetwork(s.targetId).length }) } };
   } finally {
     // On a throw: detach, and keep what was recorded before it.
     if (!stopped) await rec.stop().catch(() => {});
@@ -358,9 +363,9 @@ const challengeLine = (ctx: Ctx, c: Challenge): string =>
   `challenge: ${c.kind}${c.blocking ? " (blocking)" : ""} — let the human solve it, then ${follow(ctx).waitClear}`;
 
 const capturedLine = (ctx: Ctx, c: Captured): string =>
-  `captured ${c.captured} JSON response${c.captured === 1 ? "" : "s"} (${c.logged} in the log) — ${follow(ctx).networkList}`;
+  `captured ${c.captured} JSON response${c.captured === 1 ? "" : "s"}${c.logged !== undefined ? ` (${c.logged} in the log)` : ""} — ${follow(ctx).networkList}`;
 
-const capturedJson = (c: Captured | undefined) => (c ? { captured: c.captured, logged: c.logged } : {});
+const capturedJson = (c: Captured | undefined) => (c ? { captured: c.captured, ...(c.logged !== undefined ? { logged: c.logged } : {}) } : {});
 
 /** How much of a field's value a result line shows. */
 const VALUE_SHOWN = 200;
@@ -528,7 +533,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
   async snapshot(ctx) {
     arity(ctx, 0, 1);
     const { selector } = ctx.flags;
-    if (ctx.args[0] !== undefined && selector !== undefined) throw new UsageError("a snapshot is scoped to a ref or to a --selector, not both");
+    if (ctx.args[0] !== undefined && selector !== undefined) throw new UsageError("a snapshot is scoped to a ref or to a selector, not both");
     if (ctx.args[0] !== undefined) refArg(ctx);
     const r = await onPage(ctx, (s) => takeSnapshot(s, { ...snapOpts(ctx, ctx.args[0]), ...(selector !== undefined ? { selector } : {}) }));
     return { json: r, text: r.text };
@@ -666,9 +671,9 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     const ref = ctx.args[0];
     const { selector, full } = ctx.flags;
     // Checked here, before a browser is reached for.
-    if (ref !== undefined && selector !== undefined) throw new UsageError("a screenshot is of the element a ref or a --selector names, not both");
+    if (ref !== undefined && selector !== undefined) throw new UsageError("a screenshot is of the element a ref or a selector names, not both");
     if ((ref !== undefined || selector !== undefined) && full)
-      throw new UsageError("a screenshot is of one element (a ref or a --selector) or of the full page, not both");
+      throw new UsageError("a screenshot is of one element (a ref or a selector) or of the full page, not both");
     if (ref !== undefined) refArg(ctx);
     const bytes = await onPage(ctx, (s) =>
       actions.screenshot(s, {

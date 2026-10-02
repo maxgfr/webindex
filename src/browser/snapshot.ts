@@ -1,5 +1,5 @@
 import { UsageError } from "../cli-kit.js";
-import type { CdpSession } from "./cdp.js";
+import { CdpError, type CdpSession } from "./cdp.js";
 import { findOverlays } from "./overlay.js";
 import type { BrowserSession } from "./session.js";
 import { type RefTable, readRefs, writeRefs } from "./state.js";
@@ -59,7 +59,7 @@ export interface RenderResult {
   text: string;
   refs: RefTable;
   truncated: boolean;
-  /** Refs visible in `text`. */
+  /** Refs visible in `text`: the controls', and in a full snapshot the containers' too. */
   refCount: number;
 }
 
@@ -87,29 +87,25 @@ export class NoMatchError extends Error {
   }
 }
 
-const SELECTOR_GROUP = "selector-probe";
-
 /**
  * The backendNodeId of the first element of the main document a CSS selector
- * matches. NoMatchError when none does; a UsageError when the page calls it no
- * selector at all. What the lookup held is released, whatever happens.
+ * matches, through the DOM domain: the page's own document.querySelector,
+ * which a page may replace, is never called. NoMatchError when none matches;
+ * a UsageError when the browser calls it no selector at all.
  */
 export async function elementBySelector(page: CdpSession, selector: string): Promise<number> {
+  const { root } = await page.send<{ root: { nodeId: number } }>("DOM.getDocument", { depth: 0 });
+  let nodeId: number | undefined;
   try {
-    const r = await page.send<{ result?: { objectId?: string }; exceptionDetails?: unknown }>("Runtime.evaluate", {
-      expression: `document.querySelector(${JSON.stringify(selector)})`,
-      returnByValue: false,
-      objectGroup: SELECTOR_GROUP,
-    });
-    if (r.exceptionDetails) throw new UsageError(`${JSON.stringify(selector)} is not a valid CSS selector`);
-    const objectId = r.result?.objectId;
-    if (!objectId) throw new NoMatchError(selector);
-    const { node } = await page.send<{ node?: { backendNodeId?: number } }>("DOM.describeNode", { objectId });
-    if (typeof node?.backendNodeId !== "number" || node.backendNodeId <= 0) throw new NoMatchError(selector);
-    return node.backendNodeId;
-  } finally {
-    page.send("Runtime.releaseObjectGroup", { objectGroup: SELECTOR_GROUP }).catch(() => {});
+    ({ nodeId } = await page.send<{ nodeId?: number }>("DOM.querySelector", { nodeId: root.nodeId, selector }));
+  } catch (e) {
+    if (e instanceof CdpError) throw new UsageError(`${JSON.stringify(selector)} is not a valid CSS selector`);
+    throw e;
   }
+  if (!nodeId) throw new NoMatchError(selector);
+  const { node } = await page.send<{ node?: { backendNodeId?: number } }>("DOM.describeNode", { nodeId });
+  if (typeof node?.backendNodeId !== "number" || node.backendNodeId <= 0) throw new NoMatchError(selector);
+  return node.backendNodeId;
 }
 
 const NAME_MAX = 120;
@@ -213,6 +209,8 @@ function states(n: AXNode): string[] {
 
 class Renderer {
   readonly refs: Record<string, number>;
+  /** The refs that name a container only, never a control. */
+  readonly containers: Set<string>;
   next: number;
   private readonly seen = new Set<AXNode>();
   private readonly trees = new Map<string, Tree>();
@@ -222,6 +220,7 @@ class Renderer {
     private readonly frames: Record<string, AXNode[]>,
   ) {
     this.refs = { ...table.refs };
+    this.containers = new Set(table.containers ?? []);
     this.next = table.next;
   }
 
@@ -286,7 +285,12 @@ class Renderer {
     if (name) head += ` "${(name.length > NAME_MAX ? `${name.slice(0, NAME_MAX)}…` : name).replace(/"/g, '\\"')}"`;
     const level = prop(n, "level");
     if (level !== undefined && role === "heading") head += ` [level=${String(level)}]`;
-    if (wantsRef) head += ` [ref=${this.refFor(n.backendDOMNodeId as number)}]`;
+    if (wantsRef) {
+      const ref = this.refFor(n.backendDOMNodeId as number);
+      if (acts) this.containers.delete(ref);
+      else this.containers.add(ref);
+      head += ` [ref=${ref}]`;
+    }
     for (const s of states(n)) head += ` ${s}`;
 
     let kids: Item[];
@@ -396,7 +400,13 @@ export function renderSnapshot(nodes: AXNode[], opts: RenderOptions): RenderResu
   const text = [...kept.map((l) => l.text), ...(tail ? [tail] : [])].join("\n");
   return {
     text,
-    refs: { loaderId: opts.refs.loaderId, url: opts.refs.url, next: r.next, refs: r.refs },
+    refs: {
+      loaderId: opts.refs.loaderId,
+      url: opts.refs.url,
+      next: r.next,
+      refs: r.refs,
+      ...(r.containers.size ? { containers: [...r.containers].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))) } : {}),
+    },
     truncated: tail !== "",
     refCount: kept.filter((l) => l.ref).length,
   };
@@ -468,7 +478,7 @@ async function collectFrames(session: BrowserSession, main: AXNode[]): Promise<R
  * a ref that is not in it, NoMatchError for a selector that matches nothing.
  */
 export async function takeSnapshot(session: BrowserSession, opts: SnapshotOptions = {}): Promise<SnapshotResult> {
-  if (opts.ref !== undefined && opts.selector !== undefined) throw new UsageError("a snapshot is scoped to a ref or to a --selector, not both");
+  if (opts.ref !== undefined && opts.selector !== undefined) throw new UsageError("a snapshot is scoped to a ref or to a selector, not both");
   if (opts.ref !== undefined) checkRef(opts.ref);
   const loaderId = await session.loaderId();
   const url = await session.currentUrl();

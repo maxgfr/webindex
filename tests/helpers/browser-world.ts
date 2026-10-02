@@ -89,16 +89,14 @@ export class BrowserWorld {
       if (name === "fileInput") return { result: { value: { ok: true, multiple: true, what: "<input>" } } };
       return { result: {} };
     });
-    fake.handle("DOM.describeNode", ({ objectId }) => ({ node: { nodeId: 0, backendNodeId: Number(String(objectId).slice(1)) } }));
+    fake.handle("DOM.getDocument", () => ({ root: { nodeId: 1 } }));
+    // nodeId = backendNodeId + 1000.
+    fake.handle("DOM.querySelector", ({ selector }) => ({ nodeId: this.selectors[selector] === undefined ? 0 : (this.selectors[selector] as number) + 1000 }));
+    fake.handle("DOM.describeNode", ({ objectId, nodeId }) => ({
+      node: { nodeId: 0, backendNodeId: nodeId !== undefined ? nodeId - 1000 : Number(String(objectId).slice(1)) },
+    }));
     fake.handle("Runtime.evaluate", ({ expression }) => {
       const e = String(expression);
-      const query = /^document\.querySelector\((".*")\)$/.exec(e);
-      if (query) {
-        const id = this.selectors[JSON.parse(query[1] as string) as string];
-        return id === undefined
-          ? { result: { type: "object", subtype: "null", value: null } }
-          : { result: { type: "object", subtype: "node", objectId: `o${id}` } };
-      }
       if (e.includes(COLLECT_SOURCE)) return { result: { value: this.active } };
       if (e.includes("document.cookie")) {
         return {

@@ -392,6 +392,17 @@ const after = (a: Record<string, unknown>): BrowserCliFlags => ({
   ...(a.interactive === true ? { interactive: true } : {}),
   ...(num(a.maxChars) !== undefined ? { maxChars: num(a.maxChars) } : {}),
 });
+/** A ref argument, checked here so that the error names the tools' `selector`, not the CLI's --selector. */
+function refArg(a: Record<string, unknown>): string {
+  const v = String(a.ref ?? "");
+  if (!/^e\d+$/.test(v)) {
+    throw new ToolError(
+      "expected a ref like e12 from the latest snapshot; CSS selectors: pass `selector` to webindex_browser_screenshot or webindex_browser_snapshot, or wait with condition selector",
+    );
+  }
+  return v;
+}
+
 const confirmed = (a: Record<string, unknown>): BrowserCliFlags => (a.confirm === true ? { confirm: true } : {});
 
 /** Put `notes` after the first line of a result, before the snapshot that may follow it. */
@@ -587,20 +598,20 @@ class Host implements BrowserToolHost {
     },
     snapshot: (a) => {
       const mode = oneOf(a, "mode", ["full", "interactive"] as const);
-      const r = str(a.ref);
+      const r = a.ref === undefined ? undefined : refArg(a);
       const selector = str(a.selector);
+      if (r !== undefined && selector !== undefined) throw new ToolError("a snapshot is scoped to a `ref` or to a `selector`, not both");
       return this.cli("snapshot", r ? [r] : [], {
         interactive: mode === "interactive",
         ...(selector !== undefined ? { selector } : {}),
         ...(num(a.maxChars) !== undefined ? { maxChars: num(a.maxChars) } : {}),
       });
     },
-    click: (a) => this.cli("click", [String(a.ref ?? "")], { ...after(a), ...confirmed(a) }),
-    hover: (a) => this.cli("hover", [String(a.ref ?? "")], after(a)),
-    type: (a) =>
-      this.cli("type", [String(a.ref ?? ""), String(a.text ?? "")], { ...after(a), ...confirmed(a), ...(a.submit === true ? { submit: true } : {}) }),
-    fill: (a) => this.cli("fill", [String(a.ref ?? ""), String(a.text ?? "")], after(a)),
-    select: (a) => this.cli("select", [String(a.ref ?? ""), ...strings(a.values)], after(a)),
+    click: (a) => this.cli("click", [refArg(a)], { ...after(a), ...confirmed(a) }),
+    hover: (a) => this.cli("hover", [refArg(a)], after(a)),
+    type: (a) => this.cli("type", [refArg(a), String(a.text ?? "")], { ...after(a), ...confirmed(a), ...(a.submit === true ? { submit: true } : {}) }),
+    fill: (a) => this.cli("fill", [refArg(a), String(a.text ?? "")], after(a)),
+    select: (a) => this.cli("select", [refArg(a), ...strings(a.values)], after(a)),
     press: (a) => this.cli("press", [String(a.key ?? "")], { ...after(a), ...confirmed(a) }),
     upload: (a) => {
       const files = strings(a.files).map((f) => this.localFile(f));
@@ -609,7 +620,7 @@ class Host implements BrowserToolHost {
           `uploading ${files.join(", ")} needs confirm: true: with no extract root, any file of this machine could go — ask the user, naming the files, then retry with confirm: true`,
         );
       }
-      return this.cli("upload", [String(a.ref ?? ""), ...files], after(a));
+      return this.cli("upload", [refArg(a), ...files], after(a));
     },
     scroll: (a) => this.cli("scroll", [String(a.target ?? "")], after(a)),
     history: (a) => {
@@ -675,8 +686,9 @@ class Host implements BrowserToolHost {
     },
     screenshot: async (a) => {
       const area = oneOf(a, "area", ["viewport", "full", "element"] as const);
-      const r = str(a.ref);
+      const r = a.ref === undefined ? undefined : refArg(a);
       const selector = str(a.selector);
+      if (area !== "element" && (r !== undefined || selector !== undefined)) throw new ToolError('`ref` and `selector` go with area "element"');
       if (area === "element" && r !== undefined && selector !== undefined) throw new ToolError('area "element" takes a `ref` or a `selector`, not both');
       if (area === "element" && r === undefined && selector === undefined)
         throw new ToolError('`ref` is required with area "element": the element to capture, from the latest snapshot (or a CSS `selector`)');

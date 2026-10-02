@@ -231,6 +231,11 @@ describe("renderSnapshot", () => {
     const i = renderSnapshot(nodes, { refs: fresh(), interactive: true });
     expect(i.text).toBe('- button "Go" [ref=e10]');
     expect(i.refCount).toBe(1);
+    // The table remembers which refs are containers only: a click on one is refused.
+    expect(r.refs.containers).toEqual(["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9"]);
+    // A ref that is a control is no container, whatever an earlier table said.
+    const again = renderSnapshot(nodes, { refs: { ...r.refs, containers: ["e1", "e10"] } });
+    expect(again.refs.containers).toEqual(["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9"]);
     // A container's ref scopes a snapshot to it.
     expect(renderSnapshot(nodes, { refs: r.refs, rootBackendId: 10 }).text).toBe(lines('- table "Florian Wirtz" [ref=e1]', '  - cell "Born"'));
   });
@@ -558,16 +563,15 @@ describe("takeSnapshot", () => {
   it("scopes to the element a CSS selector matches, and fails on one that matches nothing", async () => {
     fake.addTarget("https://a.test/", "T");
     scriptAx({ main: fixture("login-form") });
-    fake.handle("Runtime.evaluate", (p: { expression: string }) => {
-      if (!p.expression.includes("querySelector")) return { result: { type: "undefined" } };
-      if (p.expression.includes('"a.reset"')) return { result: { type: "object", subtype: "node", objectId: "sel-16" } };
-      if (p.expression.includes('"div["')) return { exceptionDetails: { text: "SyntaxError" }, result: { type: "object" } };
-      return { result: { type: "object", subtype: "null", value: null } };
+    // Through the DOM domain, never the page's own document.querySelector (a page can replace it).
+    fake.handle("DOM.getDocument", () => ({ root: { nodeId: 1, backendNodeId: 1 } }));
+    fake.handle("DOM.querySelector", (p: { nodeId: number; selector: string }) => {
+      expect(p.nodeId).toBe(1);
+      if (p.selector === "div[") throw { code: -32000, message: "DOM Error while querying" };
+      return { nodeId: p.selector === "a.reset" ? 116 : 0 };
     });
     const describe = fake.handlerOf("DOM.describeNode");
-    fake.handle("DOM.describeNode", (p: { objectId?: string }, sid) =>
-      p.objectId?.startsWith("sel-") ? { node: { nodeId: 0, backendNodeId: Number(p.objectId.slice(4)) } } : describe?.(p, sid),
-    );
+    fake.handle("DOM.describeNode", (p: { nodeId?: number }, sid) => (p.nodeId === 116 ? { node: { nodeId: 116, backendNodeId: 16 } } : describe?.(p, sid)));
     const s = await attach();
     const r = await takeSnapshot(s, { selector: "a.reset" });
     expect(r.text).toBe(lines("url: https://a.test/", "title: T", '- link "Forgot password?" [ref=e1]', "  - /url: https://example.org/reset"));
@@ -577,6 +581,7 @@ describe("takeSnapshot", () => {
     expect(none.message).toBe("no element matches table.nope");
     await expect(takeSnapshot(s, { selector: "div[" })).rejects.toBeInstanceOf(UsageError);
     await expect(takeSnapshot(s, { selector: "a.reset", ref: "e1" })).rejects.toBeInstanceOf(UsageError);
+    expect(fake.calls.some((c) => c.method === "Runtime.evaluate" && String(c.params?.expression).includes("querySelector"))).toBe(false);
   });
 
   it("applies interactive and maxChars", async () => {

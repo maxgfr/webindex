@@ -153,6 +153,19 @@ addEventListener("beforeunload", (e) => {
   <img alt="Advertisement" style="display: block; width: 100%; height: 100%" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%23ddd'/%3E%3C/svg%3E">
 </div>
 </body></html>`,
+  // A consent wall in a web component with a CLOSED shadow root: from the page, no text and no control.
+  "/closed.html": `<!doctype html><html><head><title>Closed wall</title></head><body>
+<main><h1>Behind a closed wall</h1><button type="button" onclick="document.getElementById('out').textContent = 'Read'">Read on</button><p id="out">Nothing yet</p></main>
+<cookie-wall style="position: fixed; inset: 0; z-index: 9999; display: block"></cookie-wall>
+<script>
+customElements.define("cookie-wall", class extends HTMLElement {
+  constructor() {
+    super();
+    const root = this.attachShadow({ mode: "closed" });
+    root.innerHTML = '<div style="background: #fff; height: 100%"><p>We use cookies</p><button>Accept all</button><button>Reject all</button></div>';
+  }
+});
+</script></body></html>`,
   "/js.html": `<!doctype html><html><head><title>Rendered later</title></head><body><main id="root"></main>
 <script>
 fetch("/api.json").then((r) => r.json()).then((j) => {
@@ -616,12 +629,28 @@ describe.runIf(live)("a real browser, driven command by command", () => {
   );
 
   it(
+    "keeps a consent wall in a closed shadow root an overlay: shown first, and a click under it is the user's choice",
+    async () => {
+      const r = await ok("open", [`${base}/closed.html`], { snapshot: true });
+      expect(r.text).toContain("- overlay (covers the page):");
+      const under = await run("click", [refOf(r.text, "button", "Read on")]);
+      expect(under.exitCode).toBe(1);
+      expect(under.text).toMatch(/^e\d+ is covered by an overlay \(<cookie-wall>\)/);
+      expect(under.text).toMatch(/ask before choosing$/);
+    },
+    STEP_MS,
+  );
+
+  it(
     "screenshots a container by its ref and by --selector: the infobox table, not the page around it",
     async () => {
       const r = await ok("open", [`${base}/infobox.html`], { snapshot: true });
       const table = refOf(r.text, "table", "Florian Wirtz");
-      // A container's ref is not a control: --interactive leaves it out.
+      // A container's ref is not a control: --interactive leaves it out, and click refuses it.
       expect((await ok("snapshot", [], { interactive: true })).text).not.toContain(`[ref=${table}]`);
+      const pressed = await run("click", [table], { confirm: true });
+      expect(pressed.exitCode).toBe(2);
+      expect(pressed.text).toBe(`${table} is a container — click a control inside it (take a snapshot of ${table})`);
       await ok("screenshot", [table], { out: "box-ref.png" });
       const css = await ok("screenshot", [], { selector: "table.infobox", out: "box-css.png" });
       expect(css.json).toMatchObject({ format: "png" });

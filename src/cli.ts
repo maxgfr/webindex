@@ -348,18 +348,18 @@ COMMANDS
              on first use (headed unless --headless) and reused by every later
              call, its tab and refs included. attach <port|url> (or --cdp)
              drives one on a loopback port; close shuts down only a browser it
-             launched. snapshot prints the accessibility tree with refs (e12)
-             on controls and containers (table, figure, article…) for the
-             actions; --selector <css> scopes snapshot and screenshot to any
-             element. A ref from before a navigation is stale: snapshot again.
-             fill and type echo the value (never a password's). A click or an
-             Enter that looks irreversible (pay, delete, send…) or submits a
-             password is refused unless --confirm: ask the user first. A
-             challenge is never bypassed: the human solves it, then wait
-             --clear. --capture records the JSON fetched while its command runs
-             (network list|get; the log grows until network clear). A dialog is
-             dismissed before the command ends; mcp --browser answers them.
-             Exit 1: a stale ref, a timeout, a refusal; --json on every action.
+             launched. snapshot prints the accessibility tree with refs (e12):
+             controls, for the actions; containers (table, figure…), to scope
+             snapshot and screenshot, as --selector <css> does. A ref from
+             before a navigation is stale. fill and type echo the value (never
+             a password's). A click or an Enter that looks irreversible (pay,
+             delete, send…) or submits a password is refused unless --confirm:
+             ask the user first. A challenge is never bypassed: the human
+             solves it, then wait --clear. --capture records the JSON fetched
+             while its command runs (network list|get; the log grows until
+             network clear). A dialog is dismissed before the command ends; mcp
+             --browser answers them. Exit 1: a stale ref, a timeout, a refusal;
+             --json on every action.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which

@@ -121,6 +121,9 @@ const HELPERS = `const up = (n) => n.parentElement || (n.parentNode && n.parentN
    * Nothing to answer in it: no control, itself or inside (open shadow roots
    * included), and under ${BARE_TEXT_MAX} characters of text. An ad slot holding
    * an image is one; a cookie wall, a login dialog, a notice to read are not.
+   * Never bare: a consent vendor's container (its buttons may be plain divs),
+   * nor anything holding a custom element with no open shadow root (a closed
+   * one hides its text and controls from here).
    */
   const bare = (el) => {
     let text = textLength(el);
@@ -129,7 +132,8 @@ const HELPERS = `const up = (n) => n.parentElement || (n.parentNode && n.parentN
       // Too big to look through: whatever it is, it is no empty layer.
       if (text >= ${BARE_TEXT_MAX} || seen > 5000) return false;
       const n = stack.pop();
-      if (n.nodeType === 1 && isControl(n)) return false;
+      if (n.nodeType === 1 && (isControl(n) || isConsent(n))) return false;
+      if (n.nodeType === 1 && String(n.tagName || "").indexOf("-") >= 0 && !n.shadowRoot) return false;
       for (const k of Array.from(n.children || [])) stack.push(k);
       if (n.shadowRoot) {
         for (const k of Array.from(n.shadowRoot.children || [])) {
