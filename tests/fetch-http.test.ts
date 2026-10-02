@@ -164,9 +164,22 @@ describe("htmlToText", () => {
     expect(htmlToText("<p><a href='/e'>Earth</a>'s hydrosphere</p>")).toBe("Earth's hydrosphere");
   });
 
-  it("still separates adjacent inline elements and non-inline tags", () => {
-    expect(htmlToText('<a class="topic-tag">widgets</a><a class="topic-tag">ui</a>')).toBe("widgets ui");
-    expect(htmlToText("<span>Home</span><span>About</span>")).toBe("Home About");
+  it("adds no whitespace between inline elements set back to back: per-letter spans read as words", () => {
+    // A cross-fade animation that wraps every letter in a <span> (example.org's
+    // /s.js since 2026) read "T h i s d o m a i n".
+    expect(htmlToText("<p><span>T</span><span>h</span><span>i</span><span>s</span><span> </span><span>d</span><span>o</span></p>")).toBe("This do");
+    expect(htmlToText("<p><span>Hello</span> <span>world</span><span>!</span></p>")).toBe("Hello world!");
+    expect(htmlToText("<p><span>Hello </span><span>world</span> <span>again</span></p>")).toBe("Hello world again");
+    expect(htmlToText('<p>un<b>believ</b>able, un<a href="/x">believ</a>able, <b>bold</b><i>italic</i></p>')).toBe("unbelievable, unbelievable, bolditalic");
+    expect(htmlToText("<p><a>widgets</a><a>ui</a> <a>web</a></p>")).toBe("widgetsui web");
+  });
+
+  it("still separates blocks, line breaks, list items, table cells and non-inline tags", () => {
+    expect(htmlToText("<p><span>One</span></p><p><span>Two</span></p>")).toBe("One\nTwo");
+    expect(htmlToText("<div><span>a</span></div><div><span>b</span></div>")).toBe("a\nb");
+    expect(htmlToText("<ul><li><span>a</span></li><li><span>b</span></li></ul>")).toBe("a\nb");
+    expect(htmlToText("<table><tr><td><span>a</span></td><td><span>b</span></td></tr></table>")).toBe("a\nb");
+    expect(htmlToText("<p><span>a</span><br><span>b</span></p>")).toBe("a\nb");
     expect(htmlToText('left<img src="x.png">right')).toBe("left right");
   });
 
