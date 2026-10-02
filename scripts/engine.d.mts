@@ -903,6 +903,8 @@ interface BrowserBinary {
 interface DetectOptions {
     /** Tried first, before the usual order. */
     prefer?: BrowserKind;
+    /** This kind only: null when it is not installed, never another one instead. */
+    kind?: BrowserKind;
     /** Reads `<PREFIX>_<suffix>`; defaults to the brand's own environment. */
     env?: (suffix: string) => string | undefined;
     /** The system environment (`PATH`, `ProgramFiles`, `LOCALAPPDATA`); defaults to `process.env`. */
@@ -914,9 +916,9 @@ interface DetectOptions {
     exists?: (path: string) => boolean;
 }
 /**
- * The browser to launch: `<PREFIX>_BROWSER_BIN` if set, then `prefer` (else
- * `<PREFIX>_BROWSER_KIND`), then Chrome, Brave, Chromium, Edge. `null` when
- * none is installed.
+ * The browser to launch: `<PREFIX>_BROWSER_BIN` if set; else that `kind` only
+ * (`<PREFIX>_BROWSER_KIND` when neither `kind` nor `prefer` is given); else
+ * `prefer`, then Chrome, Brave, Chromium, Edge. `null` when none is installed.
  *
  * An explicit path that does not exist throws rather than falling through: a
  * user who named a binary and was handed a different one would drive the wrong
@@ -1030,8 +1032,8 @@ interface BrowserDeps {
     sleep(ms: number): Promise<void>;
     connectCdp(wsUrl: string): Promise<CdpClient>;
     discovery: typeof discovery;
-    /** Which browser to launch when none is named (`detectBrowserBinary`), trying `prefer` first. */
-    detectBrowser(prefer?: BrowserKind): BrowserBinary | null;
+    /** Which browser to launch when no binary is named (`detectBrowserBinary`): of that `kind` only, when one is given. */
+    detectBrowser(kind?: BrowserKind): BrowserBinary | null;
     /** Signal a process we launched in an earlier call, known only by its pid. */
     kill(pid: number, signal: NodeJS.Signals): void;
     /** Reads `WEBINDEX_<name>` (brand-aware), like the rest of the library. */

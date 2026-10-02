@@ -4809,13 +4809,14 @@ function detectBrowserBinary(opts = {}) {
     if (!found) throw new Error(`BROWSER_BIN points at "${explicit}", which is not an executable file`);
     return { kind: kindOf(found), path: found };
   }
-  let prefer = opts.prefer;
-  if (!prefer) {
+  let only = opts.kind;
+  if (!only && !opts.prefer) {
     const asked = (opts.env ? opts.env("BROWSER_KIND") : env("BROWSER_KIND"))?.trim().toLowerCase();
-    if (asked && !isBrowserKind(asked)) throw new Error(`BROWSER_KIND is "${asked}", not one of ${ORDER.join(", ")}`);
-    if (asked && isBrowserKind(asked)) prefer = asked;
+    if (asked && !isBrowserKind(asked)) throw new Error(`${envName("BROWSER_KIND")} is "${asked}", not one of ${ORDER.join(", ")}`);
+    if (asked && isBrowserKind(asked)) only = asked;
   }
-  const kinds = prefer ? [prefer, ...ORDER.filter((k) => k !== prefer)] : ORDER;
+  const prefer = opts.prefer;
+  const kinds = only ? [only] : prefer ? [prefer, ...ORDER.filter((k) => k !== prefer)] : ORDER;
   for (const kind of kinds) {
     const path = candidates(kind, platform, sys, home).find(exists);
     if (path) return { kind, path };
@@ -4823,7 +4824,7 @@ function detectBrowserBinary(opts = {}) {
   return null;
 }
 function ignoresUnpackedExtensions(bin, browserVersion) {
-  if (bin.kind !== "chrome" || /for testing/i.test(bin.path.split(/[\\/]/).pop() ?? "")) return false;
+  if (bin.kind !== "chrome" || /for[ _-]?testing|[\\/]chrome-(?:linux|mac|win)[^\\/]*[\\/]/i.test(bin.path)) return false;
   if (browserVersion === void 0) return true;
   const major = /^(?:Headless)?Chrome\/(\d+)\./.exec(browserVersion)?.[1];
   return major !== void 0 && Number(major) >= 137;
@@ -4992,7 +4993,7 @@ function defaultBrowserDeps() {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     connectCdp: (wsUrl) => CdpClient.connect(wsUrl),
     discovery: discovery_exports,
-    detectBrowser: (prefer) => detectBrowserBinary(prefer ? { prefer } : {}),
+    detectBrowser: (kind) => detectBrowserBinary(kind ? { kind } : {}),
     kill: (pid, signal) => void process.kill(pid, signal),
     env: (name) => env(name),
     platform: process.platform
@@ -5178,7 +5179,7 @@ var init_extensions = __esm({
     "use strict";
     init_brand();
     init_cli_kit();
-    unpackedIgnoredNote = () => `Google Chrome \u2265 137 ignores unpacked extensions \u2014 use Brave (built-in ad/tracker blocking: ${envName("BROWSER_KIND")}=brave), Chromium, Chrome for Testing or Edge`;
+    unpackedIgnoredNote = () => `Google Chrome \u2265 137 ignores unpacked extensions \u2014 use Brave (built-in ad/tracker blocking: ${envName("BROWSER_KIND")}=brave), Chromium or Chrome for Testing`;
   }
 });
 
@@ -5430,14 +5431,16 @@ async function resolveEndpoint(opts = {}) {
   }
   return launch(deps, opts.binary, profile, headless, opts.kind);
 }
-function preferredKind(deps, kind, profile) {
+function wantedKind(deps, kind, profile) {
   if (kind) return kind;
   const asked = deps.env("BROWSER_KIND")?.trim().toLowerCase();
   if (asked && !isBrowserKind(asked)) throw new UsageError(`${envName("BROWSER_KIND")} is "${asked}", not one of chrome, brave, chromium, edge`);
   return asked && isBrowserKind(asked) ? asked : readProfileKind(profile);
 }
 async function launch(deps, binary, profile, headless, kind) {
-  const found = binary ? { kind: kindOf(binary), path: binary } : deps.detectBrowser(preferredKind(deps, kind, profile));
+  const wanted = binary ? void 0 : wantedKind(deps, kind, profile);
+  const found = binary ? { kind: kindOf(binary), path: binary } : deps.detectBrowser(wanted);
+  if (!found && wanted) throw new UsageError(`no ${wanted} found: install it, or name its executable with ${envName("BROWSER_BIN")}`);
   if (!found) {
     throw new Error(`no Chrome, Brave, Chromium or Edge found: install one, or set ${envName("BROWSER_BIN")} to the browser's executable`);
   }
@@ -5453,13 +5456,22 @@ async function launch(deps, binary, profile, headless, kind) {
   }
   const owner = readProfileKind(profile);
   if (owner && owner !== found.kind) {
+    const named = binary !== void 0 || !!deps.env("BROWSER_BIN");
+    const hint = named ? `; ${envName("BROWSER_BIN")} names a ${found.kind} binary` : `, or ${owner} (\`--browser-kind ${owner}\`)`;
     throw new UsageError(
-      `the profile "${profile}" belongs to ${owner} (its logins are encrypted for that browser), not ${found.kind}: use a profile of its own (\`--profile ${found.kind}\`), or ${owner} (\`--browser-kind ${owner}\`)`
+      `the profile "${profile}" belongs to ${owner} (its logins are encrypted for that browser), not ${found.kind}: use a profile of its own (\`--profile ${found.kind}\`)${hint}`
     );
   }
   const extensions = extensionDirs(deps.env("BROWSER_EXTENSIONS"));
+  const dropped = extensions.length > 0 && ignoresUnpackedExtensions(found);
   await deps.fs.rm(portFile, { force: true });
-  const args = ["--remote-debugging-port=0", `--user-data-dir=${dir}`, "--no-first-run", "--no-default-browser-check", ...extensionArgs(extensions)];
+  const args = [
+    "--remote-debugging-port=0",
+    `--user-data-dir=${dir}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    ...dropped ? [] : extensionArgs(extensions)
+  ];
   if (headless) args.push("--headless=new");
   args.push("about:blank");
   const child = deps.spawn(bin, args, { detached: true, stdio: "ignore" });
@@ -5478,8 +5490,13 @@ async function launch(deps, binary, profile, headless, kind) {
     const active2 = await readActivePort(deps, portFile);
     if (active2 && await isSameBrowser(deps, active2.port, "127.0.0.1", active2.path)) {
       const port = active2.port;
-      if (!owner) writeProfileKind(profile, found.kind);
-      const notes = extensions.length > 0 && await dropsExtensions(deps, found, port) ? [unpackedIgnoredNote()] : [];
+      if (!owner) {
+        try {
+          writeProfileKind(profile, found.kind);
+        } catch {
+        }
+      }
+      const notes = dropped ? [unpackedIgnoredNote()] : [];
       return {
         host: "127.0.0.1",
         port,
@@ -5497,11 +5514,6 @@ async function launch(deps, binary, profile, headless, kind) {
     }
     await deps.sleep(POLL_MS);
   }
-}
-async function dropsExtensions(deps, bin, port) {
-  if (!ignoresUnpackedExtensions(bin)) return false;
-  const version = await deps.discovery.getVersion(port, "127.0.0.1").then((v) => typeof v.Browser === "string" ? v.Browser : void 0).catch(() => void 0);
-  return ignoresUnpackedExtensions(bin, version);
 }
 async function readActivePort(deps, file) {
   let text;
@@ -8767,7 +8779,7 @@ var init_challenge = __esm({
 });
 
 // src/browser/overlay.ts
-var CONSENT_SELECTORS, HELPERS, OVERLAYS_SOURCE, OVERLAY_ROOT_SOURCE, DESCRIBE_SOURCE, DESCRIBE_THIS, READ_DOCUMENT;
+var CONSENT_SELECTORS, HELPERS, OVERLAYS_SOURCE, OVERLAY_ROOT_SOURCE, DESCRIBE_SOURCE, OVERLAY_INFO_SOURCE, READ_DOCUMENT;
 var init_overlay = __esm({
   "src/browser/overlay.ts"() {
     "use strict";
@@ -8779,7 +8791,7 @@ var init_overlay = __esm({
       // Didomi
       "#didomi-host",
       "#didomi-notice",
-      '[class^="didomi-"]',
+      'div[class^="didomi-"]',
       // Sourcepoint
       '[id^="sp_message_container"]',
       // Quantcast Choice
@@ -8794,7 +8806,7 @@ var init_overlay = __esm({
       // TrustArc
       "#truste-consent-track",
       "#consent_blackbar",
-      '[class^="truste_"]',
+      'div[class^="truste_"]',
       // consentmanager.net, Commanders Act, Axeptio, Iubenda, Complianz, CookieYes, Osano, Borlabs, Google Funding Choices
       "#cmpbox",
       "#cmpbox2",
@@ -8819,6 +8831,15 @@ var init_overlay = __esm({
     roleOf(el) === "alertdialog" ||
     (!!el.getAttribute && el.getAttribute("aria-modal") === "true") ||
     (String(el.tagName || "").toUpperCase() === "DIALOG" && el.open === true);
+  const CONSENT = ${JSON.stringify(CONSENT_SELECTORS.join(", "))};
+  const isConsent = (el) => {
+    try {
+      return !!el.matches && el.matches(CONSENT);
+    } catch (e) {
+      return false;
+    }
+  };
+  /** Fixed or sticky, itself or an ancestor up to the body: what a click's covering node belongs to. */
   const pinned = (el) => {
     for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) {
       const p = getComputedStyle(n).position;
@@ -8828,18 +8849,41 @@ var init_overlay = __esm({
   };`;
     OVERLAYS_SOURCE = `function findOverlays() {
   ${HELPERS}
-  const out = [];
+  const found = [];
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  if (!body || !(vw > 0) || !(vh > 0)) return out;
+  if (!body || !(vw > 0) || !(vh > 0)) return found;
   const isMain = (el) => String(el.tagName || "").toUpperCase() === "MAIN" || roleOf(el) === "main";
   const holdsMain = (el) => isMain(el) || Array.prototype.some.call(el.querySelectorAll("*"), isMain);
-  const pageText = String(body.textContent || "").length;
+  const textOf = (el) => String(el.textContent || "").length;
+  const pageText = textOf(body);
+  const fixed = (el) => {
+    for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) if (getComputedStyle(n).position === "fixed") return true;
+    return false;
+  };
+  /** Out of the flow of the page, itself or an ancestor: what can be over something. */
+  const floating = (el) => {
+    for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) {
+      const p = getComputedStyle(n).position;
+      if (p === "fixed" || p === "absolute") return true;
+    }
+    return false;
+  };
+  const hiddenUp = (el) => {
+    for (let n = el; n && n.nodeType === 1; n = up(n)) {
+      if (n.getAttribute && (n.getAttribute("aria-hidden") === "true" || n.getAttribute("inert") !== null)) return true;
+      const cs = getComputedStyle(n);
+      if (cs.display === "none" || Number(cs.opacity) === 0) return true;
+    }
+    return false;
+  };
   const shown = (el) => {
+    if (el.checkVisibility && !el.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
     const cs = getComputedStyle(el);
-    if (cs.display === "none" || cs.visibility === "hidden" || cs.visibility === "collapse" || Number(cs.opacity) === 0) return false;
+    if (cs.visibility === "hidden" || cs.visibility === "collapse") return false;
     const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
+    if (!(r.width > 0 && r.height > 0) || r.right <= 0 || r.bottom <= 0 || r.left >= vw || r.top >= vh) return false;
+    return !hiddenUp(el);
   };
   /** The part of the viewport the element covers, or null when it is under 30%. */
   const area = (el) => {
@@ -8851,36 +8895,38 @@ var init_overlay = __esm({
     return w > 0 && h > 0 && w * h >= 0.3 * vw * vh ? { left, top, w, h } : null;
   };
   const covers = (el, a) => {
-    // A side column is no overlay: one is wide, or over the middle of the screen.
-    const middle = a.left <= vw / 2 && a.left + a.w >= vw / 2 && a.top <= vh / 2 && a.top + a.h >= vh / 2;
+    // A side column is no overlay: one is wide, or strictly across the middle of the screen.
+    const middle = a.left < vw / 2 && a.left + a.w > vw / 2 && a.top < vh / 2 && a.top + a.h > vh / 2;
     if (a.w < 0.6 * vw && !middle) return false;
     const root = el.getRootNode ? el.getRootNode() : document;
     const at = (root && root.elementFromPoint ? root : document).elementFromPoint(a.left + a.w / 2, a.top + a.h / 2);
     for (let n = at; n; n = up(n)) if (n === el) return true;
     return false;
   };
-  const found = [];
-  const walk = (root) => {
-    const els = root.querySelectorAll("*");
-    for (let i = 0; i < els.length; i++) {
-      const el = els[i];
-      let hit = false;
-      if (isDialog(el)) hit = shown(el);
-      else {
-        const a = area(el);
-        hit = !!a && shown(el) && pinned(el) && covers(el, a) && !(pageText > 0 && String(el.textContent || "").length > 0.6 * pageText);
+  const kids = (n) => Array.from((n && n.children) || []);
+  const visit = (el, inShell) => {
+    let shell = inShell;
+    let take = false;
+    const role = roleOf(el);
+    if (isConsent(el)) take = shown(el) && !holdsMain(el);
+    else if (isDialog(el)) take = floating(el) && shown(el) && !holdsMain(el);
+    else if (!inShell && role !== "presentation" && role !== "none") {
+      const a = area(el);
+      if (a && fixed(el) && shown(el) && covers(el, a)) {
+        if (holdsMain(el) || (pageText > 0 && textOf(el) > 0.6 * pageText)) shell = true;
+        else take = true;
       }
-      if (hit && !holdsMain(el)) found.push(el);
-      if (el.shadowRoot) walk(el.shadowRoot);
     }
+    // An overlay is taken whole: what is inside it is its own.
+    if (take) {
+      found.push(el);
+      return;
+    }
+    for (const k of kids(el)) visit(k, shell);
+    if (el.shadowRoot) for (const k of kids(el.shadowRoot)) visit(k, shell);
   };
-  walk(body);
-  const inside = (el, other) => {
-    for (let n = up(el); n; n = up(n)) if (n === other) return true;
-    return false;
-  };
-  for (const el of found) if (!found.some((o) => o !== el && inside(el, o))) out.push(el);
-  return out.slice(0, 5);
+  for (const k of kids(body)) visit(k, false);
+  return found.slice(0, 5);
 }`;
     OVERLAY_ROOT_SOURCE = `function overlayRoot() {
   ${HELPERS}
@@ -8903,36 +8949,45 @@ var init_overlay = __esm({
     const shown = text.length > 60 ? text.slice(0, 57) + "..." : text;
     return "<" + tag + (el.id ? "#" + el.id : "") + (role ? ' role="' + role + '"' : "") + (type ? ' type="' + type + '"' : "") + ">" + (shown ? ' "' + shown + '"' : "");
   };`;
-    DESCRIBE_THIS = `function describeOverlay() {
+    OVERLAY_INFO_SOURCE = `function overlayInfo() {
+  ${HELPERS}
   ${DESCRIBE_SOURCE}
-  return describe(this);
+  const overlays = (${OVERLAYS_SOURCE})();
+  return { what: describe(this), overlay: overlays.indexOf(this) >= 0 || isDialog(this) || isConsent(this) };
 }`;
     READ_DOCUMENT = `(() => {
   const findOverlays = ${OVERLAYS_SOURCE};
   const root = document.documentElement;
   if (!root) return { html: "", url: location.href };
-  let overlays = [];
-  try {
-    overlays = findOverlays();
-  } catch (e) {}
   const mark = "data-overlay-" + Math.random().toString(36).slice(2, 10);
-  for (const el of overlays) if (el.getRootNode && el.getRootNode() === document) el.setAttribute(mark, "");
-  let copy;
+  let overlays = [];
+  let html = "";
   try {
-    copy = root.cloneNode(true);
+    try {
+      overlays = findOverlays();
+    } catch (e) {}
+    for (const el of overlays) if (el.getRootNode && el.getRootNode() === document) el.setAttribute(mark, "");
+    html = root.outerHTML;
   } finally {
     for (const el of overlays) if (el.removeAttribute) el.removeAttribute(mark);
   }
+  let parsed;
+  try {
+    parsed = new DOMParser().parseFromString(html, "text/html");
+  } catch (e) {
+    return { html, url: location.href };
+  }
   const drop = ["[" + mark + "]", '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', "dialog", ${CONSENT_SELECTORS.map((s) => JSON.stringify(s)).join(", ")}];
-  const main = (el) => el.tagName === "MAIN" || el.getAttribute("role") === "main" || !!el.querySelector("main, [role=main]");
+  const keep = (el) =>
+    el === parsed.body || el === parsed.documentElement || el.tagName === "MAIN" || el.getAttribute("role") === "main" || !!el.querySelector("main, [role=main]");
   for (const sel of drop) {
     let els = [];
     try {
-      els = Array.from(copy.querySelectorAll(sel));
+      els = Array.from(parsed.querySelectorAll(sel));
     } catch (e) {}
-    for (const el of els) if (!main(el)) el.remove();
+    for (const el of els) if (!keep(el)) el.remove();
   }
-  return { html: copy.outerHTML, url: location.href };
+  return { html: parsed.documentElement.outerHTML, url: location.href };
 })()`;
   }
 });
@@ -11956,7 +12011,8 @@ function userScoped(name) {
 function cachePath(url, acceptLanguage = "", extractor = "native", variant = "") {
   const canon = canonicalizeUrl(url);
   const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
-  const key = `${canon}\0${acceptLanguage}\0${extractor}${variant ? `\0${variant}` : ""}`;
+  const ns = extractor === "browser" ? "browser\0no-overlays" : extractor;
+  const key = `${canon}\0${acceptLanguage}\0${ns}${variant ? `\0${variant}` : ""}`;
   return join13(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
 }
 var TEXT_VARIANTS = ["", "consent", "full"];
