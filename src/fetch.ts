@@ -986,6 +986,171 @@ function blockKind(open: string): string {
   return `${tag} ${firstClass.replace(/\d+/g, "0")}`;
 }
 
+// What a span of the page says, split by role: all of its visible text, the
+// part of it inside links, and the prose — text inside a <p> and outside a link.
+interface TextStats {
+  len: number;
+  link: number;
+  prose: number;
+}
+
+// Elements whose opening implicitly closes an open <p>, as the HTML parser
+// does: a paragraph never runs on into the block after it.
+const CLOSES_P = new Set([
+  "address",
+  "article",
+  "aside",
+  "blockquote",
+  "div",
+  "dl",
+  "fieldset",
+  "figure",
+  "footer",
+  "form",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "header",
+  "hr",
+  "main",
+  "nav",
+  "ol",
+  "pre",
+  "section",
+  "table",
+  "ul",
+]);
+
+/**
+ * The TextStats of any tag-bounded span of `html`, each in O(log n) after one
+ * linear pass: running totals are recorded at every tag, and a span's figures
+ * are the difference between the totals at its two ends. Measuring every
+ * ancestor of a heading separately would be quadratic on deep nesting.
+ */
+function textProfile(html: string): (from: number, to: number) => TextStats {
+  const at: number[] = [];
+  const len: number[] = [];
+  const link: number[] = [];
+  const prose: number[] = [];
+  let inA = false;
+  let inP = false;
+  let total = 0;
+  let linked = 0;
+  let para = 0;
+  let last = 0;
+  for (const m of html.matchAll(LOOSE_TAG_RE)) {
+    const n = html.slice(last, m.index).replace(/\s+/g, " ").trim().length;
+    total += n;
+    if (inA) linked += n;
+    else if (inP) para += n;
+    at.push(m.index);
+    len.push(total);
+    link.push(linked);
+    prose.push(para);
+    last = m.index + m[0].length;
+    const name = tagName(m[0]);
+    const closing = m[0][1] === "/";
+    if (name === "a") inA = !closing;
+    else if (name === "p") inP = !closing;
+    else if (!closing && CLOSES_P.has(name)) inP = false;
+  }
+  // The totals just before the last tag at or before `pos`.
+  const index = (pos: number) => {
+    let lo = 0;
+    let hi = at.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (at[mid]! <= pos) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  };
+  return (from, to) => {
+    if (!at.length) return { len: 0, link: 0, prose: 0 };
+    const i = index(from);
+    const j = index(to);
+    return { len: len[j]! - len[i]!, link: link[j]! - link[i]!, prose: prose[j]! - prose[i]! };
+  };
+}
+
+// A block that is mostly link text is a list of links — a menu, a row of
+// related-article cards — whatever its markup calls it.
+const isLinkList = (s: TextStats) => s.len > 0 && s.link > s.len * 0.5;
+
+// The least prose a block needs to count as an article body: a real paragraph,
+// not a tagline or a card's one-line excerpt.
+const MIN_PROSE = 200;
+
+/**
+ * The block of prose the page's headline introduces, with the given link lists
+ * (disjoint, in page order) cut out, or undefined when none holds `minProse`
+ * characters of prose.
+ *
+ * The headline is the first <h1> not inside one of the lists. Its ancestors are
+ * walked from the innermost out: the first that holds a real body of prose and
+ * is not itself a list of links is the article; a wider one replaces it only
+ * when it brings substantially more prose (the body sits beside the headline's
+ * own wrapper, not inside it). Prose here is text in <p>s and outside links,
+ * which a row of cards — a heading, a time, a link — hardly has.
+ */
+function headlineProse(clean: string, stats: (from: number, to: number) => TextStats, lists: readonly Region[], minProse: number): string | undefined {
+  const firstAtOrAfter = (pos: number) => {
+    let lo = 0;
+    let hi = lists.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (lists[mid]!.from < pos) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const inList = (pos: number) => {
+    const k = firstAtOrAfter(pos + 1) - 1;
+    return k >= 0 && pos < lists[k]!.to;
+  };
+  const h1 = [...clean.matchAll(/<h1(?=[\s/>])/gi)].map((m) => m.index).find((pos) => !inList(pos));
+  if (h1 === undefined) return undefined;
+  const ancestors = ["div", "section", "article", "main"]
+    .flatMap((tag) => balancedRegions(clean, tag, () => true))
+    .filter((r) => r.start <= h1 && h1 < r.end)
+    .sort((a, b) => a.end - a.start - (b.end - b.start));
+  // The share of the lists inside an ancestor is a range of them, summed from
+  // running totals.
+  const cum: TextStats[] = [{ len: 0, link: 0, prose: 0 }];
+  for (const r of lists) {
+    const s = stats(r.from, r.to);
+    const p = cum[cum.length - 1]!;
+    cum.push({ len: p.len + s.len, link: p.link + s.link, prose: p.prose + s.prose });
+  }
+  const measure = (r: Region) => {
+    const i = firstAtOrAfter(r.start);
+    const j = Math.max(i, firstAtOrAfter(r.end));
+    const s = stats(r.start, r.end);
+    const cut = { len: cum[j]!.len - cum[i]!.len, link: cum[j]!.link - cum[i]!.link, prose: cum[j]!.prose - cum[i]!.prose };
+    return { region: r, i, j, cut: cut.len, len: s.len - cut.len, link: s.link - cut.link, prose: s.prose - cut.prose };
+  };
+  let best: ReturnType<typeof measure> | undefined;
+  for (const r of ancestors) {
+    const m = measure(r);
+    // Prose must also say more than the lists it would cut: a category page's
+    // two-line blurb above its cards is an introduction, not the content.
+    if (m.prose < minProse || m.prose < m.cut || isLinkList(m)) continue;
+    if (!best || m.prose >= best.prose * 1.3) best = m;
+  }
+  if (!best) return undefined;
+  const { region, i, j } = best;
+  let out = "";
+  let last = region.start;
+  for (const r of lists.slice(i, j)) {
+    out += `${clean.slice(last, r.from)} `;
+    last = r.to;
+  }
+  return out + clean.slice(last, region.end);
+}
+
 /**
  * The main content region of `html`, or `html` itself when none is found with
  * confidence.
@@ -995,11 +1160,17 @@ function blockKind(open: string): string {
  * Inline scripts count as characters but are not text: a sidebar holding a chat
  * widget's JSON outscored the article, and a `__NEXT_DATA__` blob outside
  * `<main>` inflated the page until the size gate refused the real region.
+ *
+ * A candidate that is mostly link text — a row of related-article cards, which
+ * news sites mark up as `<article>`s while the story itself sits in a plain
+ * `<div>` — does not win on length alone: the prose under the page's `<h1>`
+ * does, those lists cut out, when there is enough of it.
  */
 export function extractMainHtml(html: string): string {
   const clean = dropElements(html, ["script", "style", "template", "svg"]);
   const roleMainTags = new Set(["main"]);
   for (const m of clean.matchAll(ROLE_MAIN_TAG)) roleMainTags.add(m[1]!.toLowerCase());
+  const stats = textProfile(clean);
   // Strongest tier first; the first tier with a candidate decides.
   const tiers: { tags: string[]; isCandidate: (open: string) => boolean }[] = [
     { tags: [...roleMainTags], isCandidate: (open) => /^<main[\s/>]/i.test(open) || ROLE_MAIN.test(open) },
@@ -1021,12 +1192,25 @@ export function extractMainHtml(html: string): string {
     }
     let best = outer[0]!;
     for (const r of outer) if (r.len > best.len) best = r;
+    const linkList = (r: Region) => isLinkList(stats(r.start, r.end));
     // Repeated siblings — the posts of a thread, the entries of a blog index —
     // are the content between them. Keeping only the longest dropped the rest
     // of the thread, very often the question itself. A story beside its
-    // comments is two kinds of block and still keeps just the story.
+    // comments is two kinds of block and still keeps just the story, and a
+    // story beside a row of link cards marked up as it is keeps just the story
+    // too: a card is a link, not a post.
     const kind = blockKind(best.open);
-    const kept = outer.filter((r) => r === best || blockKind(r.open) === kind);
+    const bestIsList = linkList(best);
+    const kept = outer.filter((r) => r === best || (blockKind(r.open) === kind && (bestIsList || !linkList(r))));
+    // When what won is itself a list of links — related-article cards, a
+    // "most read" rail — while the article sits in no candidate at all, the
+    // prose under the page's headline is the content, the lists cut out. A
+    // page with no such prose (a homepage of cards) keeps its cards.
+    if (bestIsList) {
+      const listProse = kept.reduce((n, r) => n + stats(r.start, r.end).prose, 0);
+      const prose = headlineProse(clean, stats, outer.filter(linkList), Math.max(MIN_PROSE, listProse + 1));
+      if (prose !== undefined) return prose;
+    }
     const keptLen = kept.reduce((n, r) => n + r.len, 0);
     // Size gate: a tiny region (short absolutely AND a small share of the page)
     // is probably a wrong match — fall back to the full document. The whole
