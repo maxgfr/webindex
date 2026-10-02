@@ -102,6 +102,28 @@ describe("renderSnapshot", () => {
     expect(all.text.split("\n")).toHaveLength(25);
   });
 
+  it("cuts the first line itself when it alone is over the budget, instead of showing nothing", () => {
+    // httpbin.org/post: the JSON body is one line, far longer than --max-chars.
+    const body = `{ "args": {}, "data": "", ${'"x": "y", '.repeat(200)}}`;
+    const r = renderSnapshot(tree(node(1, "StaticText", body), node(2, "button", "After")), { refs: fresh(), maxChars: 90 });
+    const [first, marker, ...rest] = r.text.split("\n");
+    expect(rest).toEqual([]);
+    expect(first).toBe(`- text: ${body.slice(0, 81)}…`);
+    expect(first).toHaveLength(90);
+    expect(marker).toBe("… [truncated: the first line cut, 1 more line — use `snapshot <ref>` or --interactive]");
+    expect(r.truncated).toBe(true);
+    expect(r.refCount).toBe(0);
+    // The only line, cut: nothing more to count.
+    const only = renderSnapshot(tree(node(1, "StaticText", body)), { refs: fresh(), maxChars: 20 });
+    expect(only.text).toBe(`- text: ${body.slice(0, 11)}…\n… [truncated: the first line cut — use \`snapshot <ref>\` or --interactive]`);
+    // A cut line keeps its ref only if the ref is still in what is shown.
+    const named = renderSnapshot(tree(node(1, "button", "b".repeat(40))), { refs: fresh(), maxChars: 30 });
+    expect(named.refCount).toBe(0);
+    const tail = renderSnapshot(tree(node(1, "button", "b".repeat(40), { properties: [prop("disabled", true)] })), { refs: fresh(), maxChars: 65 });
+    expect(tail.text.split("\n")[0]).toBe(`- button "${"b".repeat(40)}" [ref=e1] [di…`);
+    expect(tail.refCount).toBe(1);
+  });
+
   it("expands a same-origin iframe from frames and flags the others", () => {
     const { main, frames } = fixture<{ main: AXNode[]; frames: Record<string, AXNode[]> }>("iframes");
     const r = renderSnapshot(main, { refs: fresh(), frames });

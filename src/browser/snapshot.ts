@@ -31,7 +31,7 @@ export interface AXNode {
 export interface RenderOptions {
   /** Only nodes that have a ref, flat (no indentation, no text, no `/url` lines). */
   interactive?: boolean;
-  /** Cut the tree at a line boundary once it is longer than this. No limit by default. */
+  /** Cut the tree at a line boundary once it is longer than this (a first line longer than all of it is cut itself). No limit by default. */
   maxChars?: number;
   /** Render only the subtree of this node. */
   rootBackendId?: number;
@@ -288,9 +288,18 @@ export function renderSnapshot(nodes: AXNode[], opts: RenderOptions): RenderResu
       used += cost;
       n++;
     }
-    if (n < all.length) {
+    const hint = "use `snapshot <ref>` or --interactive";
+    if (n === 0 && all.length > 0) {
+      // One line over the whole budget (a JSON body on one line): show its start rather than nothing at all.
+      const first = all[0] as Line;
+      const text = `${first.text.slice(0, Math.max(0, opts.maxChars - 1))}…`;
+      const ref = first.ref && /\[ref=e\d+\]/.test(text);
+      const more = all.length - 1;
+      kept = [{ text, ref }];
+      tail = `… [truncated: the first line cut${more ? `, ${more} more line${more === 1 ? "" : "s"}` : ""} — ${hint}]`;
+    } else if (n < all.length) {
       kept = all.slice(0, n);
-      tail = `… [truncated: ${all.length - n} more lines — use \`snapshot <ref>\` or --interactive]`;
+      tail = `… [truncated: ${all.length - n} more lines — ${hint}]`;
     }
   }
   const text = [...kept.map((l) => l.text), ...(tail ? [tail] : [])].join("\n");
