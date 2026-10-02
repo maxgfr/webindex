@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.28.0](https://github.com/maxgfr/webindex/compare/v1.27.1...v1.28.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **browser:** launch the browser kind named or none, and key browser reads apart ([e32d372](https://github.com/maxgfr/webindex/commit/e32d372ecd695322d95cd902ae46cd1a8b50b830))
+* **browser:** take a dialog for an overlay only when it is out of the flow of the page ([a3090f6](https://github.com/maxgfr/webindex/commit/a3090f6c2fa81f0e4d460976f993272a29a28f9a))
+* **browser:** tighten what counts as an overlay, and read the page from an inert copy ([165634e](https://github.com/maxgfr/webindex/commit/165634e72ccd87bb06c2d2d3cd65e3fecb3348c9))
+
+
+### Features
+
+* **browser:** choose the browser kind, load unpacked extensions, keep one kind per profile ([55af6a9](https://github.com/maxgfr/webindex/commit/55af6a956d0ef3ccf5cafc32f79e4a968ebc5d13))
+* **browser:** read a page in the browser without its overlays and consent panels ([2de59b1](https://github.com/maxgfr/webindex/commit/2de59b19ff429a1fe117e15a54439ff85b8c0612))
+* **browser:** show overlays first in snapshots, and list their controls when a click lands on one ([ba67d17](https://github.com/maxgfr/webindex/commit/ba67d17355a483a51ac4d6575e547b6fec75cd2d))
+
 ## [1.27.1](https://github.com/maxgfr/webindex/compare/v1.27.0...v1.27.1) (2026-10-02)
 
 
