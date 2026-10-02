@@ -1,5 +1,5 @@
 import { env } from "../brand.js";
-import { type ExtractResult, looksLikeJunkExtraction } from "../fetch.js";
+import { looksLikeJunkExtraction } from "../junk.js";
 
 /** When fetchAndExtract renders a page in the browser: every time, only when the built-in read fails, or never. */
 export type BrowserFetchMode = "always" | "fallback" | "off";
@@ -19,7 +19,7 @@ const RENDER_STATUS = new Set([0, 401, 403, 429, 503]);
  * of the read it just made, the cache of a read it holds — one it fails is not
  * served while the fallback is on.
  */
-export function worthRendering(res: Pick<ExtractResult, "status" | "text">): string | undefined {
+export function worthRendering(res: { status: number; text: string }): string | undefined {
   if (RENDER_STATUS.has(res.status)) return res.status ? `got HTTP ${res.status}` : "got no answer";
   // Any other failure (a 404, a 500) would be the same in a browser; so would a 304.
   if (res.status < 200 || res.status >= 300) return undefined;
