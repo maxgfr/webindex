@@ -147,7 +147,10 @@ It does not solve captchas, does not bypass anti-bot systems and does not log in
 for the user: the human does those in its window, then `wait --clear` or
 `wait --url` takes over. A click or Enter that looks irreversible (pay, order,
 delete, publish, send, validate) is refused until `--confirm`, which you pass
-only after the user said yes to that very action. Read
+only after the user said yes to that very action; so is a click on a frame,
+whose content (a payment button) cannot be inspected. Enter in a textarea, a
+contenteditable or a formless chat box, and a `select` that submits on change,
+are not guarded: ask first. Read
 `references/browser.md` before driving it.
 
 ## Three rules that constrain every change

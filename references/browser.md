@@ -49,7 +49,16 @@ Use plain `fetch` everywhere else: it is faster and needs no browser.
   label looks like one of these (French and English) is refused with exit 1, and
   so is submitting a form that holds a password field. Retry with `--confirm`
   (`confirm: true` over MCP) only after the user has said yes to that very
-  action. The guard is a safety net. It does not replace asking.
+  action. The guard is a safety net. It does not replace asking. It follows the
+  focus into shadow roots and same-origin frames. A click on a frame, or one
+  that lands on another origin's frame (a PayPal or Google Pay button is one),
+  is refused: its content cannot be inspected. Click the element inside a
+  same-origin frame instead, and ask the user before confirming the other kind.
+  Over MCP, accepting a dialog whose message looks irreversible ("Supprimer
+  définitivement ?") needs `confirm: true` too; dismissing never does.
+- **What the guard does not see**: Enter in a textarea, a contenteditable or a
+  chat box with no form around it, and a `select` that submits on change, are
+  not guarded. Ask first when one of those would send or commit something.
 - **The human logs in and solves challenges** in the visible window. When
   `open` reports `challenge: cloudflare (blocking)`, tell the user, then run
   `wait --clear`, which waits up to 5 minutes for the wall to go. After a login,
@@ -75,9 +84,11 @@ logged out. `profile reset` deletes a profile, `profile path` prints it.
 Each command finds its browser in this order:
 
 1. **An explicit port**: `--cdp <port|url>` or `attach <port|url>`, loopback
-   only. A browser you attach to is never closed, only forgotten.
+   only, its WebSocket included. A browser you attach to is never closed, only
+   forgotten.
 2. **The saved session**: if the browser named in `session.json` still answers,
-   on the same tab.
+   on the same tab. A browser you attached to is reused only when no
+   `--profile` is given: `--profile default` means the dedicated browser.
 3. **A new browser**, started with `--remote-debugging-port=0` and
    `--user-data-dir` set to the profile, reading the real port from
    `DevToolsActivePort`. It is headed unless `--headless`. A headless window has
@@ -95,8 +106,10 @@ a `fetch` read started. `status` and `close` never launch anything.
 `fetch --browser`, or `WEBINDEX_BROWSER_FETCH=always`, renders every web page in
 the dedicated browser. `fallback` does it only when the plain read was refused
 (401, 403, 429, 503, no answer), or returned junk or under 200 characters. PDFs,
-office documents and videos never go to the browser, and neither do public-only
-MCP servers. When no browser is running, the read launches the **same headed
+office documents and videos never go to the browser, and neither do MCP
+servers run with `--public-only` or `--allow-remote`. A browser you attached to
+is never used for these reads: they go to the dedicated browser unless `cdp`
+names one. When no browser is running, the read launches the **same headed
 browser** `browser open` would, so a window appears. That shared profile is
 where the human can solve a challenge. Each read uses a scratch tab that is
 closed afterwards, so your agent tab is left alone. An error page (HTTP 400 or
