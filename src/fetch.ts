@@ -784,9 +784,15 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
   if (!opts.fullPage) s = dropLandmarks(s, CHROME_ROLES);
   const pre: string[] = [];
   s = flattenHeadings(setAsidePre(s, pre));
-  s = s.replace(TAG_RE, (tag: string) => {
+  let prevAEnd = -1; // where the last `</a>` ended
+  s = s.replace(TAG_RE, (tag: string, at: number) => {
     const closing = tag[1] === "/";
     const name = tagName(tag);
+    // `</a><a>` with no whitespace between (tag lists, breadcrumbs): links
+    // practically never split a word, so they keep a space. Other inline
+    // pairs stay joined: per-letter <span>s spell words.
+    const adjacentLinks = name === "a" && !closing && at === prevAEnd;
+    prevAEnd = name === "a" && closing ? at + tag.length : -1;
     if (/^h[1-6]$/.test(name)) {
       return closing ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
     }
@@ -800,7 +806,7 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
     // every letter in a <span> for an animation spells words with them, and
     // the spaces between words are in its text. Guessing a space at `</a><a>`
     // for a tag list read such a page as "T h i s d o m a i n".
-    if (INLINE_TAGS.has(name)) return "";
+    if (INLINE_TAGS.has(name)) return adjacentLinks ? " " : "";
     return " ";
   });
   // Malformed attributes must not leave tag markup in the extracted prose.

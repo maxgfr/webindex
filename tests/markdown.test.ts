@@ -177,8 +177,8 @@ describe("htmlToMarkdown: inline", () => {
     );
   });
 
-  it("adds no space between two inline elements set side by side, as htmlToText does", () => {
-    expect(md('<p><a href="/a">One</a><a href="/b">Two</a></p>', "https://d.test/")).toBe("[One](https://d.test/a)[Two](https://d.test/b)");
+  it("separates two adjacent links, and only links, as htmlToText does", () => {
+    expect(md('<p><a href="/a">One</a><a href="/b">Two</a></p>', "https://d.test/")).toBe("[One](https://d.test/a) [Two](https://d.test/b)");
     expect(md('<p><a href="/a">One</a> <a href="/b">Two</a></p>', "https://d.test/")).toBe("[One](https://d.test/a) [Two](https://d.test/b)");
   });
 

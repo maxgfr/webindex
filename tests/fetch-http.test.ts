@@ -171,7 +171,9 @@ describe("htmlToText", () => {
     expect(htmlToText("<p><span>Hello</span> <span>world</span><span>!</span></p>")).toBe("Hello world!");
     expect(htmlToText("<p><span>Hello </span><span>world</span> <span>again</span></p>")).toBe("Hello world again");
     expect(htmlToText('<p>un<b>believ</b>able, un<a href="/x">believ</a>able, <b>bold</b><i>italic</i></p>')).toBe("unbelievable, unbelievable, bolditalic");
-    expect(htmlToText("<p><a>widgets</a><a>ui</a> <a>web</a></p>")).toBe("widgetsui web");
+    expect(htmlToText("<p><a>widgets</a><a>ui</a> <a>web</a></p>")).toBe("widgets ui web");
+    expect(htmlToText('<a class="topic-tag">widgets</a><a class="topic-tag">ui</a>')).toBe("widgets ui");
+    expect(htmlToText("<span>Home</span><span>About</span><a>x</a><span>y</span>")).toBe("HomeAboutxy");
   });
 
   it("still separates blocks, line breaks, list items, table cells and non-inline tags", () => {

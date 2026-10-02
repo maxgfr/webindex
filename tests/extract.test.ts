@@ -257,9 +257,7 @@ describe("extraction on realistic pages", () => {
   it("GitHub README: highlighted code reads as code, topics stay apart", () => {
     const text = extract("readme");
     expect(text).toContain('import { widget } from "widget";\n\nconst w = widget({\n  size: 3,\n  color: "red",\n});');
-    // GitHub serves each topic tag on a line of its own; the whitespace
-    // between them is in the page, not guessed from the tags.
-    expect(text).toMatch(/widgets\s+ui/);
+    expect(text).toContain("widgets ui");
     expect(text).toContain("Supports Node 18+ and every evergreen browser.");
   });
 
