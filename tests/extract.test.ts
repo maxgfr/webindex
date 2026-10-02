@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
-import { extractMainHtml, htmlToText, looksLikeJunkExtraction, stripConsentBoilerplate } from "../src/fetch.js";
+import { extractFromHtml, extractMainHtml, htmlToText, looksLikeJunkExtraction, stripConsentBoilerplate } from "../src/fetch.js";
 import { pdfToText } from "../src/pdf.js";
 import { excerptWindows } from "../src/text.js";
 
@@ -185,6 +185,21 @@ describe("extraction on realistic pages", () => {
     expect(text).not.toMatch(/Log In|Categories|JavaScript is required/);
   });
 
+  it("example.org as a browser renders it: every letter in its own <span>, read as words", () => {
+    // The live page since 2026: /s.js wraps each letter for a cross-fade.
+    const html = page("example-org-spans");
+    const en =
+      "This domain is for use in documentation examples without needing permission. This is not a service, avoid relying on it for testing and monitoring purposes.";
+    const fr =
+      "L’usage de ce domaine est réservé à des exemples de documentation, sans autorisation préalable. Il ne s’agit pas d’un service ; son utilisation à des fins de test ou de surveillance est à éviter.";
+    const text = extractFromHtml(html, "https://example.org/").text;
+    expect(text).toBe(`${en}\n${fr}\nLearn more`);
+    const md = extractFromHtml(html, "https://example.org/", { format: "markdown" }).text;
+    expect(md).toContain(en);
+    expect(md).toContain(fr);
+    expect(md).toContain("[Learn more](https://iana.org/help/example-domains)");
+  });
+
   it("Next.js app: the pricing copy, not the chat widget or the data blob", () => {
     const text = extract("nextjs");
     expect(text).toContain("Start free, pay as you grow.");
@@ -242,7 +257,9 @@ describe("extraction on realistic pages", () => {
   it("GitHub README: highlighted code reads as code, topics stay apart", () => {
     const text = extract("readme");
     expect(text).toContain('import { widget } from "widget";\n\nconst w = widget({\n  size: 3,\n  color: "red",\n});');
-    expect(text).toContain("widgets ui");
+    // GitHub serves each topic tag on a line of its own; the whitespace
+    // between them is in the page, not guessed from the tags.
+    expect(text).toMatch(/widgets\s+ui/);
     expect(text).toContain("Supports Node 18+ and every evergreen browser.");
   });
 

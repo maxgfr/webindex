@@ -784,15 +784,8 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
   if (!opts.fullPage) s = dropLandmarks(s, CHROME_ROLES);
   const pre: string[] = [];
   s = flattenHeadings(setAsidePre(s, pre));
-  let prevEnd = -1;
-  let prevClosed = false;
-  s = s.replace(TAG_RE, (tag: string, at: number) => {
+  s = s.replace(TAG_RE, (tag: string) => {
     const closing = tag[1] === "/";
-    // Two elements back to back (`</a><a>`): a stylesheet almost always spaces
-    // them apart — tag lists, nav links, breadcrumbs — so they keep a space.
-    const adjacent = at === prevEnd && prevClosed && !closing;
-    prevEnd = at + tag.length;
-    prevClosed = closing;
     const name = tagName(tag);
     if (/^h[1-6]$/.test(name)) {
       return closing ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
@@ -803,7 +796,11 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
     // single sentence to anything scoring lines against a question. Headings
     // return above so their markdown markers are never doubled.
     if (BLOCK_TAGS.has(name) || name === "br" || name === "hr") return "\n";
-    if (INLINE_TAGS.has(name)) return adjacent ? " " : "";
+    // Inline elements add no whitespace, even back to back: a page that wraps
+    // every letter in a <span> for an animation spells words with them, and
+    // the spaces between words are in its text. Guessing a space at `</a><a>`
+    // for a tag list read such a page as "T h i s d o m a i n".
+    if (INLINE_TAGS.has(name)) return "";
     return " ";
   });
   // Malformed attributes must not leave tag markup in the extracted prose.

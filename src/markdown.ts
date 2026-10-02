@@ -93,8 +93,6 @@ export function markdownAgainst(html: string, base: string | undefined, fullPage
   // the wrapper of a <pre> (GitHub's, Sphinx's). Bounded like the other stacks.
   const divs: string[] = [];
   let divOverflow = 0;
-  let prevEnd = -1;
-  let prevClosed = false;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = tag.exec(s))) {
@@ -102,9 +100,6 @@ export function markdownAgainst(html: string, base: string | undefined, fullPage
     last = tag.lastIndex;
     const t = m[0];
     const closing = t[1] === "/";
-    const adjacent = m.index === prevEnd && prevClosed && !closing;
-    prevEnd = tag.lastIndex;
-    prevClosed = closing;
     const name = tagName(t);
     if (!name) continue; // a doctype or processing instruction; comments are gone
 
@@ -153,8 +148,7 @@ export function markdownAgainst(html: string, base: string | undefined, fullPage
       if (c) {
         w.flush();
         w.codeBlock(s.slice(tag.lastIndex, c.index), codeLanguage(t, s.slice(tag.lastIndex, c.index), divs));
-        last = tag.lastIndex = prevEnd = c.index + c[0].length;
-        prevClosed = true;
+        last = tag.lastIndex = c.index + c[0].length;
         continue;
       }
       preUnclosed = true; // no </pre> anywhere after: never searched for again
@@ -172,8 +166,7 @@ export function markdownAgainst(html: string, base: string | undefined, fullPage
           rows: table.rows.map((row) => row.map((cell) => escapeText(cell))),
         };
         w.block(tableToMarkdown(escaped).split("\n"));
-        last = tag.lastIndex = prevEnd = region.to;
-        prevClosed = true;
+        last = tag.lastIndex = region.to;
         continue;
       }
     }
@@ -213,7 +206,6 @@ export function markdownAgainst(html: string, base: string | undefined, fullPage
         w.close(kind);
         continue;
       }
-      if (adjacent) w.space();
       if (kind === "a") {
         // An <a> inside an open <a> closes it first, as the HTML parser does.
         w.close("a");
@@ -222,10 +214,10 @@ export function markdownAgainst(html: string, base: string | undefined, fullPage
       } else w.open(kind);
       continue;
     }
+    // Inline elements add no whitespace, even back to back, as in htmlToText:
+    // per-letter <span>s spell words, and the spaces are in the page's text.
     if (BLOCK_TAGS.has(name)) w.flush();
-    else if (INLINE_TAGS.has(name)) {
-      if (adjacent) w.space();
-    } else w.space();
+    else if (!INLINE_TAGS.has(name)) w.space();
   }
   if (last < s.length) w.text(s.slice(last));
   return w.finish();

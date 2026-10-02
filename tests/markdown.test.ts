@@ -177,8 +177,30 @@ describe("htmlToMarkdown: inline", () => {
     );
   });
 
-  it("keeps a space between two inline elements set side by side, as htmlToText does", () => {
-    expect(md('<p><a href="/a">One</a><a href="/b">Two</a></p>', "https://d.test/")).toBe("[One](https://d.test/a) [Two](https://d.test/b)");
+  it("adds no space between two inline elements set side by side, as htmlToText does", () => {
+    expect(md('<p><a href="/a">One</a><a href="/b">Two</a></p>', "https://d.test/")).toBe("[One](https://d.test/a)[Two](https://d.test/b)");
+    expect(md('<p><a href="/a">One</a> <a href="/b">Two</a></p>', "https://d.test/")).toBe("[One](https://d.test/a) [Two](https://d.test/b)");
+  });
+
+  it("reads per-letter and per-word spans as the words they spell", () => {
+    expect(md("<p><span>T</span><span>h</span><span>i</span><span>s</span><span> </span><span>d</span><span>o</span></p>")).toBe("This do");
+    expect(md("<p><span>Hello</span> <span>world</span><span>!</span></p>")).toBe("Hello world!");
+    expect(md("<p><span>Hello </span><span>world</span>\n<span>again</span></p>")).toBe("Hello world again");
+  });
+
+  it("keeps a word whole around inline markup inside it", () => {
+    expect(md("<p>un<b>believ</b>able</p>")).toBe("un**believ**able");
+    expect(md('<p>un<a href="/x">believ</a>able</p>', "https://d.test/")).toBe("un[believ](https://d.test/x)able");
+    expect(md("<p>un<span>believ</span>able</p>")).toBe("unbelievable");
+  });
+
+  it("still separates blocks, line breaks, list items and table cells built of spans", () => {
+    expect(md("<p><span>One</span></p><p><span>Two</span></p>")).toBe("One\n\nTwo");
+    expect(md("<ul><li><span>a</span></li><li><span>b</span></li></ul>")).toBe("- a\n- b");
+    expect(md("<p><span>a</span><br><span>b</span></p>")).toBe("a  \nb");
+    expect(md("<table><tr><th><span>h</span><span>1</span></th><th>h2</th></tr><tr><td><span>a</span></td><td><span>b</span></td></tr></table>")).toBe(
+      "| h1 | h2 |\n| --- | --- |\n| a | b |",
+    );
   });
 });
 
