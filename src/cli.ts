@@ -3052,7 +3052,11 @@ async function dispatch(argv: string[]): Promise<void> {
       `              home ${browser.home}${browser.profiles.length ? ` (profiles: ${browser.profiles.join(", ")})` : ""}`,
       `              session ${sess.state === "none" ? "none" : `port ${sess.port}, profile ${sess.profile}, ${sess.launchedByUs ? "launched by webindex" : "attached"}, ${sess.state === "alive" ? "answering" : "not answering"}`}`,
       `              fetch ${browser.fetch.mode === "off" ? `off (${envName("BROWSER_FETCH")}=always|fallback turns it on)` : browser.fetch.mode}, concurrency ${browser.fetch.concurrency}`,
-      ...(browser.kind ? [`              prefers ${browser.kind} (${envName("BROWSER_KIND")})`] : []),
+      ...(browser.kind
+        ? [
+            `              ${browser.kind.error ? `${envName("BROWSER_KIND")}=${browser.kind.value} is invalid: ${browser.kind.error}` : `launches ${browser.kind.value} (${envName("BROWSER_KIND")})`}`,
+          ]
+        : []),
       ...(browser.extensions
         ? [
             `              extensions ${browser.extensions.error ?? browser.extensions.paths.join(", ")}`,

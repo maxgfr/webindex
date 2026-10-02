@@ -96,7 +96,9 @@ function userScoped(name: string): string {
 export function cachePath(url: string, acceptLanguage = "", extractor: CacheNamespace = "native", variant: CacheVariant = ""): string {
   const canon = canonicalizeUrl(url);
   const domain = domainOf(url).replace(/[^a-z0-9.-]/gi, "_") || "url";
-  const key = `${canon}\u0000${acceptLanguage}\u0000${extractor}${variant ? `\u0000${variant}` : ""}`;
+  // "browser" reads dropped overlays and consent panels from 1.28 on: what was read before is keyed apart, and never served.
+  const ns = extractor === "browser" ? "browser\u0000no-overlays" : extractor;
+  const key = `${canon}\u0000${acceptLanguage}\u0000${ns}${variant ? `\u0000${variant}` : ""}`;
   return join(cacheDir(), `${domain}-${fnv1a64(key).toString(16)}.json`);
 }
 

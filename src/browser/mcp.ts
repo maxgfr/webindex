@@ -30,6 +30,7 @@ import { type BrowserCliDeps, type BrowserCliFlags, type BrowserFollowUps, dialo
 import { browserDeps } from "./deps.js";
 import { BROWSER_KINDS, type BrowserKind } from "./detect.js";
 import { NetworkRecorder } from "./network.js";
+import { readProfileKind } from "./profile.js";
 import { assessDialog } from "./risk.js";
 import { type BrowserSession, browserStatus, openBrowserSession } from "./session.js";
 import { withBrowserLock } from "./state.js";
@@ -564,7 +565,9 @@ class Host implements BrowserToolHost {
       const launch = { ...(profile ? { profile } : {}), ...(a.headless === true ? { headless: true } : {}), ...(kind ? { kind } : {}) };
       // A browser already running keeps its profile, kind and window: say so rather than ignore the ask.
       const running = this.live();
-      const moot = running && ((profile !== undefined && profile !== running.profile) || (a.headless === true && !running.headless) || kind !== undefined);
+      // The kind of a running browser of ours is its profile's; one attached to is not ours to say.
+      const otherKind = running && kind !== undefined && (!running.launchedByUs || readProfileKind(running.profile) !== kind);
+      const moot = running && ((profile !== undefined && profile !== running.profile) || (a.headless === true && !running.headless) || otherKind);
       const capture = a.capture === true;
       const out = await this.cli("open", [String(a.url ?? "")], { ...after(a), ...(a.newTab === true ? { newTab: true } : {}) }, { launch, capture });
       if (capture) this.capture = true;

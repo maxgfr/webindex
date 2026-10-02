@@ -164,9 +164,16 @@ describe("detectBrowserBinary: BROWSER_KIND", () => {
     expect(detectBrowserBinary({ ...base, env: envOf({ BROWSER_KIND: "brave", BROWSER_BIN: bin }) })).toEqual({ kind: "edge", path: bin });
   });
 
+  it("looks for that kind only, never another one installed instead, as `kind` does", () => {
+    const chromeOnly = { ...base, exists: only(MAC("Google Chrome")) };
+    expect(detectBrowserBinary({ ...chromeOnly, env: envOf({ BROWSER_KIND: "brave" }) })).toBeNull();
+    expect(detectBrowserBinary({ ...chromeOnly, kind: "edge", env: envOf({}) })).toBeNull();
+    expect(detectBrowserBinary({ ...base, kind: "chromium", env: envOf({ BROWSER_KIND: "brave" }) })?.kind).toBe("chromium");
+  });
+
   it("throws on a kind it does not know rather than driving another browser", () => {
     expect(() => detectBrowserBinary({ ...base, env: envOf({ BROWSER_KIND: "netscape" }) })).toThrow(
-      /BROWSER_KIND is "netscape".*chrome, brave, chromium, edge/,
+      /^WEBINDEX_TEST_BROWSER_KIND is "netscape".*chrome, brave, chromium, edge/,
     );
   });
 });
@@ -187,5 +194,8 @@ describe("ignoresUnpackedExtensions", () => {
     expect(ignoresUnpackedExtensions({ kind: "chromium", path: "/usr/bin/chromium" })).toBe(false);
     expect(ignoresUnpackedExtensions({ kind: "edge", path: MAC("Microsoft Edge") })).toBe(false);
     expect(ignoresUnpackedExtensions(chrome, "FakeChrome/1.0")).toBe(false);
+    // Chrome for Testing as its zips unpack, whatever the binary is called.
+    expect(ignoresUnpackedExtensions({ kind: "chrome", path: "/home/me/.cache/cft/chrome-linux64/chrome" })).toBe(false);
+    expect(ignoresUnpackedExtensions({ kind: "chrome", path: "C:\\cft\\chrome-win64\\chrome.exe" })).toBe(false);
   });
 });

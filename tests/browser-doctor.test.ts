@@ -29,10 +29,10 @@ describe("browserDoctor", () => {
       const b = await browserDoctor(
         deps({ detect: () => ({ kind: "chrome", path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" }), env: (k) => vars[k] }),
       );
-      expect(b.kind).toBe("chrome");
+      expect(b.kind).toEqual({ value: "chrome" });
       expect(b.extensions).toEqual({
         paths: [ext],
-        note: "Google Chrome ≥ 137 ignores unpacked extensions — use Brave (built-in ad/tracker blocking: WEBINDEX_TEST_BROWSER_KIND=brave), Chromium, Chrome for Testing or Edge",
+        note: "Google Chrome ≥ 137 ignores unpacked extensions — use Brave (built-in ad/tracker blocking: WEBINDEX_TEST_BROWSER_KIND=brave), Chromium or Chrome for Testing",
       });
       // Brave loads them: no note.
       expect((await browserDoctor(deps({ detect: () => ({ kind: "brave", path: "/b/brave" }), env: (k) => vars[k] }))).extensions).toEqual({ paths: [ext] });
@@ -40,6 +40,8 @@ describe("browserDoctor", () => {
       const bad = await browserDoctor(deps({ env: (k) => (k === "BROWSER_EXTENSIONS" ? "/nowhere/x" : undefined) }));
       expect(bad.extensions).toMatchObject({ paths: [], error: expect.stringMatching(/no such directory: \/nowhere\/x/) });
       expect(bad.kind).toBeUndefined();
+      const wrong = await browserDoctor(deps({ env: (k) => (k === "BROWSER_KIND" ? "netscape" : undefined) }));
+      expect(wrong.kind).toEqual({ value: "netscape", error: "not one of chrome, brave, chromium, edge" });
     } finally {
       rmSync(ext, { recursive: true, force: true });
     }

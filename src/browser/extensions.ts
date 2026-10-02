@@ -4,7 +4,9 @@
 // `<PREFIX>_BROWSER_EXTENSIONS` lists their directories (absolute, comma
 // separated). They are passed only when webindex spawns the browser: one it was
 // attached to, or one already running, keeps what it has. Branded Google Chrome
-// ignores them from version 137; Brave blocks ads and trackers on its own.
+// ignores them from version 137, so none is passed to it (--disable-extensions-except
+// would only turn off the profile's own extensions); Brave blocks ads and
+// trackers on its own.
 
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
@@ -46,4 +48,4 @@ export function extensionArgs(dirs: string[]): string[] {
 
 /** What to say when the browser is a branded Google Chrome, which drops unpacked extensions. */
 export const unpackedIgnoredNote = (): string =>
-  `Google Chrome ≥ 137 ignores unpacked extensions — use Brave (built-in ad/tracker blocking: ${envName("BROWSER_KIND")}=brave), Chromium, Chrome for Testing or Edge`;
+  `Google Chrome ≥ 137 ignores unpacked extensions — use Brave (built-in ad/tracker blocking: ${envName("BROWSER_KIND")}=brave), Chromium or Chrome for Testing`;

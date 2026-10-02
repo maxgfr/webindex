@@ -37,8 +37,8 @@ export interface BrowserDeps {
   sleep(ms: number): Promise<void>;
   connectCdp(wsUrl: string): Promise<CdpClient>;
   discovery: typeof discovery;
-  /** Which browser to launch when none is named (`detectBrowserBinary`), trying `prefer` first. */
-  detectBrowser(prefer?: BrowserKind): BrowserBinary | null;
+  /** Which browser to launch when no binary is named (`detectBrowserBinary`): of that `kind` only, when one is given. */
+  detectBrowser(kind?: BrowserKind): BrowserBinary | null;
   /** Signal a process we launched in an earlier call, known only by its pid. */
   kill(pid: number, signal: NodeJS.Signals): void;
   /** Reads `WEBINDEX_<name>` (brand-aware), like the rest of the library. */
@@ -54,7 +54,7 @@ export function defaultBrowserDeps(): BrowserDeps {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     connectCdp: (wsUrl) => CdpClient.connect(wsUrl),
     discovery,
-    detectBrowser: (prefer) => detectBrowserBinary(prefer ? { prefer } : {}),
+    detectBrowser: (kind) => detectBrowserBinary(kind ? { kind } : {}),
     kill: (pid, signal) => void process.kill(pid, signal),
     env: (name) => brandEnv(name),
     platform: process.platform,

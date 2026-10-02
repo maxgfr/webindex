@@ -6,7 +6,7 @@
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { env, envInt, envName } from "../brand.js";
-import { type BrowserBinary, detectBrowserBinary, ignoresUnpackedExtensions } from "./detect.js";
+import { BROWSER_KINDS, type BrowserBinary, detectBrowserBinary, ignoresUnpackedExtensions, isBrowserKind } from "./detect.js";
 import { isPortAlive } from "./discovery.js";
 import { extensionDirs, unpackedIgnoredNote } from "./extensions.js";
 import { type BrowserFetchMode, browserFetchMode } from "./mode.js";
@@ -32,8 +32,8 @@ export interface BrowserDoctorReport {
   profiles: string[];
   session: { state: "none" } | { state: "alive" | "dead"; port: number; launchedByUs: boolean; profile: string };
   fetch: { mode: BrowserFetchMode; concurrency: number };
-  /** The kind BROWSER_KIND asks for; absent when unset. */
-  kind?: string;
+  /** The kind BROWSER_KIND asks for, and why it is no kind at all; absent when unset. */
+  kind?: { value: string; error?: string };
   /** The unpacked extensions BROWSER_EXTENSIONS lists; absent when unset. */
   extensions?: { paths: string[]; error?: string; note?: string };
 }
@@ -81,7 +81,8 @@ export async function browserDoctor(own: Partial<BrowserDoctorDeps> = {}): Promi
     session = { state: up ? "alive" : "dead", port: saved.port, launchedByUs: saved.launchedByUs, profile: saved.profile };
   }
 
-  const kind = d.env("BROWSER_KIND")?.trim();
+  const asked = d.env("BROWSER_KIND")?.trim();
+  const kind = asked ? { value: asked, ...(isBrowserKind(asked.toLowerCase()) ? {} : { error: `not one of ${BROWSER_KINDS.join(", ")}` }) } : undefined;
   const rawExtensions = d.env("BROWSER_EXTENSIONS");
   let extensions: BrowserDoctorReport["extensions"];
   if (rawExtensions?.trim()) {

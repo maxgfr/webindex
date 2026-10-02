@@ -7,7 +7,7 @@ import { UsageError } from "../src/cli-kit.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
 import { resolveEndpoint } from "../src/browser/launch.js";
 import * as discovery from "../src/browser/discovery.js";
-import { profileDir, readProfileKind } from "../src/browser/profile.js";
+import { profileDir, profileKindFile, readProfileKind, writeProfileKind } from "../src/browser/profile.js";
 import { readSession, type Session, writeSession } from "../src/browser/state.js";
 import { FakeCdp } from "./helpers/fake-cdp.js";
 import { fakeSpawn } from "./helpers/fake-spawn.js";
@@ -290,7 +290,8 @@ describe("unpacked extensions and the browser kind", () => {
     const a = extension("ubol");
     const b = extension("other");
     const { spawn, calls } = fakeSpawn({ port: fake.port });
-    const ep = await resolveEndpoint({ deps: launchDeps(spawn, { env: envOf({ BROWSER_EXTENSIONS: ` ${a} , ${b}` }) }) });
+    const chromium = { kind: "chromium" as const, path: "/fake/chromium" };
+    const ep = await resolveEndpoint({ deps: launchDeps(spawn, { detectBrowser: () => chromium, env: envOf({ BROWSER_EXTENSIONS: ` ${a} , ${b}` }) }) });
     expect(calls[0]?.args).toEqual([
       "--remote-debugging-port=0",
       `--user-data-dir=${profileDir("default")}`,
@@ -300,7 +301,7 @@ describe("unpacked extensions and the browser kind", () => {
       `--disable-extensions-except=${a},${b}`,
       "about:blank",
     ]);
-    // The fake browser is no branded Chrome: nothing to say.
+    // Chromium loads them: nothing to say.
     expect(ep.notes).toBeUndefined();
   });
 
@@ -326,30 +327,67 @@ describe("unpacked extensions and the browser kind", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("says when the browser is a branded Google Chrome that ignores them, and points at the browsers that do not", async () => {
+  it("passes no extension flag to a branded Google Chrome, which drops them, and says so", async () => {
     const a = extension("ubol");
-    const { spawn } = fakeSpawn({ port: fake.port });
-    const ep = await resolveEndpoint({
-      deps: launchDeps(spawn, { detectBrowser: () => branded, env: envOf({ BROWSER_EXTENSIONS: a }), discovery: versioned("Chrome/140.0.7339.80") }),
-    });
-    expect(ep.notes).toEqual([
-      "Google Chrome ≥ 137 ignores unpacked extensions — use Brave (built-in ad/tracker blocking: WEBINDEX_TEST_BROWSER_KIND=brave), Chromium, Chrome for Testing or Edge",
-    ]);
-    // An older Chrome still loads them; and with no extension asked for there is nothing to say.
-    const old = await resolveEndpoint({
-      profile: "old",
-      deps: launchDeps(fakeSpawn({ port: fake.port }).spawn, {
-        detectBrowser: () => branded,
-        env: envOf({ BROWSER_EXTENSIONS: a }),
-        discovery: versioned("Chrome/136.0.1"),
-      }),
-    });
-    expect(old.notes).toBeUndefined();
+    for (const version of ["Chrome/140.0.7339.80", "Chrome/136.0.1"]) {
+      const { spawn, calls } = fakeSpawn({ port: fake.port });
+      const ep = await resolveEndpoint({
+        profile: version.replace(/\W/g, ""),
+        deps: launchDeps(spawn, { detectBrowser: () => branded, env: envOf({ BROWSER_EXTENSIONS: a }), discovery: versioned(version) }),
+      });
+      // --disable-extensions-except would only turn off the profile's own extensions.
+      expect(calls[0]?.args.join(" ")).not.toMatch(/extension/);
+      expect(ep.notes).toEqual([
+        "Google Chrome ≥ 137 ignores unpacked extensions — use Brave (built-in ad/tracker blocking: WEBINDEX_TEST_BROWSER_KIND=brave), Chromium or Chrome for Testing",
+      ]);
+    }
+    // With no extension asked for there is nothing to say.
     const none = await resolveEndpoint({
       profile: "none",
       deps: launchDeps(fakeSpawn({ port: fake.port }).spawn, { detectBrowser: () => branded, env: envOf({}), discovery: versioned("Chrome/140.0.1") }),
     });
     expect(none.notes).toBeUndefined();
+  });
+
+  it.each([
+    ["the flag", { kind: "brave" as const }, {}],
+    ["BROWSER_KIND", {}, { BROWSER_KIND: "brave" }],
+  ])("refuses to launch another browser when %s names one that is not installed", async (_what, opts, vars) => {
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    const err = await resolveEndpoint({ ...opts, deps: launchDeps(spawn, { detectBrowser: (k) => (k ? null : chrome), env: envOf(vars) }) }).catch((e) => e);
+    expect(err).toBeInstanceOf(UsageError);
+    expect(err.message).toMatch(/no brave found: install it, or name its executable with WEBINDEX_TEST_BROWSER_BIN/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refuses to launch another browser on a profile whose own kind is not installed", async () => {
+    writeProfileKind("work", "brave");
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    const err = await resolveEndpoint({ profile: "work", deps: launchDeps(spawn, { detectBrowser: (k) => (k ? null : chrome), env: envOf({}) }) }).catch(
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(UsageError);
+    expect(err.message).toMatch(/no brave found/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("launches all the same when the profile's kind cannot be recorded", async () => {
+    mkdirSync(profileKindFile("ro"), { recursive: true }); // a directory where the file goes: the write fails
+    const ep = await resolveEndpoint({ profile: "ro", deps: launchDeps(fakeSpawn({ port: fake.port }).spawn) });
+    expect(ep).toMatchObject({ launchedByUs: true, profile: "ro" });
+  });
+
+  it("does not suggest --browser-kind when BROWSER_BIN names the binary", async () => {
+    writeProfileKind("work", "brave");
+    const err = await resolveEndpoint({
+      profile: "work",
+      binary: undefined,
+      deps: launchDeps(fakeSpawn({ port: fake.port }).spawn, { detectBrowser: () => chrome, env: envOf({ BROWSER_BIN: "/fake/chrome" }) }),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(UsageError);
+    expect(err.message).toMatch(/belongs to brave/);
+    expect(err.message).not.toMatch(/--browser-kind/);
+    expect(err.message).toMatch(/WEBINDEX_TEST_BROWSER_BIN/);
   });
 
   it("asks detection for the kind the caller names, else BROWSER_KIND, else the profile's own", async () => {

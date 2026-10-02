@@ -116,8 +116,8 @@ export async function resolveEndpoint(opts: LaunchOptions = {}): Promise<Endpoin
   return launch(deps, opts.binary, profile, headless, opts.kind);
 }
 
-/** The kind to look for first: the one asked for, else BROWSER_KIND, else the profile's own. */
-function preferredKind(deps: BrowserDeps, kind: BrowserKind | undefined, profile: string): BrowserKind | undefined {
+/** The kind to launch: the one asked for, else BROWSER_KIND, else the profile's own; undefined when none is named. */
+function wantedKind(deps: BrowserDeps, kind: BrowserKind | undefined, profile: string): BrowserKind | undefined {
   if (kind) return kind;
   const asked = deps.env("BROWSER_KIND")?.trim().toLowerCase();
   if (asked && !isBrowserKind(asked)) throw new UsageError(`${envName("BROWSER_KIND")} is "${asked}", not one of chrome, brave, chromium, edge`);
@@ -125,7 +125,10 @@ function preferredKind(deps: BrowserDeps, kind: BrowserKind | undefined, profile
 }
 
 async function launch(deps: BrowserDeps, binary: string | undefined, profile: string, headless: boolean, kind?: BrowserKind): Promise<Endpoint> {
-  const found: BrowserBinary | null = binary ? { kind: kindOf(binary), path: binary } : deps.detectBrowser(preferredKind(deps, kind, profile));
+  const wanted = binary ? undefined : wantedKind(deps, kind, profile);
+  const found: BrowserBinary | null = binary ? { kind: kindOf(binary), path: binary } : deps.detectBrowser(wanted);
+  // A kind named (or the profile's own) is that kind or nothing: another one would be locked to the profile.
+  if (!found && wanted) throw new UsageError(`no ${wanted} found: install it, or name its executable with ${envName("BROWSER_BIN")}`);
   if (!found) {
     throw new Error(`no Chrome, Brave, Chromium or Edge found: install one, or set ${envName("BROWSER_BIN")} to the browser's executable`);
   }
@@ -146,16 +149,27 @@ async function launch(deps: BrowserDeps, binary: string | undefined, profile: st
   // A profile is one kind of browser's: another would find its logins unreadable.
   const owner = readProfileKind(profile);
   if (owner && owner !== found.kind) {
+    // With BROWSER_BIN set, --browser-kind changes nothing: only another profile does.
+    const named = binary !== undefined || !!deps.env("BROWSER_BIN");
+    const hint = named ? `; ${envName("BROWSER_BIN")} names a ${found.kind} binary` : `, or ${owner} (\`--browser-kind ${owner}\`)`;
     throw new UsageError(
-      `the profile "${profile}" belongs to ${owner} (its logins are encrypted for that browser), not ${found.kind}: use a profile of its own (\`--profile ${found.kind}\`), or ${owner} (\`--browser-kind ${owner}\`)`,
+      `the profile "${profile}" belongs to ${owner} (its logins are encrypted for that browser), not ${found.kind}: use a profile of its own (\`--profile ${found.kind}\`)${hint}`,
     );
   }
   const extensions = extensionDirs(deps.env("BROWSER_EXTENSIONS"));
+  // Branded Chrome drops them: --disable-extensions-except would only turn off the profile's own.
+  const dropped = extensions.length > 0 && ignoresUnpackedExtensions(found);
   // Otherwise the file is a crashed run's: it must go before the start, or the
   // poll below could read it.
   await deps.fs.rm(portFile, { force: true });
 
-  const args = ["--remote-debugging-port=0", `--user-data-dir=${dir}`, "--no-first-run", "--no-default-browser-check", ...extensionArgs(extensions)];
+  const args = [
+    "--remote-debugging-port=0",
+    `--user-data-dir=${dir}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    ...(dropped ? [] : extensionArgs(extensions)),
+  ];
   if (headless) args.push("--headless=new");
   args.push("about:blank");
   // Detached and unreferenced: the browser outlives this CLI call, and the next
@@ -179,8 +193,14 @@ async function launch(deps: BrowserDeps, binary: string | undefined, profile: st
     const active = await readActivePort(deps, portFile);
     if (active && (await isSameBrowser(deps, active.port, "127.0.0.1", active.path))) {
       const port = active.port;
-      if (!owner) writeProfileKind(profile, found.kind);
-      const notes = extensions.length > 0 && (await dropsExtensions(deps, found, port)) ? [unpackedIgnoredNote()] : [];
+      if (!owner) {
+        try {
+          writeProfileKind(profile, found.kind);
+        } catch {
+          /* unrecorded: the next launch records it */
+        }
+      }
+      const notes = dropped ? [unpackedIgnoredNote()] : [];
       return {
         host: "127.0.0.1",
         port,
@@ -198,16 +218,6 @@ async function launch(deps: BrowserDeps, binary: string | undefined, profile: st
     }
     await deps.sleep(POLL_MS);
   }
-}
-
-/** Whether the browser just started on `port` is one that drops unpacked extensions (branded Chrome ≥ 137). */
-async function dropsExtensions(deps: BrowserDeps, bin: BrowserBinary, port: number): Promise<boolean> {
-  if (!ignoresUnpackedExtensions(bin)) return false;
-  const version = await deps.discovery
-    .getVersion(port, "127.0.0.1")
-    .then((v) => (typeof v.Browser === "string" ? v.Browser : undefined))
-    .catch(() => undefined);
-  return ignoresUnpackedExtensions(bin, version);
 }
 
 /** Line 1 (the port) and line 2 (the browser socket path) of DevToolsActivePort, or undefined while it is absent or half-written. */
