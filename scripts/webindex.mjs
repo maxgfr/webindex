@@ -5480,6 +5480,49 @@ var init_firecrawl = __esm({
   }
 });
 
+// src/junk.ts
+function looksLikeJunkExtraction(text) {
+  const t = text.trim();
+  if (t.length >= 2e3) return void 0;
+  const head = t.slice(0, 800);
+  const hits = JUNK_PATTERNS.filter(([re]) => re.test(head));
+  const strong = hits.find(([, , kind]) => kind === "strong");
+  if (!strong) return void 0;
+  if (hits.length >= 2) return strong[1];
+  const prose = t.split("\n").filter((l) => l.trim().length >= 60 && !JUNK_PATTERNS.some(([re]) => re.test(l))).length;
+  return prose < 3 ? strong[1] : void 0;
+}
+var JUNK_PATTERNS;
+var init_junk = __esm({
+  "src/junk.ts"() {
+    "use strict";
+    JUNK_PATTERNS = [
+      [/\b(accept|manage)\s+(all\s+)?cookies\b/i, "cookie/consent wall", "strong"],
+      [/\bwe use cookies\b/i, "cookie/consent wall", "strong"],
+      [/\bcookie (policy|settings|consent|preferences)\b/i, "cookie/consent wall", "weak"],
+      [/\b(accept|reject|allow|decline) all\b/i, "cookie/consent wall", "weak"],
+      [/\b(please )?enable javascript\b/i, "JavaScript-required shell", "strong"],
+      [/\bjavascript is (disabled|required|not enabled)\b/i, "JavaScript-required shell", "strong"],
+      [
+        /\bverify(ing)? (that )?(you are|you're) (a )?(human|not a (ro)?bot)\b|\bare you a (human|robot)\b|\bhuman verification\b/i,
+        "anti-bot interstitial",
+        "strong"
+      ],
+      [/\battention required\b.*cloudflare|\bunusual traffic from your (computer )?network\b|\bchecking your browser\b/i, "anti-bot interstitial", "strong"],
+      // Akamai's and Cloudflare's denials carry an incident reference; without one
+      // the phrase is as likely a permission-error article.
+      [/\baccess denied\b[\s\S]{0,300}?(\breference #|\bray id\b|\bpermission to access\b)/i, "anti-bot interstitial", "strong"],
+      // Cloudflare's WAF block page. Its "Attention Required!" is the <title>,
+      // which extraction drops, so the body's own wording has to carry it.
+      [/\bsorry, you have been blocked\b|\byou are unable to access\b[\s\S]{0,300}?\bray id\b/i, "anti-bot interstitial", "strong"],
+      [/\baccess denied\b|\benable cookies\b/i, "anti-bot interstitial", "weak"],
+      // FR / DE (the locale layer targets non-EN markets)
+      [/\bnous utilisons des cookies\b|\baccepter (tous )?les cookies\b|\bactiver javascript\b/i, "cookie/consent wall (fr)", "strong"],
+      [/\bwir verwenden cookies\b|\bcookies akzeptieren\b|\bjavascript aktivieren\b/i, "cookie/consent wall (de)", "strong"]
+    ];
+  }
+});
+
 // src/browser/mode.ts
 function browserFetchMode(explicit) {
   const m = (explicit ?? env("BROWSER_FETCH"))?.toLowerCase();
@@ -5497,7 +5540,7 @@ var init_mode = __esm({
   "src/browser/mode.ts"() {
     "use strict";
     init_brand();
-    init_fetch();
+    init_junk();
     RENDER_STATUS = /* @__PURE__ */ new Set([0, 401, 403, 429, 503]);
   }
 });
@@ -7419,7 +7462,7 @@ var init_session = __esm({
         const timeoutMs = opts.timeoutMs ?? NAVIGATION_TIMEOUT_MS;
         const nav = this.watch();
         try {
-          const r = await this.page.send("Page.navigate", { url });
+          const r = await this.page.send("Page.navigate", { url }, { timeoutMs });
           if (r.errorText) throw new Error(`navigation to ${url} failed: ${r.errorText}`);
           if (!r.loaderId) {
             const f = await this.frame();
@@ -7453,7 +7496,7 @@ var init_session = __esm({
         const before = await this.frame();
         const nav = this.watch();
         try {
-          await trigger();
+          await trigger(timeoutMs);
           const isNew = (l) => l !== before.loaderId;
           let hit;
           try {
@@ -7478,7 +7521,11 @@ var init_session = __esm({
         const h = await this.page.send("Page.getNavigationHistory");
         const entry = h.entries[h.currentIndex + step];
         if (!entry) throw new Error(step < 0 ? "no previous page in this tab's history" : "no next page in this tab's history");
-        return this.settle(step < 0 ? "going back" : "going forward", () => this.page.send("Page.navigateToHistoryEntry", { entryId: entry.id }), timeoutMs);
+        return this.settle(
+          step < 0 ? "going back" : "going forward",
+          (t) => this.page.send("Page.navigateToHistoryEntry", { entryId: entry.id }, { timeoutMs: t }),
+          timeoutMs
+        );
       }
       back(opts = {}) {
         return this.history(-1, opts.timeoutMs);
@@ -7487,7 +7534,7 @@ var init_session = __esm({
         return this.history(1, opts.timeoutMs);
       }
       reload(opts = {}) {
-        return this.settle("reloading", () => this.page.send("Page.reload"), opts.timeoutMs);
+        return this.settle("reloading", (t) => this.page.send("Page.reload", void 0, { timeoutMs: t }), opts.timeoutMs);
       }
       // --- tabs --------------------------------------------------------------------
       /** The browser's tabs with their stable short ids; the map is refreshed and saved. */
@@ -8716,17 +8763,6 @@ function extractFromHtml(html, finalUrl, opts = {}) {
     ...opts.keepHtml ? { html } : {}
   };
 }
-function looksLikeJunkExtraction(text) {
-  const t = text.trim();
-  if (t.length >= 2e3) return void 0;
-  const head = t.slice(0, 800);
-  const hits = JUNK_PATTERNS.filter(([re]) => re.test(head));
-  const strong = hits.find(([, , kind]) => kind === "strong");
-  if (!strong) return void 0;
-  if (hits.length >= 2) return strong[1];
-  const prose = t.split("\n").filter((l) => l.trim().length >= 60 && !JUNK_PATTERNS.some(([re]) => re.test(l))).length;
-  return prose < 3 ? strong[1] : void 0;
-}
 function stripConsentBoilerplate(text, opts = {}) {
   if (opts.markdown) return stripConsentMarkdown(text);
   let dropped = 0;
@@ -8779,7 +8815,7 @@ function metaDescriptionOf(html) {
   }
   return og;
 }
-var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, NOT_TITLE, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, JUNK_PATTERNS, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP;
+var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, NOT_TITLE, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP;
 var init_fetch = __esm({
   "src/fetch.ts"() {
     "use strict";
@@ -8796,6 +8832,7 @@ var init_fetch = __esm({
     init_firecrawl();
     init_video();
     init_mode();
+    init_junk();
     DEFAULT_BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
     RETRY_STATUS = /* @__PURE__ */ new Set([429, 503, 502, 504]);
     defaultTimeoutMs2 = () => envInt("TIMEOUT_MS", 2e4, 1e3, 3e5);
@@ -8850,30 +8887,6 @@ ${NUL2}${i}${NUL2}
     PURE_VIDEO_HOSTS = /* @__PURE__ */ new Set(["youtube", "vimeo", "dailymotion"]);
     HTML_TYPE_RE = /^(?:text\/html|application\/xhtml\+xml)$/;
     NON_TEXT_TYPE_RE = /^(?:image\/(?!svg\+xml$)|audio\/|video\/|font\/|model\/|application\/(?:gzip|x-gzip|x-tar|x-bzip2|x-xz|x-7z-compressed|x-rar-compressed|vnd\.rar|java-archive|wasm|x-msdownload|vnd\.android\.package-archive|x-shockwave-flash|ogg)$)/;
-    JUNK_PATTERNS = [
-      [/\b(accept|manage)\s+(all\s+)?cookies\b/i, "cookie/consent wall", "strong"],
-      [/\bwe use cookies\b/i, "cookie/consent wall", "strong"],
-      [/\bcookie (policy|settings|consent|preferences)\b/i, "cookie/consent wall", "weak"],
-      [/\b(accept|reject|allow|decline) all\b/i, "cookie/consent wall", "weak"],
-      [/\b(please )?enable javascript\b/i, "JavaScript-required shell", "strong"],
-      [/\bjavascript is (disabled|required|not enabled)\b/i, "JavaScript-required shell", "strong"],
-      [
-        /\bverify(ing)? (that )?(you are|you're) (a )?(human|not a (ro)?bot)\b|\bare you a (human|robot)\b|\bhuman verification\b/i,
-        "anti-bot interstitial",
-        "strong"
-      ],
-      [/\battention required\b.*cloudflare|\bunusual traffic from your (computer )?network\b|\bchecking your browser\b/i, "anti-bot interstitial", "strong"],
-      // Akamai's and Cloudflare's denials carry an incident reference; without one
-      // the phrase is as likely a permission-error article.
-      [/\baccess denied\b[\s\S]{0,300}?(\breference #|\bray id\b|\bpermission to access\b)/i, "anti-bot interstitial", "strong"],
-      // Cloudflare's WAF block page. Its "Attention Required!" is the <title>,
-      // which extraction drops, so the body's own wording has to carry it.
-      [/\bsorry, you have been blocked\b|\byou are unable to access\b[\s\S]{0,300}?\bray id\b/i, "anti-bot interstitial", "strong"],
-      [/\baccess denied\b|\benable cookies\b/i, "anti-bot interstitial", "weak"],
-      // FR / DE (the locale layer targets non-EN markets)
-      [/\bnous utilisons des cookies\b|\baccepter (tous )?les cookies\b|\bactiver javascript\b/i, "cookie/consent wall (fr)", "strong"],
-      [/\bwir verwenden cookies\b|\bcookies akzeptieren\b|\bjavascript aktivieren\b/i, "cookie/consent wall (de)", "strong"]
-    ];
     CONSENT_PATTERNS = [
       /\bcookies?\b/i,
       /\bconsent\b/i,
@@ -9178,12 +9191,13 @@ var init_risk = __esm({
   return el;
 }`;
     OWNER_SOURCE = `(node) => {
+  const formHost = (h) => !!h && /^(input|textarea|select)$/i.test(h.tagName || "");
   let el = node;
-  for (let i = 0; el && el.nodeType !== 1 && i < 64; i++) el = el.nodeType === 11 ? el.host : el.parentElement || el.parentNode;
+  for (let i = 0; el && el.nodeType !== 1 && i < 64; i++) el = el.nodeType === 11 ? (formHost(el.host) ? el.host : null) : el.parentElement || el.parentNode;
   for (let i = 0; el && el.nodeType === 1 && i < 8; i++) {
     const root = el.getRootNode ? el.getRootNode() : null;
     const host = root && root.nodeType === 11 ? root.host : null;
-    if (!host || !/^(input|textarea|select)$/i.test(host.tagName || "")) break;
+    if (!formHost(host)) break;
     el = host;
   }
   return el && el.nodeType === 1 ? el : null;
@@ -9217,7 +9231,9 @@ var init_risk = __esm({
     const alts = Array.from(e.querySelectorAll("img[alt],svg title"), (n) => n.getAttribute("alt") || n.textContent);
     const labels = isBtn && e.labels ? Array.from(e.labels, (l) => l.textContent) : [];
     const value = t === "input" && ["button", "submit", "reset", "image"].includes(ty) ? e.value : "";
-    return norm([e.getAttribute("aria-label"), by, e.getAttribute("title"), e.getAttribute("alt"), value, t === "input" ? "" : e.innerText || e.textContent, ...alts, ...labels].filter(Boolean).join(" "));
+    // A web component's text may live in its open shadow root only: innerText and textContent of the host do not show it.
+    const shadow = t !== "input" && e.shadowRoot ? e.shadowRoot.textContent : "";
+    return norm([e.getAttribute("aria-label"), by, e.getAttribute("title"), e.getAttribute("alt"), value, t === "input" ? "" : e.innerText || e.textContent, shadow, ...alts, ...labels].filter(Boolean).join(" "));
   };
   const explicit = (ctl.getAttribute("role") || "").toLowerCase();
   let role = explicit;
@@ -9534,7 +9550,7 @@ var init_snapshot = __esm({
         const name2 = squash(str4(n.name));
         const hasRole = REF_ROLES.has(role.toLowerCase());
         const wantsRef = n.backendDOMNodeId !== void 0 && (hasRole || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
-        const editor = wantsRef && !hasRole && !name2 && parent?.ref === true && FIELD_ROLES.has(parent.role);
+        const editor = wantsRef && !hasRole && !name2 && truthy(prop(n, "editable")) && parent?.ref === true && FIELD_ROLES.has(parent.role);
         if (COLLAPSIBLE.has(role) && !name2 && !wantsRef || editor) return [{ t: "break" }, ...this.children(tree, n, parent), { t: "break" }];
         const isFrame = role.toLowerCase() === "iframe";
         const shown2 = isFrame ? "iframe" : role;
@@ -10006,7 +10022,7 @@ var init_actions = __esm({
     PAGE_FUNCTIONS = {
       /**
        * Where `hit` (the node under the click point) is: true when it stands for the
-       * target itself (its text, its user-agent shadow tree: see OWNER_SOURCE), null
+       * target itself (its own text, its user-agent shadow tree: see OWNER_SOURCE), null
        * when it is inside the target (a button in a card, which the guard then looks
        * at), else a description of what covers the target.
        */
@@ -11398,7 +11414,7 @@ async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date
   const variant = variantOf(opts);
   const served = (entry, note) => {
     countFetch(Buffer.byteLength(entry.text), true);
-    const { note: _stored, ...rest } = entry;
+    const { note: _stored, browserTried: _tried, ...rest } = entry;
     const about = note ?? (entry.truncated ? `The cached text of ${url} is a prefix: the page overran the response size cap.` : void 0);
     return { ...rest, cached: true, ...about ? { note: about } : {} };
   };
@@ -11410,12 +11426,14 @@ async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date
     return { text: "", finalUrl: url, status: 0, note: `Offline: ${url} is not in the cache (drop --offline, or warm it with a normal run).` };
   }
   const ns = await currentExtractor(opts, url);
-  const store = (result) => {
+  const fallback = browserFetchMode(opts.browser) === "fallback";
+  const store = (result, tried = false) => {
     const target = namespaceFor(result, ns);
-    const entry = ns === "firecrawl" && target === "native" ? { ...result, fallbackFrom: "firecrawl" } : result;
+    let entry = ns === "firecrawl" && target === "native" ? { ...result, fallbackFrom: "firecrawl" } : result;
+    if (tried && wouldRender(entry)) entry = { ...entry, browserTried: true };
     writeCache(url, entry, now, lang, target, variant);
   };
-  const hit = refresh ? void 0 : lookup(url, lang, ns, variant, browserFetchMode(opts.browser) === "fallback");
+  const hit = refresh ? void 0 : lookup(url, lang, ns, variant, fallback);
   if (hit && isCacheFresh(hit, now)) return served(hit);
   let res;
   const revalidate = hit ? revalidationHeaders(hit) : {};
@@ -11432,9 +11450,10 @@ async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date
     }
     if (probe.status !== 412 && !(probe.status >= 200 && probe.status < 300)) res = probe;
   }
+  const unconditional = res === void 0;
   res ??= await fetchAndExtract(url, opts);
   if (res.text?.trim()) {
-    store(res);
+    store(res, fallback && unconditional);
     return res;
   }
   const stale = hit ?? readAnyCopy(url, lang, variant);
@@ -11447,7 +11466,7 @@ function lookup(url, acceptLanguage, ns, variant, browserFallback = false) {
   const rendered = browserFallback ? readCache(url, acceptLanguage, "browser", variant) : void 0;
   return rendered && (!best || rendered.cachedAt > best.cachedAt) ? rendered : best;
 }
-var wouldRender = (entry) => !entry.documentType && ["native", "firecrawl"].includes(entry.extractor ?? "native") && worthRendering(entry) !== void 0;
+var wouldRender = (entry) => !entry.browserTried && !entry.documentType && ["native", "firecrawl"].includes(entry.extractor ?? "native") && worthRendering(entry) !== void 0;
 function lookupOwn(url, acceptLanguage, ns, variant) {
   const best = readAnyNamespace(url, acceptLanguage, [.../* @__PURE__ */ new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
   if (ns === VIDEO_CACHE_NS && !best) return readCache(url, acceptLanguage, "native", variant);

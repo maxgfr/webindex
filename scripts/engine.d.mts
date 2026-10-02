@@ -1250,6 +1250,8 @@ declare function decodeEntities(s: string): string;
 /** When fetchAndExtract renders a page in the browser: every time, only when the built-in read fails, or never. */
 type BrowserFetchMode = "always" | "fallback" | "off";
 
+declare function looksLikeJunkExtraction(text: string): string | undefined;
+
 /**
  * A realistic desktop-browser User-Agent. Several keyless web endpoints (DDG,
  * Mojeek) serve 403 or empty to obvious bot UAs, so scrapers default to this.
@@ -1558,7 +1560,6 @@ declare function rescueViaWayback(url: string, opts?: {
     snapshotUrl: string;
     timestamp: string;
 } | undefined>;
-declare function looksLikeJunkExtraction(text: string): string | undefined;
 /**
  * Drop consent-banner lines from extracted text, and say how many went.
  *
@@ -3393,6 +3394,13 @@ interface CacheEntry extends Extract {
      * TTL paid for the same failed scrape plus a fresh download.
      */
     fallbackFrom?: "firecrawl";
+    /**
+     * Set on a built-in or Firecrawl read stored while the browser fallback was
+     * on, that the fallback would retry: the browser was tried and did no better.
+     * Served until its TTL like any other entry, rather than rendered again on
+     * every call.
+     */
+    browserTried?: true;
 }
 declare function cacheDir(): string;
 declare function cachePath(url: string, acceptLanguage?: string, extractor?: CacheNamespace, variant?: CacheVariant): string;
