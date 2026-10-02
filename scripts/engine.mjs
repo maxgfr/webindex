@@ -5561,7 +5561,7 @@ async function openBrowserSession(opts = {}) {
     throw e;
   }
 }
-var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, STATUS_TIMEOUT_MS, ATTACH_TIMEOUT_MS, TAB_ID, LIFECYCLE, NavigationTimeoutError, tabNumber, BrowserSession;
+var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, STATUS_TIMEOUT_MS, ATTACH_TIMEOUT_MS, TAB_ID, LIFECYCLE, NavigationTimeoutError, committedIn, stillLoading, tabNumber, BrowserSession;
 var init_session = __esm({
   "src/browser/session.ts"() {
     "use strict";
@@ -5580,6 +5580,8 @@ var init_session = __esm({
     LIFECYCLE = { load: "load", domcontentloaded: "DOMContentLoaded" };
     NavigationTimeoutError = class extends Error {
     };
+    committedIn = (frameId, isNew) => (e) => e.frameId === frameId && isNew(e.loaderId) && (e.kind === "commit" || e.kind === "lifecycle" && e.name !== "init");
+    stillLoading = (timeoutMs) => `still loading after ${timeoutMs} ms \u2014 take a snapshot or \`${brand().cli} browser wait --load\``;
     tabNumber = (id) => Number(TAB_ID.exec(id)?.[1] ?? 0);
     BrowserSession = class {
       /** @internal use openBrowserSession */
@@ -5704,8 +5706,15 @@ var init_session = __esm({
         const handlers = [
           ["Page.lifecycleEvent", (p) => push({ kind: "lifecycle", frameId: p.frameId, loaderId: p.loaderId, name: p.name })],
           ["Page.navigatedWithinDocument", (p) => push({ kind: "same-document", frameId: p.frameId })],
-          // A page restored from the back/forward cache fires no lifecycle event.
-          ["Page.frameNavigated", (p) => p.type === "BackForwardCacheRestore" && push({ kind: "bfcache", frameId: p.frame?.id, loaderId: p.frame?.loaderId })],
+          // A page restored from the back/forward cache fires no lifecycle event. Any other is a new
+          // document committing: in the main frame, what a navigation that has not loaded yet has got to.
+          [
+            "Page.frameNavigated",
+            (p) => {
+              if (p.type === "BackForwardCacheRestore") push({ kind: "bfcache", frameId: p.frame?.id, loaderId: p.frame?.loaderId });
+              else if (p.frame && !p.frame.parentId) push({ kind: "commit", frameId: p.frame.id, loaderId: p.frame.loaderId });
+            }
+          ],
           ["Page.javascriptDialogOpening", (p) => leaving = p?.type === "beforeunload"],
           [
             "Page.javascriptDialogClosed",
@@ -5753,9 +5762,9 @@ var init_session = __esm({
        * `DOMContentLoaded`, or nothing). The tab's refs are cleared: they named
        * nodes of the document that is going away. A navigation the browser refuses
        * (`errorText`: DNS failure, refused connection…) rejects, and so does one
-       * that did not even reach DOMContentLoaded in time. One that did, but whose
-       * `load` has not come (a cold server, a script that never finishes), is the
-       * page: it is shown, and a snapshot works. It resolves, with a `note`.
+       * that did not even commit in time. One that committed but has not loaded
+       * (a cold server, a render-blocking script that holds even DOMContentLoaded)
+       * is the page now, still loading: it resolves, with a `note`.
        */
       async navigate(url, opts = {}) {
         const waitUntil = opts.waitUntil ?? "load";
@@ -5771,30 +5780,46 @@ var init_session = __esm({
           clearRefs(this.targetId);
           if (waitUntil === "none") return { url, loaderId: r.loaderId };
           const name = LIFECYCLE[waitUntil];
-          const reached = (event) => (e) => e.kind === "lifecycle" && e.name === event && e.loaderId === r.loaderId;
           try {
-            await nav.until(reached(name), timeoutMs, `navigation to ${url} did not reach ${name}`, `navigation to ${url}`);
+            await nav.until(
+              (e) => e.kind === "lifecycle" && e.name === name && e.loaderId === r.loaderId,
+              timeoutMs,
+              `navigation to ${url} did not reach ${name}`,
+              `navigation to ${url}`
+            );
           } catch (e) {
-            if (!(e instanceof NavigationTimeoutError) || !nav.saw(reached(LIFECYCLE.domcontentloaded))) throw e;
-            return { ...await this.loaded(), note: `still loading after ${timeoutMs} ms: the page is shown (DOMContentLoaded) but has not fired load` };
+            if (!(e instanceof NavigationTimeoutError) || !nav.saw(committedIn(r.frameId, (l) => l === r.loaderId))) throw e;
+            return { ...await this.loaded(), note: stillLoading(timeoutMs) };
           }
           return await this.loaded();
         } finally {
           nav.stop();
         }
       }
-      /** Run a history move or a reload and wait until the main frame shows another document (or the same one, scrolled). */
+      /**
+       * Run a history move or a reload and wait until the main frame shows another
+       * document (or the same one, scrolled). One that committed but has not loaded
+       * in time resolves with a `note`, as in navigate.
+       */
       async settle(what, trigger, timeoutMs = NAVIGATION_TIMEOUT_MS) {
         const before = await this.frame();
         const nav = this.watch();
         try {
           await trigger();
-          const hit = await nav.until(
-            (e) => e.frameId === before.id && (e.kind !== "lifecycle" || e.name === "load" && e.loaderId !== before.loaderId),
-            timeoutMs,
-            `${what} did not reach load`,
-            what
-          );
+          const isNew = (l) => l !== before.loaderId;
+          let hit;
+          try {
+            hit = await nav.until(
+              (e) => e.frameId === before.id && (e.kind === "same-document" || e.kind === "bfcache" || e.kind === "lifecycle" && e.name === "load" && isNew(e.loaderId)),
+              timeoutMs,
+              `${what} did not reach load`,
+              what
+            );
+          } catch (e) {
+            if (!(e instanceof NavigationTimeoutError) || !nav.saw(committedIn(before.id, isNew))) throw e;
+            clearRefs(this.targetId);
+            return { ...await this.loaded(), note: stillLoading(timeoutMs) };
+          }
           if (hit.kind !== "same-document") clearRefs(this.targetId);
           return await this.loaded();
         } finally {

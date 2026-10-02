@@ -1089,7 +1089,7 @@ interface NavigationResult {
     loaderId: string;
     /** The HTTP status of the document, when the page exposes it. */
     status?: number;
-    /** The page is shown but did not finish loading in time (see navigate). */
+    /** The new document committed but did not finish loading in time (see navigate). */
     note?: string;
 }
 interface BrowserTab {
@@ -1173,12 +1173,16 @@ declare class BrowserSession {
      * `DOMContentLoaded`, or nothing). The tab's refs are cleared: they named
      * nodes of the document that is going away. A navigation the browser refuses
      * (`errorText`: DNS failure, refused connection…) rejects, and so does one
-     * that did not even reach DOMContentLoaded in time. One that did, but whose
-     * `load` has not come (a cold server, a script that never finishes), is the
-     * page: it is shown, and a snapshot works. It resolves, with a `note`.
+     * that did not even commit in time. One that committed but has not loaded
+     * (a cold server, a render-blocking script that holds even DOMContentLoaded)
+     * is the page now, still loading: it resolves, with a `note`.
      */
     navigate(url: string, opts?: NavigateOptions): Promise<NavigationResult>;
-    /** Run a history move or a reload and wait until the main frame shows another document (or the same one, scrolled). */
+    /**
+     * Run a history move or a reload and wait until the main frame shows another
+     * document (or the same one, scrolled). One that committed but has not loaded
+     * in time resolves with a `note`, as in navigate.
+     */
     private settle;
     private history;
     back(opts?: {
@@ -1772,6 +1776,8 @@ interface ActionResult {
     /** An anti-bot challenge on the page after the action; null when none. */
     challenge?: Challenge | null;
     value?: unknown;
+    /** The page the move landed on committed but was still loading when the wait ran out. */
+    note?: string;
 }
 
 declare const PDF_INSPECTOR_SPEC = "@firecrawl/pdf-inspector@1";
