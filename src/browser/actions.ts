@@ -70,6 +70,8 @@ export interface ActionResult {
   /** An anti-bot challenge on the page after the action; null when none. */
   challenge?: Challenge | null;
   value?: unknown;
+  /** The page the move landed on committed but was still loading when the wait ran out. */
+  note?: string;
 }
 
 export interface ActionOptions {
@@ -314,6 +316,7 @@ interface Performed {
   /** The url of the frame that opened the dialog, from the event: known without asking the frozen page. */
   dialogUrl?: string;
   value?: unknown;
+  note?: string;
 }
 
 function watchDialogs(page: CdpSession) {
@@ -429,6 +432,7 @@ async function finish(session: ActionSession, action: string, ref: string | unde
     ...(p.dialog ? { dialog: p.dialog } : {}),
     challenge,
     ...(p.value !== undefined ? { value: p.value } : {}),
+    ...(p.note ? { note: p.note } : {}),
   };
 }
 
@@ -833,7 +837,7 @@ async function history(session: HistorySession, action: string, move: (o: { time
   const before = await session.loaderId();
   const nav = await move(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {});
   await settle(session, settleOpts(opts));
-  return finish(session, action, undefined, { navigated: nav.loaderId !== before });
+  return finish(session, action, undefined, { navigated: nav.loaderId !== before, ...(nav.note ? { note: nav.note } : {}) });
 }
 
 export function back(session: HistorySession, opts: HistoryOptions = {}): Promise<ActionResult> {

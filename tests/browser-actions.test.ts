@@ -904,6 +904,16 @@ describe("handleDialog", () => {
 });
 
 describe("back, forward, reload", () => {
+  it("pass on the note of a move whose page committed but is still loading", async () => {
+    const note = "still loading after 50 ms — take a snapshot or `webindex-tests browser wait --load`";
+    session.reload = async () => {
+      w.loader = "L3";
+      return { url: "https://a.test/", loaderId: "L3", note };
+    };
+    expect(await reload(session, { deps })).toMatchObject({ action: "reload", navigated: true, note });
+    expect(await back(session, { deps })).not.toHaveProperty("note");
+  });
+
   it("wrap the session's history moves in an action result", async () => {
     expect(await back(session, { deps })).toEqual({
       ok: true,

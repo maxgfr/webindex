@@ -62,7 +62,7 @@ export interface NavigationResult {
   loaderId: string;
   /** The HTTP status of the document, when the page exposes it. */
   status?: number;
-  /** The page is shown but did not finish loading in time (see navigate). */
+  /** The new document committed but did not finish loading in time (see navigate). */
   note?: string;
 }
 
@@ -99,7 +99,8 @@ interface FrameInfo {
 }
 
 interface NavEvent {
-  kind: "lifecycle" | "same-document" | "bfcache";
+  /** `commit`: the main frame's new document committed (Page.frameNavigated). */
+  kind: "lifecycle" | "same-document" | "bfcache" | "commit";
   frameId: string;
   loaderId?: string;
   name?: string;
@@ -109,6 +110,15 @@ const LIFECYCLE: Record<Exclude<WaitUntil, "none">, string> = { load: "load", do
 
 /** The event waited for did not come in time; any other failure (a cancelled navigation, a closed connection) is not this. */
 class NavigationTimeoutError extends Error {}
+
+/** Has this event shown the document `loaderId` committed in that frame? Any lifecycle event of it past the start says so too. */
+const committedIn =
+  (frameId: string, isNew: (loaderId: string | undefined) => boolean) =>
+  (e: NavEvent): boolean =>
+    e.frameId === frameId && isNew(e.loaderId) && (e.kind === "commit" || (e.kind === "lifecycle" && e.name !== "init"));
+
+/** What a navigation that committed but has not loaded in time says instead of failing. */
+const stillLoading = (timeoutMs: number): string => `still loading after ${timeoutMs} ms — take a snapshot or \`${brand().cli} browser wait --load\``;
 
 // --- tab ids -----------------------------------------------------------------
 
@@ -370,8 +380,15 @@ export class BrowserSession {
     const handlers: [string, CdpHandler][] = [
       ["Page.lifecycleEvent", (p) => push({ kind: "lifecycle", frameId: p.frameId, loaderId: p.loaderId, name: p.name })],
       ["Page.navigatedWithinDocument", (p) => push({ kind: "same-document", frameId: p.frameId })],
-      // A page restored from the back/forward cache fires no lifecycle event.
-      ["Page.frameNavigated", (p) => p.type === "BackForwardCacheRestore" && push({ kind: "bfcache", frameId: p.frame?.id, loaderId: p.frame?.loaderId })],
+      // A page restored from the back/forward cache fires no lifecycle event. Any other is a new
+      // document committing: in the main frame, what a navigation that has not loaded yet has got to.
+      [
+        "Page.frameNavigated",
+        (p) => {
+          if (p.type === "BackForwardCacheRestore") push({ kind: "bfcache", frameId: p.frame?.id, loaderId: p.frame?.loaderId });
+          else if (p.frame && !p.frame.parentId) push({ kind: "commit", frameId: p.frame.id, loaderId: p.frame.loaderId });
+        },
+      ],
       ["Page.javascriptDialogOpening", (p) => (leaving = p?.type === "beforeunload")],
       [
         "Page.javascriptDialogClosed",
@@ -421,9 +438,9 @@ export class BrowserSession {
    * `DOMContentLoaded`, or nothing). The tab's refs are cleared: they named
    * nodes of the document that is going away. A navigation the browser refuses
    * (`errorText`: DNS failure, refused connection…) rejects, and so does one
-   * that did not even reach DOMContentLoaded in time. One that did, but whose
-   * `load` has not come (a cold server, a script that never finishes), is the
-   * page: it is shown, and a snapshot works. It resolves, with a `note`.
+   * that did not even commit in time. One that committed but has not loaded
+   * (a cold server, a render-blocking script that holds even DOMContentLoaded)
+   * is the page now, still loading: it resolves, with a `note`.
    */
   async navigate(url: string, opts: NavigateOptions = {}): Promise<NavigationResult> {
     const waitUntil = opts.waitUntil ?? "load";
@@ -440,12 +457,16 @@ export class BrowserSession {
       clearRefs(this.targetId);
       if (waitUntil === "none") return { url, loaderId: r.loaderId };
       const name = LIFECYCLE[waitUntil];
-      const reached = (event: string) => (e: NavEvent) => e.kind === "lifecycle" && e.name === event && e.loaderId === r.loaderId;
       try {
-        await nav.until(reached(name), timeoutMs, `navigation to ${url} did not reach ${name}`, `navigation to ${url}`);
+        await nav.until(
+          (e) => e.kind === "lifecycle" && e.name === name && e.loaderId === r.loaderId,
+          timeoutMs,
+          `navigation to ${url} did not reach ${name}`,
+          `navigation to ${url}`,
+        );
       } catch (e) {
-        if (!(e instanceof NavigationTimeoutError) || !nav.saw(reached(LIFECYCLE.domcontentloaded))) throw e;
-        return { ...(await this.loaded()), note: `still loading after ${timeoutMs} ms: the page is shown (DOMContentLoaded) but has not fired load` };
+        if (!(e instanceof NavigationTimeoutError) || !nav.saw(committedIn(r.frameId, (l) => l === r.loaderId))) throw e;
+        return { ...(await this.loaded()), note: stillLoading(timeoutMs) };
       }
       return await this.loaded();
     } finally {
@@ -453,18 +474,32 @@ export class BrowserSession {
     }
   }
 
-  /** Run a history move or a reload and wait until the main frame shows another document (or the same one, scrolled). */
+  /**
+   * Run a history move or a reload and wait until the main frame shows another
+   * document (or the same one, scrolled). One that committed but has not loaded
+   * in time resolves with a `note`, as in navigate.
+   */
   private async settle(what: string, trigger: () => Promise<unknown>, timeoutMs = NAVIGATION_TIMEOUT_MS): Promise<NavigationResult> {
     const before = await this.frame();
     const nav = this.watch();
     try {
       await trigger();
-      const hit = await nav.until(
-        (e) => e.frameId === before.id && (e.kind !== "lifecycle" || (e.name === "load" && e.loaderId !== before.loaderId)),
-        timeoutMs,
-        `${what} did not reach load`,
-        what,
-      );
+      const isNew = (l: string | undefined) => l !== before.loaderId;
+      let hit: NavEvent;
+      try {
+        hit = await nav.until(
+          (e) =>
+            e.frameId === before.id &&
+            (e.kind === "same-document" || e.kind === "bfcache" || (e.kind === "lifecycle" && e.name === "load" && isNew(e.loaderId))),
+          timeoutMs,
+          `${what} did not reach load`,
+          what,
+        );
+      } catch (e) {
+        if (!(e instanceof NavigationTimeoutError) || !nav.saw(committedIn(before.id, isNew))) throw e;
+        clearRefs(this.targetId);
+        return { ...(await this.loaded()), note: stillLoading(timeoutMs) };
+      }
       if (hit.kind !== "same-document") clearRefs(this.targetId);
       return await this.loaded();
     } finally {

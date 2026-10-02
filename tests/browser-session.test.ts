@@ -324,14 +324,49 @@ describe("navigation", () => {
       url: "https://slow.test/",
       loaderId: "L2",
       status: 200,
-      note: "still loading after 50 ms: the page is shown (DOMContentLoaded) but has not fired load",
+      note: "still loading after 50 ms — take a snapshot or `webindex-tests browser wait --load`",
     });
     expect(readRefs(s.targetId)).toBeNull();
     // Waiting for DOMContentLoaded itself is met, with no note.
     expect(await s.navigate("https://dcl.test/", { waitUntil: "domcontentloaded", timeoutMs: 50 })).not.toHaveProperty("note");
   });
 
-  it("still fails a navigation that never reached DOMContentLoaded, or whose DOMContentLoaded was another document's", async () => {
+  it("returns with a note when the page committed but did not even reach DOMContentLoaded (a render-blocking script)", async () => {
+    // the-internet.herokuapp.com: a script in the head holds DOMContentLoaded and load for 30 s.
+    fake.addTarget();
+    script.options.lifecycle = "commit";
+    const s = await attach();
+    writeRefs(s.targetId, table);
+    const r = await s.navigate("https://blocked.test/", { timeoutMs: 50 });
+    expect(r).toMatchObject({
+      url: "https://blocked.test/",
+      loaderId: "L2",
+      note: "still loading after 50 ms — take a snapshot or `webindex-tests browser wait --load`",
+    });
+    expect(readRefs(s.targetId)).toBeNull();
+    expect(await s.loaderId()).toBe("L2");
+  });
+
+  it("goes back, forward and reloads to a page that committed but is still loading, with the same note", async () => {
+    fake.addTarget("https://one.test/");
+    const s = await attach();
+    await s.navigate("https://two.test/");
+    script.options.lifecycle = "commit";
+    const note = "still loading after 50 ms — take a snapshot or `webindex-tests browser wait --load`";
+    writeRefs(s.targetId, table);
+    expect(await s.back({ timeoutMs: 50 })).toMatchObject({ url: "https://one.test/", note });
+    expect(readRefs(s.targetId)).toBeNull();
+    expect(await s.forward({ timeoutMs: 50 })).toMatchObject({ url: "https://two.test/", note });
+    const before = await s.loaderId();
+    expect(await s.reload({ timeoutMs: 50 })).toMatchObject({ url: "https://two.test/", note });
+    expect(await s.loaderId()).not.toBe(before);
+    // A move that never commits still fails.
+    script.options.lifecycle = "never";
+    await expect(s.reload({ timeoutMs: 50 })).rejects.toThrow(/reloading did not reach load within 50 ms/);
+    await expect(s.back({ timeoutMs: 50 })).rejects.toThrow(/going back did not reach load within 50 ms/);
+  });
+
+  it("still fails a navigation that never committed, or whose events were another document's", async () => {
     fake.addTarget();
     script.options.lifecycle = "never";
     const s = await attach();

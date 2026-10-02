@@ -14,9 +14,11 @@ export interface ScriptOptions {
   /**
    * When the lifecycle events of a navigation are sent: before the command's
    * answer (a race), after it, or never; `dcl` sends them after it but stops at
-   * DOMContentLoaded, as a page whose load never comes (a cold server, a hung script).
+   * DOMContentLoaded, as a page whose load never comes (a cold server, a hung script);
+   * `commit` only commits (Page.frameNavigated), as a page held before
+   * DOMContentLoaded by a render-blocking script. `never` does not even commit.
    */
-  lifecycle?: "before" | "after" | "never" | "dcl";
+  lifecycle?: "before" | "after" | "never" | "dcl" | "commit";
   /** The value `performance…responseStatus` evaluates to. */
   status?: number;
 }
@@ -54,8 +56,12 @@ export function scriptBrowser(fake: FakeCdp, opts: ScriptOptions = {}) {
     t.title = `Title of ${url}`;
     const loaderId = p.loaderId;
     const mode = opts.lifecycle ?? "after";
-    if (mode === "before") events(id, loaderId, sessionId);
-    else if (mode === "after") setTimeout(() => events(id, loaderId, sessionId), 5);
+    const navigated = () => fake.emit("Page.frameNavigated", { frame: { id, loaderId, url }, type: "Navigation" }, sessionId);
+    if (mode === "before") {
+      navigated();
+      events(id, loaderId, sessionId);
+    } else if (mode !== "never") setTimeout(navigated, 2);
+    if (mode === "after") setTimeout(() => events(id, loaderId, sessionId), 5);
     else if (mode === "dcl") setTimeout(() => events(id, loaderId, sessionId, ["init", "commit", "DOMContentLoaded"]), 5);
     return { frameId: id, loaderId };
   };

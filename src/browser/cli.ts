@@ -349,6 +349,7 @@ function actionText(ctx: Ctx, r: ActionResult, captured: number | undefined, sna
   const lines = [`${r.action}${r.ref !== undefined ? ` ${r.ref}` : ""}: ${r.navigated ? "navigated to " : ""}${where(r.url, r.title)}`];
   // What the action yields (the options chosen, the scroll position); an empty protocol answer says nothing.
   if (r.value !== undefined && !(typeof r.value === "object" && r.value !== null && Object.keys(r.value).length === 0)) lines.push(`  value: ${show(r.value)}`);
+  if (r.note) lines.push(`note: ${r.note}`);
   if (r.dialog) lines.push(dialogLine(r.dialog, follow(ctx)));
   if (r.challenge) lines.push(challengeLine(ctx, r.challenge));
   if (captured !== undefined) lines.push(capturedLine(ctx, captured));
