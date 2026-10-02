@@ -21,6 +21,7 @@
 // the agent decides with handleDialog.
 
 import { isAbsolute } from "node:path";
+import { brand } from "../brand.js";
 import { UsageError } from "../cli-kit.js";
 import { CdpError, type CdpHandler, type CdpSession } from "./cdp.js";
 import { type Challenge, detectChallenge } from "./challenge.js";
@@ -156,6 +157,20 @@ export const PAGE_FUNCTIONS = {
   // A target inside a frame: the top document's hit test stops at the frame element.
   if (el.ownerDocument !== this.ownerDocument && /^i?frame$/i.test(el.tagName)) return null;
   return describe(el);
+}`,
+  /** The url of the link the target is, or sits inside (an SVG <a> too); null when it is no link. */
+  linkHref: `function linkHref() {
+  const a = this.closest ? this.closest("a[href], a[*|href]") : null;
+  if (!a) return null;
+  let h = a.href;
+  if (h && typeof h === "object") h = h.baseVal;
+  if (typeof h !== "string") h = a.getAttribute("href") || a.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+  if (typeof h !== "string") return null;
+  try {
+    return new URL(h, a.ownerDocument.baseURI).href;
+  } catch (e) {
+    return null;
+  }
 }`,
   /** What fill can do with the element: a field, a contenteditable, or nothing (with a hint at the right action). */
   fieldKind: `function fieldKind() {
@@ -477,6 +492,21 @@ async function centreOf(page: CdpSession, node: ResolvedRef): Promise<{ x: numbe
 /** How many of an overlay's controls a refused click lists. */
 const OVERLAY_CONTROLS_MAX = 12;
 
+/** The url as the page gave it, when it is an http(s) one; undefined for anything else (javascript:, data:…). */
+function httpUrl(href: string): string | undefined {
+  try {
+    const u = new URL(href);
+    return /^https?:$/.test(u.protocol) ? u.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One shell word, whatever the text holds. */
+export function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
 /**
  * Why a click was refused when `hitObjectId` (what it would land on) is not the
  * target. What covers it is named, and its controls are listed with refs from
@@ -484,7 +514,24 @@ const OVERLAY_CONTROLS_MAX = 12;
  * overlay (a cookie wall, a dialog), which one to press — accepting tracking,
  * refusing it, closing — is the user's; a sticky header is only in the way.
  */
-async function coveredError(page: CdpSession, targetId: string, ref: string, hitObjectId: string, where: string, at: string): Promise<ActionError> {
+async function coveredError(
+  page: CdpSession,
+  targetId: string,
+  ref: string,
+  hitObjectId: string,
+  where: string,
+  at: string,
+  href: string | null = null,
+): Promise<ActionError> {
+  const err = await coveredBy(page, targetId, ref, hitObjectId, where, at);
+  // A covered link can still be reached by its address, and navigating there accepts nothing.
+  const safe = href ? httpUrl(href) : undefined;
+  if (safe)
+    err.message += `\nor open its URL directly (navigating doesn't accept anything):\nurl: ${safe}\n\`${brand().cli} browser open ${shellQuote(safe)}\``;
+  return err;
+}
+
+async function coveredBy(page: CdpSession, targetId: string, ref: string, hitObjectId: string, where: string, at: string): Promise<ActionError> {
   const root = await overlayRootOf(page, hitObjectId);
   if (!root) return new ActionError(`${ref} is covered by ${where} at ${at}: close or move it out of the way, then retry`);
   let controls: string[] = [];
@@ -542,7 +589,10 @@ async function hitTarget(page: CdpSession, targetId: string, node: ResolvedRef, 
     const where = await callOn<string | true | null>(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
     // The target itself, reached through its own text or user-agent shadow tree: its guard has run already.
     if (where === true) return undefined;
-    if (where) throw await coveredError(page, targetId, node.ref, objectId, where, at);
+    if (where) {
+      const href = await callOn<string | null>(page, node.objectId, PAGE_FUNCTIONS.linkHref).catch(() => null);
+      throw await coveredError(page, targetId, node.ref, objectId, where, at, href);
+    }
   } finally {
     release(page, objectId);
   }

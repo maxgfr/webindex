@@ -16,6 +16,7 @@
 
 import { join } from "node:path";
 import { brand } from "../brand.js";
+import { UsageError } from "../cli-kit.js";
 import { CdpError, type CdpClient, type CdpHandler, type CdpSession } from "./cdp.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
 import { loopbackSocketUrl, type TargetInfo } from "./discovery.js";
@@ -176,6 +177,25 @@ function tabList(map: Record<string, string>, pages: TargetInfo[], current: stri
 }
 
 // --- CDP helpers -------------------------------------------------------------
+
+/**
+ * Only http(s) pages (and about:blank) are opened: `javascript:` runs in the page,
+ * `data:` renders what a link says, and `file:` would show local files to an agent
+ * a page may be steering. Local files are for `extract`.
+ */
+export function assertOpenableUrl(url: string): void {
+  const u = url.trim();
+  // A bare fragment stays in the current document.
+  let ok = /^about:blank$/i.test(u) || u.startsWith("#");
+  if (!ok) {
+    try {
+      ok = /^https?:$/.test(new URL(u).protocol);
+    } catch {
+      /* not a url */
+    }
+  }
+  if (!ok) throw new UsageError(`only http(s) URLs (and about:blank) can be opened — use \`${brand().cli} extract <path>\` for local files`);
+}
 
 async function createTarget(cdp: CdpClient): Promise<string> {
   const { targetId } = await cdp.send<{ targetId: string }>("Target.createTarget", { url: "about:blank" });
@@ -457,6 +477,7 @@ export class BrowserSession {
    * is the page now, still loading: it resolves, with a `note`.
    */
   async navigate(url: string, opts: NavigateOptions = {}): Promise<NavigationResult> {
+    assertOpenableUrl(url);
     const waitUntil = opts.waitUntil ?? "load";
     const timeoutMs = opts.timeoutMs ?? NAVIGATION_TIMEOUT_MS;
     const nav = this.watch();
@@ -598,6 +619,7 @@ export class BrowserSession {
 
   /** Open a tab, make it current and, given a url, load it. */
   async newTab(url?: string, opts: NavigateOptions = {}): Promise<BrowserTab> {
+    if (url !== undefined) assertOpenableUrl(url);
     const targetId = await createTarget(this.cdp);
     try {
       await this.switchTo(targetId);

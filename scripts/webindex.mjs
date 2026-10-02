@@ -7537,6 +7537,17 @@ function tabList(map, pages, current2) {
     return { id, targetId, url: p?.url ?? "", title: p?.title ?? "", active: targetId === current2 };
   });
 }
+function assertOpenableUrl(url) {
+  const u = url.trim();
+  let ok = /^about:blank$/i.test(u) || u.startsWith("#");
+  if (!ok) {
+    try {
+      ok = /^https?:$/.test(new URL(u).protocol);
+    } catch {
+    }
+  }
+  if (!ok) throw new UsageError(`only http(s) URLs (and about:blank) can be opened \u2014 use \`${brand().cli} extract <path>\` for local files`);
+}
 async function createTarget(cdp) {
   const { targetId } = await cdp.send("Target.createTarget", { url: "about:blank" });
   return targetId;
@@ -7690,6 +7701,7 @@ var init_session = __esm({
   "src/browser/session.ts"() {
     "use strict";
     init_brand();
+    init_cli_kit();
     init_cdp();
     init_deps();
     init_discovery();
@@ -7906,6 +7918,7 @@ var init_session = __esm({
        * is the page now, still loading: it resolves, with a `note`.
        */
       async navigate(url, opts = {}) {
+        assertOpenableUrl(url);
         const waitUntil = opts.waitUntil ?? "load";
         const timeoutMs = opts.timeoutMs ?? NAVIGATION_TIMEOUT_MS;
         const nav = this.watch();
@@ -8031,6 +8044,7 @@ var init_session = __esm({
       }
       /** Open a tab, make it current and, given a url, load it. */
       async newTab(url, opts = {}) {
+        if (url !== void 0) assertOpenableUrl(url);
         const targetId = await createTarget(this.cdp);
         try {
           await this.switchTo(targetId);
@@ -8096,6 +8110,17 @@ var init_session = __esm({
 });
 
 // src/browser/wait.ts
+function timeoutText(c, elapsedMs) {
+  if ("text" in c) return `text ${JSON.stringify(c.text)} did not appear after ${elapsedMs} ms`;
+  if ("gone" in c) return `text ${JSON.stringify(c.gone)} is still on the page after ${elapsedMs} ms`;
+  if ("selector" in c) return `no element matches ${JSON.stringify(c.selector)} after ${elapsedMs} ms`;
+  if ("url" in c) return `the url did not match ${JSON.stringify(c.url)} after ${elapsedMs} ms`;
+  if ("load" in c) return `the page did not finish loading after ${elapsedMs} ms`;
+  if ("idle" in c) return `the network did not go idle after ${elapsedMs} ms`;
+  if ("clear" in c)
+    return `the challenge is still there after ${elapsedMs} ms \u2014 a human must solve it in the browser window (\`${brand().cli} browser open <url>\` shows it), then run wait --clear again`;
+  return `timed out after ${elapsedMs} ms`;
+}
 async function watchNetwork(page) {
   const inflight2 = /* @__PURE__ */ new Set();
   const handlers = [
@@ -8325,11 +8350,12 @@ var WaitTimeoutError, WaitCancelledError, POLL_MS2, DEFAULT_TIMEOUT_MS3, CLEAR_T
 var init_wait = __esm({
   "src/browser/wait.ts"() {
     "use strict";
+    init_brand();
     init_challenge();
     init_deps();
     WaitTimeoutError = class extends Error {
       constructor(condition, elapsedMs) {
-        super(`timed out waiting for ${JSON.stringify(condition)} after ${elapsedMs} ms`);
+        super(timeoutText(condition, elapsedMs));
         this.condition = condition;
         this.elapsedMs = elapsedMs;
         this.name = "WaitTimeoutError";
@@ -10003,11 +10029,21 @@ function nested(items, depth, out) {
     }
   }
 }
-function flat(items, out) {
+function compactUrl(url, base2) {
+  let shown2 = url;
+  try {
+    const u = new URL(url, base2);
+    if (u.origin !== "null" && u.origin === new URL(base2).origin) shown2 = `${u.pathname}${u.search}${u.hash}`;
+  } catch {
+  }
+  const chars = Array.from(shown2);
+  return chars.length > LINK_URL_MAX ? `${chars.slice(0, LINK_URL_MAX).join("")}\u2026` : shown2;
+}
+function flat(items, out, base2) {
   for (const it of items) {
     if (it.t !== "node") continue;
-    if (it.act) out.push({ text: it.head, ref: true });
-    flat(it.children, out);
+    if (it.act) out.push({ text: it.url ? `${it.head} \u2192 ${compactUrl(it.url, base2)}` : it.head, ref: true });
+    flat(it.children, out, base2);
   }
 }
 function renderSnapshot(nodes, opts) {
@@ -10024,14 +10060,14 @@ function renderSnapshot(nodes, opts) {
       if (!hit) continue;
       const lines = [];
       const over = merge(r.collect(hit.tree, hit.node));
-      if (opts.interactive) flat(over, lines);
+      if (opts.interactive) flat(over, lines, opts.refs.url);
       else nested(over, 1, lines);
       if (lines.length === 0) continue;
       all.push({ text: OVERLAY_HEADER, ref: false }, ...opts.interactive ? lines.map((l) => ({ ...l, text: `  ${l.text}` })) : lines);
     }
     if (main2.root) items = merge(r.collect(main2, main2.root));
   }
-  if (opts.interactive) flat(items, all);
+  if (opts.interactive) flat(items, all, opts.refs.url);
   else nested(items, 0, all);
   let kept = all;
   let tail = "";
@@ -10169,7 +10205,7 @@ async function takeSnapshot(session, opts = {}) {
 title: ${title}
 ${r.text}`, url, title, loaderId, refCount: r.refCount, truncated: r.truncated };
 }
-var StaleRefError, REF_SHAPE, NoMatchError, NAME_MAX, OVERLAY_HEADER, OVERLAY_RETRY_MS, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, CONTAINER_ROLES, NAMED_CONTAINER_ROLES, VALUE_ROLES, FIELD_ROLES, HINT_ROLES, HINT_MAX, HINT_VALUE_MAX, str4, squash, truthy, Renderer;
+var StaleRefError, REF_SHAPE, NoMatchError, NAME_MAX, OVERLAY_HEADER, OVERLAY_RETRY_MS, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, CONTAINER_ROLES, NAMED_CONTAINER_ROLES, VALUE_ROLES, FIELD_ROLES, HINT_ROLES, HINT_MAX, HINT_VALUE_MAX, str4, squash, truthy, Renderer, LINK_URL_MAX;
 var init_snapshot = __esm({
   "src/browser/snapshot.ts"() {
     "use strict";
@@ -10334,6 +10370,7 @@ var init_snapshot = __esm({
         ];
       }
     };
+    LINK_URL_MAX = 80;
   }
 });
 
@@ -10487,7 +10524,28 @@ async function centreOf(page, node) {
     y: Math.round((q[1] + q[3] + q[5] + q[7]) / 4)
   };
 }
-async function coveredError(page, targetId, ref2, hitObjectId, where2, at) {
+function httpUrl2(href) {
+  try {
+    const u = new URL(href);
+    return /^https?:$/.test(u.protocol) ? u.href : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function shellQuote(s) {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+async function coveredError(page, targetId, ref2, hitObjectId, where2, at, href = null) {
+  const err = await coveredBy(page, targetId, ref2, hitObjectId, where2, at);
+  const safe = href ? httpUrl2(href) : void 0;
+  if (safe)
+    err.message += `
+or open its URL directly (navigating doesn't accept anything):
+url: ${safe}
+\`${brand().cli} browser open ${shellQuote(safe)}\``;
+  return err;
+}
+async function coveredBy(page, targetId, ref2, hitObjectId, where2, at) {
   const root = await overlayRootOf(page, hitObjectId);
   if (!root) return new ActionError(`${ref2} is covered by ${where2} at ${at}: close or move it out of the way, then retry`);
   let controls = [];
@@ -10534,7 +10592,10 @@ async function hitTarget(page, targetId, node, x, y) {
   try {
     const where2 = await callOn(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
     if (where2 === true) return void 0;
-    if (where2) throw await coveredError(page, targetId, node.ref, objectId, where2, at);
+    if (where2) {
+      const href = await callOn(page, node.objectId, PAGE_FUNCTIONS.linkHref).catch(() => null);
+      throw await coveredError(page, targetId, node.ref, objectId, where2, at, href);
+    }
   } finally {
     release(page, objectId);
   }
@@ -10801,6 +10862,7 @@ var ActionError, DESCRIBE, PAGE_FUNCTIONS, exceptionText, an, settleOpts, CutSho
 var init_actions = __esm({
   "src/browser/actions.ts"() {
     "use strict";
+    init_brand();
     init_cli_kit();
     init_cdp();
     init_challenge();
@@ -10835,6 +10897,20 @@ var init_actions = __esm({
   // A target inside a frame: the top document's hit test stops at the frame element.
   if (el.ownerDocument !== this.ownerDocument && /^i?frame$/i.test(el.tagName)) return null;
   return describe(el);
+}`,
+      /** The url of the link the target is, or sits inside (an SVG <a> too); null when it is no link. */
+      linkHref: `function linkHref() {
+  const a = this.closest ? this.closest("a[href], a[*|href]") : null;
+  if (!a) return null;
+  let h = a.href;
+  if (h && typeof h === "object") h = h.baseVal;
+  if (typeof h !== "string") h = a.getAttribute("href") || a.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+  if (typeof h !== "string") return null;
+  try {
+    return new URL(h, a.ownerDocument.baseURI).href;
+  } catch (e) {
+    return null;
+  }
 }`,
       /** What fill can do with the element: a field, a contenteditable, or nothing (with a hint at the right action). */
       fieldKind: `function fieldKind() {

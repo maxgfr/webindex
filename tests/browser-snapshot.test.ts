@@ -100,8 +100,33 @@ describe("renderSnapshot", () => {
 
   it("renders only nodes with refs, flat, with interactive", () => {
     const r = renderSnapshot(fixture("nested-generic"), { refs: fresh(), interactive: true });
-    expect(r.text).toBe(lines('- link "Home \\"page\\"" [ref=e1]', '- generic "Box" [ref=e2]'));
+    expect(r.text).toBe(lines('- link "Home \\"page\\"" [ref=e1] → /', '- generic "Box" [ref=e2]'));
     expect(r.refCount).toBe(2);
+  });
+
+  it("shows a link's url in interactive mode: path and query on the page's origin, the whole url elsewhere, cut at 80", () => {
+    const link = (id: number, name: string, url: string) => node(id, "link", name, { properties: [{ name: "url", value: { type: "string", value: url } }] });
+    const long = `https://other.test/${"p".repeat(120)}`;
+    const r = renderSnapshot(
+      tree(link(1, "Docs", "https://a.test/docs?x=1#top"), link(2, "Out", "https://b.test/x"), link(3, "Long", long), node(4, "button", "Go")),
+      { refs: fresh(), interactive: true },
+    );
+    expect(r.text).toBe(
+      lines(
+        '- link "Docs" [ref=e1] → /docs?x=1#top',
+        '- link "Out" [ref=e2] → https://b.test/x',
+        `- link "Long" [ref=e3] → ${long.slice(0, 80)}…`,
+        '- button "Go" [ref=e4]',
+      ),
+    );
+  });
+
+  it("does not render an opaque-origin url (javascript:, data:) as a relative one, and cuts on whole characters", () => {
+    const link = (id: number, name: string, url: string) => node(id, "link", name, { properties: [{ name: "url", value: { type: "string", value: url } }] });
+    const emoji = `https://other.test/${"😀".repeat(100)}`;
+    const r = renderSnapshot(tree(link(1, "Run", "javascript:void(0)"), link(2, "Em", emoji)), { refs: fresh(), interactive: true });
+    expect(r.text.split("\n")[0]).toBe('- link "Run" [ref=e1] → javascript:void(0)');
+    expect(r.text.split("\n")[1]).toBe(`- link "Em" [ref=e2] → ${Array.from(emoji).slice(0, 80).join("")}…`);
   });
 
   it("reuses refs already seen and does not mutate the table it is given", () => {

@@ -812,7 +812,7 @@ describe("wait", () => {
     await cli("attach", [String(fake.port)]);
     const r = await cli("wait", [], { text: "Order shipped", timeout: 1000 });
     expect(r.exitCode).toBe(1);
-    expect(r.text).toMatch(/timed out waiting for \{"text":"Order shipped"\} after 1000 ms/);
+    expect(r.text).toMatch(/text "Order shipped" did not appear after 1000 ms/);
   });
 });
 
