@@ -149,6 +149,32 @@ describe("extractMainHtml (readability-lite)", () => {
     expect(text).not.toContain("Sidebar page 7");
   });
 
+  const card = (i: number) => `<article><a href="/n/${i}"><h3>Related headline number ${i} about the league</h3></a><time>01/10</time></article>`;
+  const cards = (n: number) => Array.from({ length: n }, (_, i) => card(i)).join("");
+
+  it("cuts a row of link cards out of the prose block under the <h1> that holds it", () => {
+    const body = `<p>${"The match report goes on at length about the second half. ".repeat(20)}</p>`;
+    const html = `<nav>${"menu ".repeat(20)}</nav><div class="wrap"><h1>Match report</h1><div class="text">${body}</div><div class="more">${cards(15)}</div></div>`;
+    const text = htmlToText(extractMainHtml(html));
+    expect(text).toContain("Match report");
+    expect(text).toContain("about the second half");
+    expect(text).not.toContain("Related headline");
+  });
+
+  it("keeps the cards of a category page whose blurb says less than they do", () => {
+    const blurb =
+      "<p>All the latest news, transfer rumours and match reports from the league, updated every hour by our team of reporters across the country.</p>";
+    const html = `<div class="wrap"><h1>League news</h1>${blurb}<div class="grid">${cards(15)}</div></div>`;
+    const text = htmlToText(extractMainHtml(html));
+    expect(text).toContain("Related headline number 0");
+    expect(text).toContain("Related headline number 14");
+  });
+
+  it("ignores an <h1> that sits inside a card", () => {
+    const html = `<article><a href="/x"><h1>Card headline</h1></a></article>${cards(12)}<div><p>${"Footer prose that is not the article at all. ".repeat(10)}</p></div>`;
+    expect(htmlToText(extractMainHtml(html))).toContain("Related headline number 11");
+  });
+
   it("does not take navigation for content because its class starts with main-", () => {
     const html = `<div class="main-nav">${"<a>Section link</a> ".repeat(80)}</div><main-nav>${"<a>Custom nav link</a> ".repeat(80)}</main-nav><div class="entry-content"><p>${"Entry prose about lanes. ".repeat(30)}</p></div>`;
     const text = htmlToText(extractMainHtml(html));
@@ -170,6 +196,38 @@ describe("extraction on realistic pages", () => {
     for (const title of ["How we rebuilt our rate limiter", "Upgrading to Postgres 16 with zero downtime", "What we changed about on-call"])
       expect(text).toContain(title);
     expect(text).not.toMatch(/Careers|© Acme/);
+  });
+
+  // A news article with no <article> of its own, followed by ~20 related
+  // <article> cards (a heading, a time, a link). Trimmed from a live
+  // footmercato.net page (maxgfr/webindex#29): the cards used to win.
+  it("news article among related <article> cards: the article, not the card list", () => {
+    const text = extract("news-related-cards");
+    expect(text).toContain("Jürgen Klopp aux anges après sa première victoire");
+    expect(text).toContain("notre contre-pressing a été phénoménal");
+    expect(text).toContain("L’Allemagne tentera de confirmer dimanche à Thessalonique");
+    expect(text).not.toMatch(/La diva Kylian Mbappé|les compositions probables|Jorge Jesus a été hué|Foot Mercato 2004/);
+  });
+
+  it("an <article> followed by related <article> cards: the story without the cards", () => {
+    const text = extract("article-related-cards");
+    expect(text).toContain("Coach praises the pressing after his first win");
+    expect(text).toContain("deeper defensive block");
+    expect(text).not.toMatch(/Ten things we learned|Fans vote for the player/);
+  });
+
+  it("prose with no landmark beside a sidebar of link cards: the prose under the <h1>", () => {
+    const text = extract("prose-sidebar-cards");
+    expect(text).toContain("How the club rebuilt its academy in three seasons");
+    expect(text).toContain("Minutes, not reputation, decide who comes back.");
+    expect(text).toContain("made the next budget meeting easier");
+    expect(text).not.toMatch(/Most read|Ten things we learned|Riverside Sports 2026/);
+  });
+
+  it("a listing page with no prose block still returns its cards", () => {
+    const text = extract("listing-cards");
+    for (const title of ["Transfer window: the five deals that never happened", "Fans vote for the player of the month"]) expect(text).toContain(title);
+    expect(text).not.toMatch(/Privacy|Riverside Sports 2026/);
   });
 
   it("forum thread: keeps the question, the answer and the follow-up", () => {

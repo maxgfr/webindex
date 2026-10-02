@@ -847,6 +847,12 @@ describe("HTML scans stay linear on hostile markup", () => {
     within(10_000, () => extractMainHtml(`<div ${"a".repeat(300_000)}><p>text</p></div>`));
   });
 
+  it("extractMainHtml: a headline under thousands of wrappers, beside thousands of link cards", () => {
+    const n = 20_000;
+    const cards = '<article><a href="/x">card</a></article>'.repeat(n);
+    within(10_000, () => extractMainHtml(`${"<div>".repeat(n)}<h1>t</h1><p>${"word ".repeat(40)}</p>${"</div>".repeat(n)}${cards}`));
+  });
+
   it("extractMainHtml: many unclosed <main>/<article> openers", () => {
     within(10_000, () => extractMainHtml(`<main><article><p>${"word ".repeat(20)}</p>`.repeat(20_000)));
   });
