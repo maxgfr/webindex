@@ -7,6 +7,7 @@ import { renderSnapshot } from "../src/browser/snapshot.js";
 const FUNCTIONS = [
   "openBrowserSession",
   "readRenderedPage",
+  "closeBrowserReads",
   "renderBrowserSnapshot",
   "classifyBrowserChallenge",
   "detectBrowserBinary",

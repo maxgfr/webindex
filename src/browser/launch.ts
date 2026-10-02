@@ -60,6 +60,8 @@ export interface Endpoint {
   port: number;
   /** True only for a browser this library started: only that one may be closed. */
   launchedByUs: boolean;
+  /** True only from the call that started the browser: a reuse of one already running never says so. */
+  spawned?: boolean;
   pid?: number;
   profile: string;
   headless: boolean;
@@ -205,6 +207,7 @@ async function launch(deps: BrowserDeps, binary: string | undefined, profile: st
         host: "127.0.0.1",
         port,
         launchedByUs: true,
+        spawned: true,
         ...(child.pid !== undefined ? { pid: child.pid } : {}),
         profile,
         headless,
@@ -236,7 +239,7 @@ export async function readActivePort(deps: BrowserDeps, file: string): Promise<{
 }
 
 /** The path of a browser socket URL (`/devtools/browser/<guid>`); a bare path is returned as is. */
-function socketPath(urlOrPath: string): string {
+export function socketPath(urlOrPath: string): string {
   try {
     return new URL(urlOrPath).pathname;
   } catch {

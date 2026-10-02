@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -9,7 +10,7 @@ import { configure, resetBrand } from "../src/brand.js";
 import { type BrowserCliFlags, type BrowserCliResult, runBrowserCommand } from "../src/browser/cli.js";
 import { isPortAlive } from "../src/browser/discovery.js";
 import { createBrowserToolHost } from "../src/browser/mcp.js";
-import { readRenderedPage } from "../src/index.js";
+import { closeBrowserReads, readRenderedPage } from "../src/index.js";
 
 // A real Chrome (or Brave, Chromium, Edge), headless, driven the way the CLI
 // drives it: every step is one `browser` command that reconnects through
@@ -220,6 +221,16 @@ function readActivePortFile(path: string): number | undefined {
   if (!existsSync(path)) return undefined;
   const port = Number(readFileSync(path, "utf8").split("\n")[0]);
   return Number.isInteger(port) && port > 0 ? port : undefined;
+}
+
+/** Whether any process still runs on that profile directory (the browser and its helpers). */
+function runsOn(dir: string): boolean {
+  try {
+    execFileSync("pgrep", ["-f", `user-data-dir=${dir}`], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function waitGone(pid: number, ms: number): Promise<boolean> {
@@ -672,6 +683,26 @@ describe.runIf(live)("a real browser, driven command by command", () => {
       const until = Date.now() + 10_000;
       while ((await isPortAlive(port as number)) && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
       expect(await isPortAlive(port as number)).toBe(false);
+    },
+    STEP_MS,
+  );
+
+  it(
+    "closeBrowserReads closes the browser a read of this process launched, and leaves no browser process behind",
+    async () => {
+      const dir = join(home, "profiles", "default");
+      expect(runsOn(dir)).toBe(false);
+      const page = await readRenderedPage(`${base}/second.html`, { headless: true });
+      expect(page.text).toContain("The second page");
+      const port = readActivePortFile(join(dir, "DevToolsActivePort"));
+      expect(await isPortAlive(port as number)).toBe(true);
+      expect(runsOn(dir)).toBe(true);
+      expect(await closeBrowserReads()).toEqual({ closed: true });
+      const until = Date.now() + 10_000;
+      while ((runsOn(dir) || (await isPortAlive(port as number))) && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
+      expect(await isPortAlive(port as number)).toBe(false);
+      expect(runsOn(dir)).toBe(false);
+      expect(await closeBrowserReads()).toEqual({ closed: false });
     },
     STEP_MS,
   );

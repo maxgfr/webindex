@@ -150,7 +150,8 @@ describe("launch policy order", () => {
     const { spawn, calls } = fakeSpawn({ port: fake.port });
     const ep = await resolveEndpoint({ deps: launchDeps(spawn) });
     expect(calls).toHaveLength(1);
-    expect(ep).toEqual({ host: "127.0.0.1", port: fake.port, launchedByUs: true, pid: 4242, profile: "default", headless: false });
+    // `spawned`: this very call started it (a reuse never says so).
+    expect(ep).toEqual({ host: "127.0.0.1", port: fake.port, launchedByUs: true, spawned: true, pid: 4242, profile: "default", headless: false });
     expect(readSession()).toBeNull();
   });
 });

@@ -214,7 +214,7 @@ export interface DialogEvent {
 export type DialogListener = (d: DialogEvent, page: CdpSession) => void;
 
 /** Ask a browser we launched to quit; kill its pid only if it refused while still connected. */
-async function closeLaunched(cdp: CdpClient, pid: number | undefined, deps: BrowserDeps): Promise<void> {
+export async function closeLaunched(cdp: CdpClient, pid: number | undefined, deps: BrowserDeps): Promise<void> {
   try {
     await cdp.send("Browser.close", undefined, { timeoutMs: BROWSER_CLOSE_TIMEOUT_MS });
   } catch {
@@ -278,6 +278,14 @@ export class BrowserSession {
   }
   get launchedByUs(): boolean {
     return this.endpoint.launchedByUs;
+  }
+  /** Whether opening this session started the browser (not a reuse of one already running). */
+  get spawned(): boolean {
+    return this.endpoint.spawned === true;
+  }
+  /** The browser-level socket URL: its path names this run of the browser and no other. */
+  get browserSocket(): string {
+    return this.wsBrowserUrl;
   }
   get pid(): number | undefined {
     return this.endpoint.pid;

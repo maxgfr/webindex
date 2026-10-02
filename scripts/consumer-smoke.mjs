@@ -37,6 +37,7 @@ import {
   isNoWrite, setNoWrite, writeArtifact, takeArtifacts,
   createServer, runStdioServer, ToolError,
   renderBrowserSnapshot, classifyBrowserChallenge, detectBrowserBinary, browserHome, readRenderedPage,
+  closeBrowserReads,
 } from "./engine.mjs";
 
 const fail = (m) => { console.error("consumer-smoke: " + m); process.exit(1); };
@@ -81,6 +82,9 @@ process.env.${PREFIX}_BROWSER_DIR = "/tmp/acme-browser-home";
 ok(browserHome() === "/tmp/acme-browser-home", "browserHome() ignored the consumer's BROWSER_DIR");
 delete process.env.${PREFIX}_BROWSER_DIR;
 ok(typeof readRenderedPage === "function", "readRenderedPage is not exported");
+ok(typeof closeBrowserReads === "function", "closeBrowserReads is not exported");
+const noReads = await closeBrowserReads();
+ok(noReads && noReads.closed === false && Object.keys(noReads).length === 1, "closeBrowserReads must resolve { closed: false } when no read launched a browser: " + JSON.stringify(noReads));
 
 // ── The PDF ladder, pinned to its built-in rung (no npx, no network) ────────
 process.env.${PREFIX}_PDF_ENGINE = "native";

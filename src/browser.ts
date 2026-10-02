@@ -7,11 +7,17 @@
 // (click, type, fill…, behind the irreversibility guard), `challenge.ts` (anti-bot
 // walls), `network.ts` and `read.ts` (a rendered page as readable text).
 //
-// Callers want `openBrowserSession`, or `readRenderedPage` for a one-shot read.
+// Callers want `openBrowserSession`, or `readRenderedPage` for a one-shot read
+// (and `closeBrowserReads` at the end of their run).
 // Names are prefixed `Browser*` so vendoring skills do not collide.
 
 export { openBrowserSession, type BrowserSession, type OpenOptions as BrowserOpenOptions } from "./browser/session.js";
-export { readRenderedPage, type ReadPageOptions as BrowserReadOptions } from "./browser/read.js";
+export {
+  closeBrowserReads,
+  readRenderedPage,
+  type CloseReadsOptions as BrowserCloseReadsOptions,
+  type ReadPageOptions as BrowserReadOptions,
+} from "./browser/read.js";
 export {
   renderSnapshot as renderBrowserSnapshot,
   type AXNode as BrowserAXNode,
