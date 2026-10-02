@@ -447,7 +447,7 @@ export class BrowserSession {
     const timeoutMs = opts.timeoutMs ?? NAVIGATION_TIMEOUT_MS;
     const nav = this.watch();
     try {
-      const r = await this.page.send<{ frameId: string; loaderId?: string; errorText?: string }>("Page.navigate", { url });
+      const r = await this.page.send<{ frameId: string; loaderId?: string; errorText?: string }>("Page.navigate", { url }, { timeoutMs });
       if (r.errorText) throw new Error(`navigation to ${url} failed: ${r.errorText}`);
       if (!r.loaderId) {
         // Same document (a fragment): nothing reloads, the refs still hold.
@@ -479,11 +479,12 @@ export class BrowserSession {
    * document (or the same one, scrolled). One that committed but has not loaded
    * in time resolves with a `note`, as in navigate.
    */
-  private async settle(what: string, trigger: () => Promise<unknown>, timeoutMs = NAVIGATION_TIMEOUT_MS): Promise<NavigationResult> {
+  private async settle(what: string, trigger: (timeoutMs: number) => Promise<unknown>, timeoutMs = NAVIGATION_TIMEOUT_MS): Promise<NavigationResult> {
     const before = await this.frame();
     const nav = this.watch();
     try {
-      await trigger();
+      // The command answers once the new document starts arriving: a slow server holds it as long as the wait itself.
+      await trigger(timeoutMs);
       const isNew = (l: string | undefined) => l !== before.loaderId;
       let hit: NavEvent;
       try {
@@ -511,7 +512,11 @@ export class BrowserSession {
     const h = await this.page.send<{ currentIndex: number; entries: { id: number }[] }>("Page.getNavigationHistory");
     const entry = h.entries[h.currentIndex + step];
     if (!entry) throw new Error(step < 0 ? "no previous page in this tab's history" : "no next page in this tab's history");
-    return this.settle(step < 0 ? "going back" : "going forward", () => this.page.send("Page.navigateToHistoryEntry", { entryId: entry.id }), timeoutMs);
+    return this.settle(
+      step < 0 ? "going back" : "going forward",
+      (t) => this.page.send("Page.navigateToHistoryEntry", { entryId: entry.id }, { timeoutMs: t }),
+      timeoutMs,
+    );
   }
 
   back(opts: { timeoutMs?: number } = {}): Promise<NavigationResult> {
@@ -523,7 +528,7 @@ export class BrowserSession {
   }
 
   reload(opts: { timeoutMs?: number } = {}): Promise<NavigationResult> {
-    return this.settle("reloading", () => this.page.send("Page.reload"), opts.timeoutMs);
+    return this.settle("reloading", (t) => this.page.send("Page.reload", undefined, { timeoutMs: t }), opts.timeoutMs);
   }
 
   // --- tabs --------------------------------------------------------------------

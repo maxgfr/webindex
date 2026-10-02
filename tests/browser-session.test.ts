@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
 import * as discovery from "../src/browser/discovery.js";
@@ -378,6 +378,22 @@ describe("navigation", () => {
       return r;
     });
     await expect(s.navigate("https://other.test/", { timeoutMs: 50 })).rejects.toThrow(/did not reach load within 50 ms/);
+  });
+
+  it("gives Page.navigate and the history moves the navigation's own timeout, not a CDP call's 30 s", async () => {
+    // A server that answers after 35 s: Page.navigate itself only answers then, and `--timeout 60000` must cover it.
+    fake.addTarget("https://one.test/");
+    const s = await attach();
+    const send = vi.spyOn(s.page, "send");
+    await s.navigate("https://two.test/", { timeoutMs: 60_000 });
+    await s.back({ timeoutMs: 45_000 });
+    await s.forward({ timeoutMs: 46_000 });
+    await s.reload({ timeoutMs: 47_000 });
+    await s.reload();
+    const opts = (m: string) => send.mock.calls.filter((c) => c[0] === m).map((c) => c[2]);
+    expect(opts("Page.navigate")).toEqual([{ timeoutMs: 60_000 }]);
+    expect(opts("Page.navigateToHistoryEntry")).toEqual([{ timeoutMs: 45_000 }, { timeoutMs: 46_000 }]);
+    expect(opts("Page.reload")).toEqual([{ timeoutMs: 47_000 }, { timeoutMs: 30_000 }]);
   });
 
   it("returns at once on a same-document navigation and keeps the refs", async () => {
