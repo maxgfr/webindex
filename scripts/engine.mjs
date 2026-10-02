@@ -5561,7 +5561,7 @@ async function openBrowserSession(opts = {}) {
     throw e;
   }
 }
-var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, STATUS_TIMEOUT_MS, ATTACH_TIMEOUT_MS, TAB_ID, LIFECYCLE, tabNumber, BrowserSession;
+var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, STATUS_TIMEOUT_MS, ATTACH_TIMEOUT_MS, TAB_ID, LIFECYCLE, NavigationTimeoutError, tabNumber, BrowserSession;
 var init_session = __esm({
   "src/browser/session.ts"() {
     "use strict";
@@ -5578,6 +5578,8 @@ var init_session = __esm({
     ATTACH_TIMEOUT_MS = 5e3;
     TAB_ID = /^t([1-9]\d*)$/;
     LIFECYCLE = { load: "load", domcontentloaded: "DOMContentLoaded" };
+    NavigationTimeoutError = class extends Error {
+    };
     tabNumber = (id) => Number(TAB_ID.exec(id)?.[1] ?? 0);
     BrowserSession = class {
       /** @internal use openBrowserSession */
@@ -5726,10 +5728,12 @@ var init_session = __esm({
             for (const [method, h] of handlers) page.off(method, h);
             offClose();
           },
+          /** Whether such an event has come, whatever was waited for. */
+          saw: (match) => seen.some(match),
           until: (match, timeoutMs, what, cancelledWhat) => new Promise((resolve8, reject) => {
             const timer = setTimeout(() => {
               wake = void 0;
-              reject(new Error(`${what} within ${timeoutMs} ms`));
+              reject(new NavigationTimeoutError(`${what} within ${timeoutMs} ms`));
             }, timeoutMs);
             wake = () => {
               const hit = seen.find(match);
@@ -5748,7 +5752,10 @@ var init_session = __esm({
        * Load `url` in the current tab and wait for the new document's `load` (or
        * `DOMContentLoaded`, or nothing). The tab's refs are cleared: they named
        * nodes of the document that is going away. A navigation the browser refuses
-       * (`errorText`: DNS failure, refused connection…) rejects.
+       * (`errorText`: DNS failure, refused connection…) rejects, and so does one
+       * that did not even reach DOMContentLoaded in time. One that did, but whose
+       * `load` has not come (a cold server, a script that never finishes), is the
+       * page: it is shown, and a snapshot works. It resolves, with a `note`.
        */
       async navigate(url, opts = {}) {
         const waitUntil = opts.waitUntil ?? "load";
@@ -5764,12 +5771,13 @@ var init_session = __esm({
           clearRefs(this.targetId);
           if (waitUntil === "none") return { url, loaderId: r.loaderId };
           const name = LIFECYCLE[waitUntil];
-          await nav.until(
-            (e) => e.kind === "lifecycle" && e.name === name && e.loaderId === r.loaderId,
-            timeoutMs,
-            `navigation to ${url} did not reach ${name}`,
-            `navigation to ${url}`
-          );
+          const reached = (event) => (e) => e.kind === "lifecycle" && e.name === event && e.loaderId === r.loaderId;
+          try {
+            await nav.until(reached(name), timeoutMs, `navigation to ${url} did not reach ${name}`, `navigation to ${url}`);
+          } catch (e) {
+            if (!(e instanceof NavigationTimeoutError) || !nav.saw(reached(LIFECYCLE.domcontentloaded))) throw e;
+            return { ...await this.loaded(), note: `still loading after ${timeoutMs} ms: the page is shown (DOMContentLoaded) but has not fired load` };
+          }
           return await this.loaded();
         } finally {
           nav.stop();
@@ -7413,10 +7421,20 @@ function browserFetchMode(explicit) {
   const m = (explicit ?? env("BROWSER_FETCH"))?.toLowerCase();
   return m === "always" || m === "fallback" ? m : "off";
 }
+function worthRendering(res) {
+  if (RENDER_STATUS.has(res.status)) return res.status ? `got HTTP ${res.status}` : "got no answer";
+  if (res.status < 200 || res.status >= 300) return void 0;
+  const junk = looksLikeJunkExtraction(res.text);
+  if (junk) return `read a ${junk}`;
+  return res.text.trim().length < 200 ? "found almost no text" : void 0;
+}
+var RENDER_STATUS;
 var init_mode = __esm({
   "src/browser/mode.ts"() {
     "use strict";
     init_brand();
+    init_fetch();
+    RENDER_STATUS = /* @__PURE__ */ new Set([0, 401, 403, 429, 503]);
   }
 });
 
@@ -7974,13 +7992,6 @@ async function fetchAndExtract(url, opts = {}) {
     return { ...got.result, note: [`Read ${url} in the browser: the built-in fetch ${why}.`, got.result.note].filter(Boolean).join(" ") };
   return { ...res, note: [res.note, got.result ? got.result.note : `${got.note}.`, got.detail].filter(Boolean).join(" ") || void 0 };
 }
-function worthRendering(res) {
-  if (RENDER_STATUS.has(res.status)) return res.status ? `got HTTP ${res.status}` : "got no answer";
-  if (res.status < 200 || res.status >= 300) return void 0;
-  const junk = looksLikeJunkExtraction(res.text);
-  if (junk) return `read a ${junk}`;
-  return res.text.trim().length < 200 ? "found almost no text" : void 0;
-}
 async function renderInBrowser(url, opts) {
   try {
     const { readRenderedPage: readRenderedPage2 } = await Promise.resolve().then(() => (init_read(), read_exports));
@@ -8244,7 +8255,7 @@ function capExtract(text, depth) {
   const lastNl = slice.lastIndexOf("\n");
   return (lastNl > cap * 0.6 ? slice.slice(0, lastNl) : slice) + "\n\n\u2026 [truncated]";
 }
-var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, NOT_TITLE, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, RENDER_STATUS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, DEAD_LINK_STATUS, JUNK_PATTERNS, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP;
+var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, NOT_TITLE, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, DEAD_LINK_STATUS, JUNK_PATTERNS, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP;
 var init_fetch = __esm({
   "src/fetch.ts"() {
     "use strict";
@@ -8313,7 +8324,6 @@ ${NUL2}${i}${NUL2}
     PDF_FETCH_OPTS = { accept: "application/pdf,*/*", binary: true, maxBytes: 16 * 1024 * 1024 };
     DOC_FETCH_OPTS = { accept: "*/*", binary: true, maxBytes: 16 * 1024 * 1024 };
     PURE_VIDEO_HOSTS = /* @__PURE__ */ new Set(["youtube", "vimeo", "dailymotion"]);
-    RENDER_STATUS = /* @__PURE__ */ new Set([0, 401, 403, 429, 503]);
     HTML_TYPE_RE = /^(?:text\/html|application\/xhtml\+xml)$/;
     NON_TEXT_TYPE_RE = /^(?:image\/(?!svg\+xml$)|audio\/|video\/|font\/|model\/|application\/(?:gzip|x-gzip|x-tar|x-bzip2|x-xz|x-7z-compressed|x-rar-compressed|vnd\.rar|java-archive|wasm|x-msdownload|vnd\.android\.package-archive|x-shockwave-flash|ogg)$)/;
     DEAD_LINK_STATUS = /* @__PURE__ */ new Set([404, 410, 451, 403]);
@@ -8949,6 +8959,7 @@ var REF_ROLES = /* @__PURE__ */ new Set([
   "heading"
 ]);
 var VALUE_ROLES = /* @__PURE__ */ new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider"]);
+var FIELD_ROLES = /* @__PURE__ */ new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
 var str2 = (v) => typeof v?.value === "string" ? v.value : typeof v?.value === "number" ? String(v.value) : "";
 var squash = (s) => s.replace(/\s+/g, " ").trim();
 function buildTree(nodes) {
@@ -9026,29 +9037,31 @@ var Renderer = class {
     }
     return void 0;
   }
-  children(tree, n) {
+  children(tree, n, parent) {
     const out = [];
     for (const id of n.childIds ?? []) {
       const c = tree.byId.get(id);
-      if (c) out.push(...this.collect(tree, c));
+      if (c) out.push(...this.collect(tree, c, parent));
     }
     return out;
   }
-  collect(tree, n) {
+  collect(tree, n, parent = void 0) {
     if (this.seen.has(n)) return [];
     this.seen.add(n);
     const role = str2(n.role);
-    if (n.ignored) return this.children(tree, n);
+    if (n.ignored) return this.children(tree, n, parent);
     if (role === "InlineTextBox") return [];
     if (role === "LineBreak") return [{ t: "break" }];
     if (TEXT_ROLES.has(role)) {
       const boxes = (n.childIds ?? []).map((id) => str2(tree.byId.get(id)?.name)).join("");
       return [{ t: "text", text: str2(n.name) || boxes }];
     }
-    if (HOISTED.has(role)) return this.children(tree, n);
+    if (HOISTED.has(role)) return this.children(tree, n, parent);
     const name = squash(str2(n.name));
-    const wantsRef = n.backendDOMNodeId !== void 0 && (REF_ROLES.has(role.toLowerCase()) || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
-    if (COLLAPSIBLE.has(role) && !name && !wantsRef) return [{ t: "break" }, ...this.children(tree, n), { t: "break" }];
+    const hasRole = REF_ROLES.has(role.toLowerCase());
+    const wantsRef = n.backendDOMNodeId !== void 0 && (hasRole || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
+    const editor = wantsRef && !hasRole && !name && parent?.ref === true && FIELD_ROLES.has(parent.role);
+    if (COLLAPSIBLE.has(role) && !name && !wantsRef || editor) return [{ t: "break" }, ...this.children(tree, n, parent), { t: "break" }];
     const isFrame = role.toLowerCase() === "iframe";
     const shown = isFrame ? "iframe" : role;
     let head = `- ${shown}`;
@@ -9061,14 +9074,14 @@ var Renderer = class {
     let note = "";
     const inner = isFrame && n.backendDOMNodeId !== void 0 ? this.frameTree(n.backendDOMNodeId) : void 0;
     if (isFrame) {
-      if (inner?.root) kids = merge(this.collect(inner, inner.root));
+      if (inner?.root) kids = merge(this.collect(inner, inner.root, void 0));
       else {
         kids = [];
         note = " (cross-origin, not expanded)";
       }
-    } else kids = merge(this.children(tree, n));
-    if (name) kids = kids.filter((k) => !(k.t === "text" && k.text === name));
+    } else kids = merge(this.children(tree, n, { role, ref: wantsRef }));
     const value = VALUE_ROLES.has(role) ? squash(str2(n.value)) : "";
+    kids = kids.filter((k) => !(k.t === "text" && (name && k.text === name || value && k.text === value)));
     const rawUrl = role === "link" ? prop(n, "url") : void 0;
     const url = typeof rawUrl === "string" ? rawUrl : "";
     return [{ t: "node", head: value ? `${head}${note}: ${value}` : `${head}${note}`, ref: wantsRef, ...url ? { url } : {}, note, children: kids }];
@@ -9114,9 +9127,17 @@ function renderSnapshot(nodes, opts) {
       used += cost;
       n++;
     }
-    if (n < all.length) {
+    const hint = "use `snapshot <ref>` or --interactive";
+    if (n === 0 && all.length > 0) {
+      const first = all[0];
+      const text2 = `${first.text.slice(0, Math.max(0, opts.maxChars - 1))}\u2026`;
+      const ref = first.ref && /\[ref=e\d+\]/.test(text2);
+      const more = all.length - 1;
+      kept = [{ text: text2, ref }];
+      tail = `\u2026 [truncated: the first line cut${more ? `, ${more} more line${more === 1 ? "" : "s"}` : ""} \u2014 ${hint}]`;
+    } else if (n < all.length) {
       kept = all.slice(0, n);
-      tail = `\u2026 [truncated: ${all.length - n} more lines \u2014 use \`snapshot <ref>\` or --interactive]`;
+      tail = `\u2026 [truncated: ${all.length - n} more lines \u2014 ${hint}]`;
     }
   }
   const text = [...kept.map((l) => l.text), ...tail ? [tail] : []].join("\n");
@@ -11825,10 +11846,12 @@ async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date
   return res;
 }
 function lookup(url, acceptLanguage, ns, variant, browserFallback = false) {
-  const best = lookupOwn(url, acceptLanguage, ns, variant);
+  const own = lookupOwn(url, acceptLanguage, ns, variant);
+  const best = browserFallback && own && wouldRender(own) ? void 0 : own;
   const rendered = browserFallback ? readCache(url, acceptLanguage, "browser", variant) : void 0;
   return rendered && (!best || rendered.cachedAt > best.cachedAt) ? rendered : best;
 }
+var wouldRender = (entry) => !entry.documentType && ["native", "firecrawl"].includes(entry.extractor ?? "native") && worthRendering(entry) !== void 0;
 function lookupOwn(url, acceptLanguage, ns, variant) {
   const best = readAnyNamespace(url, acceptLanguage, [.../* @__PURE__ */ new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
   if (ns === VIDEO_CACHE_NS && !best) return readCache(url, acceptLanguage, "native", variant);

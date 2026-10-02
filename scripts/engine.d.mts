@@ -1089,6 +1089,8 @@ interface NavigationResult {
     loaderId: string;
     /** The HTTP status of the document, when the page exposes it. */
     status?: number;
+    /** The page is shown but did not finish loading in time (see navigate). */
+    note?: string;
 }
 interface BrowserTab {
     id: string;
@@ -1170,7 +1172,10 @@ declare class BrowserSession {
      * Load `url` in the current tab and wait for the new document's `load` (or
      * `DOMContentLoaded`, or nothing). The tab's refs are cleared: they named
      * nodes of the document that is going away. A navigation the browser refuses
-     * (`errorText`: DNS failure, refused connection…) rejects.
+     * (`errorText`: DNS failure, refused connection…) rejects, and so does one
+     * that did not even reach DOMContentLoaded in time. One that did, but whose
+     * `load` has not come (a cold server, a script that never finishes), is the
+     * page: it is shown, and a snapshot works. It resolves, with a `note`.
      */
     navigate(url: string, opts?: NavigateOptions): Promise<NavigationResult>;
     /** Run a history move or a reload and wait until the main frame shows another document (or the same one, scrolled). */
@@ -1652,7 +1657,7 @@ interface AXNode {
 interface RenderOptions {
     /** Only nodes that have a ref, flat (no indentation, no text, no `/url` lines). */
     interactive?: boolean;
-    /** Cut the tree at a line boundary once it is longer than this. No limit by default. */
+    /** Cut the tree at a line boundary once it is longer than this (a first line longer than all of it is cut itself). No limit by default. */
     maxChars?: number;
     /** Render only the subtree of this node. */
     rootBackendId?: number;

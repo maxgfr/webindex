@@ -5485,10 +5485,20 @@ function browserFetchMode(explicit) {
   const m = (explicit ?? env("BROWSER_FETCH"))?.toLowerCase();
   return m === "always" || m === "fallback" ? m : "off";
 }
+function worthRendering(res) {
+  if (RENDER_STATUS.has(res.status)) return res.status ? `got HTTP ${res.status}` : "got no answer";
+  if (res.status < 200 || res.status >= 300) return void 0;
+  const junk = looksLikeJunkExtraction(res.text);
+  if (junk) return `read a ${junk}`;
+  return res.text.trim().length < 200 ? "found almost no text" : void 0;
+}
+var RENDER_STATUS;
 var init_mode = __esm({
   "src/browser/mode.ts"() {
     "use strict";
     init_brand();
+    init_fetch();
+    RENDER_STATUS = /* @__PURE__ */ new Set([0, 401, 403, 429, 503]);
   }
 });
 
@@ -7198,7 +7208,7 @@ async function withPage(opts, fn) {
     { deps }
   );
 }
-var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, STATUS_TIMEOUT_MS, ATTACH_TIMEOUT_MS, TAB_ID, LIFECYCLE, sameTabs, tabNumber, BrowserSession;
+var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, STATUS_TIMEOUT_MS, ATTACH_TIMEOUT_MS, TAB_ID, LIFECYCLE, NavigationTimeoutError, sameTabs, tabNumber, BrowserSession;
 var init_session = __esm({
   "src/browser/session.ts"() {
     "use strict";
@@ -7215,6 +7225,8 @@ var init_session = __esm({
     ATTACH_TIMEOUT_MS = 5e3;
     TAB_ID = /^t([1-9]\d*)$/;
     LIFECYCLE = { load: "load", domcontentloaded: "DOMContentLoaded" };
+    NavigationTimeoutError = class extends Error {
+    };
     sameTabs = (a, b) => Object.keys(a).length === Object.keys(b).length && Object.entries(a).every(([k, v]) => b[k] === v);
     tabNumber = (id) => Number(TAB_ID.exec(id)?.[1] ?? 0);
     BrowserSession = class {
@@ -7364,10 +7376,12 @@ var init_session = __esm({
             for (const [method, h] of handlers) page.off(method, h);
             offClose();
           },
+          /** Whether such an event has come, whatever was waited for. */
+          saw: (match) => seen.some(match),
           until: (match, timeoutMs, what, cancelledWhat) => new Promise((resolve12, reject) => {
             const timer = setTimeout(() => {
               wake = void 0;
-              reject(new Error(`${what} within ${timeoutMs} ms`));
+              reject(new NavigationTimeoutError(`${what} within ${timeoutMs} ms`));
             }, timeoutMs);
             wake = () => {
               const hit = seen.find(match);
@@ -7386,7 +7400,10 @@ var init_session = __esm({
        * Load `url` in the current tab and wait for the new document's `load` (or
        * `DOMContentLoaded`, or nothing). The tab's refs are cleared: they named
        * nodes of the document that is going away. A navigation the browser refuses
-       * (`errorText`: DNS failure, refused connection…) rejects.
+       * (`errorText`: DNS failure, refused connection…) rejects, and so does one
+       * that did not even reach DOMContentLoaded in time. One that did, but whose
+       * `load` has not come (a cold server, a script that never finishes), is the
+       * page: it is shown, and a snapshot works. It resolves, with a `note`.
        */
       async navigate(url, opts = {}) {
         const waitUntil = opts.waitUntil ?? "load";
@@ -7402,12 +7419,13 @@ var init_session = __esm({
           clearRefs(this.targetId);
           if (waitUntil === "none") return { url, loaderId: r.loaderId };
           const name2 = LIFECYCLE[waitUntil];
-          await nav.until(
-            (e) => e.kind === "lifecycle" && e.name === name2 && e.loaderId === r.loaderId,
-            timeoutMs,
-            `navigation to ${url} did not reach ${name2}`,
-            `navigation to ${url}`
-          );
+          const reached = (event) => (e) => e.kind === "lifecycle" && e.name === event && e.loaderId === r.loaderId;
+          try {
+            await nav.until(reached(name2), timeoutMs, `navigation to ${url} did not reach ${name2}`, `navigation to ${url}`);
+          } catch (e) {
+            if (!(e instanceof NavigationTimeoutError) || !nav.saw(reached(LIFECYCLE.domcontentloaded))) throw e;
+            return { ...await this.loaded(), note: `still loading after ${timeoutMs} ms: the page is shown (DOMContentLoaded) but has not fired load` };
+          }
           return await this.loaded();
         } finally {
           nav.stop();
@@ -8516,13 +8534,6 @@ async function fetchAndExtract(url, opts = {}) {
     return { ...got.result, note: [`Read ${url} in the browser: the built-in fetch ${why}.`, got.result.note].filter(Boolean).join(" ") };
   return { ...res, note: [res.note, got.result ? got.result.note : `${got.note}.`, got.detail].filter(Boolean).join(" ") || void 0 };
 }
-function worthRendering(res) {
-  if (RENDER_STATUS.has(res.status)) return res.status ? `got HTTP ${res.status}` : "got no answer";
-  if (res.status < 200 || res.status >= 300) return void 0;
-  const junk = looksLikeJunkExtraction(res.text);
-  if (junk) return `read a ${junk}`;
-  return res.text.trim().length < 200 ? "found almost no text" : void 0;
-}
 async function renderInBrowser(url, opts) {
   try {
     const { readRenderedPage: readRenderedPage2 } = await Promise.resolve().then(() => (init_read(), read_exports));
@@ -8743,7 +8754,7 @@ function metaDescriptionOf(html) {
   }
   return og;
 }
-var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, NOT_TITLE, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, RENDER_STATUS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, JUNK_PATTERNS, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP;
+var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, NOT_TITLE, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, JUNK_PATTERNS, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP;
 var init_fetch = __esm({
   "src/fetch.ts"() {
     "use strict";
@@ -8812,7 +8823,6 @@ ${NUL2}${i}${NUL2}
     PDF_FETCH_OPTS = { accept: "application/pdf,*/*", binary: true, maxBytes: 16 * 1024 * 1024 };
     DOC_FETCH_OPTS = { accept: "*/*", binary: true, maxBytes: 16 * 1024 * 1024 };
     PURE_VIDEO_HOSTS = /* @__PURE__ */ new Set(["youtube", "vimeo", "dailymotion"]);
-    RENDER_STATUS = /* @__PURE__ */ new Set([0, 401, 403, 429, 503]);
     HTML_TYPE_RE = /^(?:text\/html|application\/xhtml\+xml)$/;
     NON_TEXT_TYPE_RE = /^(?:image\/(?!svg\+xml$)|audio\/|video\/|font\/|model\/|application\/(?:gzip|x-gzip|x-tar|x-bzip2|x-xz|x-7z-compressed|x-rar-compressed|vnd\.rar|java-archive|wasm|x-msdownload|vnd\.android\.package-archive|x-shockwave-flash|ogg)$)/;
     JUNK_PATTERNS = [
@@ -9057,7 +9067,7 @@ async function guardAction(page, opts) {
     throw new RiskRefusedError(opts.action, risk.reason ?? "looks irreversible", onTarget ? el.label : el.submitLabel || el.label, opts.key);
   }
 }
-var PASSWORD_REASON, IRREVERSIBLE, SIGN, IRREVERSIBLE_RE, norm2, ENTER, SPACE, lastKey, isEnter, isSpace2, ACTIVATES, SPACE_ACTIVATES, shown, FOCUS_SOURCE, COLLECT_SOURCE, UninspectableError, FRAME_REASON, RiskRefusedError;
+var PASSWORD_REASON, IRREVERSIBLE, SIGN, IRREVERSIBLE_RE, norm2, ENTER, SPACE, lastKey, isEnter, isSpace2, ACTIVATES, SPACE_ACTIVATES, shown, FOCUS_SOURCE, OWNER_SOURCE, COLLECT_SOURCE, UninspectableError, FRAME_REASON, RiskRefusedError;
 var init_risk = __esm({
   "src/browser/risk.ts"() {
     "use strict";
@@ -9142,10 +9152,20 @@ var init_risk = __esm({
   }
   return el;
 }`;
+    OWNER_SOURCE = `(node) => {
+  let el = node;
+  for (let i = 0; el && el.nodeType !== 1 && i < 64; i++) el = el.nodeType === 11 ? el.host : el.parentElement || el.parentNode;
+  for (let i = 0; el && el.nodeType === 1 && i < 8; i++) {
+    const root = el.getRootNode ? el.getRootNode() : null;
+    const host = root && root.nodeType === 11 ? root.host : null;
+    if (!host || !/^(input|textarea|select)$/i.test(host.tagName || "")) break;
+    el = host;
+  }
+  return el && el.nodeType === 1 ? el : null;
+}`;
     COLLECT_SOURCE = `function (action) {
-  let el = this;
-  if (el && el.nodeType === 3) el = el.parentElement;
-  if (!el || el.nodeType !== 1) return null;
+  const el = (${OWNER_SOURCE})(this);
+  if (!el) return null;
   if (/^i?frame$/i.test(el.tagName || "")) {
     let inner = null;
     try { inner = el.contentDocument; } catch (e) { inner = null; }
@@ -9309,9 +9329,17 @@ function renderSnapshot(nodes, opts) {
       used += cost;
       n++;
     }
-    if (n < all.length) {
+    const hint = "use `snapshot <ref>` or --interactive";
+    if (n === 0 && all.length > 0) {
+      const first = all[0];
+      const text2 = `${first.text.slice(0, Math.max(0, opts.maxChars - 1))}\u2026`;
+      const ref2 = first.ref && /\[ref=e\d+\]/.test(text2);
+      const more = all.length - 1;
+      kept = [{ text: text2, ref: ref2 }];
+      tail = `\u2026 [truncated: the first line cut${more ? `, ${more} more line${more === 1 ? "" : "s"}` : ""} \u2014 ${hint}]`;
+    } else if (n < all.length) {
       kept = all.slice(0, n);
-      tail = `\u2026 [truncated: ${all.length - n} more lines \u2014 use \`snapshot <ref>\` or --interactive]`;
+      tail = `\u2026 [truncated: ${all.length - n} more lines \u2014 ${hint}]`;
     }
   }
   const text = [...kept.map((l) => l.text), ...tail ? [tail] : []].join("\n");
@@ -9382,7 +9410,7 @@ async function takeSnapshot(session, opts = {}) {
 title: ${title}
 ${r.text}`, url, title, loaderId, refCount: r.refCount, truncated: r.truncated };
 }
-var StaleRefError, NAME_MAX, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, VALUE_ROLES, str4, squash, truthy, Renderer;
+var StaleRefError, NAME_MAX, FRAME_MAX, COLLAPSIBLE, HOISTED, TEXT_ROLES, REF_ROLES, VALUE_ROLES, FIELD_ROLES, str4, squash, truthy, Renderer;
 var init_snapshot = __esm({
   "src/browser/snapshot.ts"() {
     "use strict";
@@ -9422,6 +9450,7 @@ var init_snapshot = __esm({
       "heading"
     ]);
     VALUE_ROLES = /* @__PURE__ */ new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider"]);
+    FIELD_ROLES = /* @__PURE__ */ new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
     str4 = (v) => typeof v?.value === "string" ? v.value : typeof v?.value === "number" ? String(v.value) : "";
     squash = (s) => s.replace(/\s+/g, " ").trim();
     truthy = (v) => v === true || v === "true" || typeof v === "string" && v !== "" && v !== "false";
@@ -9457,29 +9486,31 @@ var init_snapshot = __esm({
         }
         return void 0;
       }
-      children(tree, n) {
+      children(tree, n, parent) {
         const out = [];
         for (const id of n.childIds ?? []) {
           const c = tree.byId.get(id);
-          if (c) out.push(...this.collect(tree, c));
+          if (c) out.push(...this.collect(tree, c, parent));
         }
         return out;
       }
-      collect(tree, n) {
+      collect(tree, n, parent = void 0) {
         if (this.seen.has(n)) return [];
         this.seen.add(n);
         const role = str4(n.role);
-        if (n.ignored) return this.children(tree, n);
+        if (n.ignored) return this.children(tree, n, parent);
         if (role === "InlineTextBox") return [];
         if (role === "LineBreak") return [{ t: "break" }];
         if (TEXT_ROLES.has(role)) {
           const boxes = (n.childIds ?? []).map((id) => str4(tree.byId.get(id)?.name)).join("");
           return [{ t: "text", text: str4(n.name) || boxes }];
         }
-        if (HOISTED.has(role)) return this.children(tree, n);
+        if (HOISTED.has(role)) return this.children(tree, n, parent);
         const name2 = squash(str4(n.name));
-        const wantsRef = n.backendDOMNodeId !== void 0 && (REF_ROLES.has(role.toLowerCase()) || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
-        if (COLLAPSIBLE.has(role) && !name2 && !wantsRef) return [{ t: "break" }, ...this.children(tree, n), { t: "break" }];
+        const hasRole = REF_ROLES.has(role.toLowerCase());
+        const wantsRef = n.backendDOMNodeId !== void 0 && (hasRole || truthy(prop(n, "focusable")) || truthy(prop(n, "editable")));
+        const editor = wantsRef && !hasRole && !name2 && parent?.ref === true && FIELD_ROLES.has(parent.role);
+        if (COLLAPSIBLE.has(role) && !name2 && !wantsRef || editor) return [{ t: "break" }, ...this.children(tree, n, parent), { t: "break" }];
         const isFrame = role.toLowerCase() === "iframe";
         const shown2 = isFrame ? "iframe" : role;
         let head = `- ${shown2}`;
@@ -9492,14 +9523,14 @@ var init_snapshot = __esm({
         let note = "";
         const inner = isFrame && n.backendDOMNodeId !== void 0 ? this.frameTree(n.backendDOMNodeId) : void 0;
         if (isFrame) {
-          if (inner?.root) kids = merge(this.collect(inner, inner.root));
+          if (inner?.root) kids = merge(this.collect(inner, inner.root, void 0));
           else {
             kids = [];
             note = " (cross-origin, not expanded)";
           }
-        } else kids = merge(this.children(tree, n));
-        if (name2) kids = kids.filter((k) => !(k.t === "text" && k.text === name2));
+        } else kids = merge(this.children(tree, n, { role, ref: wantsRef }));
         const value = VALUE_ROLES.has(role) ? squash(str4(n.value)) : "";
+        kids = kids.filter((k) => !(k.t === "text" && (name2 && k.text === name2 || value && k.text === value)));
         const rawUrl = role === "link" ? prop(n, "url") : void 0;
         const url = typeof rawUrl === "string" ? rawUrl : "";
         return [{ t: "node", head: value ? `${head}${note}: ${value}` : `${head}${note}`, ref: wantsRef, ...url ? { url } : {}, note, children: kids }];
@@ -9674,8 +9705,9 @@ async function hitTarget(page, node, x, y) {
   const objectId = (await ask("DOM.resolveNode", { backendNodeId: hit })).object?.objectId;
   if (!objectId) throw unreachable();
   try {
-    const cover = await callOn(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
-    if (cover) throw new ActionError(`${node.ref} is covered by ${cover} at ${at}: close or move it out of the way, then retry`);
+    const where2 = await callOn(page, node.objectId, PAGE_FUNCTIONS.hitTest, [{ objectId }]);
+    if (where2 === true) return void 0;
+    if (where2) throw new ActionError(`${node.ref} is covered by ${where2} at ${at}: close or move it out of the way, then retry`);
   } finally {
     release(page, objectId);
   }
@@ -9946,11 +9978,18 @@ var init_actions = __esm({
     return "<" + tag + (el.id ? "#" + el.id : "") + (role ? ' role="' + role + '"' : "") + (type ? ' type="' + type + '"' : "") + ">" + (shown ? ' "' + shown + '"' : "");
   };`;
     PAGE_FUNCTIONS = {
-      /** null when `hit` (the node under the click point) is the target or inside it; else a description of what covers it. */
+      /**
+       * Where `hit` (the node under the click point) is: true when it stands for the
+       * target itself (its text, its user-agent shadow tree: see OWNER_SOURCE), null
+       * when it is inside the target (a button in a card, which the guard then looks
+       * at), else a description of what covers the target.
+       */
       hitTest: `function hitTest(hit) {
   ${DESCRIBE}
+  const owner = ${OWNER_SOURCE};
+  const el = hit ? owner(hit) : null;
+  if (el === this) return true;
   for (let n = hit; n; n = n.parentNode || n.host) if (n === this) return null;
-  const el = hit && hit.nodeType !== 1 ? hit.parentElement : hit;
   if (!el) return "nothing";
   // A target inside a frame: the top document's hit test stops at the frame element.
   if (el.ownerDocument !== this.ownerDocument && /^i?frame$/i.test(el.tagName)) return null;
@@ -10428,7 +10467,7 @@ function currentTarget(ctx) {
   if (!saved) throw new Error(`no browser session: record what a page fetches with ${follow(ctx).capture}`);
   return saved.targetId;
 }
-var cliFollowUps, USAGE, BROWSER_ACTIONS, SNAPSHOT_MAX_CHARS, cliName, usageError, dialogsJson, unreported, actOpts, snapOpts, show, pretty, where, follow, dialogLine, frozen, challengeLine, capturedLine, confirm, historyOpts, HANDLERS;
+var cliFollowUps, USAGE, BROWSER_ACTIONS, SNAPSHOT_MAX_CHARS, cliName, usageError, dialogsJson, unreported, actOpts, snapOpts, show, pretty, where, follow, dialogLine, frozen, challengeLine, capturedLine, confirm, timeoutOpts, HANDLERS;
 var init_cli = __esm({
   "src/browser/cli.ts"() {
     "use strict";
@@ -10454,7 +10493,7 @@ var init_cli = __esm({
       capture: `\`${cliName()} browser open <url> --capture\`, or --capture on an action`
     });
     USAGE = {
-      open: "open <url> [--new-tab] [--headless] [--profile <n>] [--capture] [--snapshot]",
+      open: "open <url> [--new-tab] [--headless] [--profile <n>] [--capture] [--snapshot] [--timeout <ms>]",
       attach: "attach <port|url>",
       status: "status",
       close: "close [--all]",
@@ -10504,7 +10543,7 @@ var init_cli = __esm({
     challengeLine = (ctx, c) => `challenge: ${c.kind}${c.blocking ? " (blocking)" : ""} \u2014 let the human solve it, then ${follow(ctx).waitClear}`;
     capturedLine = (ctx, n) => `captured ${n} JSON response${n === 1 ? "" : "s"} \u2014 ${follow(ctx).networkList}`;
     confirm = (ctx) => ctx.flags.confirm ? { confirm: true } : {};
-    historyOpts = (ctx) => ctx.flags.timeout !== void 0 ? { timeoutMs: ctx.flags.timeout } : {};
+    timeoutOpts = (ctx) => ctx.flags.timeout !== void 0 ? { timeoutMs: ctx.flags.timeout } : {};
     HANDLERS = {
       async open(ctx) {
         arity(ctx, 1);
@@ -10513,7 +10552,7 @@ var init_cli = __esm({
           ctx,
           async (s) => {
             const { value: nav, captured } = await capturing(ctx, s, async () => {
-              const nav2 = await s.navigate(url);
+              const nav2 = await s.navigate(url, timeoutOpts(ctx));
               await settle(s, actOpts(ctx));
               return nav2;
             });
@@ -10521,6 +10560,7 @@ var init_cli = __esm({
             const challenge = await detectChallenge(s);
             const snap = ctx.flags.snapshot ? await takeSnapshot(s, snapOpts(ctx)) : void 0;
             const lines = [`${where(nav.url, title)}${nav.status !== void 0 ? ` (HTTP ${nav.status})` : ""}`];
+            if (nav.note) lines.push(`note: ${nav.note}`);
             if (challenge) lines.push(challengeLine(ctx, challenge));
             if (captured !== void 0) lines.push(capturedLine(ctx, captured));
             if (snap) lines.push("", snap.text);
@@ -10530,6 +10570,7 @@ var init_cli = __esm({
                 url: nav.url,
                 title,
                 ...nav.status !== void 0 ? { status: nav.status } : {},
+                ...nav.note ? { note: nav.note } : {},
                 tab: s.targetId,
                 challenge,
                 ...captured !== void 0 ? { captured } : {},
@@ -10609,15 +10650,15 @@ var init_cli = __esm({
       },
       async back(ctx) {
         arity(ctx, 0);
-        return mutate(ctx, (s, o) => back(s, { ...o, ...historyOpts(ctx) }));
+        return mutate(ctx, (s, o) => back(s, { ...o, ...timeoutOpts(ctx) }));
       },
       async forward(ctx) {
         arity(ctx, 0);
-        return mutate(ctx, (s, o) => forward(s, { ...o, ...historyOpts(ctx) }));
+        return mutate(ctx, (s, o) => forward(s, { ...o, ...timeoutOpts(ctx) }));
       },
       async reload(ctx) {
         arity(ctx, 0);
-        return mutate(ctx, (s, o) => reload(s, { ...o, ...historyOpts(ctx) }));
+        return mutate(ctx, (s, o) => reload(s, { ...o, ...timeoutOpts(ctx) }));
       },
       async dialog(ctx) {
         const answer = ctx.args[0];
@@ -11374,10 +11415,12 @@ async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date
   return res;
 }
 function lookup(url, acceptLanguage, ns, variant, browserFallback = false) {
-  const best = lookupOwn(url, acceptLanguage, ns, variant);
+  const own = lookupOwn(url, acceptLanguage, ns, variant);
+  const best = browserFallback && own && wouldRender(own) ? void 0 : own;
   const rendered = browserFallback ? readCache(url, acceptLanguage, "browser", variant) : void 0;
   return rendered && (!best || rendered.cachedAt > best.cachedAt) ? rendered : best;
 }
+var wouldRender = (entry) => !entry.documentType && ["native", "firecrawl"].includes(entry.extractor ?? "native") && worthRendering(entry) !== void 0;
 function lookupOwn(url, acceptLanguage, ns, variant) {
   const best = readAnyNamespace(url, acceptLanguage, [.../* @__PURE__ */ new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
   if (ns === VIDEO_CACHE_NS && !best) return readCache(url, acceptLanguage, "native", variant);
@@ -16465,7 +16508,7 @@ USAGE
   webindex video     frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]
   webindex video     list <playlist|channel> [--limit <n>] [--out <dir>] [--refresh] [--json]
   webindex browser   open <url> [--new-tab] [--headless] [--profile <n>] [--cdp <port|url>]
-                     [--capture] [--snapshot]
+                     [--capture] [--snapshot] [--timeout <ms>]
   webindex browser   attach <port|url> | status | close [--all]
   webindex browser   snapshot [<ref>] [--interactive] [--max-chars <n>]
   webindex browser   click|hover <ref> [--confirm] | type <ref> <text> [--submit]
