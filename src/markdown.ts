@@ -93,6 +93,7 @@ export function markdownAgainst(html: string, base: string | undefined, fullPage
   // the wrapper of a <pre> (GitHub's, Sphinx's). Bounded like the other stacks.
   const divs: string[] = [];
   let divOverflow = 0;
+  let prevAEnd = -1; // where the last `</a>` ended
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = tag.exec(s))) {
@@ -101,6 +102,9 @@ export function markdownAgainst(html: string, base: string | undefined, fullPage
     const t = m[0];
     const closing = t[1] === "/";
     const name = tagName(t);
+    // `</a><a>` with no whitespace between keeps a space; no other inline pair does.
+    const adjacentLinks = name === "a" && !closing && m.index === prevAEnd;
+    prevAEnd = name === "a" && closing ? tag.lastIndex : -1;
     if (!name) continue; // a doctype or processing instruction; comments are gone
 
     if (name === "div") {
@@ -206,6 +210,7 @@ export function markdownAgainst(html: string, base: string | undefined, fullPage
         w.close(kind);
         continue;
       }
+      if (adjacentLinks) w.space();
       if (kind === "a") {
         // An <a> inside an open <a> closes it first, as the HTML parser does.
         w.close("a");

@@ -6689,6 +6689,7 @@ function markdownAgainst(html, base2, fullPage) {
   let headingEnd = -1;
   const divs = [];
   let divOverflow = 0;
+  let prevAEnd = -1;
   let last = 0;
   let m;
   while (m = tag.exec(s)) {
@@ -6697,6 +6698,8 @@ function markdownAgainst(html, base2, fullPage) {
     const t = m[0];
     const closing = t[1] === "/";
     const name = tagName(t);
+    const adjacentLinks = name === "a" && !closing && m.index === prevAEnd;
+    prevAEnd = name === "a" && closing ? tag.lastIndex : -1;
     if (!name) continue;
     if (name === "div") {
       if (closing) {
@@ -6790,6 +6793,7 @@ function markdownAgainst(html, base2, fullPage) {
         w.close(kind);
         continue;
       }
+      if (adjacentLinks) w.space();
       if (kind === "a") {
         w.close("a");
         const href = htmlAttributes(t).get("href");
@@ -8006,14 +8010,17 @@ function htmlToText(html, opts = {}) {
   if (!opts.fullPage) s = dropLandmarks(s, CHROME_ROLES);
   const pre = [];
   s = flattenHeadings(setAsidePre(s, pre));
-  s = s.replace(TAG_RE, (tag) => {
+  let prevAEnd = -1;
+  s = s.replace(TAG_RE, (tag, at) => {
     const closing = tag[1] === "/";
     const name = tagName(tag);
+    const adjacentLinks = name === "a" && !closing && at === prevAEnd;
+    prevAEnd = name === "a" && closing ? at + tag.length : -1;
     if (/^h[1-6]$/.test(name)) {
       return closing ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
     }
     if (BLOCK_TAGS.has(name) || name === "br" || name === "hr") return "\n";
-    if (INLINE_TAGS.has(name)) return "";
+    if (INLINE_TAGS.has(name)) return adjacentLinks ? " " : "";
     return " ";
   });
   s = s.replace(LOOSE_TAG_RE, " ");
