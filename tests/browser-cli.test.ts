@@ -564,6 +564,39 @@ describe("page actions", () => {
     }
   });
 
+  it("exits 0 when the page only carries a challenge widget (a captcha on a form), not a wall", async () => {
+    await ready();
+    world.widget = true;
+    for (const [action, args] of [
+      ["click", ["e1"]],
+      ["reload", []],
+      ["open", ["https://b.test/"]],
+    ] as [string, string[]][]) {
+      const r = await cli(action, args, { json: true });
+      expect(r.exitCode, `${action}: ${r.text}`).toBe(0);
+      expect(r.json).toMatchObject({ challenge: { kind: "recaptcha", blocking: false } });
+      expect(r.text).toMatch(/challenge: recaptcha — let the human/);
+      await cli("snapshot");
+    }
+  });
+
+  it("exits 3 when tabs new <url> lands on a blocking challenge, and says so", async () => {
+    await ready();
+    world.blocking = true;
+    const r = await cli("tabs", ["new", "https://b.test/"], { json: true });
+    expect(r.exitCode, r.text).toBe(3);
+    expect(r.json).toMatchObject({ ok: true, id: "t2", challenge: { blocking: true } });
+    const t = await cli("tabs", ["new", "https://c.test/"]);
+    expect(t.exitCode).toBe(3);
+    expect(t.text.split("\n")[1]).toMatch(/^challenge: cloudflare \(blocking\)/);
+    world.blocking = false;
+    const clear = await cli("tabs", ["new", "https://d.test/"], { json: true });
+    expect(clear.exitCode).toBe(0);
+    expect(clear.json).toMatchObject({ challenge: null });
+    // A blank tab loads nothing: nothing to look at.
+    expect((await cli("tabs", ["new"], { json: true })).json).not.toHaveProperty("challenge");
+  });
+
   it("scopes the post-action snapshot to --selector, never the action's target", async () => {
     await ready();
     world.selectors = { "input.q": 12 };
@@ -974,14 +1007,18 @@ async function run(argv: string[]): Promise<{ code: number; out: string; err: st
     throw new Error(`__exit__${code ?? 0}`);
   }) as never);
   let code = 0;
+  process.exitCode = undefined;
   try {
     await main(argv);
+    // A printed result sets the code instead of exiting, so a pipe gets all of it.
+    code = Number(process.exitCode ?? 0);
   } catch (e) {
     const m = /^__exit__(\d+)$/.exec((e as Error).message);
     if (!m) throw e;
     code = Number(m[1]);
   } finally {
     vi.restoreAllMocks();
+    process.exitCode = undefined;
   }
   return { code, out: out.join(""), err: err.join("") };
 }

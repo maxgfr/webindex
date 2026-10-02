@@ -95,6 +95,7 @@ export async function readPageText(session: ActionSession, opts: PageTextOptions
   text = text.trim();
   const title = await session.title();
   const max = opts.maxChars;
+  if (max !== undefined && !(Number.isInteger(max) && max >= 1)) throw new RangeError(`maxChars must be a whole number, 1 or more, not ${max}`);
   const truncated = max !== undefined && text.length > max;
   return {
     url,

@@ -153,14 +153,18 @@ async function run(argv: string[]): Promise<{ code: number; err: string }> {
     throw new Error(`__exit__${code ?? 0}`);
   }) as never);
   let code = 0;
+  process.exitCode = undefined;
   try {
     await main(argv);
+    // A printed result sets the code instead of exiting, so a pipe gets all of it.
+    code = Number(process.exitCode ?? 0);
   } catch (e) {
     const m = /^__exit__(\d+)$/.exec((e as Error).message);
     if (!m) throw e;
     code = Number(m[1]);
   } finally {
     vi.restoreAllMocks();
+    process.exitCode = undefined;
   }
   return { code, err: err.join("") };
 }
@@ -639,14 +643,18 @@ describe("the other tools", () => {
     await expect(h.call("webindex_browser_text", { scope: "element" })).rejects.toThrow(/`ref` or a `selector`/);
     await expect(h.call("webindex_browser_text", { scope: "page", ref: "e3" })).rejects.toThrow(/scope "element"/);
     await expect(h.call("webindex_browser_text", { scope: "all" })).rejects.toThrow(/`scope` must be one of page, element/);
+    for (const maxChars of [-5, 0, 2.5]) {
+      await expect(h.call("webindex_browser_text", { scope: "page", maxChars }), String(maxChars)).rejects.toThrow(/`maxChars` must be a whole number/);
+    }
   });
 
-  it("names a blocking challenge an action lands on, first thing after the result line, and is no error", async () => {
+  it("names a blocking challenge an action lands on in a line after the result line, and is no error", async () => {
     const h = await host();
     world.blocking = true;
     const r = await h.call("webindex_browser_open", { url: "https://b.test/" });
     // Resolved, not thrown: the tool result is no error.
-    expect(r.text.split("\n")[1]).toMatch(/^challenge: cloudflare \(blocking\) — let the human solve it, then webindex_browser_wait with condition clear/);
+    expect(r.text.split("\n")[0]).toMatch(/^https:\/\/b\.test\//);
+    expect(r.text).toMatch(/^challenge: cloudflare \(blocking\) — let the human solve it, then webindex_browser_wait with condition clear/m);
     await h.call("webindex_browser_snapshot", { mode: "full" });
     expect((await h.call("webindex_browser_click", { ref: "e1" })).text).toMatch(/challenge: cloudflare \(blocking\)/);
   });

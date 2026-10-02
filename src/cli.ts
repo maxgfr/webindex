@@ -351,8 +351,8 @@ COMMANDS
              drives one on a loopback port; close shuts down only a browser it
              launched. snapshot prints the accessibility tree with refs (e12)
              on controls and containers (table, figure…); a ref or --selector
-             scopes snapshot, screenshot, text and an action's --snapshot. text
-             reads the tab's main content as fetch does, overlays stripped. A
+             scopes snapshot, screenshot and text, and --selector an action's
+             --snapshot. text reads the tab's main content, overlays gone. A
              ref from before a navigation is stale. An irreversible-looking
              click or Enter (pay, delete, send, a password) needs --confirm:
              ask the user first. A challenge is never bypassed: the human
@@ -564,6 +564,17 @@ const VIDEO_ACTIONS = ["fetch", "search", "frames", "list"];
 
 /** A yt-dlp release older than this is flagged by doctor: YouTube breaks old ones. */
 const YTDLP_STALE_DAYS = 60;
+
+/**
+ * End with `code` once everything written is out. process.exit() ends the
+ * process at once, and a write to a pipe (`webindex … | jq`) is asynchronous:
+ * a result over the pipe's buffer (64 KiB) was cut off there, while a file or a
+ * terminal got all of it. Every path that printed a result returns after this
+ * instead; fail() and usage() print one line of their own.
+ */
+function exitAfterOutput(code: number): void {
+  process.exitCode = code;
+}
 
 function fail(msg: string): never {
   process.stderr.write(`webindex: ${msg}\n`);
@@ -2067,7 +2078,7 @@ async function dispatch(argv: string[]): Promise<void> {
       // Notes stay off stdout so pipelines retain clean results.
       for (const n of r.notes) process.stderr.write(`  ${n}\n`);
     }
-    if (!r.hits.length) process.exit(EXIT_FAILURE);
+    if (!r.hits.length) exitAfterOutput(EXIT_FAILURE);
     return;
   }
 
@@ -2228,7 +2239,7 @@ async function dispatch(argv: string[]): Promise<void> {
     // stdout for the report, so `webindex stack status` is pipeable; the engine
     // already streamed docker's own progress to the terminal.
     (r.code === 0 ? process.stdout : process.stderr).write(r.message + "\n");
-    if (r.code !== 0) process.exit(r.code);
+    if (r.code !== 0) exitAfterOutput(r.code);
     return;
   }
 
@@ -2264,7 +2275,7 @@ async function dispatch(argv: string[]): Promise<void> {
     if (r.note) process.stderr.write(`  ${r.note}\n`);
     if (!r.queryTerms.length) {
       process.stderr.write("The question has no rankable terms once stopwords are removed — the order is arbitrary.\n");
-      process.exit(1);
+      exitAfterOutput(EXIT_FAILURE);
     }
     return;
   }
@@ -2372,7 +2383,7 @@ async function dispatch(argv: string[]): Promise<void> {
         ...(r.crawlDelayMs ? [`  delay     ${r.crawlDelayMs}ms`] : []),
         ...(r.sitemaps.length ? [`  sitemaps  ${r.sitemaps.join("\n            ")}`] : []),
       ]);
-      if (!allowed) process.exit(1); // scriptable: `webindex robots <url> && fetch it`
+      if (!allowed) exitAfterOutput(EXIT_FAILURE); // scriptable: `webindex robots <url> && fetch it`
       return;
     }
     if (cmd === "sitemap") {
@@ -2493,7 +2504,7 @@ async function dispatch(argv: string[]): Promise<void> {
       for (const d of r.disallowed) process.stderr.write(`  disallowed: ${d}\n`);
       for (const n of r.notes) process.stderr.write(`  ${n}\n`);
     }
-    if (!r.pages.length) process.exit(EXIT_FAILURE);
+    if (!r.pages.length) exitAfterOutput(EXIT_FAILURE);
     return;
   }
 
@@ -2610,7 +2621,7 @@ async function dispatch(argv: string[]): Promise<void> {
     }
     // Exit 1 on "could not tell", so a watcher script never reads an error as
     // "nothing to do". `changed` itself is not a failure.
-    if (v.changed === undefined) process.exit(EXIT_FAILURE);
+    if (v.changed === undefined) exitAfterOutput(EXIT_FAILURE);
     return;
   }
 
@@ -2749,12 +2760,13 @@ async function dispatch(argv: string[]): Promise<void> {
     if (r.exitCode === 0 || r.exitCode === EXIT_HUMAN) {
       process.stdout.write(asJson ? jsonLine(r.json) : `${r.text}\n`);
       // Done, and the page is a blocking challenge: the result is printed as on success, the code says a human is needed.
-      if (r.exitCode === EXIT_HUMAN) process.exit(EXIT_HUMAN);
+      if (r.exitCode === EXIT_HUMAN) exitAfterOutput(EXIT_HUMAN);
       return;
     }
     if (asJson) process.stdout.write(jsonLine(r.json));
-    if (r.exitCode === EXIT_USAGE) usage(r.text);
-    fail(r.text);
+    process.stderr.write(`webindex: ${r.text}\n`);
+    exitAfterOutput(r.exitCode === EXIT_USAGE ? EXIT_USAGE : EXIT_FAILURE);
+    return;
   }
 
   // The packaging toolchain for a repo built ON this engine. Dev-time: it reads
@@ -2777,7 +2789,7 @@ async function dispatch(argv: string[]): Promise<void> {
       for (const e of r.errors) process.stderr.write(`  ${e}\n`);
       if (asJson) process.stdout.write(jsonLine(r));
       else if (r.written.length) process.stdout.write(`${r.written.map((p) => `  wrote ${relative(root, p)}`).join("\n")}\n`);
-      if (!r.written.length) process.exit(EXIT_FAILURE);
+      if (!r.written.length) exitAfterOutput(EXIT_FAILURE);
       return;
     }
 
@@ -2825,7 +2837,7 @@ async function dispatch(argv: string[]): Promise<void> {
             if (s.ok) process.stdout.write(`  ok   ${s.engine} matches the ${s.tag} pin (${s.engineVersion})\n`);
             else for (const p of s.problems) process.stderr.write(`  FAIL ${p}\n`);
           }
-        if (statuses.some((s) => !s.ok)) process.exit(EXIT_FAILURE);
+        if (statuses.some((s) => !s.ok)) exitAfterOutput(EXIT_FAILURE);
         return;
       }
       const ref = argValue(args, "ref");
@@ -2845,7 +2857,8 @@ async function dispatch(argv: string[]): Promise<void> {
         for (const w of r.written) process.stdout.write(`  wrote ${relative(root, w)}\n`);
         if (r.errors.length) {
           for (const e of r.errors) process.stderr.write(`webindex: ${e}\n`);
-          process.exit(EXIT_FAILURE);
+          exitAfterOutput(EXIT_FAILURE);
+          return;
         }
         process.stdout.write(`  pinned ${n} ${r.tag} (${r.engineVersion})\n`);
       }
@@ -2889,7 +2902,7 @@ async function dispatch(argv: string[]): Promise<void> {
           );
         }
       }
-      if (failedAny) process.exit(EXIT_FAILURE);
+      if (failedAny) exitAfterOutput(EXIT_FAILURE);
       return;
     }
 
@@ -2932,7 +2945,8 @@ async function dispatch(argv: string[]): Promise<void> {
       const bad = checks.filter((c) => !c.ok).length;
       if (bad) {
         process.stderr.write(`\nwebindex: ${bad} problem(s) — the published skill would not install correctly.\n`);
-        process.exit(EXIT_FAILURE);
+        exitAfterOutput(EXIT_FAILURE);
+        return;
       }
       if (!asJson) process.stdout.write(`\n  skills/${config.name}/ installs as a complete skill.\n`);
       return;

@@ -1,10 +1,13 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "tsup";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { BrowserWorld } from "./helpers/browser-world.js";
+import { scriptBrowser } from "./helpers/fake-browser.js";
+import { FakeCdp } from "./helpers/fake-cdp.js";
 
 let dir: string;
 let binary: string;
@@ -130,4 +133,54 @@ describe("MCP process survival", () => {
     );
     expect(responses).toHaveLength(2);
   });
+});
+
+describe("browser output through a pipe", () => {
+  /** Run the built CLI with its stdout on a pipe (as `… | jq` has it), and read all of it. */
+  const piped = (args: string[], env: Record<string, string>): Promise<{ status: number | null; stdout: string; stderr: string }> =>
+    new Promise((resolve) => {
+      const child = spawn(process.execPath, [binary, ...args], { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8").on("data", (c: string) => {
+        stdout += c;
+      });
+      child.stderr.setEncoding("utf8").on("data", (c: string) => {
+        stderr += c;
+      });
+      child.on("close", (status) => resolve({ status, stdout, stderr }));
+    });
+
+  it("writes all of a large result before it exits 3 on a blocking challenge", async () => {
+    const fake = await FakeCdp.start();
+    const home = mkdtempSync(join(tmpdir(), "webindex-pipe-"));
+    try {
+      scriptBrowser(fake);
+      const world = new BrowserWorld(fake);
+      fake.addTarget("https://a.test/", "A page");
+      world.blocking = true;
+      // A page far over a pipe's buffer: 6000 buttons, each a line of the snapshot.
+      const buttons = Array.from({ length: 6000 }, (_, i) => ({
+        nodeId: String(i + 2),
+        parentId: "1",
+        role: { value: "button" },
+        name: { value: `Button number ${i} of a very long page` },
+        backendDOMNodeId: 100 + i,
+      }));
+      fake.handle("Accessibility.getFullAXTree", () => ({
+        nodes: [{ nodeId: "1", role: { value: "RootWebArea" }, name: { value: "A" }, childIds: buttons.map((b) => b.nodeId), backendDOMNodeId: 1 }, ...buttons],
+      }));
+      const r = await piped(["browser", "open", "https://b.test/", "--cdp", String(fake.port), "--json", "--snapshot", "--max-chars", "1000000"], {
+        WEBINDEX_BROWSER_DIR: home,
+      });
+      expect(r.status, r.stderr).toBe(3);
+      expect(r.stdout.length).toBeGreaterThan(200_000);
+      const json = JSON.parse(r.stdout);
+      expect(json).toMatchObject({ ok: true, challenge: { blocking: true } });
+      expect(json.snapshot.text).toContain("Button number 5999 of a very long page");
+    } finally {
+      await fake.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

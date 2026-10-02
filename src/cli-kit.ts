@@ -26,10 +26,10 @@ import { escapeRegExp } from "./text.js";
 
 // ── Exit codes ──────────────────────────────────────────────────────────────
 // Three everywhere (`browser` adds a fourth, EXIT_HUMAN), and the distinction
-// between 1 and 2 is the one that matters: a
-// caller scripting this engine needs to tell "your question had no answer" from
-// "you asked wrongly". Collapsing them onto 1 — which is what an unguarded
-// `process.exit(1)` does — makes a typo indistinguishable from an empty result.
+// between 1 and 2 is the one that matters: a caller scripting this engine needs
+// to tell "your question had no answer" from "you asked wrongly". Collapsing
+// them onto 1 — which is what an unguarded `process.exit(1)` does — makes a
+// typo indistinguishable from an empty result.
 
 /** The command did what it was asked. */
 export const EXIT_OK = 0;

@@ -4,8 +4,8 @@
 // returns what to print and the exit code, and src/cli.ts prints it — 0 done,
 // 1 ran and failed (a stale ref, a timeout, a guard refusal, a page error),
 // 2 the invocation was wrong, 3 done but a human is needed: a navigation (open,
-// back, forward, reload, a click, an Enter) ended on a blocking challenge. Stdin,
-// for `eval -`, is handed in.
+// back, forward, reload, a click, an Enter, tabs new <url>) ended on a blocking
+// challenge. Stdin, for `eval -`, is handed in.
 //
 // Every command that touches a page runs inside withPage: under the browser
 // lock, reconnected to the tab the last call left, detached at the end — the
@@ -163,8 +163,8 @@ const TEXT_MAX_CHARS = 20_000;
 const SELECTOR_ACTIONS = new Set(["snapshot", "screenshot", "wait", "text"]);
 /** The actions --snapshot appends a snapshot to: --selector scopes it there, and never names what they act on. */
 const SNAPSHOT_ACTIONS = new Set(["open", "click", "hover", "type", "fill", "select", "press", "upload", "scroll", "back", "forward", "reload", "dialog"]);
-/** The actions that may land on another page: one that lands on a blocking challenge exits 3. type only with --submit. */
-const NAVIGATING = new Set(["open", "click", "press", "back", "forward", "reload"]);
+/** The actions that may land on another page: one that lands on a blocking challenge exits 3. type only with --submit, tabs only new <url>. */
+const NAVIGATING = new Set(["open", "click", "press", "back", "forward", "reload", "tabs"]);
 
 interface Ctx {
   action: Action;
@@ -801,8 +801,20 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     }
     if (sub === "new") {
       arity(ctx, 1, 2);
-      const tab = await onPage(ctx, (s) => s.newTab(ctx.args[1]));
-      return { json: tab, text: tabLines([tab]) };
+      const url = ctx.args[1];
+      const { tab, challenge } = await onPage(ctx, async (s) => {
+        const tab = await s.newTab(url);
+        if (url === undefined) return { tab, challenge: undefined };
+        // A tab opened on a URL is a navigation like open's: a wall it lands on is said, and exits 3.
+        await settle(s, actOpts(ctx));
+        return { tab, challenge: await detectChallenge(s) };
+      });
+      if (challenge === undefined) return { json: tab, text: tabLines([tab]) };
+      return {
+        json: { ...tab, challenge },
+        text: [tabLines([tab]), ...(challenge ? [challengeLine(ctx, challenge)] : [])].join("\n"),
+        ...(challenge?.blocking ? { challenged: true } : {}),
+      };
     }
     if (sub === "select") {
       arity(ctx, 2);

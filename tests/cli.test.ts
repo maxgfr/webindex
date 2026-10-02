@@ -63,20 +63,26 @@ afterAll(() => vi.restoreAllMocks());
 const stdout = () => out.join("");
 const stderr = () => err.join("");
 
-/** main() calls process.exit on failure; catch it so the case can assert. */
+/**
+ * main() calls process.exit on a failure it prints itself, and sets
+ * process.exitCode after printing a result (so a pipe gets all of it): catch
+ * the one, read the other, and leave neither behind.
+ */
 async function run(argv: string[]): Promise<number> {
   const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
     throw new Error(`__exit__${code ?? 0}`);
   }) as never);
+  process.exitCode = undefined;
   try {
     await main(argv);
-    return 0;
+    return Number(process.exitCode ?? 0);
   } catch (e) {
     const m = /^__exit__(\d+)$/.exec((e as Error).message);
     if (m) return Number(m[1]);
     throw e;
   } finally {
     exit.mockRestore();
+    process.exitCode = undefined;
   }
 }
 

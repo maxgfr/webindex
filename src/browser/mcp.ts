@@ -575,7 +575,7 @@ class Host implements BrowserToolHost {
       followUps: FOLLOW_UPS,
       ...(this.signal ? { signal: this.signal } : {}),
     });
-    // A blocking challenge (exit 3) is no failure: the result says it, first thing after its own line.
+    // A blocking challenge (exit 3) is no failure: a `challenge:` line follows the result line.
     if (r.exitCode !== 0 && r.exitCode !== EXIT_HUMAN) throw new ToolError(r.text);
     return { text: r.text, json: r.json };
   }
@@ -636,6 +636,8 @@ class Host implements BrowserToolHost {
       if (scope === "element" && r !== undefined && selector !== undefined) throw new ToolError('scope "element" takes a `ref` or a `selector`, not both');
       if (scope === "element" && r === undefined && selector === undefined)
         throw new ToolError('scope "element" needs a `ref` or a `selector`: the element to read, from the latest snapshot');
+      if (a.maxChars !== undefined && !(typeof a.maxChars === "number" && Number.isInteger(a.maxChars) && a.maxChars >= 1))
+        throw new ToolError(`\`maxChars\` must be a whole number of characters, 1 or more, not ${JSON.stringify(a.maxChars)}`);
       return this.cli("text", r !== undefined ? [r] : [], {
         ...(selector !== undefined ? { selector } : {}),
         ...(a.markdown === true ? { markdown: true } : {}),
