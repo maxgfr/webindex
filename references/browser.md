@@ -171,6 +171,11 @@ closed afterwards, so your agent tab is left alone. An error page (HTTP 400 or
 higher) never counts as a browser read. Downloads are denied while a read runs,
 and `WEBINDEX_BROWSER_CONCURRENCY` limits how many pages render at once.
 
+A library consumer should call `closeBrowserReads()` at the end of its run. It
+closes the browser only if a read in that same process launched it, after the
+reads still in flight there finish (5 s at most), and resolves `{ closed: false }`
+for any other browser: one `browser open` started or took over, or one you attached.
+
 ## Ad blocking
 
 Ads and trackers slow pages down and put more overlays in the way. Two ways to

@@ -1,11 +1,12 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
 import { READ_DOCUMENT } from "../src/browser/overlay.js";
-import { readRenderedPage } from "../src/browser/read.js";
+import { closeBrowserReads, readRenderedPage } from "../src/browser/read.js";
+import { profileDir } from "../src/browser/profile.js";
 import { closeBrowser } from "../src/browser/session.js";
 import { readSession, type Session, writeSession } from "../src/browser/state.js";
 import { FakeCdp, type FakeHandler } from "./helpers/fake-cdp.js";
@@ -65,6 +66,8 @@ beforeEach(async () => {
   });
 });
 afterEach(async () => {
+  // What a case's reads launched is forgotten (closed) before its fake browser goes: the next case starts clean.
+  await closeBrowserReads();
   await fake.close();
   rmSync(home, { recursive: true, force: true });
 });
@@ -382,5 +385,125 @@ describe("readRenderedPage", () => {
     held[0]?.();
     await vi.waitFor(() => expect(ids()).toEqual(["T1"]));
     expect(created()).toBe(1);
+  });
+});
+
+describe("closeBrowserReads", () => {
+  const closes = () => fake.calls.filter((c) => c.method === "Browser.close").length;
+  /** A read with no browser running: it launches the dedicated one (the fake spawn points at `fake`). */
+  const launchingRead = (over: Partial<BrowserDeps> = {}) => {
+    pages["https://spa.test/"] = { html: ARTICLE };
+    fake.addTarget();
+    const spawned = fakeSpawn({ port: fake.port });
+    const read = readRenderedPage("https://spa.test/", { waitUntil: "load", deps: deps({ spawn: spawned.spawn, ...over }) });
+    return { read, spawned };
+  };
+
+  it("does nothing when no read ran in this process", async () => {
+    expect(await closeBrowserReads()).toEqual({ closed: false });
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("closes the browser a read of this process launched, once: a second call is a no-op", async () => {
+    const { read, spawned } = launchingRead();
+    expect((await read).extractor).toBe("browser");
+    expect(spawned.calls).toHaveLength(1);
+    expect(await closeBrowserReads()).toEqual({ closed: true });
+    expect(closes()).toBe(1);
+    expect(await closeBrowserReads()).toEqual({ closed: false });
+    expect(closes()).toBe(1);
+  });
+
+  it("kills the pid it launched when the browser refuses to close", async () => {
+    const killed: [number, string][] = [];
+    const { read } = launchingRead({ kill: (pid, signal) => void killed.push([pid, signal]) });
+    await read;
+    fake.handle("Browser.close", () => {
+      throw { message: "not now" };
+    });
+    expect(await closeBrowserReads()).toEqual({ closed: true });
+    expect(killed).toEqual([[4242, "SIGTERM"]]);
+  });
+
+  it("never throws: a browser it cannot reach any more is simply not closed", async () => {
+    const { read } = launchingRead();
+    await read;
+    await fake.close();
+    expect(await closeBrowserReads()).toEqual({ closed: false });
+    fake = await FakeCdp.start(); // for afterEach
+  });
+
+  it("leaves alone a browser the reads only reused: one already running on the profile", async () => {
+    // A browser of ours, started by an earlier process: still running on the dedicated profile.
+    mkdirSync(profileDir("default"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(profileDir("default"), "DevToolsActivePort"), `${fake.port}\n/devtools/browser/fake\n`);
+    pages["https://spa.test/"] = { html: ARTICLE };
+    fake.addTarget();
+    const spawned = fakeSpawn({ port: fake.port });
+    expect((await readRenderedPage("https://spa.test/", { waitUntil: "load", deps: deps({ spawn: spawned.spawn }) })).extractor).toBe("browser");
+    expect(spawned.calls).toHaveLength(0);
+    expect(await closeBrowserReads()).toEqual({ closed: false });
+    expect(closes()).toBe(0);
+  });
+
+  it("leaves alone a browser named with cdp, or saved by the agent's session", async () => {
+    pages["https://spa.test/"] = { html: ARTICLE };
+    fake.addTarget();
+    await readRenderedPage("https://spa.test/", { cdp: fake.port, waitUntil: "load", deps: deps() });
+    writeSession({ ...agentSession(), launchedByUs: true, wsBrowserUrl: fake.browserWsUrl, pid: 99 });
+    const spawned = fakeSpawn({ port: fake.port });
+    await readRenderedPage("https://spa.test/", { waitUntil: "load", deps: deps({ spawn: spawned.spawn }) });
+    expect(spawned.calls).toHaveLength(0);
+    expect(await closeBrowserReads()).toEqual({ closed: false });
+    expect(closes()).toBe(0);
+  });
+
+  it("leaves alone the browser it launched once the agent's session has taken it over", async () => {
+    const { read } = launchingRead();
+    await read;
+    // `browser open` in another process found it running on the profile and saved it as the agent's.
+    writeSession({ ...agentSession(), launchedByUs: true, wsBrowserUrl: fake.browserWsUrl });
+    expect(await closeBrowserReads()).toEqual({ closed: false });
+    expect(closes()).toBe(0);
+  });
+
+  it("does not close another browser that answers on the port since", async () => {
+    const killed: number[] = [];
+    const { read } = launchingRead({ kill: (pid) => void killed.push(pid) });
+    await read;
+    // Ours quit; the port went to another browser, with another socket GUID.
+    Object.defineProperty(fake, "browserWsUrl", { get: () => `ws://127.0.0.1:${fake.port}/devtools/browser/someone-else` });
+    expect(await closeBrowserReads()).toEqual({ closed: false });
+    expect(closes()).toBe(0);
+    expect(killed).toEqual([]);
+  });
+
+  it("waits for the reads still in flight in this process before closing", async () => {
+    const held = gateNavigation();
+    const { read } = launchingRead();
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    let settled = false;
+    const closing = closeBrowserReads().then((r) => {
+      settled = true;
+      return r;
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(settled).toBe(false);
+    expect(closes()).toBe(0);
+    held[0]?.();
+    expect((await read).extractor).toBe("browser");
+    expect(await closing).toEqual({ closed: true });
+    expect(closes()).toBe(1);
+  });
+
+  it("waits for them for a bounded time only", async () => {
+    const held = gateNavigation();
+    const { read } = launchingRead();
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    const started = Date.now();
+    expect(await closeBrowserReads({ waitMs: 100 })).toEqual({ closed: true });
+    expect(Date.now() - started).toBeLessThan(2000);
+    held[0]?.();
+    await read.catch(() => {});
   });
 });

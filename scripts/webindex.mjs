@@ -2791,11 +2791,11 @@ function pickAutoTrack(meta) {
   return origs.length === 1 ? origs[0] : void 0;
 }
 async function subtitleRung(auto, meta, info, opts, deps) {
-  const track2 = auto ? pickAutoTrack(meta) : pickManualTrack(meta, opts.lang);
-  if (!track2) return { failure: auto ? "no auto-captions in the video's language" : "no manual subtitles", noTrack: true };
-  const got = await downloadSubtitle(info, track2, auto, deps.run, opts.signal, opts.knownHostsOnly);
-  if ("error" in got) return { failure: `${auto ? "auto-captions" : "subtitles"} (${track2}): ${got.error}` };
-  return { segments: mergeSegments(parseVtt(got.vtt, { rolling: auto }), chapterStarts(meta)), track: track2 };
+  const track3 = auto ? pickAutoTrack(meta) : pickManualTrack(meta, opts.lang);
+  if (!track3) return { failure: auto ? "no auto-captions in the video's language" : "no manual subtitles", noTrack: true };
+  const got = await downloadSubtitle(info, track3, auto, deps.run, opts.signal, opts.knownHostsOnly);
+  if ("error" in got) return { failure: `${auto ? "auto-captions" : "subtitles"} (${track3}): ${got.error}` };
+  return { segments: mergeSegments(parseVtt(got.vtt, { rolling: auto }), chapterStarts(meta)), track: track3 };
 }
 async function whisperRung(meta, info, opts, deps) {
   const missing = ["uvx", "ffmpeg"].filter((c) => !deps.have(c));
@@ -3632,8 +3632,8 @@ function videoRoot(out) {
 }
 function servesLang(meta, lang) {
   if (!lang) return true;
-  const read2 = meta.track ?? meta.lang ?? meta.language;
-  return read2 !== void 0 && baseLang2(read2) === baseLang2(lang);
+  const read3 = meta.track ?? meta.lang ?? meta.language;
+  return read3 !== void 0 && baseLang2(read3) === baseLang2(lang);
 }
 function readVideoRun(dir) {
   const meta = readJson(join10(dir, "meta.json"));
@@ -4098,13 +4098,13 @@ function corpusMarkdown(c, root) {
       v.dir ? `${v.id}/TRANSCRIPT.md` : cell2(`not read: ${v.reason ?? "no transcript"}`)
     ].join(" | ")
   );
-  const read2 = c.videos.filter((v) => v.dir).length;
+  const read3 = c.videos.filter((v) => v.dir).length;
   return [
     `# ${c.title ?? "Video corpus"}`,
     "",
     `- Source: ${c.source}`,
     `- Directory: ${root}`,
-    `- ${read2} of ${c.videos.length} videos read, ${c.createdAt}`,
+    `- ${read3} of ${c.videos.length} videos read, ${c.createdAt}`,
     "",
     "| V# | id | title | duration | via | transcript |",
     "|---|---|---|---|---|---|",
@@ -6474,272 +6474,6 @@ var init_deps = __esm({
   }
 });
 
-// src/browser/overlay.ts
-async function backendIdOf(page, objectId) {
-  const { node } = await page.send("DOM.describeNode", { objectId }, { timeoutMs: PROBE_TIMEOUT_MS4 });
-  return typeof node?.backendNodeId === "number" && node.backendNodeId > 0 ? node.backendNodeId : void 0;
-}
-function releaseGroup(page) {
-  page.send("Runtime.releaseObjectGroup", { objectGroup: GROUP }).catch(() => {
-  });
-}
-async function findOverlays(page) {
-  try {
-    const r = await page.send(
-      "Runtime.evaluate",
-      { expression: `(${OVERLAYS_SOURCE})()`, returnByValue: false, objectGroup: GROUP },
-      { timeoutMs: PROBE_TIMEOUT_MS4 }
-    );
-    if (r.exceptionDetails || !r.result?.objectId) return [];
-    const { result = [] } = await page.send(
-      "Runtime.getProperties",
-      { objectId: r.result.objectId, ownProperties: true },
-      { timeoutMs: PROBE_TIMEOUT_MS4 }
-    );
-    const elements2 = result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId).map((p) => p.value?.objectId);
-    const ids = (await Promise.all(elements2.map((id) => backendIdOf(page, id)))).filter((id) => id !== void 0);
-    return ids;
-  } catch {
-    return [];
-  } finally {
-    releaseGroup(page);
-  }
-}
-async function overlayRootOf(page, objectId) {
-  try {
-    const call = (id, fn, byValue) => page.send(
-      "Runtime.callFunctionOn",
-      { objectId: id, functionDeclaration: fn, returnByValue: byValue, objectGroup: GROUP },
-      { timeoutMs: PROBE_TIMEOUT_MS4 }
-    );
-    const root = await call(objectId, OVERLAY_ROOT_SOURCE, false);
-    const rootId = root.result?.objectId;
-    if (root.exceptionDetails || !rootId) return void 0;
-    const backendNodeId = await backendIdOf(page, rootId);
-    if (backendNodeId === void 0) return void 0;
-    const info = (await call(rootId, OVERLAY_INFO_SOURCE, true)).result?.value;
-    return { backendNodeId, what: typeof info?.what === "string" ? info.what : "an element", overlay: info?.overlay === true };
-  } catch {
-    return void 0;
-  } finally {
-    releaseGroup(page);
-  }
-}
-var CONSENT_SELECTORS, HELPERS, OVERLAYS_SOURCE, OVERLAY_ROOT_SOURCE, DESCRIBE_SOURCE, OVERLAY_INFO_SOURCE, READ_DOCUMENT, GROUP, PROBE_TIMEOUT_MS4;
-var init_overlay = __esm({
-  "src/browser/overlay.ts"() {
-    "use strict";
-    CONSENT_SELECTORS = [
-      // OneTrust
-      "#onetrust-consent-sdk",
-      "#onetrust-banner-sdk",
-      "#onetrust-pc-sdk",
-      // Didomi
-      "#didomi-host",
-      "#didomi-notice",
-      'div[class^="didomi-"]',
-      // Sourcepoint
-      '[id^="sp_message_container"]',
-      // Quantcast Choice
-      ".qc-cmp2-container",
-      "#qc-cmp2-container",
-      // Cookiebot
-      "#CybotCookiebotDialog",
-      "#CybotCookiebotDialogBodyUnderlay",
-      // Usercentrics
-      "#usercentrics-root",
-      "#usercentrics-cmp-ui",
-      // TrustArc
-      "#truste-consent-track",
-      "#consent_blackbar",
-      'div[class^="truste_"]',
-      // consentmanager.net, Commanders Act, Axeptio, Iubenda, Complianz, CookieYes, Osano, Borlabs, Google Funding Choices
-      "#cmpbox",
-      "#cmpbox2",
-      "#tc-privacy-wrapper",
-      "#axeptio_overlay",
-      "#iubenda-cs-banner",
-      "#cmplz-cookiebanner-container",
-      ".cky-consent-container",
-      ".osano-cm-window",
-      "#BorlabsCookieBox",
-      ".fc-consent-root",
-      // The IAB TCF / GPP locator frames
-      'iframe[name="__tcfapiLocator"]',
-      'iframe[name="__cmpLocator"]',
-      'iframe[name="__gppLocator"]'
-    ];
-    HELPERS = `const up = (n) => n.parentElement || (n.parentNode && n.parentNode.host) || n.host || null;
-  const body = document.body;
-  const roleOf = (el) => String((el.getAttribute && el.getAttribute("role")) || "").toLowerCase();
-  const isDialog = (el) =>
-    roleOf(el) === "dialog" ||
-    roleOf(el) === "alertdialog" ||
-    (!!el.getAttribute && el.getAttribute("aria-modal") === "true") ||
-    (String(el.tagName || "").toUpperCase() === "DIALOG" && el.open === true);
-  const CONSENT = ${JSON.stringify(CONSENT_SELECTORS.join(", "))};
-  const isConsent = (el) => {
-    try {
-      return !!el.matches && el.matches(CONSENT);
-    } catch (e) {
-      return false;
-    }
-  };
-  /** Fixed or sticky, itself or an ancestor up to the body: what a click's covering node belongs to. */
-  const pinned = (el) => {
-    for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) {
-      const p = getComputedStyle(n).position;
-      if (p === "fixed" || p === "sticky") return true;
-    }
-    return false;
-  };`;
-    OVERLAYS_SOURCE = `function findOverlays() {
-  ${HELPERS}
-  const found = [];
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  if (!body || !(vw > 0) || !(vh > 0)) return found;
-  const isMain = (el) => String(el.tagName || "").toUpperCase() === "MAIN" || roleOf(el) === "main";
-  const holdsMain = (el) => isMain(el) || Array.prototype.some.call(el.querySelectorAll("*"), isMain);
-  const textOf = (el) => String(el.textContent || "").length;
-  const pageText = textOf(body);
-  const fixed = (el) => {
-    for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) if (getComputedStyle(n).position === "fixed") return true;
-    return false;
-  };
-  /** Out of the flow of the page, itself or an ancestor: what can be over something. */
-  const floating = (el) => {
-    for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) {
-      const p = getComputedStyle(n).position;
-      if (p === "fixed" || p === "absolute") return true;
-    }
-    return false;
-  };
-  const hiddenUp = (el) => {
-    for (let n = el; n && n.nodeType === 1; n = up(n)) {
-      if (n.getAttribute && (n.getAttribute("aria-hidden") === "true" || n.getAttribute("inert") !== null)) return true;
-      const cs = getComputedStyle(n);
-      if (cs.display === "none" || Number(cs.opacity) === 0) return true;
-    }
-    return false;
-  };
-  const shown = (el) => {
-    if (el.checkVisibility && !el.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
-    const cs = getComputedStyle(el);
-    if (cs.visibility === "hidden" || cs.visibility === "collapse") return false;
-    const r = el.getBoundingClientRect();
-    if (!(r.width > 0 && r.height > 0) || r.right <= 0 || r.bottom <= 0 || r.left >= vw || r.top >= vh) return false;
-    return !hiddenUp(el);
-  };
-  /** The part of the viewport the element covers, or null when it is under 30%. */
-  const area = (el) => {
-    const r = el.getBoundingClientRect();
-    const left = Math.max(r.left, 0);
-    const top = Math.max(r.top, 0);
-    const w = Math.min(r.right, vw) - left;
-    const h = Math.min(r.bottom, vh) - top;
-    return w > 0 && h > 0 && w * h >= 0.3 * vw * vh ? { left, top, w, h } : null;
-  };
-  const covers = (el, a) => {
-    // A side column is no overlay: one is wide, or strictly across the middle of the screen.
-    const middle = a.left < vw / 2 && a.left + a.w > vw / 2 && a.top < vh / 2 && a.top + a.h > vh / 2;
-    if (a.w < 0.6 * vw && !middle) return false;
-    const root = el.getRootNode ? el.getRootNode() : document;
-    const at = (root && root.elementFromPoint ? root : document).elementFromPoint(a.left + a.w / 2, a.top + a.h / 2);
-    for (let n = at; n; n = up(n)) if (n === el) return true;
-    return false;
-  };
-  const kids = (n) => Array.from((n && n.children) || []);
-  const visit = (el, inShell) => {
-    let shell = inShell;
-    let take = false;
-    const role = roleOf(el);
-    if (isConsent(el)) take = shown(el) && !holdsMain(el);
-    else if (isDialog(el)) take = floating(el) && shown(el) && !holdsMain(el);
-    else if (!inShell && role !== "presentation" && role !== "none") {
-      const a = area(el);
-      if (a && fixed(el) && shown(el) && covers(el, a)) {
-        if (holdsMain(el) || (pageText > 0 && textOf(el) > 0.6 * pageText)) shell = true;
-        else take = true;
-      }
-    }
-    // An overlay is taken whole: what is inside it is its own.
-    if (take) {
-      found.push(el);
-      return;
-    }
-    for (const k of kids(el)) visit(k, shell);
-    if (el.shadowRoot) for (const k of kids(el.shadowRoot)) visit(k, shell);
-  };
-  for (const k of kids(body)) visit(k, false);
-  return found.slice(0, 5);
-}`;
-    OVERLAY_ROOT_SOURCE = `function overlayRoot() {
-  ${HELPERS}
-  const overlays = (${OVERLAYS_SOURCE})();
-  for (let n = this; n; n = up(n)) if (overlays.indexOf(n) >= 0) return n;
-  let outer = null;
-  for (let n = this; n && n !== body && n !== document.documentElement; n = up(n)) {
-    if (n.nodeType !== 1) continue;
-    if (isDialog(n)) return n;
-    if (pinned(n) && !pinned(up(n) || body)) outer = n;
-  }
-  return outer;
-}`;
-    DESCRIBE_SOURCE = `const describe = (el) => {
-    const tag = String(el.tagName || "").toLowerCase();
-    const attr = (n) => (el.getAttribute ? el.getAttribute(n) : null);
-    const role = attr("role");
-    const type = tag === "input" ? attr("type") : null;
-    const text = String(el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim();
-    const shown = text.length > 60 ? text.slice(0, 57) + "..." : text;
-    return "<" + tag + (el.id ? "#" + el.id : "") + (role ? ' role="' + role + '"' : "") + (type ? ' type="' + type + '"' : "") + ">" + (shown ? ' "' + shown + '"' : "");
-  };`;
-    OVERLAY_INFO_SOURCE = `function overlayInfo() {
-  ${HELPERS}
-  ${DESCRIBE_SOURCE}
-  const overlays = (${OVERLAYS_SOURCE})();
-  return { what: describe(this), overlay: overlays.indexOf(this) >= 0 || isDialog(this) || isConsent(this) };
-}`;
-    READ_DOCUMENT = `(() => {
-  const findOverlays = ${OVERLAYS_SOURCE};
-  const root = document.documentElement;
-  if (!root) return { html: "", url: location.href };
-  const mark = "data-overlay-" + Math.random().toString(36).slice(2, 10);
-  let overlays = [];
-  let html = "";
-  try {
-    try {
-      overlays = findOverlays();
-    } catch (e) {}
-    for (const el of overlays) if (el.getRootNode && el.getRootNode() === document) el.setAttribute(mark, "");
-    html = root.outerHTML;
-  } finally {
-    for (const el of overlays) if (el.removeAttribute) el.removeAttribute(mark);
-  }
-  let parsed;
-  try {
-    parsed = new DOMParser().parseFromString(html, "text/html");
-  } catch (e) {
-    return { html, url: location.href };
-  }
-  const drop = ["[" + mark + "]", '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', "dialog", ${CONSENT_SELECTORS.map((s) => JSON.stringify(s)).join(", ")}];
-  const keep = (el) =>
-    el === parsed.body || el === parsed.documentElement || el.tagName === "MAIN" || el.getAttribute("role") === "main" || !!el.querySelector("main, [role=main]");
-  for (const sel of drop) {
-    let els = [];
-    try {
-      els = Array.from(parsed.querySelectorAll(sel));
-    } catch (e) {}
-    for (const el of els) if (!keep(el)) el.remove();
-  }
-  return { html: parsed.documentElement.outerHTML, url: location.href };
-})()`;
-    GROUP = "overlay-probe";
-    PROBE_TIMEOUT_MS4 = 5e3;
-  }
-});
-
 // src/cli-kit.ts
 import { basename } from "path";
 function parseArgs(argv, spec) {
@@ -7384,6 +7118,7 @@ async function launch(deps, binary, profile, headless, kind) {
         host: "127.0.0.1",
         port,
         launchedByUs: true,
+        spawned: true,
         ...child.pid !== void 0 ? { pid: child.pid } : {},
         profile,
         headless,
@@ -7440,6 +7175,272 @@ var init_launch = __esm({
     init_state();
     STARTUP_TIMEOUT_MS = 2e4;
     POLL_MS = 100;
+  }
+});
+
+// src/browser/overlay.ts
+async function backendIdOf(page, objectId) {
+  const { node } = await page.send("DOM.describeNode", { objectId }, { timeoutMs: PROBE_TIMEOUT_MS4 });
+  return typeof node?.backendNodeId === "number" && node.backendNodeId > 0 ? node.backendNodeId : void 0;
+}
+function releaseGroup(page) {
+  page.send("Runtime.releaseObjectGroup", { objectGroup: GROUP }).catch(() => {
+  });
+}
+async function findOverlays(page) {
+  try {
+    const r = await page.send(
+      "Runtime.evaluate",
+      { expression: `(${OVERLAYS_SOURCE})()`, returnByValue: false, objectGroup: GROUP },
+      { timeoutMs: PROBE_TIMEOUT_MS4 }
+    );
+    if (r.exceptionDetails || !r.result?.objectId) return [];
+    const { result = [] } = await page.send(
+      "Runtime.getProperties",
+      { objectId: r.result.objectId, ownProperties: true },
+      { timeoutMs: PROBE_TIMEOUT_MS4 }
+    );
+    const elements2 = result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId).map((p) => p.value?.objectId);
+    const ids = (await Promise.all(elements2.map((id) => backendIdOf(page, id)))).filter((id) => id !== void 0);
+    return ids;
+  } catch {
+    return [];
+  } finally {
+    releaseGroup(page);
+  }
+}
+async function overlayRootOf(page, objectId) {
+  try {
+    const call = (id, fn, byValue) => page.send(
+      "Runtime.callFunctionOn",
+      { objectId: id, functionDeclaration: fn, returnByValue: byValue, objectGroup: GROUP },
+      { timeoutMs: PROBE_TIMEOUT_MS4 }
+    );
+    const root = await call(objectId, OVERLAY_ROOT_SOURCE, false);
+    const rootId = root.result?.objectId;
+    if (root.exceptionDetails || !rootId) return void 0;
+    const backendNodeId = await backendIdOf(page, rootId);
+    if (backendNodeId === void 0) return void 0;
+    const info = (await call(rootId, OVERLAY_INFO_SOURCE, true)).result?.value;
+    return { backendNodeId, what: typeof info?.what === "string" ? info.what : "an element", overlay: info?.overlay === true };
+  } catch {
+    return void 0;
+  } finally {
+    releaseGroup(page);
+  }
+}
+var CONSENT_SELECTORS, HELPERS, OVERLAYS_SOURCE, OVERLAY_ROOT_SOURCE, DESCRIBE_SOURCE, OVERLAY_INFO_SOURCE, READ_DOCUMENT, GROUP, PROBE_TIMEOUT_MS4;
+var init_overlay = __esm({
+  "src/browser/overlay.ts"() {
+    "use strict";
+    CONSENT_SELECTORS = [
+      // OneTrust
+      "#onetrust-consent-sdk",
+      "#onetrust-banner-sdk",
+      "#onetrust-pc-sdk",
+      // Didomi
+      "#didomi-host",
+      "#didomi-notice",
+      'div[class^="didomi-"]',
+      // Sourcepoint
+      '[id^="sp_message_container"]',
+      // Quantcast Choice
+      ".qc-cmp2-container",
+      "#qc-cmp2-container",
+      // Cookiebot
+      "#CybotCookiebotDialog",
+      "#CybotCookiebotDialogBodyUnderlay",
+      // Usercentrics
+      "#usercentrics-root",
+      "#usercentrics-cmp-ui",
+      // TrustArc
+      "#truste-consent-track",
+      "#consent_blackbar",
+      'div[class^="truste_"]',
+      // consentmanager.net, Commanders Act, Axeptio, Iubenda, Complianz, CookieYes, Osano, Borlabs, Google Funding Choices
+      "#cmpbox",
+      "#cmpbox2",
+      "#tc-privacy-wrapper",
+      "#axeptio_overlay",
+      "#iubenda-cs-banner",
+      "#cmplz-cookiebanner-container",
+      ".cky-consent-container",
+      ".osano-cm-window",
+      "#BorlabsCookieBox",
+      ".fc-consent-root",
+      // The IAB TCF / GPP locator frames
+      'iframe[name="__tcfapiLocator"]',
+      'iframe[name="__cmpLocator"]',
+      'iframe[name="__gppLocator"]'
+    ];
+    HELPERS = `const up = (n) => n.parentElement || (n.parentNode && n.parentNode.host) || n.host || null;
+  const body = document.body;
+  const roleOf = (el) => String((el.getAttribute && el.getAttribute("role")) || "").toLowerCase();
+  const isDialog = (el) =>
+    roleOf(el) === "dialog" ||
+    roleOf(el) === "alertdialog" ||
+    (!!el.getAttribute && el.getAttribute("aria-modal") === "true") ||
+    (String(el.tagName || "").toUpperCase() === "DIALOG" && el.open === true);
+  const CONSENT = ${JSON.stringify(CONSENT_SELECTORS.join(", "))};
+  const isConsent = (el) => {
+    try {
+      return !!el.matches && el.matches(CONSENT);
+    } catch (e) {
+      return false;
+    }
+  };
+  /** Fixed or sticky, itself or an ancestor up to the body: what a click's covering node belongs to. */
+  const pinned = (el) => {
+    for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) {
+      const p = getComputedStyle(n).position;
+      if (p === "fixed" || p === "sticky") return true;
+    }
+    return false;
+  };`;
+    OVERLAYS_SOURCE = `function findOverlays() {
+  ${HELPERS}
+  const found = [];
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  if (!body || !(vw > 0) || !(vh > 0)) return found;
+  const isMain = (el) => String(el.tagName || "").toUpperCase() === "MAIN" || roleOf(el) === "main";
+  const holdsMain = (el) => isMain(el) || Array.prototype.some.call(el.querySelectorAll("*"), isMain);
+  const textOf = (el) => String(el.textContent || "").length;
+  const pageText = textOf(body);
+  const fixed = (el) => {
+    for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) if (getComputedStyle(n).position === "fixed") return true;
+    return false;
+  };
+  /** Out of the flow of the page, itself or an ancestor: what can be over something. */
+  const floating = (el) => {
+    for (let n = el; n && n.nodeType === 1 && n !== body && n !== document.documentElement; n = up(n)) {
+      const p = getComputedStyle(n).position;
+      if (p === "fixed" || p === "absolute") return true;
+    }
+    return false;
+  };
+  const hiddenUp = (el) => {
+    for (let n = el; n && n.nodeType === 1; n = up(n)) {
+      if (n.getAttribute && (n.getAttribute("aria-hidden") === "true" || n.getAttribute("inert") !== null)) return true;
+      const cs = getComputedStyle(n);
+      if (cs.display === "none" || Number(cs.opacity) === 0) return true;
+    }
+    return false;
+  };
+  const shown = (el) => {
+    if (el.checkVisibility && !el.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
+    const cs = getComputedStyle(el);
+    if (cs.visibility === "hidden" || cs.visibility === "collapse") return false;
+    const r = el.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0) || r.right <= 0 || r.bottom <= 0 || r.left >= vw || r.top >= vh) return false;
+    return !hiddenUp(el);
+  };
+  /** The part of the viewport the element covers, or null when it is under 30%. */
+  const area = (el) => {
+    const r = el.getBoundingClientRect();
+    const left = Math.max(r.left, 0);
+    const top = Math.max(r.top, 0);
+    const w = Math.min(r.right, vw) - left;
+    const h = Math.min(r.bottom, vh) - top;
+    return w > 0 && h > 0 && w * h >= 0.3 * vw * vh ? { left, top, w, h } : null;
+  };
+  const covers = (el, a) => {
+    // A side column is no overlay: one is wide, or strictly across the middle of the screen.
+    const middle = a.left < vw / 2 && a.left + a.w > vw / 2 && a.top < vh / 2 && a.top + a.h > vh / 2;
+    if (a.w < 0.6 * vw && !middle) return false;
+    const root = el.getRootNode ? el.getRootNode() : document;
+    const at = (root && root.elementFromPoint ? root : document).elementFromPoint(a.left + a.w / 2, a.top + a.h / 2);
+    for (let n = at; n; n = up(n)) if (n === el) return true;
+    return false;
+  };
+  const kids = (n) => Array.from((n && n.children) || []);
+  const visit = (el, inShell) => {
+    let shell = inShell;
+    let take = false;
+    const role = roleOf(el);
+    if (isConsent(el)) take = shown(el) && !holdsMain(el);
+    else if (isDialog(el)) take = floating(el) && shown(el) && !holdsMain(el);
+    else if (!inShell && role !== "presentation" && role !== "none") {
+      const a = area(el);
+      if (a && fixed(el) && shown(el) && covers(el, a)) {
+        if (holdsMain(el) || (pageText > 0 && textOf(el) > 0.6 * pageText)) shell = true;
+        else take = true;
+      }
+    }
+    // An overlay is taken whole: what is inside it is its own.
+    if (take) {
+      found.push(el);
+      return;
+    }
+    for (const k of kids(el)) visit(k, shell);
+    if (el.shadowRoot) for (const k of kids(el.shadowRoot)) visit(k, shell);
+  };
+  for (const k of kids(body)) visit(k, false);
+  return found.slice(0, 5);
+}`;
+    OVERLAY_ROOT_SOURCE = `function overlayRoot() {
+  ${HELPERS}
+  const overlays = (${OVERLAYS_SOURCE})();
+  for (let n = this; n; n = up(n)) if (overlays.indexOf(n) >= 0) return n;
+  let outer = null;
+  for (let n = this; n && n !== body && n !== document.documentElement; n = up(n)) {
+    if (n.nodeType !== 1) continue;
+    if (isDialog(n)) return n;
+    if (pinned(n) && !pinned(up(n) || body)) outer = n;
+  }
+  return outer;
+}`;
+    DESCRIBE_SOURCE = `const describe = (el) => {
+    const tag = String(el.tagName || "").toLowerCase();
+    const attr = (n) => (el.getAttribute ? el.getAttribute(n) : null);
+    const role = attr("role");
+    const type = tag === "input" ? attr("type") : null;
+    const text = String(el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim();
+    const shown = text.length > 60 ? text.slice(0, 57) + "..." : text;
+    return "<" + tag + (el.id ? "#" + el.id : "") + (role ? ' role="' + role + '"' : "") + (type ? ' type="' + type + '"' : "") + ">" + (shown ? ' "' + shown + '"' : "");
+  };`;
+    OVERLAY_INFO_SOURCE = `function overlayInfo() {
+  ${HELPERS}
+  ${DESCRIBE_SOURCE}
+  const overlays = (${OVERLAYS_SOURCE})();
+  return { what: describe(this), overlay: overlays.indexOf(this) >= 0 || isDialog(this) || isConsent(this) };
+}`;
+    READ_DOCUMENT = `(() => {
+  const findOverlays = ${OVERLAYS_SOURCE};
+  const root = document.documentElement;
+  if (!root) return { html: "", url: location.href };
+  const mark = "data-overlay-" + Math.random().toString(36).slice(2, 10);
+  let overlays = [];
+  let html = "";
+  try {
+    try {
+      overlays = findOverlays();
+    } catch (e) {}
+    for (const el of overlays) if (el.getRootNode && el.getRootNode() === document) el.setAttribute(mark, "");
+    html = root.outerHTML;
+  } finally {
+    for (const el of overlays) if (el.removeAttribute) el.removeAttribute(mark);
+  }
+  let parsed;
+  try {
+    parsed = new DOMParser().parseFromString(html, "text/html");
+  } catch (e) {
+    return { html, url: location.href };
+  }
+  const drop = ["[" + mark + "]", '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', "dialog", ${CONSENT_SELECTORS.map((s) => JSON.stringify(s)).join(", ")}];
+  const keep = (el) =>
+    el === parsed.body || el === parsed.documentElement || el.tagName === "MAIN" || el.getAttribute("role") === "main" || !!el.querySelector("main, [role=main]");
+  for (const sel of drop) {
+    let els = [];
+    try {
+      els = Array.from(parsed.querySelectorAll(sel));
+    } catch (e) {}
+    for (const el of els) if (!keep(el)) el.remove();
+  }
+  return { html: parsed.documentElement.outerHTML, url: location.href };
+})()`;
+    GROUP = "overlay-probe";
+    PROBE_TIMEOUT_MS4 = 5e3;
   }
 });
 
@@ -7681,6 +7682,14 @@ var init_session = __esm({
       }
       get launchedByUs() {
         return this.endpoint.launchedByUs;
+      }
+      /** Whether opening this session started the browser (not a reuse of one already running). */
+      get spawned() {
+        return this.endpoint.spawned === true;
+      }
+      /** The browser-level socket URL: its path names this run of the browser and no other. */
+      get browserSocket() {
+        return this.wsBrowserUrl;
       }
       get pid() {
         return this.endpoint.pid;
@@ -8031,17 +8040,17 @@ var init_session = __esm({
 
 // src/browser/wait.ts
 async function watchNetwork(page) {
-  const inflight = /* @__PURE__ */ new Set();
+  const inflight2 = /* @__PURE__ */ new Set();
   const handlers = [
-    ["Network.requestWillBeSent", (p) => inflight.add(String(p.requestId))],
-    ["Network.loadingFinished", (p) => inflight.delete(String(p.requestId))],
-    ["Network.loadingFailed", (p) => inflight.delete(String(p.requestId))]
+    ["Network.requestWillBeSent", (p) => inflight2.add(String(p.requestId))],
+    ["Network.loadingFinished", (p) => inflight2.delete(String(p.requestId))],
+    ["Network.loadingFailed", (p) => inflight2.delete(String(p.requestId))]
   ];
   for (const [m, h] of handlers) page.on(m, h);
   await page.send("Network.enable").catch(() => {
   });
   return {
-    count: () => inflight.size,
+    count: () => inflight2.size,
     stop: () => {
       for (const [m, h] of handlers) page.off(m, h);
     }
@@ -8294,6 +8303,7 @@ var init_wait = __esm({
 // src/browser/read.ts
 var read_exports = {};
 __export(read_exports, {
+  closeBrowserReads: () => closeBrowserReads,
   readRenderedPage: () => readRenderedPage
 });
 function pump() {
@@ -8327,6 +8337,48 @@ async function acquire(limit, signal, cancelled) {
     pump();
   };
 }
+function track(p) {
+  inflight.add(p);
+  const done = () => inflight.delete(p);
+  p.then(done, done);
+  return p;
+}
+async function closeBrowserReads(opts = {}) {
+  try {
+    if (inflight.size > 0) {
+      let timer;
+      const bound = new Promise((r) => {
+        timer = setTimeout(r, opts.waitMs ?? DRAIN_MS);
+        timer.unref?.();
+      });
+      await Promise.race([Promise.allSettled([...inflight]), bound]);
+      clearTimeout(timer);
+    }
+    const ours = launched;
+    launched = void 0;
+    if (!ours) return { closed: false };
+    const deps = opts.deps ? browserDeps({ ...ours.deps, ...opts.deps }) : ours.deps;
+    if (!await isSameBrowser(deps, ours.port, ours.host, ours.wsBrowserUrl)) return { closed: false };
+    const saved = readSession();
+    if (saved?.wsBrowserUrl && socketPath(saved.wsBrowserUrl) === socketPath(ours.wsBrowserUrl)) return { closed: false };
+    let cdp;
+    try {
+      cdp = await deps.connectCdp(loopbackSocketUrl(ours.wsBrowserUrl));
+    } catch {
+      if (ours.pid === void 0) return { closed: false };
+      deps.kill(ours.pid, "SIGTERM");
+      return { closed: true };
+    }
+    try {
+      await closeLaunched(cdp, ours.pid, deps);
+    } finally {
+      await cdp.close();
+    }
+    return { closed: true };
+  } catch {
+    return { closed: false };
+  }
+}
 async function render(url, opts, deps, timeoutMs, run) {
   const { cdp, profile, headless, binary } = opts;
   const session = await withBrowserLock(
@@ -8337,6 +8389,10 @@ async function render(url, opts, deps, timeoutMs, run) {
     { deps }
   );
   run.session = session;
+  if (session.spawned) {
+    const { host, port, pid, browserSocket } = session;
+    launched = { host, port, wsBrowserUrl: browserSocket, ...pid !== void 0 ? { pid } : {}, deps };
+  }
   const page = session.page;
   let status;
   let mime;
@@ -8387,7 +8443,10 @@ async function render(url, opts, deps, timeoutMs, run) {
     await session.detach();
   }
 }
-async function readRenderedPage(url, opts = {}) {
+function readRenderedPage(url, opts = {}) {
+  return track(read(url, opts));
+}
+async function read(url, opts) {
   const cancelled = () => new Error(`reading ${url} in the browser was cancelled`);
   const { signal } = opts;
   if (signal?.aborted) throw cancelled();
@@ -8399,7 +8458,7 @@ async function readRenderedPage(url, opts = {}) {
     throw cancelled();
   }
   const run = { stopped: false };
-  const work = render(url, opts, deps, timeoutMs, run);
+  const work = track(render(url, opts, deps, timeoutMs, run));
   work.then(release2, release2);
   let stop;
   const cut = new Promise((_, reject) => {
@@ -8421,7 +8480,7 @@ async function readRenderedPage(url, opts = {}) {
     signal?.removeEventListener("abort", onAbort);
   }
 }
-var IDLE_CAP_MS, WEB_PAGE, active, queue, WHOLE_DOCUMENT;
+var IDLE_CAP_MS, WEB_PAGE, active, queue, DRAIN_MS, launched, inflight, WHOLE_DOCUMENT;
 var init_read = __esm({
   "src/browser/read.ts"() {
     "use strict";
@@ -8429,6 +8488,8 @@ var init_read = __esm({
     init_fetch();
     init_challenge();
     init_deps();
+    init_launch();
+    init_discovery();
     init_overlay();
     init_session();
     init_state();
@@ -8437,6 +8498,8 @@ var init_read = __esm({
     WEB_PAGE = /^(?:text\/html|application\/xhtml\+xml)$/i;
     active = 0;
     queue = [];
+    DRAIN_MS = 5e3;
+    inflight = /* @__PURE__ */ new Set();
     WHOLE_DOCUMENT = "({ html: document.documentElement ? document.documentElement.outerHTML : '', url: location.href })";
   }
 });
@@ -8516,9 +8579,9 @@ async function readCappedBytes(res, max) {
   return Buffer.concat(chunks);
 }
 async function readMeasuredBody(res, max) {
-  const read2 = await readCappedBytes(res, max + 1);
-  const bytes = read2.subarray(0, max);
-  return { bytes, bytesRead: bytes.length, truncated: read2.length > max };
+  const read3 = await readCappedBytes(res, max + 1);
+  const bytes = read3.subarray(0, max);
+  return { bytes, bytesRead: bytes.length, truncated: read3.length > max };
 }
 function isBinaryDocument(contentType) {
   return /application\/pdf/i.test(contentType) || docFormatForContentType(contentType) !== void 0;
@@ -10259,14 +10322,14 @@ async function fill(session, ref2, text, opts = {}) {
     const field = await textField(page, node);
     const kind = { value: field.kind };
     const p = await perform(session, opts, async (pg) => {
-      const read2 = () => callOn(pg, node.objectId, PAGE_FUNCTIONS.readValue, [kind]);
+      const read3 = () => callOn(pg, node.objectId, PAGE_FUNCTIONS.readValue, [kind]);
       await pg.send("DOM.focus", { backendNodeId: node.backendNodeId });
       await callOn(pg, node.objectId, PAGE_FUNCTIONS.selectAll, [kind]);
       if (text === "") await dispatchKeys(pg, parseKey("Delete"));
       else await pg.send("Input.insertText", { text });
-      if (holds2(await read2(), text)) return;
+      if (holds2(await read3(), text)) return;
       await callOn(pg, node.objectId, PAGE_FUNCTIONS.setValue, [{ value: text }, kind]);
-      const now = await read2();
+      const now = await read3();
       if (holds2(now, text)) return;
       const shown2 = field.secret ? "something else" : JSON.stringify(typeof now === "string" && now.length > 80 ? `${now.slice(0, 77)}...` : now);
       throw new ActionError(`could not fill ${ref2}: it holds ${shown2} (an input mask, a maxlength or a script rewrites it); try typeText`);
@@ -10569,7 +10632,7 @@ var init_actions = __esm({
 });
 
 // src/browser/network.ts
-function track(map, key, value) {
+function track2(map, key, value) {
   map.delete(key);
   map.set(key, value);
   for (const old of map.keys()) {
@@ -10680,7 +10743,7 @@ var init_network = __esm({
       }
       onRequest(p) {
         if (!this.active || typeof p?.requestId !== "string") return;
-        track(this.requests, p.requestId, {
+        track2(this.requests, p.requestId, {
           method: String(p.request?.method ?? "GET"),
           url: String(p.request?.url ?? ""),
           resourceType: p.type,
@@ -10699,7 +10762,7 @@ var init_network = __esm({
           resourceType: String(p.type ?? req?.resourceType ?? "Other"),
           requestBody: typeof req?.postData === "string" ? req.postData.slice(0, REQUEST_BODY_CAP) : void 0
         };
-        if (this.keep(rec)) track(this.pending, p.requestId, rec);
+        if (this.keep(rec)) track2(this.pending, p.requestId, rec);
       }
       onFailed(p) {
         this.requests.delete(p?.requestId);
@@ -11690,9 +11753,9 @@ var TEXT_VARIANTS = ["", "consent", "full"];
 var MARKDOWN_VARIANTS = ["md", "consent-md", "full-md"];
 var PLAIN = [""];
 function variantOf(opts) {
-  const read2 = opts.fullPage ? "full" : opts.stripConsent ? "consent" : "";
-  if (opts.format !== "markdown") return read2;
-  return read2 ? `${read2}-md` : "md";
+  const read3 = opts.fullPage ? "full" : opts.stripConsent ? "consent" : "";
+  if (opts.format !== "markdown") return read3;
+  return read3 ? `${read3}-md` : "md";
 }
 var sameFormat = (variant) => MARKDOWN_VARIANTS.includes(variant) ? MARKDOWN_VARIANTS : TEXT_VARIANTS;
 var PDF_CACHE_NS = "pdf";
@@ -13375,7 +13438,7 @@ async function crawlSite(seed, opts = {}) {
     settleSeed();
   };
   const seen = /* @__PURE__ */ new Set([canonicalizeUrl(seed)]);
-  const read2 = /* @__PURE__ */ new Set();
+  const read3 = /* @__PURE__ */ new Set();
   let skippedFiles = 0;
   const admit = (url, depth, into) => {
     const canon = canonicalizeUrl(url);
@@ -13477,11 +13540,11 @@ async function crawlSite(seed, opts = {}) {
         const done = settled[i];
         if (!("page" in done)) continue;
         const canon = canonicalizeUrl(done.page.url);
-        if (read2.has(canon)) {
+        if (read3.has(canon)) {
           settled[i] = { note: `${batch[i].url} redirected to ${done.page.url}, already read.`, duplicate: true };
           continue;
         }
-        read2.add(canon);
+        read3.add(canon);
         seen.add(canon);
         opts.onPage?.(done.page);
       }
@@ -13545,7 +13608,7 @@ function contentHash(body) {
   return createHash3("sha256").update(body).digest("hex");
 }
 var FINGERPRINT_MAX_BYTES = 64 * 1024 * 1024;
-function read(url, opts, headers) {
+function read2(url, opts, headers) {
   return httpGet(url, { timeoutMs: opts.timeoutMs, maxBytes: opts.maxBytes ?? FINGERPRINT_MAX_BYTES, binary: true, ...headers ? { headers } : {} });
 }
 function observation(url, res) {
@@ -13563,13 +13626,13 @@ function observation(url, res) {
   };
 }
 async function fingerprint(url, opts = {}) {
-  return observation(url, await read(url, opts));
+  return observation(url, await read2(url, opts));
 }
 async function hasChanged(url, previous, opts = {}) {
   const headers = {};
   if (previous?.etag) headers["if-none-match"] = previous.etag;
   if (previous?.lastModified) headers["if-modified-since"] = previous.lastModified;
-  const res = await read(url, opts, Object.keys(headers).length ? headers : void 0);
+  const res = await read2(url, opts, Object.keys(headers).length ? headers : void 0);
   const observed = observation(url, res);
   if (res.status === 304) {
     const etag = observed.etag ?? previous?.etag;
@@ -14606,8 +14669,8 @@ function pageMetadata(html, opts = {}) {
   const authorKeys = /* @__PURE__ */ new Set(["article:author", "author", "citation_author", "dc.creator"]);
   for (const [key, v] of entries) if (authorKeys.has(key)) addAuthor(v);
   if (!primary || rank(primary) < 4) {
-    const read2 = new Set(sources);
-    const rest = nodes.filter((n) => !read2.has(n) && rank(n) > 0);
+    const read3 = new Set(sources);
+    const rest = nodes.filter((n) => !read3.has(n) && rank(n) > 0);
     for (const n of rest) {
       if (out.authors.length) break;
       for (const a of names(n.author)) addAuthor(a);
@@ -15885,7 +15948,7 @@ async function runStdioServer(adapter, opts = {}) {
     emit(JSON.stringify(msg) + "\n");
   };
   const inFlight = /* @__PURE__ */ new Set();
-  const track2 = (p) => {
+  const track3 = (p) => {
     inFlight.add(p);
     void p.finally(() => inFlight.delete(p));
     return p;
@@ -15949,7 +16012,7 @@ async function runStdioServer(adapter, opts = {}) {
           continue;
         }
         const batch = parsed;
-        track2(
+        track3(
           (async () => {
             const out = [];
             await Promise.all(batch.map((m) => dispatch2(m, (r) => void out.push(r))));
@@ -15962,7 +16025,7 @@ async function runStdioServer(adapter, opts = {}) {
         send({ jsonrpc: "2.0", id: null, error: { code: ERR_INVALID_REQUEST, message: "invalid request: expected a JSON-RPC object" } });
         continue;
       }
-      track2(dispatch2(parsed, send).catch(reportInternal(send)));
+      track3(dispatch2(parsed, send).catch(reportInternal(send)));
     }
     await Promise.all(inFlight);
   } finally {
@@ -18318,12 +18381,12 @@ extractor: ${r.extractor}` };
         if (!Number.isInteger(max) || max < 1)
           throw new ToolError("`max` is required and must be a positive whole number \u2014 a crawl without a budget is not one.");
         await refuseUrl(url);
-        let read2 = 0;
+        let read3 = 0;
         const r = await crawlSite(url, {
           maxPages: max,
           signal,
           ...guard ? { authorizeUrl: guard } : {},
-          onPage: (page) => ctx?.progress(++read2, max, page.url),
+          onPage: (page) => ctx?.progress(++read3, max, page.url),
           ...args.depth !== void 0 ? { maxDepth: Number(args.depth) } : {},
           ...typeof args.prefix === "string" && args.prefix ? { prefix: args.prefix } : {},
           ...args.sitemap === false ? { useSitemap: false } : {}
