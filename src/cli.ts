@@ -83,6 +83,7 @@ import {
   type CliSpec,
   type CommandArgs,
   EXIT_FAILURE,
+  EXIT_HUMAN,
   EXIT_OK,
   EXIT_USAGE,
   isInvokedDirectly,
@@ -158,6 +159,7 @@ USAGE
                      [--capture] [--snapshot] [--timeout <ms>]
   webindex browser   attach <port|url> | status | close [--all] | eval <expr|->
   webindex browser   snapshot [<ref> | --selector <css>] [--interactive] [--max-chars <n>]
+  webindex browser   text [<ref> | --selector <css>] [--markdown] [--max-chars <n>]
   webindex browser   click|hover <ref> [--confirm] | type <ref> <text> [--submit]
   webindex browser   fill <ref> <text> | select <ref> <val…> | press <key> [--confirm]
   webindex browser   upload <ref> <file…> | scroll <ref|up|down|top|bottom>
@@ -166,8 +168,7 @@ USAGE
   webindex browser   screenshot [<ref> | --selector <css>] [--full] [--out <file>]
   webindex browser   network [list|get <n>|clear] | tabs [list|new|select <tN>|close <tN>]
   webindex browser   back|forward|reload | dialog accept|dismiss (MCP only)
-  webindex browser   profile import <chrome|brave|chromium|edge|path> [--force]
-                     | reset | path
+  webindex browser   profile import <kind|path> [--force] | reset | path
   webindex doctor [--json]
   webindex version
 
@@ -348,18 +349,18 @@ COMMANDS
              on first use (headed unless --headless) and reused by every later
              call, its tab and refs included. attach <port|url> (or --cdp)
              drives one on a loopback port; close shuts down only a browser it
-             launched. snapshot prints the accessibility tree with refs (e12):
-             controls, for the actions; containers (table, figure…), to scope
-             snapshot and screenshot, as --selector <css> does. A ref from
-             before a navigation is stale. fill and type echo the value (never
-             a password's). A click or an Enter that looks irreversible (pay,
-             delete, send…) or submits a password is refused unless --confirm:
+             launched. snapshot prints the accessibility tree with refs (e12)
+             on controls and containers (table, figure…); a ref or --selector
+             scopes snapshot, screenshot, text and an action's --snapshot. text
+             reads the tab's main content as fetch does, overlays stripped. A
+             ref from before a navigation is stale. An irreversible-looking
+             click or Enter (pay, delete, send, a password) needs --confirm:
              ask the user first. A challenge is never bypassed: the human
              solves it, then wait --clear. --capture records the JSON fetched
-             while its command runs (network list|get; the log grows until
-             network clear). A dialog is dismissed before the command ends; mcp
-             --browser answers them. Exit 1: a stale ref, a timeout, a refusal;
-             --json on every action.
+             (network list|get|clear). A dialog is dismissed before the command
+             ends; mcp --browser answers them. --json on every action. Exit 1:
+             a stale ref, a timeout, a refusal; Exit 3: the page needs a human
+             (a blocking challenge), the result printed as on success.
   doctor     Report which optional helpers are reachable, and what each
              extraction rung will do on this machine: installed, downloads on
              first use, not installed, built-in, or switched off (and by which
@@ -1941,9 +1942,24 @@ function commandHelp(cmd: string): string {
     ...usageLines,
     "",
     ...described,
+    ...(cmd === "mcp" ? ["", ...browserToolsHelp()] : []),
     "",
     "Run `webindex --help` for every command and the environment variables.",
   ].join("\n");
+}
+
+/** `mcp --help`: the names of the tools --browser adds, wrapped, and where their arguments are told. */
+function browserToolsHelp(): string[] {
+  const lines = ["BROWSER TOOLS (--browser): each one's arguments are in references/browser.md", "  (skill://references/browser.md over MCP)"];
+  let line = " ";
+  for (const t of browserToolDecls()) {
+    if (line.length + t.name.length + 1 > 78) {
+      lines.push(line);
+      line = " ";
+    }
+    line += ` ${t.name}`;
+  }
+  return [...lines, line];
 }
 
 /**
@@ -2703,6 +2719,7 @@ async function dispatch(argv: string[]): Promise<void> {
         browserKind: argValue(args, "browser-kind"),
         capture: argBool(args, "capture"),
         snapshot: argBool(args, "snapshot"),
+        markdown: argBool(args, "markdown"),
         interactive: argBool(args, "interactive"),
         maxChars: argInt(args, "max-chars", { min: 1 }),
         confirm: argBool(args, "confirm"),
@@ -2729,8 +2746,10 @@ async function dispatch(argv: string[]): Promise<void> {
         },
       },
     );
-    if (r.exitCode === 0) {
+    if (r.exitCode === 0 || r.exitCode === EXIT_HUMAN) {
       process.stdout.write(asJson ? jsonLine(r.json) : `${r.text}\n`);
+      // Done, and the page is a blocking challenge: the result is printed as on success, the code says a human is needed.
+      if (r.exitCode === EXIT_HUMAN) process.exit(EXIT_HUMAN);
       return;
     }
     if (asJson) process.stdout.write(jsonLine(r.json));

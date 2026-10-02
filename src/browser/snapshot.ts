@@ -20,6 +20,11 @@ import { type RefTable, readRefs, writeRefs } from "./state.js";
 // What covers the page (a cookie wall, a modal: see overlay.ts) is rendered
 // first, under an `overlay` header, and not again in the tree: a wall that comes
 // last in the document is never what a --max-chars cut drops.
+//
+// A form control with no name, or with the name another one has (two <label>s
+// for one field name the first field after both and leave the second unnamed),
+// cannot be told apart by its line alone: takeSnapshot looks up its type, name
+// and placeholder attributes and prints them after its ref. Never its value.
 
 /** A CDP Accessibility.AXValue, reduced to what we read. */
 export interface AXValue {
@@ -53,6 +58,8 @@ export interface RenderOptions {
   frames?: Record<string, AXNode[]>;
   /** The backendDOMNodeIds of the overlays over the page: rendered first, each under its own header. Ignored with rootBackendId. */
   overlays?: number[];
+  /** What to print after the ref of a control, by its backendDOMNodeId: see fieldHint. */
+  hints?: Record<number, string>;
 }
 
 export interface RenderResult {
@@ -61,6 +68,8 @@ export interface RenderResult {
   truncated: boolean;
   /** Refs visible in `text`: the controls', and in a full snapshot the containers' too. */
   refCount: number;
+  /** The form controls rendered with no name, or with a name another one shares, in document order: their backendDOMNodeIds. */
+  unclear: number[];
 }
 
 /** A ref the table does not know, or that belongs to a document that is gone. */
@@ -76,7 +85,7 @@ const REF_SHAPE = /^e\d+$/;
 /** Refuse what cannot be a ref at all (a CSS selector, a typo) as a usage error, before anything looks it up. */
 export function checkRef(ref: string): void {
   if (!REF_SHAPE.test(ref))
-    throw new UsageError("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)");
+    throw new UsageError("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, text, wait)");
 }
 
 /** No element of the document matches a CSS selector: the page as it is, not the invocation (exit 1). */
@@ -143,6 +152,34 @@ const NAMED_CONTAINER_ROLES = new Set(["region", "image", "img"]);
 const VALUE_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider"]);
 /** Fields whose editor (a node in the input's user-agent shadow tree) is the field itself, not a control of its own. */
 const FIELD_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
+/** The form controls an unclear name earns a hint: see fieldHint. */
+const HINT_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton", "checkbox", "radio", "button"]);
+/** How many controls one snapshot looks up for hints. */
+const HINT_MAX = 50;
+const HINT_VALUE_MAX = 40;
+
+/**
+ * The hint printed after an unclear control's ref, from its element's tag and
+ * attributes (a flat [name, value, …] list, as DOM.describeNode gives them):
+ * `(type=password, name="password", placeholder="…")`, the id when it has no
+ * name. An input's type defaults to text. Its value is never read: a password
+ * field's would be the secret itself. Undefined when there is nothing to say.
+ */
+export function fieldHint(nodeName: string, attributes: string[]): string | undefined {
+  const attr = new Map<string, string>();
+  for (let i = 0; i + 1 < attributes.length; i += 2) attr.set((attributes[i] as string).toLowerCase(), attributes[i + 1] as string);
+  const quote = (v: string) => JSON.stringify(v.length > HINT_VALUE_MAX ? `${v.slice(0, HINT_VALUE_MAX)}…` : v);
+  const parts: string[] = [];
+  const type = attr.get("type")?.trim().toLowerCase() || (nodeName.toUpperCase() === "INPUT" ? "text" : "");
+  if (type) parts.push(`type=${type}`);
+  const name = attr.get("name")?.trim();
+  if (name) parts.push(`name=${quote(name)}`);
+  const placeholder = attr.get("placeholder")?.trim();
+  if (placeholder) parts.push(`placeholder=${quote(placeholder)}`);
+  const id = attr.get("id")?.trim();
+  if (!name && id) parts.push(`id=${quote(id)}`);
+  return parts.length ? `(${parts.join(", ")})` : undefined;
+}
 
 /** The nearest ancestor printed as a line: its role, and whether it has a ref. */
 type Parent = { role: string; ref: boolean } | undefined;
@@ -212,12 +249,15 @@ class Renderer {
   /** The refs that name a container only, never a control. */
   readonly containers: Set<string>;
   next: number;
+  /** The form controls rendered, in document order, with the name each was shown with. */
+  readonly controls: { id: number; name: string }[] = [];
   private readonly seen = new Set<AXNode>();
   private readonly trees = new Map<string, Tree>();
 
   constructor(
     table: RefTable,
     private readonly frames: Record<string, AXNode[]>,
+    private readonly hints: Record<number, string> = {},
   ) {
     this.refs = { ...table.refs };
     this.containers = new Set(table.containers ?? []);
@@ -290,6 +330,10 @@ class Renderer {
       if (acts) this.containers.delete(ref);
       else this.containers.add(ref);
       head += ` [ref=${ref}]`;
+      const id = n.backendDOMNodeId as number;
+      if (acts && HINT_ROLES.has(role)) this.controls.push({ id, name });
+      const hint = this.hints[id];
+      if (hint) head += ` ${hint}`;
     }
     for (const s of states(n)) head += ` ${s}`;
 
@@ -347,7 +391,7 @@ function flat(items: Item[], out: Line[]): void {
  * context is added, to keep it cheap.
  */
 export function renderSnapshot(nodes: AXNode[], opts: RenderOptions): RenderResult {
-  const r = new Renderer(opts.refs, opts.frames ?? {});
+  const r = new Renderer(opts.refs, opts.frames ?? {}, opts.hints);
   const main = buildTree(nodes);
   const all: Line[] = [];
   let items: Item[] = [];
@@ -409,7 +453,36 @@ export function renderSnapshot(nodes: AXNode[], opts: RenderOptions): RenderResu
     },
     truncated: tail !== "",
     refCount: kept.filter((l) => l.ref).length,
+    unclear: unclearControls(r.controls),
   };
+}
+
+/** The controls with no name, or a name another control shares. */
+function unclearControls(controls: { id: number; name: string }[]): number[] {
+  const count = new Map<string, number>();
+  for (const c of controls) count.set(c.name, (count.get(c.name) ?? 0) + 1);
+  return controls.filter((c) => c.name === "" || (count.get(c.name) ?? 0) > 1).map((c) => c.id);
+}
+
+/**
+ * The hints of the unclear controls, HINT_MAX at most: one DOM.describeNode
+ * each (attributes only, no page script runs), in parallel. A lookup that
+ * fails leaves that control without one.
+ */
+async function lookupHints(page: CdpSession, ids: number[]): Promise<Record<number, string>> {
+  const out: Record<number, string> = {};
+  await Promise.all(
+    ids.slice(0, HINT_MAX).map(async (backendNodeId) => {
+      try {
+        const { node } = await page.send<{ node?: { nodeName?: string; attributes?: string[] } }>("DOM.describeNode", { backendNodeId });
+        const hint = fieldHint(node?.nodeName ?? "", node?.attributes ?? []);
+        if (hint) out[backendNodeId] = hint;
+      } catch {
+        /* no hint for this one */
+      }
+    }),
+  );
+  return out;
 }
 
 // --- collector ----------------------------------------------------------------
@@ -508,14 +581,22 @@ export async function takeSnapshot(session: BrowserSession, opts: SnapshotOption
     throw new Error(`the element ${opts.selector} matches is not in the accessibility tree: scope to an ancestor, or take the whole snapshot`);
   }
 
-  const r = renderSnapshot(nodes, {
-    refs: table,
-    frames,
-    ...(opts.interactive !== undefined ? { interactive: opts.interactive } : {}),
-    ...(opts.maxChars !== undefined ? { maxChars: opts.maxChars } : {}),
-    ...(rootBackendId !== undefined ? { rootBackendId } : {}),
-    ...(overlays.length ? { overlays } : {}),
-  });
+  const render = (hints?: Record<number, string>) =>
+    renderSnapshot(nodes, {
+      refs: table,
+      frames,
+      ...(opts.interactive !== undefined ? { interactive: opts.interactive } : {}),
+      ...(opts.maxChars !== undefined ? { maxChars: opts.maxChars } : {}),
+      ...(rootBackendId !== undefined ? { rootBackendId } : {}),
+      ...(overlays.length ? { overlays } : {}),
+      ...(hints ? { hints } : {}),
+    });
+  let r = render();
+  // Rendered again, from the same table, once the unclear controls' hints are known: the same refs, with hints.
+  if (r.unclear.length) {
+    const hints = await lookupHints(session.page, r.unclear);
+    if (Object.keys(hints).length) r = render(hints);
+  }
   writeRefs(session.targetId, r.refs);
   return { text: `url: ${url}\ntitle: ${title}\n${r.text}`, url, title, loaderId, refCount: r.refCount, truncated: r.truncated };
 }

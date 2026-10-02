@@ -38,6 +38,7 @@ const GIF = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABA
 const PAGES: Record<string, string> = {
   "/": `<!doctype html><html><head><title>E2E form</title></head><body>
 <h1>Form</h1>
+<p class="intro">${"This form searches the catalogue of the test shop, and the paragraph is long enough to be read as the page's prose. ".repeat(4)}</p>
 <form id="search" onsubmit="event.preventDefault(); go()">
   <label>Query <input id="q" name="q"></label>
   <label>Kind <select id="kind"><option value="a">Alpha</option><option value="b">Beta</option></select></label>
@@ -166,6 +167,14 @@ customElements.define("cookie-wall", class extends HTMLElement {
   }
 });
 </script></body></html>`,
+  // A blocking challenge as an anti-bot vendor serves one: HTTP 403, a title and a line asking the human to prove it.
+  "/challenge.html": `<!doctype html><html><head><title>Verify you are human</title></head><body><p>Verify you are human to continue.</p></body></html>`,
+  "/gate.html": `<!doctype html><html><head><title>Gate</title></head><body><h1>Members</h1><a href="/challenge.html">Members area</a></body></html>`,
+  // Two labels for one field, as quotes.toscrape.com/login has: the first textbox is named by both, the password field by none.
+  "/login.html": `<!doctype html><html><head><title>Login</title></head><body><form>
+<label for="username">Username</label><label for="username">Password</label>
+<input type="text" id="username" name="username"><input type="password" id="password" name="password" value="hunter2">
+<input type="submit" value="Login"></form></body></html>`,
   "/js.html": `<!doctype html><html><head><title>Rendered later</title></head><body><main id="root"></main>
 <script>
 fetch("/api.json").then((r) => r.json()).then((j) => {
@@ -185,7 +194,7 @@ function serve(): Promise<Server> {
       return;
     }
     const page = PAGES[path]?.replace("__OTHER_ORIGIN__", `http://localhost:${(server.address() as AddressInfo).port}`);
-    res.writeHead(page ? 200 : 404, { "content-type": "text/html; charset=utf-8" });
+    res.writeHead(page ? (path === "/challenge.html" ? 403 : 200) : 404, { "content-type": "text/html; charset=utf-8" });
     res.end(page ?? "<!doctype html><title>Not found</title><h1>Not found</h1>");
   });
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
@@ -683,6 +692,64 @@ describe.runIf(live)("a real browser, driven command by command", () => {
       const asRef = await run("screenshot", ["table.infobox"]);
       expect(asRef.exitCode).toBe(2);
       expect(asRef.text).toMatch(/^expected a ref like e12 from the latest snapshot; CSS selectors: use --selector/);
+    },
+    STEP_MS,
+  );
+
+  it(
+    "exits 3 when open, a click or a reload lands on a blocking challenge, the challenge in the JSON; 0 once it is gone",
+    async () => {
+      const opened = await run("open", [`${base}/challenge.html`]);
+      expect(opened.exitCode, opened.text).toBe(3);
+      expect(opened.json).toMatchObject({ ok: true, status: 403, challenge: { kind: "generic", blocking: true } });
+      expect(opened.text.split("\n")[1]).toMatch(/^challenge: generic \(blocking\) — let the human solve it, then `webindex-tests browser wait --clear`$/);
+      expect((await run("reload")).exitCode).toBe(3);
+      const gate = await ok("open", [`${base}/gate.html`], { snapshot: true });
+      const clicked = await run("click", [refOf(gate.text, "link", "Members area")], { json: true });
+      expect(clicked.exitCode, clicked.text).toBe(3);
+      expect(clicked.json).toMatchObject({ navigated: true, challenge: { blocking: true } });
+      // Not a navigation: the page is still one, but the action is no reason to call the human.
+      expect((await run("scroll", ["down"])).exitCode).toBe(0);
+      expect((await run("open", [`${base}/second.html`])).exitCode).toBe(0);
+    },
+    STEP_MS,
+  );
+
+  it(
+    "reads the current tab's text: the form page's prose, one element by --selector, and the article behind a consent wall without answering it",
+    async () => {
+      await ok("open", [`${base}/`]);
+      const page = await ok("text");
+      expect(page.text).toContain("This form searches the catalogue of the test shop");
+      expect(page.json).toMatchObject({ url: `${base}/`, title: "E2E form", truncated: false });
+      const intro = await ok("text", [], { selector: "p.intro", maxChars: 60 });
+      expect(intro.json).toMatchObject({ truncated: true });
+      expect((intro.json as { text: string }).text).toMatch(/^This form searches the catalogue/);
+      expect(intro.text).toMatch(/\[truncated at 60 of \d+ characters/);
+      const walled = await ok("open", [`${base}/overlay.html`], { snapshot: true, interactive: true });
+      expect(walled.text).toContain("- overlay (covers the page):");
+      const article = await ok("text", [], { markdown: true });
+      expect(article.text).toContain("The article body that a reader came for");
+      expect(article.text).toMatch(/^# The walled article$/m);
+      expect(article.text).not.toContain("812 partners");
+      expect(article.text).not.toContain("Accept and continue");
+      // Read, not answered: the wall is still up.
+      expect((await ok("snapshot", [], { interactive: true })).text).toContain("- overlay (covers the page):");
+      // --selector scopes the snapshot an action prints, never what it acts on.
+      const scoped = await ok("press", ["Escape"], { snapshot: true, selector: "article" });
+      expect(scoped.text).toContain('heading "The walled article"');
+      expect(scoped.text).not.toContain("Section 0");
+    },
+    STEP_MS,
+  );
+
+  it(
+    "hints a form field with no name of its own, and never shows a password's value",
+    async () => {
+      const r = await ok("open", [`${base}/login.html`], { snapshot: true, interactive: true });
+      expect(r.text).toMatch(/- textbox "Username Password" \[ref=e\d+\]\n/);
+      expect(r.text).toMatch(/- textbox \[ref=e\d+\] \(type=password, name="password"\)/);
+      expect(r.text).not.toContain("hunter2");
     },
     STEP_MS,
   );

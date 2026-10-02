@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { envName } from "../src/brand.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
 import { type BrowserSession, openBrowserSession } from "../src/browser/session.js";
-import { type AXNode, renderSnapshot, StaleRefError, takeSnapshot } from "../src/browser/snapshot.js";
+import { type AXNode, fieldHint, renderSnapshot, StaleRefError, takeSnapshot } from "../src/browser/snapshot.js";
 import { type RefTable, readRefs, writeRefs } from "../src/browser/state.js";
 import { UsageError } from "../src/cli-kit.js";
 import { FakeCdp } from "./helpers/fake-cdp.js";
@@ -35,6 +35,42 @@ const tree = (...inner: AXNode[][]): AXNode[] => {
   return [{ nodeId: "0", role: { type: "role", value: "RootWebArea" }, childIds: kids.map((k) => k.nodeId), backendDOMNodeId: 1 }, ...inner.flat()];
 };
 const top = (n: AXNode[]): AXNode => n[0] as AXNode;
+
+describe("hints on unclear form controls", () => {
+  const form = () =>
+    tree(
+      node(1, "textbox", "Username Password"),
+      node(2, "textbox", ""),
+      node(3, "button", "Add"),
+      node(4, "button", "Add"),
+      node(5, "link", ""),
+      node(6, "checkbox", "Agree"),
+      node(7, "radio", undefined),
+    );
+
+  it("lists the form controls with no name, or a name another one shares; never a link or a uniquely named one", () => {
+    expect(renderSnapshot(form(), { refs: fresh() }).unclear).toEqual([20, 30, 40, 70]);
+    expect(renderSnapshot(form(), { refs: fresh(), interactive: true }).unclear).toEqual([20, 30, 40, 70]);
+  });
+
+  it("prints a hint right after the ref", () => {
+    const r = renderSnapshot(form(), { refs: fresh(), hints: { 20: '(type=password, name="password")', 70: '(type=radio, name="size")' } });
+    expect(r.text).toContain('- textbox [ref=e2] (type=password, name="password")');
+    expect(r.text).toContain('- radio [ref=e7] (type=radio, name="size")');
+    expect(r.text).toContain('- textbox "Username Password" [ref=e1]\n');
+  });
+
+  it("builds a hint from the type, name and placeholder (else the id), never the value", () => {
+    expect(fieldHint("INPUT", ["type", "password", "name", "password", "value", "hunter2", "placeholder", "Your password", "id", "pw"])).toBe(
+      '(type=password, name="password", placeholder="Your password")',
+    );
+    expect(fieldHint("INPUT", ["id", "q"])).toBe('(type=text, id="q")');
+    expect(fieldHint("BUTTON", ["name", "add", "value", "3"])).toBe('(name="add")');
+    expect(fieldHint("TEXTAREA", ["placeholder", `a ${"very ".repeat(20)}long "hint"`])).toMatch(/^\(placeholder="a very .{20,}…"\)$/);
+    expect(fieldHint("DIV", ["class", "x"])).toBeUndefined();
+    expect(fieldHint("INPUT", ["type", "password", "value", "hunter2"])).not.toContain("hunter2");
+  });
+});
 
 describe("renderSnapshot", () => {
   it("renders a login form: roles, names, values, states, urls, merged text", () => {
@@ -556,7 +592,7 @@ describe("takeSnapshot", () => {
     const s = await attach();
     const err = await takeSnapshot(s, { ref: "table.infobox" }).catch((e) => e);
     expect(err).toBeInstanceOf(UsageError);
-    expect(err.message).toBe("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)");
+    expect(err.message).toBe("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, text, wait)");
     expect(getFull).toEqual([]);
   });
 
@@ -673,6 +709,36 @@ describe("takeSnapshot", () => {
     const before = fake.calls.filter((c) => c.method === "Runtime.getProperties").length;
     await takeSnapshot(s, { ref: "e5" });
     expect(fake.calls.filter((c) => c.method === "Runtime.getProperties").length).toBe(before);
+  });
+
+  it("hints the unclear controls from their attributes: one lookup each, 50 at most, never a password's value", async () => {
+    fake.addTarget("https://a.test/", "T");
+    const many = Array.from({ length: 60 }, (_, i) => node(100 + i, "textbox", ""));
+    scriptAx({ main: tree(node(1, "textbox", "Username Password"), node(2, "textbox", ""), ...many) });
+    fake.handle("DOM.describeNode", (p: { backendNodeId: number }) => ({
+      node: {
+        nodeId: 0,
+        backendNodeId: p.backendNodeId,
+        nodeName: "INPUT",
+        attributes: p.backendNodeId === 20 ? ["type", "password", "name", "password", "value", "hunter2"] : ["name", `f${p.backendNodeId}`],
+      },
+    }));
+    const s = await attach();
+    const r = await takeSnapshot(s, { interactive: true });
+    expect(r.text).toContain('- textbox [ref=e2] (type=password, name="password")');
+    expect(r.text).toContain('- textbox "Username Password" [ref=e1]\n');
+    expect(r.text).not.toContain("hunter2");
+    const lookups = fake.calls.filter((c) => c.method === "DOM.describeNode" && c.params?.backendNodeId !== undefined);
+    expect(lookups).toHaveLength(50);
+    // Those past the cap are printed as they are.
+    expect(r.text).toMatch(/^- textbox \[ref=e62\]$/m);
+  });
+
+  it("prints the snapshot without hints when the lookups fail", async () => {
+    fake.addTarget("https://a.test/", "T");
+    scriptAx({ main: tree(node(2, "textbox", "")) });
+    const s = await attach();
+    expect((await takeSnapshot(s, {})).text).toContain("- textbox [ref=e1]");
   });
 
   it("leaves a frame unexpanded when describeNode or the frame fetch fails", async () => {

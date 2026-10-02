@@ -297,7 +297,7 @@ describe("resolveRef", () => {
     for (const bad of ["table.infobox", "#main", "E12", "e", "e1 ", ""]) {
       const err = await resolveRef(session, bad).catch((e) => e);
       expect(err, bad).toBeInstanceOf(UsageError);
-      expect(err.message).toBe("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, wait)");
+      expect(err.message).toBe("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, text, wait)");
     }
     expect(w.page.calls).toEqual([]);
   });
