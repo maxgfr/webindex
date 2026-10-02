@@ -11186,6 +11186,7 @@ async function readPageText(session, opts = {}) {
   text = text.trim();
   const title = await session.title();
   const max = opts.maxChars;
+  if (max !== void 0 && !(Number.isInteger(max) && max >= 1)) throw new RangeError(`maxChars must be a whole number, 1 or more, not ${max}`);
   const truncated = max !== void 0 && text.length > max;
   return {
     url,
@@ -11470,7 +11471,7 @@ var init_cli = __esm({
     TEXT_MAX_CHARS = 2e4;
     SELECTOR_ACTIONS = /* @__PURE__ */ new Set(["snapshot", "screenshot", "wait", "text"]);
     SNAPSHOT_ACTIONS = /* @__PURE__ */ new Set(["open", "click", "hover", "type", "fill", "select", "press", "upload", "scroll", "back", "forward", "reload", "dialog"]);
-    NAVIGATING = /* @__PURE__ */ new Set(["open", "click", "press", "back", "forward", "reload"]);
+    NAVIGATING = /* @__PURE__ */ new Set(["open", "click", "press", "back", "forward", "reload", "tabs"]);
     cliName = () => brand().cli;
     usageError = (action) => new UsageError(`usage: ${cliName()} browser ${USAGE[action]}`);
     dialogsJson = (dialogs) => dialogs.length ? { dialogs } : {};
@@ -11759,8 +11760,19 @@ var init_cli = __esm({
         }
         if (sub === "new") {
           arity(ctx, 1, 2);
-          const tab = await onPage(ctx, (s) => s.newTab(ctx.args[1]));
-          return { json: tab, text: tabLines([tab]) };
+          const url = ctx.args[1];
+          const { tab, challenge } = await onPage(ctx, async (s) => {
+            const tab2 = await s.newTab(url);
+            if (url === void 0) return { tab: tab2, challenge: void 0 };
+            await settle(s, actOpts(ctx));
+            return { tab: tab2, challenge: await detectChallenge(s) };
+          });
+          if (challenge === void 0) return { json: tab, text: tabLines([tab]) };
+          return {
+            json: { ...tab, challenge },
+            text: [tabLines([tab]), ...challenge ? [challengeLine(ctx, challenge)] : []].join("\n"),
+            ...challenge?.blocking ? { challenged: true } : {}
+          };
         }
         if (sub === "select") {
           arity(ctx, 2);
@@ -17426,6 +17438,8 @@ var Host = class {
       if (scope === "element" && r !== void 0 && selector !== void 0) throw new ToolError('scope "element" takes a `ref` or a `selector`, not both');
       if (scope === "element" && r === void 0 && selector === void 0)
         throw new ToolError('scope "element" needs a `ref` or a `selector`: the element to read, from the latest snapshot');
+      if (a.maxChars !== void 0 && !(typeof a.maxChars === "number" && Number.isInteger(a.maxChars) && a.maxChars >= 1))
+        throw new ToolError(`\`maxChars\` must be a whole number of characters, 1 or more, not ${JSON.stringify(a.maxChars)}`);
       return this.cli("text", r !== void 0 ? [r] : [], {
         ...selector !== void 0 ? { selector } : {},
         ...a.markdown === true ? { markdown: true } : {},
@@ -17794,8 +17808,8 @@ COMMANDS
              drives one on a loopback port; close shuts down only a browser it
              launched. snapshot prints the accessibility tree with refs (e12)
              on controls and containers (table, figure\u2026); a ref or --selector
-             scopes snapshot, screenshot, text and an action's --snapshot. text
-             reads the tab's main content as fetch does, overlays stripped. A
+             scopes snapshot, screenshot and text, and --selector an action's
+             --snapshot. text reads the tab's main content, overlays gone. A
              ref from before a navigation is stale. An irreversible-looking
              click or Enter (pay, delete, send, a password) needs --confirm:
              ask the user first. A challenge is never bypassed: the human
@@ -17989,6 +18003,9 @@ var SPEC = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS 
 var SKILL_ACTIONS = ["check", "bundle", "vendor", "copy", "doctor", "init", "repin", "finish", "recall"];
 var VIDEO_ACTIONS = ["fetch", "search", "frames", "list"];
 var YTDLP_STALE_DAYS = 60;
+function exitAfterOutput(code) {
+  process.exitCode = code;
+}
 function fail(msg) {
   process.stderr.write(`webindex: ${msg}
 `);
@@ -19115,7 +19132,7 @@ async function dispatch(argv) {
       for (const n of r.notes) process.stderr.write(`  ${n}
 `);
     }
-    if (!r.hits.length) process.exit(EXIT_FAILURE);
+    if (!r.hits.length) exitAfterOutput(EXIT_FAILURE);
     return;
   }
   if (cmd === "fetch") {
@@ -19251,7 +19268,7 @@ async function dispatch(argv) {
     if (!valid.includes(action)) usage(`usage: webindex ${cmd} ${valid.join("|")}`);
     const r = stackControl(cmd === "stack" ? "all" : cmd, action);
     (r.code === 0 ? process.stdout : process.stderr).write(r.message + "\n");
-    if (r.code !== 0) process.exit(r.code);
+    if (r.code !== 0) exitAfterOutput(r.code);
     return;
   }
   if (cmd === "rank") {
@@ -19286,7 +19303,7 @@ async function dispatch(argv) {
 `);
     if (!r.queryTerms.length) {
       process.stderr.write("The question has no rankable terms once stopwords are removed \u2014 the order is arbitrary.\n");
-      process.exit(1);
+      exitAfterOutput(EXIT_FAILURE);
     }
     return;
   }
@@ -19368,7 +19385,7 @@ async function dispatch(argv) {
         ...r.crawlDelayMs ? [`  delay     ${r.crawlDelayMs}ms`] : [],
         ...r.sitemaps.length ? [`  sitemaps  ${r.sitemaps.join("\n            ")}`] : []
       ]);
-      if (!allowed) process.exit(1);
+      if (!allowed) exitAfterOutput(EXIT_FAILURE);
       return;
     }
     if (cmd === "sitemap") {
@@ -19489,7 +19506,7 @@ async function dispatch(argv) {
       for (const n of r.notes) process.stderr.write(`  ${n}
 `);
     }
-    if (!r.pages.length) process.exit(EXIT_FAILURE);
+    if (!r.pages.length) exitAfterOutput(EXIT_FAILURE);
     return;
   }
   if (cmd === "tables") {
@@ -19600,7 +19617,7 @@ async function dispatch(argv) {
       if (v.note) process.stderr.write(`  ${v.note}
 `);
     }
-    if (v.changed === void 0) process.exit(EXIT_FAILURE);
+    if (v.changed === void 0) exitAfterOutput(EXIT_FAILURE);
     return;
   }
   if (cmd === "video") {
@@ -19736,12 +19753,14 @@ ${rows.join("\n")}
     if (r.exitCode === 0 || r.exitCode === EXIT_HUMAN) {
       process.stdout.write(asJson ? jsonLine(r.json) : `${r.text}
 `);
-      if (r.exitCode === EXIT_HUMAN) process.exit(EXIT_HUMAN);
+      if (r.exitCode === EXIT_HUMAN) exitAfterOutput(EXIT_HUMAN);
       return;
     }
     if (asJson) process.stdout.write(jsonLine(r.json));
-    if (r.exitCode === EXIT_USAGE) usage(r.text);
-    fail(r.text);
+    process.stderr.write(`webindex: ${r.text}
+`);
+    exitAfterOutput(r.exitCode === EXIT_USAGE ? EXIT_USAGE : EXIT_FAILURE);
+    return;
   }
   if (cmd === "skill") {
     const action = args.positional[0] ?? "";
@@ -19759,7 +19778,7 @@ ${rows.join("\n")}
       if (asJson) process.stdout.write(jsonLine(r));
       else if (r.written.length) process.stdout.write(`${r.written.map((p) => `  wrote ${relative4(root, p)}`).join("\n")}
 `);
-      if (!r.written.length) process.exit(EXIT_FAILURE);
+      if (!r.written.length) exitAfterOutput(EXIT_FAILURE);
       return;
     }
     const { config, errors: configErrors } = readSkillConfig(root);
@@ -19802,7 +19821,7 @@ ${rows.join("\n")}
             else for (const p of s.problems) process.stderr.write(`  FAIL ${p}
 `);
           }
-        if (statuses.some((s) => !s.ok)) process.exit(EXIT_FAILURE);
+        if (statuses.some((s) => !s.ok)) exitAfterOutput(EXIT_FAILURE);
         return;
       }
       const ref2 = argValue(args, "ref");
@@ -19822,7 +19841,8 @@ ${rows.join("\n")}
         if (r.errors.length) {
           for (const e of r.errors) process.stderr.write(`webindex: ${e}
 `);
-          process.exit(EXIT_FAILURE);
+          exitAfterOutput(EXIT_FAILURE);
+          return;
         }
         process.stdout.write(`  pinned ${n} ${r.tag} (${r.engineVersion})
 `);
@@ -19870,7 +19890,7 @@ ${rows.join("\n")}
           );
         }
       }
-      if (failedAny) process.exit(EXIT_FAILURE);
+      if (failedAny) exitAfterOutput(EXIT_FAILURE);
       return;
     }
     if (action === "bundle") {
@@ -19903,7 +19923,8 @@ ${rows.join("\n")}
         process.stderr.write(`
 webindex: ${bad} problem(s) \u2014 the published skill would not install correctly.
 `);
-        process.exit(EXIT_FAILURE);
+        exitAfterOutput(EXIT_FAILURE);
+        return;
       }
       if (!asJson) process.stdout.write(`
   skills/${config.name}/ installs as a complete skill.
