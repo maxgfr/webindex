@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.33.0](https://github.com/maxgfr/webindex/compare/v1.32.0...v1.33.0) (2026-10-08)
+
+
+### Features
+
+* **skill:** let the agent invoke webindex on request ([5ce52ff](https://github.com/maxgfr/webindex/commit/5ce52ffc3315729235616f5a3140edece1bd2fbf))
+
 # [1.32.0](https://github.com/maxgfr/webindex/compare/v1.31.0...v1.32.0) (2026-10-02)
 
 
