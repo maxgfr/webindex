@@ -527,11 +527,21 @@ release workflow moves the `v1` major tag onto every stable release, and every c
 runs the current shell with no edit. A breaking change to the workflow contract ships as
 a new major, which consumers adopt deliberately.
 
-## Manual skill invocation
+## Skill invocation on request
 
-These skills run when explicitly invoked: `webindex`. Use `$name` in Codex or `/name` in Claude Code and OpenCode (with the plugin namespace when installed as a Claude plugin).
+The `webindex` skill ships **model-invocable, on request**: the agent may call it through its skill tool, but the skill's description restricts it to explicit requests, so the agent calls it when you ask, not on its own. Use `$webindex` in Codex or `/webindex` in Claude Code and OpenCode (with the plugin namespace when installed as a Claude plugin), or ask for webindex by name.
 
-The skill bundle disables implicit selection in Codex and Claude Code. OpenCode V2 reads `metadata.opencode/autoinvoke: "false"`. For OpenCode V1, merge these entries into `permission.skill` in `~/.config/opencode/opencode.json` or the project configuration; retain unrelated permissions:
+Making it explicit-only is one setting per host, applied to the **installed** copy of the skill:
+
+| Host | Shipped, on request | Explicit-only |
+| --- | --- | --- |
+| Claude Code | no `disable-model-invocation` in `SKILL.md` | add `disable-model-invocation: true` |
+| Codex | `allow_implicit_invocation: true` under `policy:` in `agents/openai.yaml` | set it to `false` |
+| OpenCode | `metadata.opencode/autoinvoke: 'true'` in `SKILL.md` | set it to `'false'` |
+
+Claude Code can do it without touching the file: `"skillOverrides": { "webindex": "user-invocable-only" }` in `settings.json` leaves `/webindex` working while hiding the skill from the model. Plugin installs ignore `skillOverrides`, so edit the frontmatter there. Updating or reinstalling restores the shipped default, so reapply the change afterwards.
+
+OpenCode V1 reads no `autoinvoke` metadata; `permission.skill` in `~/.config/opencode/opencode.json` or the project configuration is how you force explicit-only there. Retain unrelated permissions:
 
 ```json
 {
@@ -543,4 +553,4 @@ The skill bundle disables implicit selection in Codex and Claude Code. OpenCode 
 }
 ```
 
-On OpenCode 1.18.30, these rules hide the skills from the agent and reject skill-tool loading, while explicit `/name` commands remain available. Installation with `skills add` does not apply this OpenCode V1 configuration.
+On OpenCode 1.18.30, that rule hides the skill from the agent and rejects skill-tool loading, while the explicit `/webindex` command still works. Installation with `skills add` does not apply this OpenCode V1 configuration.

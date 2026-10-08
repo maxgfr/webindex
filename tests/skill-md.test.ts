@@ -46,9 +46,15 @@ describe("the engine stays out of the skill-matching pool", () => {
     expect(existsSync(join(root, ".agents", "skills", "webindex", "SKILL.md"))).toBe(true);
   });
 
-  it("declares explicit-only invocation through supported Codex metadata", () => {
+  it("is model-invocable, but only on an explicit request", () => {
+    // The agent may call it through its skill tool when the user asks for it;
+    // the description is what keeps it from being picked up on its own.
+    expect(frontmatter).not.toMatch(/^disable-model-invocation:\s*true\s*$/m);
+    expect(frontmatter).not.toMatch(/opencode\/autoinvoke:\s*['"]?false['"]?\s*$/m);
+    expect(description).toMatch(/\bUse only when the user explicitly asks for webindex\b/);
     const metadata = readFileSync(join(root, "agents", "openai.yaml"), "utf8");
-    expect(metadata).toMatch(/allow_implicit_invocation:\s*false/);
+    // This is a host policy boolean, not a prose instruction to the model.
+    expect(metadata).toMatch(/^policy:\s*\n(?:[ \t]+[^\n]*\n)*?[ \t]+allow_implicit_invocation:\s*true\s*$/m);
   });
 
   it("says plainly what it is not, and routes elsewhere", () => {
