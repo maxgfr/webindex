@@ -602,6 +602,26 @@ describe("click", () => {
     });
     const r = await click(session, "e1", { deps });
     expect(r).toMatchObject({ navigated: true, url: "https://a.test/next" });
+    expect(r).not.toHaveProperty("note");
+  });
+
+  it("says the page is still loading when the click's navigation committed but did not load before the settle ran out", async () => {
+    w.add(101, { tag: "A" });
+    w.hitFor = 101;
+    w.page.handle("Input.dispatchMouseEvent", (e) => {
+      if (e.type !== "mouseReleased") return;
+      // A slow, streaming response: the new document commits, its load never comes.
+      w.page.emit("Page.frameStartedLoading", { frameId: "F" });
+      w.loader = "L2";
+      w.url = "https://a.test/next";
+      w.page.emit("Page.frameNavigated", { frame: { id: "F", loaderId: "L2", url: w.url } });
+    });
+    const r = await click(session, "e1", { deps, settleTimeoutMs: 2000 });
+    expect(r).toMatchObject({
+      navigated: true,
+      url: "https://a.test/next",
+      note: "still loading after 2000 ms — take a snapshot or `webindex-tests browser wait --load`",
+    });
   });
 
   it("returns the dialog the click opened instead of waiting on a page it froze", async () => {

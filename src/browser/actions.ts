@@ -29,7 +29,7 @@ import { type BrowserDeps, browserDeps } from "./deps.js";
 import { type KeySpec, keyEventsFor, keyName, parseKey } from "./keys.js";
 import { DESCRIBE_SOURCE, overlayRootOf } from "./overlay.js";
 import { guardAction, OWNER_SOURCE } from "./risk.js";
-import type { NavigationResult } from "./session.js";
+import { type NavigationResult, stillLoading } from "./session.js";
 import { type AXNode, checkRef, elementBySelector, renderSnapshot, StaleRefError } from "./snapshot.js";
 import { readRefs, writeRefs } from "./state.js";
 import { armSettle, type SettleOptions, settle } from "./wait.js";
@@ -77,7 +77,7 @@ export interface ActionResult {
   value?: unknown;
   /** fill or type on a password field: its value is never echoed. */
   valueHidden?: true;
-  /** The page the move landed on committed but was still loading when the wait ran out. */
+  /** The page the action or move landed on committed but was still loading when the wait ran out. */
   note?: string;
 }
 
@@ -401,10 +401,17 @@ async function perform(session: ActionSession, opts: ActionOptions, act: (page: 
         const url = dialogs.url();
         return { navigated: false, dialog: dialogs.seen() as DialogInfo, ...(url !== undefined ? { dialogUrl: url } : {}) };
       }
-      const { navigated } = await armed.done();
+      const settled = await armed.done();
       const dialog = dialogs.seen();
       const url = dialogs.url();
-      return { navigated, ...(dialog ? { dialog } : {}), ...(url !== undefined ? { dialogUrl: url } : {}), value: first.value };
+      return {
+        navigated: settled.navigated,
+        ...(dialog ? { dialog } : {}),
+        ...(url !== undefined ? { dialogUrl: url } : {}),
+        value: first.value,
+        // A slow, streaming page outlasts the settle: said here, or the next read meets an empty body unwarned.
+        ...(settled.stillLoading ? { note: stillLoading(settled.waitedMs) } : {}),
+      };
     } finally {
       stopped = true;
       armed.cancel();

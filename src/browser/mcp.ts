@@ -49,6 +49,7 @@ const FOLLOW_UPS: BrowserFollowUps = {
   networkList: "webindex_browser_network with action list",
   capture: "webindex_browser_open with capture: true",
   textMore: "raise maxChars, or read one element (scope element with a ref or a selector)",
+  waitLoad: "webindex_browser_wait with condition load",
 };
 
 /** What may still run while a dialog freezes the page: nothing that asks the page anything. */

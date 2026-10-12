@@ -184,7 +184,8 @@ const realDeps: Pick<BrowserDeps, "now" | "sleep"> = {
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
 };
 
-function pidAlive(pid: number): boolean {
+/** Whether a process runs under `pid`, ours to signal or not. */
+export function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;

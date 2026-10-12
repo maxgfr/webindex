@@ -4,6 +4,7 @@ import { env as brandEnv } from "../brand.js";
 import { CdpClient } from "./cdp.js";
 import { type BrowserBinary, type BrowserKind, detectBrowserBinary } from "./detect.js";
 import * as discovery from "./discovery.js";
+import { pidAlive } from "./state.js";
 
 // The seams later tasks fake in tests. Everything here is resolved lazily, in
 // defaultBrowserDeps(), so importing this module has no side effect.
@@ -41,6 +42,8 @@ export interface BrowserDeps {
   detectBrowser(kind?: BrowserKind): BrowserBinary | null;
   /** Signal a process we launched in an earlier call, known only by its pid. */
   kill(pid: number, signal: NodeJS.Signals): void;
+  /** Whether the process `pid` is still running: closing waits on it. */
+  alive(pid: number): boolean;
   /** Reads `WEBINDEX_<name>` (brand-aware), like the rest of the library. */
   env(name: string): string | undefined;
   platform: NodeJS.Platform;
@@ -56,6 +59,7 @@ export function defaultBrowserDeps(): BrowserDeps {
     discovery,
     detectBrowser: (kind) => detectBrowserBinary(kind ? { kind } : {}),
     kill: (pid, signal) => void process.kill(pid, signal),
+    alive: pidAlive,
     env: (name) => brandEnv(name),
     platform: process.platform,
   };

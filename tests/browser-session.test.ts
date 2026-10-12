@@ -10,6 +10,7 @@ import { appendNetwork, readNetwork, readRefs, readSession, type Session, writeR
 import { profileDir } from "../src/browser/profile.js";
 import { FakeCdp } from "./helpers/fake-cdp.js";
 import { scriptBrowser } from "./helpers/fake-browser.js";
+import { fakeClock } from "./helpers/fake-page.js";
 import { fakeSpawn } from "./helpers/fake-spawn.js";
 
 let fake: FakeCdp;
@@ -35,6 +36,8 @@ const deps = (over: Partial<BrowserDeps> = {}): Partial<BrowserDeps> => ({
   spawn: fakeSpawn({ port: fake.port }).spawn,
   detectBrowser: () => ({ kind: "chrome", path: "/fake/chrome" }),
   kill: (pid, signal) => void kills.push([pid, signal]),
+  // The fake browser has no process: gone by the time anyone looks. Never the real pid 4242.
+  alive: () => false,
   ...over,
 });
 const attach = async (over: Parameters<typeof openBrowserSession>[0] = {}) => {
@@ -711,6 +714,33 @@ describe("browserStatus and closeBrowser (no session to open)", () => {
     expect(await closeBrowser({ deps: deps({ spawn: spawned.spawn }) })).toEqual({ closed: true, launchedByUs: true });
     expect(methods()).toContain("Browser.close");
     expect(spawned.calls).toHaveLength(0);
+    expect(readSession()).toBeNull();
+  });
+
+  it("closeBrowser returns only once the browser it launched has exited", async () => {
+    fake.addTarget();
+    writeSession(ours());
+    // Its processes take 2 s to go after Browser.close, as a real browser's do.
+    const clock = fakeClock();
+    const alive = (pid: number) => pid === 4242 && clock.now() < 3000;
+    expect(await closeBrowser({ all: true, deps: deps({ now: clock.now, sleep: clock.sleep, alive }) })).toEqual({ closed: true, launchedByUs: true });
+    expect(clock.now()).toBeGreaterThanOrEqual(3000);
+    expect(clock.now()).toBeLessThan(3200);
+    expect(kills).toEqual([]); // it went on its own: no signal
+  });
+
+  it("closeBrowser stops waiting for a browser that does not exit, after a SIGTERM, and says so", async () => {
+    fake.addTarget();
+    writeSession(ours());
+    const clock = fakeClock();
+    const r = await closeBrowser({ deps: deps({ now: clock.now, sleep: clock.sleep, alive: () => true }) });
+    expect(r).toEqual({
+      closed: true,
+      launchedByUs: true,
+      note: "the browser (pid 4242) was still running 5000 ms after it was told to quit: let it exit before you remove its profile or launch it again",
+    });
+    expect(clock.now() - 1000).toBe(5000);
+    expect(kills).toEqual([[4242, "SIGTERM"]]);
     expect(readSession()).toBeNull();
   });
 

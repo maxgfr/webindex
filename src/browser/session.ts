@@ -26,6 +26,9 @@ import { clearNetwork, clearRefs, clearSession, readSession, withBrowserLock, wr
 
 const NAVIGATION_TIMEOUT_MS = 30_000;
 const BROWSER_CLOSE_TIMEOUT_MS = 5000;
+/** How long `close` waits for the browser's process to exit once told to quit. */
+const BROWSER_EXIT_TIMEOUT_MS = 5000;
+const EXIT_POLL_MS = 100;
 /** A page showing a dialog on load never answers Runtime.evaluate; the status is not worth waiting for. */
 const STATUS_TIMEOUT_MS = 2000;
 /**
@@ -118,8 +121,8 @@ const committedIn =
   (e: NavEvent): boolean =>
     e.frameId === frameId && isNew(e.loaderId) && (e.kind === "commit" || (e.kind === "lifecycle" && e.name !== "init"));
 
-/** What a navigation that committed but has not loaded in time says instead of failing. */
-const stillLoading = (timeoutMs: number): string => `still loading after ${timeoutMs} ms — take a snapshot or \`${brand().cli} browser wait --load\``;
+/** What a navigation that committed but has not loaded in time says instead of failing (an action's too: see actions.ts). */
+export const stillLoading = (timeoutMs: number): string => `still loading after ${timeoutMs} ms — take a snapshot or \`${brand().cli} browser wait --load\``;
 
 // --- tab ids -----------------------------------------------------------------
 
@@ -773,8 +776,39 @@ async function closeAt(deps: BrowserDeps, port: number, host: string, pid: numbe
 }
 
 /**
+ * Wait until the browser process `pid` has exited: its socket closes before
+ * its processes are gone (seconds later, measured), and a caller that removes
+ * the profile or launches again at once races them. Past half the wait it is
+ * sent SIGTERM, as closeLaunched does for a browser that refuses to quit.
+ * False when it is still running at the end.
+ */
+async function awaitExit(deps: BrowserDeps, pid: number): Promise<boolean> {
+  const start = deps.now();
+  let termed = false;
+  while (deps.alive(pid)) {
+    const elapsed = deps.now() - start;
+    if (elapsed >= BROWSER_EXIT_TIMEOUT_MS) return false;
+    if (!termed && elapsed >= BROWSER_EXIT_TIMEOUT_MS / 2) {
+      termed = true;
+      try {
+        deps.kill(pid, "SIGTERM");
+      } catch (e) {
+        if (deps.alive(pid)) throw e; // a failed kill of a process that has since exited says nothing
+      }
+    }
+    await deps.sleep(Math.min(EXIT_POLL_MS, BROWSER_EXIT_TIMEOUT_MS - elapsed));
+  }
+  return true;
+}
+
+const exitNote = (pid: number): string =>
+  `the browser (pid ${pid}) was still running ${BROWSER_EXIT_TIMEOUT_MS} ms after it was told to quit: let it exit before you remove its profile or launch it again`;
+
+/**
  * `browser close` from a fresh process: shut the saved browser down if we
  * launched it, without launching or attaching to anything first, then forget it.
+ * It returns once the browser's process has exited, or with a `note` when it
+ * gave up waiting.
  *
  * With no live session, the browser running on our dedicated profile is closed
  * instead: it is ours whatever started it — a fetch read launches one without
@@ -783,7 +817,7 @@ async function closeAt(deps: BrowserDeps, port: number, host: string, pid: numbe
  */
 export async function closeBrowser(
   opts: CloseOptions & { profile?: string; deps?: Partial<BrowserDeps> } = {},
-): Promise<{ closed: boolean; launchedByUs: boolean }> {
+): Promise<{ closed: boolean; launchedByUs: boolean; note?: string }> {
   const deps = browserDeps(opts.deps);
   const saved = readSession();
   const host = saved?.host ?? "127.0.0.1";
@@ -795,9 +829,11 @@ export async function closeBrowser(
       : !saved.launchedByUs && (await deps.discovery.isPortAlive(saved.port, host));
   let closed = false;
   let launchedByUs = saved?.launchedByUs ?? false;
+  let note: string | undefined;
   if (saved?.launchedByUs && live) {
     await closeAt(deps, saved.port, host, saved.pid);
     closed = true;
+    if (saved.pid !== undefined && !(await awaitExit(deps, saved.pid))) note = exitNote(saved.pid);
   } else if (!live) {
     const own = await readActivePort(deps, join(profileDir(opts.profile ?? saved?.profile), "DevToolsActivePort"));
     if (own && (await isSameBrowser(deps, own.port, "127.0.0.1", own.path))) {
@@ -806,7 +842,7 @@ export async function closeBrowser(
     }
   }
   forget(saved ? [saved.targetId, ...Object.values(cleanTabs(saved.tabs))] : [], opts.all);
-  return { closed, launchedByUs };
+  return { closed, launchedByUs, ...(note ? { note } : {}) };
 }
 
 /**

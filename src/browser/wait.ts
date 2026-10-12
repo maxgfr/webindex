@@ -227,6 +227,8 @@ export interface SettleResult {
   /** The main frame loaded (or was loading) another document around the action. */
   navigated: boolean;
   waitedMs: number;
+  /** The main frame's new document committed but had not loaded when the wait ran out. */
+  stillLoading?: true;
 }
 
 export interface ArmedSettle {
@@ -347,8 +349,15 @@ export async function armSettle(session: WaitSession, opts: SettleOptions = {}):
           if (committedElsewhere || docLoading) return (await evaluate(page, "document.readyState")) === "complete";
           return true;
         };
-        while (now() < deadline && !(await loaded())) await step();
+        // Asked once more after the last step too: what it says then is what the result reports.
+        let isLoaded = await loaded();
+        while (!isLoaded && now() < deadline) {
+          await step();
+          isLoaded = await loaded();
+        }
         const navigated = sawNavigation() || committedElsewhere;
+        // Only a document that committed is the page now: one still on its way leaves the old one readable.
+        const stillLoading = !isLoaded && (committedElsewhere || (mainId !== undefined && committed.has(mainId)));
         // Quiet network: counted from the load (or from the start, if nothing navigated).
         let quietSince = navigated || docLoading ? undefined : start;
         while (now() < deadline) {
@@ -357,7 +366,7 @@ export async function armSettle(session: WaitSession, opts: SettleOptions = {}):
           if (quietSince !== undefined && now() - quietSince >= SETTLE_QUIET_MS) break;
           await step();
         }
-        return { navigated, waitedMs: now() - start };
+        return { navigated, waitedMs: now() - start, ...(stillLoading ? { stillLoading: true } : {}) };
       } finally {
         stop();
       }
@@ -373,4 +382,36 @@ export async function armSettle(session: WaitSession, opts: SettleOptions = {}):
  */
 export async function settle(session: WaitSession, opts: SettleOptions = {}): Promise<SettleResult> {
   return (await armSettle(session, opts)).done();
+}
+
+// --- before a read ---------------------------------------------------------------
+
+const PARSE_TIMEOUT_MS = 3000;
+const PARSE_POLL_MS = 100;
+
+export interface ParsedResult {
+  /** The document was still parsing (readyState "loading") when the wait ran out: it is read as it is. */
+  stillLoading: boolean;
+  waitedMs: number;
+}
+
+/**
+ * Before a read (text, snapshot): give a main-frame document that is still
+ * parsing a few seconds to reach "interactive". An action's settle is bounded,
+ * so a slow, streaming response can outlast it: the next read then meets a
+ * document with an empty body, and would call the page empty. Only an
+ * explicit "loading" waits: a page that cannot answer (a dialog, a context
+ * going away) is read as it is, as before.
+ */
+export async function awaitParsed(session: WaitSession, opts: SettleOptions = {}): Promise<ParsedResult> {
+  const { now, sleep } = browserDeps(opts.deps);
+  const timeoutMs = opts.timeoutMs ?? PARSE_TIMEOUT_MS;
+  const start = now();
+  for (;;) {
+    const ready = await evaluate(session.page, "document.readyState");
+    const elapsed = now() - start;
+    if (ready !== "loading") return { stillLoading: false, waitedMs: elapsed };
+    if (elapsed >= timeoutMs) return { stillLoading: true, waitedMs: elapsed };
+    await sleep(Math.min(PARSE_POLL_MS, timeoutMs - elapsed));
+  }
 }

@@ -429,4 +429,12 @@ describe("defaultBrowserDeps", () => {
     d.kill(child.pid as number, "SIGTERM");
     expect(await exited).toBe("SIGTERM");
   });
+
+  it("tells a running process from one that has exited, by pid", async () => {
+    const d = defaultBrowserDeps();
+    expect(d.alive(process.pid)).toBe(true);
+    const child = d.spawn(process.execPath, ["-e", "0"], { stdio: "ignore" });
+    await new Promise<void>((r) => child.on("exit", () => r()));
+    expect(d.alive(child.pid as number)).toBe(false);
+  });
 });

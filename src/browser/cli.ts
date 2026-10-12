@@ -33,7 +33,7 @@ import { type BrowserSession, type BrowserStatus, type BrowserTab, browserStatus
 import { checkRef, type SnapshotOptions, type SnapshotResult, takeSnapshot } from "./snapshot.js";
 import { readSession } from "./state.js";
 import { readPageText } from "./text.js";
-import { settle, type WaitCondition, waitFor } from "./wait.js";
+import { awaitParsed, settle, type WaitCondition, waitFor } from "./wait.js";
 
 /** The flags a browser command reads, already parsed and checked by the caller. */
 export interface BrowserCliFlags {
@@ -104,6 +104,8 @@ export interface BrowserFollowUps {
   capture: string;
   /** How to read more of a text that was cut. */
   textMore: string;
+  /** Wait until the page has loaded. */
+  waitLoad: string;
 }
 
 const cliFollowUps = (): BrowserFollowUps => ({
@@ -112,6 +114,7 @@ const cliFollowUps = (): BrowserFollowUps => ({
   networkList: `\`${cliName()} browser network list\``,
   capture: `\`${cliName()} browser open <url> --capture\`, or --capture on an action`,
   textMore: "raise --max-chars, or read one element (a ref or --selector)",
+  waitLoad: `\`${cliName()} browser wait --load\``,
 });
 
 export interface BrowserCliResult {
@@ -334,6 +337,24 @@ const snapOpts = (ctx: Ctx, ref?: string): SnapshotOptions => ({
   ...(ctx.flags.interactive ? { interactive: true } : {}),
   ...(ref !== undefined ? { ref } : {}),
 });
+
+/**
+ * A read (text, snapshot) of the current tab, once its document is past
+ * parsing — or, if it is still loading when the bounded wait runs out, as it
+ * is, with a note saying so: a slow navigation an action's settle did not
+ * outlast would otherwise read as an empty page.
+ */
+async function whenParsed<T>(ctx: Ctx, read: (s: BrowserSession) => Promise<T>): Promise<{ value: T; note?: string }> {
+  return onPage(ctx, async (s) => {
+    const doc = await awaitParsed(s, ctx.deps.browser ? { deps: ctx.deps.browser } : {});
+    const value = await read(s);
+    if (!doc.stillLoading) return { value };
+    return {
+      value,
+      note: `the page was still loading after ${doc.waitedMs} ms, so this is only what it held so far — ${follow(ctx).waitLoad}, then look again`,
+    };
+  });
+}
 
 /** What --snapshot appends after an action: the page, or the element --selector names. */
 type After = { snap?: SnapshotResult; error?: string };
@@ -570,7 +591,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
       : had && !had.launchedByUs
         ? `forgot the browser on port ${had.port}; it is not ours, so it was left running`
         : "no browser to close";
-    return { json: r, text };
+    return { json: r, text: r.note ? `${text}\nnote: ${r.note}` : text };
   },
 
   async snapshot(ctx) {
@@ -578,8 +599,13 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     const { selector } = ctx.flags;
     if (ctx.args[0] !== undefined && selector !== undefined) throw new UsageError("a snapshot is scoped to a ref or to a selector, not both");
     if (ctx.args[0] !== undefined) refArg(ctx);
-    const r = await onPage(ctx, (s) => takeSnapshot(s, { ...snapOpts(ctx, ctx.args[0]), ...(selector !== undefined ? { selector } : {}) }));
-    return { json: r, text: r.text };
+    const { value: r, note } = await whenParsed(ctx, (s) =>
+      takeSnapshot(s, { ...snapOpts(ctx, ctx.args[0]), ...(selector !== undefined ? { selector } : {}) }),
+    );
+    if (!note) return { json: r, text: r.text };
+    // After the url and title lines, as `open` puts its own note after where it landed.
+    const lines = r.text.split("\n");
+    return { json: { ...r, note }, text: [...lines.slice(0, 2), `note: ${note}`, ...lines.slice(2)].join("\n") };
   },
 
   async text(ctx) {
@@ -589,7 +615,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     if (ref !== undefined && selector !== undefined) throw new UsageError("text reads the element a ref or a selector names, not both");
     if (ref !== undefined) refArg(ctx);
     const max = ctx.flags.maxChars ?? TEXT_MAX_CHARS;
-    const r = await onPage(ctx, (s) =>
+    const { value: r, note } = await whenParsed(ctx, (s) =>
       readPageText(s, {
         ...(ref !== undefined ? { ref } : {}),
         ...(selector !== undefined ? { selector } : {}),
@@ -598,14 +624,17 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
       }),
     );
     const element = ref !== undefined || selector !== undefined;
+    // An empty body on a page still loading is not a page without text: the note says what to do.
     const body = r.text
       ? r.text
       : element
         ? "(no text in this element)"
-        : "(no readable text on this page: take a snapshot, or read one element with a ref or a selector)";
-    const lines = [`url: ${r.url}`, `title: ${r.title}`, "", body];
+        : note
+          ? "(no readable text yet: the page is still loading)"
+          : "(no readable text on this page: take a snapshot, or read one element with a ref or a selector)";
+    const lines = [`url: ${r.url}`, `title: ${r.title}`, ...(note ? [`note: ${note}`] : []), "", body];
     if (r.truncated) lines.push(`… [truncated at ${max} of ${r.chars} characters: ${follow(ctx).textMore}]`);
-    return { json: r, text: lines.join("\n") };
+    return { json: note ? { ...r, note } : r, text: lines.join("\n") };
   },
 
   async click(ctx) {
