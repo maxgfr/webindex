@@ -71,7 +71,7 @@ webindex video fetch|search|frames|list …  # keep a video on disk, search it, 
 webindex extract <file|-> [--full-page] # the same on disk (- reads stdin); --full-page keeps navigation and consent banners too; --format markdown
 webindex rank --query <q> --docs <f> # BM25F + near-dup collapse + MMR; --dense adds the embedding lane
 webindex repo|issues|prs|releases|tags <ref> [--forge github|gitlab|gitea]  # a browser URL or a local checkout works
-webindex package <name> [--registry npm|pypi|crates]
+webindex package <name> [--registry npm|pypi|crates]  # or npm:vitest, pypi:requests, crates:serde
 webindex meta|robots|sitemap|feed <url> # meta also reads a saved page: <file|->
 webindex crawl <url> --max <n>       # bounded site walk, robots at every hop; --prefix /docs/, --no-sitemap
 webindex tables <url|file|->         # tables as data, not flattened prose

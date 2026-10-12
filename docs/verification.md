@@ -1,5 +1,112 @@
 # Repository verification — 2026-09-07
 
+## Live check — 2026-10-12
+
+`pnpm live` (`scripts/live-check.mjs`) runs every CLI command, every MCP tool
+and every ladder rung against the real web: real sites, real PDFs and office
+files, real videos, Chrome and Brave, the Docker stack and whisper. It is not
+part of CI — the network decides its outcome — and it writes `report.md` and
+`report.json` to `.ultraeval/live/<date>/`, exiting non-zero when a case fails.
+
+```sh
+pnpm build                                          # the cases run scripts/webindex.mjs
+node scripts/live-check.mjs                         # everything but Docker and the browser
+node scripts/webindex.mjs stack up                  # then:
+node scripts/live-check.mjs --with-docker --with-browser
+node scripts/live-check.mjs --area fetch,feed --id wiki --jobs 2   # a subset
+```
+
+Each case runs the built CLI in a subprocess with its own cache, video and
+browser directories in a temporary directory, removed afterwards (`--keep`
+keeps it). SearXNG, Firecrawl and Ollama are off unless a Docker case turns
+its backend on, so the default run measures the built-in path. Cases that hit
+the keyless search engines run one at a time, four seconds apart: a burst from
+one address is answered with an anti-bot page, which webindex reports as
+"blocked, not empty" — correct, but not a measurement. `LIVE_OLLAMA` points the
+Docker cases at the stack's Ollama elsewhere when another program holds
+`:11434`.
+
+### What the first campaign found
+
+The first run (131 cases, no Docker, no browser) and the Docker and browser
+runs that followed found these in webindex itself; each fix carries a
+regression test cut down from the real page, and none of those tests touches
+the network:
+
+| Found live | Fix | Regression test |
+|---|---|---|
+| Every Wikipedia read (en, fr, de; text and Markdown) opened with "163 languages" and the 163 links | A block whose links are mostly `hreflang` is a language selector and is dropped, label and edit link included, never past a heading or a paragraph | `tests/extract.test.ts` (`fixtures/html/wiki-langs.html`) |
+| Hacker News read "Hacker Newsnew": `</a></b><a>` | A closing inline tag right after `</a>` keeps the two links apart | `tests/extract.test.ts`, `tests/markdown.test.ts` |
+| A GitHub `blob` page read "Copy path / Blame / More file actions…" before the file | The file is read from `raw.githubusercontent.com` and cited by the blob URL | `tests/fetch-http.test.ts` |
+| An RFC served as `text/plain` opened with four blank lines | Blank lines before the first and after the last line of text are dropped | `tests/retrieval-integrity.test.ts` |
+| `package npm:vitest` found nothing | `npm:` / `pypi:` / `crates:` name the registry | `tests/cli.test.ts` |
+| `extract -` and `rank` failed with EAGAIN when the parent process wrote stdin a moment late — how an agent's harness spawns the CLI | stdin is read until end of file, waiting out EAGAIN | `tests/mcp-cli-process.test.ts` |
+| A `.docx` Firecrawl returned as its ZIP bytes was refused as an "undecodable PDF stream" | The office ladder says the converter returned the file's bytes | `tests/doc-ladder.test.ts` |
+| `fetch --markdown`, `sitemap --limit`, `mcp --port` on stdio, `search -x`, `--effort toString` all ran and ignored what they were given | Flags belong to their command; short flags, and `--port`/`--bind` without `--transport http`, are usage errors | `tests/cli-kit.test.ts`, `tests/cli.test.ts` |
+| `{"id":null,"method":"ping"}` over MCP went unanswered (HTTP: 202) | `-32600`, as MCP forbids a null id | `tests/mcp-server.test.ts`, `tests/mcp-http.test.ts` |
+| With the stack's ports on loopback, a desktop Ollama on `127.0.0.1:11434` made `stack up` fail with docker's words alone | A failed `up` names the ports it publishes and the variable that uses what already holds one | `tests/stack.test.ts` |
+
+The same pass fixed what a code audit found and the tests reproduced: a
+self-closing `<svg/>` swallowing the text after it, a `<title>` read as body
+text when `</head>` is omitted, xlsx cells without an `r` attribute and empty
+shared-string cells, quadratic regexes on hostile input (`url`, `registry`,
+`video/vtt`, `cite`), timeouts past 2³¹−1 ms firing at once (`exec`, `repo`,
+the OCR and npx rungs), a conditional revalidation sent through Firecrawl,
+`hammingDistance` looping on a negative bigint, the Docker stack published on
+every interface, unbounded concurrent tool calls over MCP HTTP and an uncapped
+`webindex_crawl.max`, shared (not per-user) screenshot, video and clone
+directories, a non-atomic takeover of a stale browser lock, ffmpeg 4 rejecting
+`-fps_mode`, prefixed Atom feeds, `skill.json` `files` escaping the vendor
+directory, and a failed `ensureHistoryDepth` memoised. And four
+optimisations, behaviour unchanged: the CDP WebSocket joins a frame's chunks
+once (a 4 MB frame copied 8 MB instead of 543 MB), a retried 429/503 body is
+cancelled unread and `httpJson` takes a cancel signal (so an MCP cancel stops
+Ollama, Qdrant and Wayback requests), a page's title, canonical and
+description are read off one cleaned copy (`pageMetadata` on the 2.2 MB bench
+page: 139 → 384 ops/s), and a cache read reads every candidate's metadata but
+only the served body.
+
+### Final campaign
+
+On the rebuilt bundle, `--with-docker --with-browser` ran 222 cases: 214
+passed, every browser case among them on both Chrome and Brave (open, an
+interactive snapshot, type, fill, click with `--confirm`, select, upload,
+scroll, wait, a full-page screenshot, tabs, network capture, `text
+--markdown`, eval, back and reload, a stale ref, `fetch --browser` on a
+JavaScript-only page, profile import, and no browser process left behind).
+Of the eight failures, three were the harness's own (a site that answers a
+script with 403, a JSON key, UTF-8 split across pipe chunks) and pass rerun.
+The other five are the keyless engines refusing this address after a day of
+queries — DuckDuckGo, DuckDuckGo Lite and Mojeek served anti-bot pages, and
+SearXNG's own upstreams reported CAPTCHAs — which a plain `curl` with a
+browser User-Agent reproduced, and which webindex reported as "blocked, not
+empty". Search itself was exercised live: the first campaign's keyless
+searches (English, French, `--region`) passed, and Firecrawl's search rung
+returned hits in the final one.
+
+The Docker cases ran against the stack brought up from the rebuilt bundle,
+SearXNG, Qdrant and Firecrawl bound to `127.0.0.1` only; a desktop Ollama
+held `127.0.0.1:11434`, so the stack's Ollama image ran as an audit
+container on `:11435` over the stack's own volume (`LIVE_OLLAMA`). Afterwards
+the stack was taken down with its volumes (the pulled embedding model
+included) and the audit container removed; the images stay in Docker's cache.
+
+### Limits seen, not fixed
+
+- The native PDF rung has no font tables, as `src/pdf/native.ts` says: on a
+  TeX paper (arXiv 1706.03762) it refuses the text, whose ligatures are
+  control codes, and on a simple PDF it can read the `fi` ligature as `Þ`.
+  The default ladder reads both papers through pdf-inspector or pdftotext.
+- yt-dlp 2026.08.19's TED extractor fails on talk pages; webindex reports
+  its error. The video rungs were exercised on YouTube (manual subtitles,
+  auto-captions, whisper), Vimeo and a playlist.
+- Self-hosted Firecrawl returns an `application/octet-stream` `.docx` as its
+  ZIP bytes; the office ladder refuses that rung and says why.
+- Chrome computes doubled accessible names for the controls inside
+  `<input type="time">` ("Heures Heures"); snapshots show Chrome's name as is.
+- The keyless engines block an address after a burst of queries; a run that
+  searches too often measures that, not webindex.
+
 The corrected workspace passes the automated matrix and the live retrieval,
 Docker and ChatGPT-search-to-MCP scenarios below. These checks support using
 webindex as discovery, extraction and ranking primitives. They do not establish
