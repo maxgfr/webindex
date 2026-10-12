@@ -13,7 +13,7 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // What it offers is what the engine actually does today: discover candidate
 // URLs through the local keyless stack, turn a URL or a local file into clean
 // text, drive the containers, and serve all of that to an agent over MCP.
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { isIP } from "node:net";
 import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -74,7 +74,7 @@ import { pageMetadata } from "./structured.js";
 import { type RepoRef, resolveRepo } from "./repo.js";
 import { apiBase, type ForgeKind, forgeAuthHeaders, forgeRef, listReleases, listTags, repoFactsResult, searchIssues } from "./forge.js";
 import { configuredForgeHosts, normalizeForgeHost } from "./forge-host.js";
-import { type RegistryKind, resolvePackageResult } from "./registry.js";
+import { type RegistryKind, resolvePackageResult, splitRegistryPrefix } from "./registry.js";
 import { bm25MatchedTerms, bm25Score, bm25Tokenize, buildBm25Index, dedupeNearDuplicates, diversify } from "./rank.js";
 import {
   argBool,
@@ -343,7 +343,7 @@ COMMANDS
              first --limit videos (default 10) of a playlist or channel on any
              site, two at a time, and writes CORPUS.md naming them V1…Vn;
              'search' on that directory then labels its hits V1…Vn. The directory is --out,
-             else WEBINDEX_VIDEO_DIR, else <tmp>/webindex/video.
+             else WEBINDEX_VIDEO_DIR, else <tmp>/webindex-<uid>/video.
   browser    Drive a real Chrome, Brave, Chromium or Edge for an agent: a
              SEPARATE browser on a dedicated profile, never your own, launched
              on first use (headed unless --headless) and reused by every later
@@ -391,7 +391,7 @@ ENVIRONMENT
                          whisper's model (default small), videos one process may
                          transcribe (3), one video's budget (1800000)
   WEBINDEX_YTDLP_ARGS    extra yt-dlp flags on every call: browser cookies, a proxy
-  WEBINDEX_VIDEO_DIR     where \`video\` keeps its runs (default <tmp>/webindex/video)
+  WEBINDEX_VIDEO_DIR     where \`video\` keeps its runs (default <tmp>/webindex-<uid>/video)
   WEBINDEX_OLLAMA        embedding server base URL, or "off"  (default http://localhost:11434)
   WEBINDEX_QDRANT        vector store base URL, or "off"      (default http://localhost:6333)
   WEBINDEX_EMBED_MODEL   the embedding model to ask for       (default nomic-embed-text)
@@ -467,7 +467,6 @@ export const VALUE_FLAGS = [
   "region",
   "searxng",
   "firecrawl",
-  "engine",
   "query",
   "docs",
   "transport",
@@ -554,7 +553,69 @@ export const COMMANDS = [
   "stack",
 ];
 
-const SPEC: CliSpec = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS };
+// The flags each command reads. A flag declared above but not read by the
+// command at hand used to be accepted and ignored: `fetch --markdown` (the
+// tables flag, where fetch wants --format markdown) printed plain text, and
+// `sitemap --limit 3` read every child.
+const BROWSER_FLAGS = [
+  "json",
+  "new-tab",
+  "headless",
+  "profile",
+  "cdp",
+  "browser-kind",
+  "capture",
+  "snapshot",
+  "markdown",
+  "interactive",
+  "max-chars",
+  "confirm",
+  "submit",
+  "text",
+  "gone",
+  "selector",
+  "url",
+  "idle",
+  "load",
+  "clear",
+  "ms",
+  "timeout",
+  "full",
+  "out",
+  "all",
+  "force",
+];
+export const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  search: ["json", "limit", "pages", "lang", "region", "engine", "searxng", "firecrawl", "timeout"],
+  fetch: ["json", "format", "firecrawl", "lang", "full-page", "cache", "refresh", "offline", "timeout", "browser"],
+  extract: ["json", "format", "full-page"],
+  rank: ["json", "query", "docs", "limit", "dense"],
+  repo: ["json", "forge"],
+  issues: ["json", "terms", "limit", "forge"],
+  prs: ["json", "terms", "limit", "forge"],
+  releases: ["json", "limit", "forge"],
+  tags: ["json", "limit", "forge"],
+  package: ["json", "registry", "version"],
+  meta: ["json"],
+  robots: ["json"],
+  sitemap: ["json", "max"],
+  feed: ["json"],
+  mcp: ["transport", "port", "bind", "allow-remote", "public-only", "allow-private", "extract-root", "browser"],
+  cache: ["json", "all"],
+  doctor: ["json"],
+  skill: ["json", "root", "ref", "check", "engine"],
+  crawl: ["json", "max", "depth", "prefix", "no-sitemap", "cross-origin"],
+  tables: ["json", "markdown"],
+  embed: ["json", "docs", "lines"],
+  hybrid: ["json", "query", "docs", "limit"],
+  changed: ["json", "etag", "last-modified", "hash", "timeout"],
+  video: ["json", "out", "lang", "refresh", "limit", "effort"],
+  browser: BROWSER_FLAGS,
+  stack: [],
+  ...Object.fromEntries(STACK_SERVICES.filter((s) => s !== "all").map((s) => [s, []])),
+};
+
+const SPEC: CliSpec = { commands: COMMANDS, valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS, commandFlags: COMMAND_FLAGS };
 
 /** What `webindex skill` does. The last three are the repin workflow's steps (.github/workflows/skill-repin.yml). */
 const SKILL_ACTIONS = ["check", "bundle", "vendor", "copy", "doctor", "init", "repin", "finish", "recall"];
@@ -845,7 +906,7 @@ const MMR_WINDOW = 100;
  * A fused score is the fusion rescaled over the matching documents — 1 for the
  * best, 0.01 for the weakest — so it orders the pool but is not a ratio.
  */
-async function rankDocuments(question: string, docs: RankInput[], opts: { limit?: number; dense?: boolean } = {}): Promise<RankResult> {
+async function rankDocuments(question: string, docs: RankInput[], opts: { limit?: number; dense?: boolean; signal?: AbortSignal } = {}): Promise<RankResult> {
   const { limit } = opts;
   const bm = docs.map((d, i) => ({ id: String(i), title: d.title ?? "", headings: d.headings ?? "", body: d.text ?? "" }));
   // Each body is tokenised ONCE, and the tokens shared by the index, the
@@ -865,7 +926,7 @@ async function rankDocuments(question: string, docs: RankInput[], opts: { limit?
   const notes: string[] = [];
   let dense = false;
   if (opts.dense) {
-    const h = await hybridSearch(question, bm);
+    const h = await hybridSearch(question, bm, opts.signal ? { signal: opts.signal } : {});
     const ranks = new Array<number | undefined>(bm.length);
     for (const hit of h.hits) if (hit.denseRank !== undefined) ranks[Number(hit.doc.id)] = hit.denseRank;
     dense = ranks.some((r) => r !== undefined);
@@ -950,17 +1011,46 @@ function readDocsInput(args: CommandArgs, usageLine: string): { text: string; la
   if (src === undefined && process.stdin.isTTY) usage(usageLine);
   const label = `--docs ${src === undefined || src === "-" ? "(stdin)" : src}`;
   try {
-    return { text: readFileSync(src === undefined || src === "-" ? 0 : src, "utf8"), label };
+    return { text: src === undefined || src === "-" ? readStdinSync().toString("utf8") : readFileSync(src, "utf8"), label };
   } catch (e) {
     fail(`cannot read ${src === undefined || src === "-" ? "stdin" : src}: ${(e as Error).message}`);
   }
+}
+
+/**
+ * All of stdin, read synchronously. A parent process that spawns this one —
+ * an agent's harness, a Node script — hands it a NON-blocking pipe, on which
+ * readFileSync(0) throws EAGAIN as soon as the writer is a moment late. Wait
+ * for it instead: EAGAIN means "not yet", only end-of-file means "done".
+ */
+function readStdinSync(): Buffer {
+  const chunks: Buffer[] = [];
+  const buf = Buffer.allocUnsafe(1 << 16);
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    let n: number;
+    try {
+      n = readSync(0, buf, 0, buf.length, null);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "EAGAIN") {
+        Atomics.wait(pause, 0, 0, 5);
+        continue;
+      }
+      if (code === "EOF") break; // Windows, for a closed pipe
+      throw e;
+    }
+    if (n === 0) break;
+    chunks.push(Buffer.from(buf.subarray(0, n)));
+  }
+  return Buffer.concat(chunks);
 }
 
 /** Stdin's bytes, for a `-` argument. A terminal would never send any, so it is a usage error. */
 function readStdin(usageLine: string): Buffer {
   if (process.stdin.isTTY) usage(usageLine);
   try {
-    return readFileSync(0);
+    return readStdinSync();
   } catch (e) {
     fail(`cannot read stdin: ${(e as Error).message}`);
   }
@@ -1023,6 +1113,9 @@ function parseRankDocs(value: unknown, where: string): RankInput[] {
 const CLOSED_WORLD_TOOLS = new Set(["webindex_extract", "webindex_rank", "webindex_embed", "webindex_video_search"]);
 
 /** A tool's count argument: a whole number from 1 to `max`, else the default. */
+// The most pages webindex_crawl walks for a client, at up to 3 requests each.
+const CRAWL_TOOL_MAX = 100;
+
 function toolLimit(raw: unknown, def: number, max = 50): number {
   const n = typeof raw === "number" ? Math.trunc(raw) : Number.NaN;
   return Number.isFinite(n) ? Math.min(max, Math.max(1, n)) : def;
@@ -1508,7 +1601,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & {
                 type: "number",
                 description:
                   "Pages to return. Required. A failed fetch costs no page, but the crawl makes at most 3 × `max` page requests in all. " +
-                  "Every page's text comes back inline and an answer over 1 MB is withheld, so ask for the tens of pages you will read, not hundreds.",
+                  "Every page's text comes back inline and an answer over 1 MB is withheld, so ask for the tens of pages you will read, not hundreds (at most 100).",
               },
               depth: { type: "number", description: "How many links deep to follow (default 2)." },
               prefix: { type: "string", description: "Only follow URLs whose path starts with this, e.g. `/docs/`." },
@@ -1706,17 +1799,21 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & {
         } catch (e) {
           throw new InvalidParamsError((e as Error).message);
         }
-        const r = await rankDocuments(question, docs, { limit: typeof args.limit === "number" ? args.limit : undefined, dense: args.dense === true });
+        const r = await rankDocuments(question, docs, { limit: typeof args.limit === "number" ? args.limit : undefined, dense: args.dense === true, signal });
         if (!r.queryTerms.length) {
           throw new ToolError("`question` has no rankable terms once stopwords are removed — nothing to score against.");
         }
         return { text: JSON.stringify(r, null, 2) };
       }
       if (name === "webindex_package") {
-        const pkg = String(args.name ?? "").trim();
-        if (!pkg) throw new ToolError("`name` is required.");
-        const reg = args.registry === undefined ? undefined : String(args.registry);
-        if (reg !== undefined && !isRegistryKind(reg)) throw new InvalidParamsError("`registry` must be one of: npm, pypi, crates");
+        const spec = String(args.name ?? "").trim();
+        if (!spec) throw new ToolError("`name` is required.");
+        const flagged = args.registry === undefined ? undefined : String(args.registry);
+        if (flagged !== undefined && !isRegistryKind(flagged)) throw new InvalidParamsError("`registry` must be one of: npm, pypi, crates");
+        const { registry: prefixed, name: pkg } = splitRegistryPrefix(spec);
+        if (prefixed && flagged && prefixed !== flagged)
+          throw new InvalidParamsError(`\`name\` "${spec}" names ${prefixed}, \`registry\` ${flagged}: drop one`);
+        const reg = prefixed ?? flagged;
         const { facts: p, note } = await resolvePackageResult(pkg, {
           ...(reg ? { registry: reg } : {}),
           ...(args.version ? { version: String(args.version) } : {}),
@@ -1816,16 +1913,18 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & {
       if (name === "webindex_embed") {
         const texts = Array.isArray(args.texts) ? args.texts.map(String) : [];
         if (!texts.length) throw new ToolError("`texts` must be a non-empty array of strings.");
-        const r = await embed(texts);
+        const r = await embed(texts, { signal });
         if (!r.vectors.length) throw new ToolError(r.note ?? "the embedding server returned nothing.");
         return { text: JSON.stringify({ model: r.model, dimensions: r.vectors[0]?.length ?? 0, vectors: r.vectors }, null, 2) };
       }
       if (name === "webindex_crawl") {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//i.test(url)) throw new ToolError("`url` must be an http(s) URL.");
-        const max = Number(args.max);
-        if (!Number.isInteger(max) || max < 1)
+        const asked = Number(args.max);
+        if (!Number.isInteger(asked) || asked < 1)
           throw new ToolError("`max` is required and must be a positive whole number — a crawl without a budget is not one.");
+        // A model's budget, not the operator's: capped as every list a tool returns is.
+        const max = toolLimit(asked, asked, CRAWL_TOOL_MAX);
         await refuseUrl(url);
         let read = 0;
         const r = await crawlSite(url, {
@@ -1875,7 +1974,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & {
       if (name === "webindex_video_frames") {
         const url = await videoUrl(args.url, "video");
         const effort = args.effort === undefined ? "med" : String(args.effort);
-        if (!(effort in FRAME_EFFORT)) throw new ToolError("`effort` must be low, med or high.");
+        if (!Object.hasOwn(FRAME_EFFORT, effort)) throw new ToolError("`effort` must be low, med or high.");
         const run = await fetchVideoRun(url, videoDir(args.dir), { signal, knownHostsOnly: guarded });
         if (!run.ok) throw new ToolError(`No transcript for ${url}: ${run.reason}.`);
         const r = await extractFrames(run.dir, { effort: effort as FrameEffort, signal, url, knownHostsOnly: guarded });
@@ -2175,6 +2274,11 @@ async function dispatch(argv: string[]): Promise<void> {
 
   if (cmd === "mcp") {
     const transport = argValue(args, "transport") ?? "stdio";
+    // On stdio they were ignored: the server an agent was told to reach on a
+    // port never listened on one.
+    if (transport !== "http" && (argValue(args, "port") !== undefined || argValue(args, "bind") !== undefined)) {
+      usage("--port and --bind need --transport http");
+    }
     const allowRemote = argBool(args, "allow-remote");
     const policy = mcpPolicy(args, allowRemote);
     // stderr, not stdout: stdio's stdout is the protocol stream, and keeping
@@ -2290,9 +2394,12 @@ async function dispatch(argv: string[]): Promise<void> {
     const emit = (obj: unknown, human: string[]) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}\n`);
 
     if (cmd === "package") {
-      const reg = argValue(args, "registry");
-      if (reg !== undefined && !isRegistryKind(reg)) usage(`--registry expects npm, pypi or crates, got "${reg}"`);
-      const { facts: p, note } = await resolvePackageResult(target, {
+      const flagged = argValue(args, "registry");
+      if (flagged !== undefined && !isRegistryKind(flagged)) usage(`--registry expects npm, pypi or crates, got "${flagged}"`);
+      const { registry: prefixed, name } = splitRegistryPrefix(target);
+      if (prefixed && flagged && prefixed !== flagged) usage(`"${target}" names ${prefixed}: drop the ${prefixed}: prefix or --registry ${flagged}`);
+      const reg = prefixed ?? flagged;
+      const { facts: p, note } = await resolvePackageResult(name, {
         ...(reg ? { registry: reg } : {}),
         ...(argValue(args, "version") ? { version: argValue(args, "version") } : {}),
       });
@@ -2680,7 +2787,7 @@ async function dispatch(argv: string[]): Promise<void> {
       const frameUsage = "usage: webindex video frames <url|id|dir> [--effort low|med|high] [--out <dir>] [--json]";
       if (!target) usage(frameUsage);
       const effort = argValue(args, "effort") ?? "med";
-      if (!(effort in FRAME_EFFORT)) usage(`--effort must be low, med or high, not "${effort}"`);
+      if (!Object.hasOwn(FRAME_EFFORT, effort)) usage(`--effort must be low, med or high, not "${effort}"`);
       // A URL is fetched first (or found already on disk); an id names a run
       // under the directory; anything else is a run directory itself.
       let runDir: string;
@@ -2753,7 +2860,7 @@ async function dispatch(argv: string[]): Promise<void> {
         // A UsageError, not usage(): runBrowserCommand turns it into exit 2 with its JSON.
         stdin: () => {
           if (process.stdin.isTTY) throw new UsageError("usage: webindex browser eval <expr|-> — `-` reads the expression from a pipe, not a terminal");
-          return readFileSync(0, "utf8");
+          return readStdinSync().toString("utf8");
         },
       },
     );

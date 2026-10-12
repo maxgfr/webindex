@@ -71,6 +71,33 @@ describe("the built CLI as a process", () => {
     expect(extracted.stdout).toContain("Read from a pipe, not a file.");
   });
 
+  it("waits for a parent process that writes stdin late, rather than failing with EAGAIN", async () => {
+    // A parent spawning the CLI (an agent's harness) hands it a non-blocking
+    // pipe; a synchronous read of fd 0 then threw EAGAIN before the first byte.
+    const env = { ...process.env, WEBINDEX_CACHE_DIR: dir, WEBINDEX_NO_NPX: "1" };
+    const docs = JSON.stringify([
+      { url: "https://a.test/1", title: "Enigma", text: "Turing broke the Enigma cipher." },
+      { url: "https://a.test/2", title: "Banana", text: "Bananas grow on plantations." },
+    ]);
+    const run = (argv: string[], input: string) =>
+      new Promise<{ code: number | null; stdout: string; stderr: string }>((done) => {
+        const child = spawn(process.execPath, [binary, ...argv], { env, stdio: ["pipe", "pipe", "pipe"] });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (d) => (stdout += d));
+        child.stderr.on("data", (d) => (stderr += d));
+        child.on("close", (code) => done({ code, stdout, stderr }));
+        setTimeout(() => child.stdin.end(input), 300);
+      });
+    const extracted = await run(["extract", "-"], "<html><body><article><p>Written after a pause.</p></article></body></html>");
+    expect(extracted.stderr).not.toMatch(/EAGAIN/);
+    expect(extracted.code, extracted.stderr).toBe(0);
+    expect(extracted.stdout).toContain("Written after a pause.");
+    const ranked = await run(["rank", "--query", "enigma cipher", "--limit", "1"], docs);
+    expect(ranked.code, ranked.stderr).toBe(0);
+    expect(ranked.stdout).toContain("Enigma");
+  }, 30_000);
+
   it("runs under whatever name the file was saved as", () => {
     // Only a file NAMED webindex ran: a release asset saved as
     // webindex-1.20.0.mjs printed nothing at all and exited 0.

@@ -989,6 +989,25 @@ describe("unknown input", () => {
     expect(stderr()).toMatch(message);
   });
 
+  it.each([
+    [["fetch", "https://a.test/", "--markdown"], /--markdown does not apply to fetch/],
+    [["sitemap", "https://s.test/", "--limit", "3"], /--limit does not apply to sitemap/],
+    [["search", "q", "--format", "markdown"], /--format does not apply to search/],
+    [["robots", "https://r.test/", "--max", "2"], /--max does not apply to robots/],
+    [["stack", "status", "--json"], /--json does not apply to stack/],
+    [["search", "-x", "rust"], /unknown flag "-x"/],
+    [["mcp", "--port", "9999"], /--port and --bind need --transport http/],
+    [["mcp", "--bind", "0.0.0.0"], /--port and --bind need --transport http/],
+    [["video", "frames", "x", "--effort", "toString"], /--effort must be low, med or high/],
+    [["video", "frames", "x", "--effort", "constructor"], /--effort must be low, med or high/],
+  ])("refuses a flag the command would have ignored: %j", async (argv, message) => {
+    // Each of these ran: `fetch --markdown` as plain text, `mcp --port` on stdio,
+    // `search -x rust` searched for "-x rust", `--effort toString` passed the
+    // `in` check through Object.prototype and went looking for a video.
+    expect(await run(argv)).toBe(2);
+    expect(stderr()).toMatch(message);
+  });
+
   it("refuses contradictory address policies, and a root that is not a directory", async () => {
     expect(await run(["mcp", "--public-only", "--allow-private"])).toBe(2);
     expect(stderr()).toMatch(/contradict/);
@@ -1507,6 +1526,24 @@ describe("the MCP tools", () => {
       const pages = spy.mock.calls.map((c) => String(c[0])).filter((u) => !/robots|sitemap/.test(u));
       expect(pages).toEqual(["https://cx.test/"]);
       expect(JSON.parse(r.text).notes.join(" ")).toMatch(/cancelled/);
+    });
+
+    // The CLI's --max is the operator's own budget; over MCP it is whatever a
+    // model asked for, and `max: 1e9` meant a walk of up to three billion requests.
+    it("webindex_crawl caps the pages a client may ask for", async () => {
+      process.env[envName("POLITE_DELAY_MS")] = "0";
+      site();
+      const ctrl = new AbortController();
+      const totals: (number | undefined)[] = [];
+      await adapter.callTool(
+        "webindex_crawl",
+        { url: "https://cx.test/", max: 1_000_000_000, depth: 1 },
+        ctx(ctrl.signal, (_p, total) => {
+          totals.push(total);
+          ctrl.abort();
+        }),
+      );
+      expect(totals).toEqual([100]);
     });
 
     it("webindex_fetch abandons its request", async () => {
@@ -2030,6 +2067,48 @@ describe("the forge, registry and page-metadata commands", () => {
     expect(await run(["package", "react"])).toBe(1);
     expect(stderr()).toMatch(/npm could not be asked \(status 503\)/);
     await expect(webindexAdapter().callTool("webindex_package", { name: "react" })).rejects.toThrow(/npm could not be asked/);
+  });
+
+  describe("a registry prefix, the way package specs are written", () => {
+    const asked: string[] = [];
+    const registries = () =>
+      installFetchMock((url) => {
+        asked.push(url);
+        if (url.includes("registry.npmjs.org")) return json({ name: "vitest", "dist-tags": { latest: "4.1.0" }, versions: { "4.1.0": {} } });
+        if (url.includes("pypi.org")) return json({ info: { name: "requests", version: "2.32.0" } });
+        if (url.includes("crates.io")) return json({ crate: { name: "serde", max_stable_version: "1.0.200" }, versions: [] });
+        return json({}, 404);
+      });
+    const bare = () => !asked.some((u) => /npm:|pypi:|crates:/i.test(decodeURIComponent(u)));
+
+    it.each([
+      [["package", "npm:vitest", "--json"], "npm"],
+      [["package", "PyPI:requests", "--json"], "pypi"],
+      [["package", "crates:serde", "--registry", "crates", "--json"], "crates"],
+    ])("%j asks %s, by the bare name", async (argv, registry) => {
+      asked.length = 0;
+      registries();
+      expect(await run(argv)).toBe(0);
+      expect(JSON.parse(stdout())).toMatchObject({ registry });
+      expect(asked.length).toBeGreaterThan(0);
+      expect(asked.every((u) => u.includes(registry === "npm" ? "npmjs" : registry === "pypi" ? "pypi.org" : "crates.io"))).toBe(true);
+      expect(bare()).toBe(true);
+    });
+
+    it("works through MCP too", async () => {
+      asked.length = 0;
+      registries();
+      await expect(webindexAdapter().callTool("webindex_package", { name: "npm:vitest" })).resolves.toMatchObject({
+        text: expect.stringContaining('"registry": "npm"'),
+      });
+      expect(bare()).toBe(true);
+    });
+  });
+
+  it("refuses a prefix that contradicts --registry as a usage error", async () => {
+    expect(await run(["package", "npm:vitest", "--registry", "pypi"])).toBe(2);
+    expect(stderr()).toMatch(/npm:.*--registry pypi/);
+    await expect(webindexAdapter().callTool("webindex_package", { name: "npm:vitest", registry: "pypi" })).rejects.toThrow(/npm/);
   });
 
   it("refuses a registry it does not know as a usage error, not a TypeError", async () => {
