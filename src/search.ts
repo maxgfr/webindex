@@ -2,6 +2,7 @@ import { brand, env, envName } from "./brand.js";
 import { httpGet, pageDelayMs, sleep } from "./fetch.js";
 import { firecrawlBase, ProbeMemo, searchViaFirecrawl, type FirecrawlHit } from "./firecrawl.js";
 import { acceptLanguageHeader, searxngLanguage } from "./locale.js";
+import { trimTrailing } from "./trim.js";
 import { canonicalizeUrl } from "./url.js";
 import { isKeylessEngine, KEYLESS_ENGINES, keylessEngines, searchViaKeyless, unknownEngines, type EngineResult, type KeylessEngine } from "./engines.js";
 
@@ -117,7 +118,7 @@ export interface SearchResult {
 export function searxngBase(opts: SearchOptions = {}): string | null {
   const raw = (opts.searxng ?? env("SEARXNG") ?? SEARXNG_DEFAULT_BASE).trim();
   if (!raw || raw.toLowerCase() === "off") return null;
-  return raw.replace(/\/+$/, "");
+  return trimTrailing(raw, "/");
 }
 
 /** True when the base came from the caller rather than the default. */

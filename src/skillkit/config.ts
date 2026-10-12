@@ -16,7 +16,7 @@
 // without anyone noticing, which is the failure mode the ratchet exists to
 // prevent in the first place.
 
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { readJsonSafe } from "../run.js";
 
 export const SKILL_CONFIG = "skill.json";
@@ -79,6 +79,21 @@ export interface ConfigResult {
 }
 
 /**
+ * A path that stays where it is joined: relative, and never climbing. `local`
+ * is joined onto vendorDir and written to, so `../../x` wrote outside it;
+ * `remote` is a path in the engine's repo, and climbing there is no file.
+ */
+function isRelativePath(p: unknown): p is string {
+  return typeof p === "string" && p.trim() !== "" && !isAbsolute(p) && !/^(?:[\\/]|[A-Za-z]:)/.test(p) && !p.split(/[\\/]/).includes("..");
+}
+
+function isFilePair(f: unknown): f is { remote: string; local: string } {
+  if (typeof f !== "object" || f === null) return false;
+  const { remote, local } = f as Record<string, unknown>;
+  return isRelativePath(remote) && isRelativePath(local);
+}
+
+/**
  * Read and validate a repo's `skill.json`.
  *
  * Returns errors rather than throwing, because every caller is a CLI command
@@ -121,6 +136,8 @@ export function readSkillConfig(root: string): ConfigResult {
         errors.push(`${SKILL_CONFIG}: engines.${key}.forks must map declarations to non-empty reasons.`);
       if (e.dependency !== undefined && (typeof e.dependency !== "string" || !e.dependency.trim()))
         errors.push(`${SKILL_CONFIG}: engines.${key}.dependency must be a package name.`);
+      if (e.files !== undefined && (!Array.isArray(e.files) || !e.files.every(isFilePair)))
+        errors.push(`${SKILL_CONFIG}: engines.${key}.files must be { remote, local } pairs of relative paths with no ".." in them.`);
       const meta = typeof e.meta === "string" && e.meta ? e.meta : `${key}.meta.json`;
       const files = Array.isArray(e.files) && e.files.length ? e.files : DEFAULT_FILES.map((f) => ({ ...f, local: f.local.replace("{name}", key) }));
       engines[key] = { repo: e.repo, minRef: e.minRef, meta, files, usageFloor: e.usageFloor, forks: e.forks, dependency: e.dependency };
@@ -135,8 +152,13 @@ export function readSkillConfig(root: string): ConfigResult {
     errors.push(`${SKILL_CONFIG}: "usageFloor" must be a non-negative integer.`);
   }
 
+  // A reason that is not text is no reason: the audit prints it as the
+  // argument for the fork, and a number or a blank argues nothing.
   const forks = raw.forks;
-  if (forks !== undefined && (typeof forks !== "object" || forks === null || Array.isArray(forks))) {
+  if (
+    forks !== undefined &&
+    (typeof forks !== "object" || forks === null || Array.isArray(forks) || Object.values(forks).some((why) => typeof why !== "string" || !why.trim()))
+  ) {
     errors.push(`${SKILL_CONFIG}: "forks" must be an object of "path:Name" -> reason.`);
   }
 

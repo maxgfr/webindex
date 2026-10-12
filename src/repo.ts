@@ -1,8 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { brand, env, envInt } from "./brand.js";
+import { brand, env, envInt, MAX_TIMER_MS, userTmpDir } from "./brand.js";
 import { have, sh, shAsync } from "./exec.js";
 import type { ForgeKind } from "./forge.js";
 import { hostForgeKind, normalizeForgeHost } from "./forge-host.js";
@@ -33,7 +32,7 @@ export interface RepoRef {
 
 /**
  * Where clones live: `<PREFIX>_REPO_DIR`, then the brand's declared `repoDir`,
- * then `<tmpdir>/<name>/repos`.
+ * then `<tmpdir>/<name>-<uid>/repos`.
  *
  * The brand tier is what lets a consumer that already had a clone cache adopt
  * this module at all. Without it, adopting moves every checkout: the clones the
@@ -42,14 +41,16 @@ export interface RepoRef {
  * cache that is not empty.
  */
 export function repoCacheRoot(): string {
-  return env("REPO_DIR") ?? brand().repoDir ?? join(tmpdir(), brand().name, "repos");
+  return env("REPO_DIR") ?? brand().repoDir ?? userTmpDir("repos");
 }
 
-const cloneTimeoutMs = () => envInt("GIT_CLONE_TIMEOUT_MS", 300_000, 1000);
-const fetchTimeoutMs = () => envInt("GIT_FETCH_TIMEOUT_MS", 120_000, 1000);
+// Each capped at what a timer can hold: past it, "wait a very long time" fires
+// after 1 ms and every clone dies as it starts.
+const cloneTimeoutMs = () => envInt("GIT_CLONE_TIMEOUT_MS", 300_000, 1000, MAX_TIMER_MS);
+const fetchTimeoutMs = () => envInt("GIT_FETCH_TIMEOUT_MS", 120_000, 1000, MAX_TIMER_MS);
 // Unshallowing a large repository is a full history transfer, so it gets its own
 // (much larger) ceiling rather than the per-fetch one.
-const historyTimeoutMs = () => envInt("GIT_HISTORY_TIMEOUT_MS", 300_000, 1000);
+const historyTimeoutMs = () => envInt("GIT_HISTORY_TIMEOUT_MS", 300_000, 1000, MAX_TIMER_MS);
 
 /**
  * Parse any repository identifier into a `RepoRef`. Accepts a local directory,
@@ -434,7 +435,10 @@ async function freshClone(ref: RepoRef, dir: string, branch: string | undefined)
 }
 
 // One verdict per working tree, per process: the probe and the fetch behind it
-// are expensive, and a `drill` that asks three times must not re-run them.
+// are expensive, and a `drill` that asks three times must not re-run them. A
+// FAILED deepen is not kept: it is usually the network, not the clone, and a
+// long-lived server would otherwise refuse history for the rest of its life
+// after one bad minute.
 const deepened = new Map<string, { ok: boolean; note?: string }>();
 
 /** Test seam: forget which working trees were deepened. */
@@ -469,7 +473,7 @@ export async function ensureHistoryDepth(dir: string, opts: { deepen?: number } 
   const cached = deepened.get(dir);
   if (cached) return cached;
   const out = await computeHistoryDepth(dir, opts);
-  deepened.set(dir, out);
+  if (out.ok) deepened.set(dir, out);
   return out;
 }
 

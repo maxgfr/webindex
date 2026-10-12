@@ -90,6 +90,32 @@ describe("skill.json", () => {
     expect(readSkillConfig(root).errors.join(" ")).toMatch(/minRef/);
   });
 
+  // `local` is joined onto vendorDir and written: `../../x` wrote outside it.
+  it("refuses an engine file that is not a string, or that escapes the vendor dir", () => {
+    const engine = (files: unknown) => ({ ...CONFIG, engines: { w: { repo: "a/b", minRef: "v1.0.0", files } } });
+    for (const files of [
+      [{ remote: "scripts/engine.mjs", local: "../../x.mjs" }],
+      [{ remote: "scripts/engine.mjs", local: "/etc/x.mjs" }],
+      [{ remote: "../engine.mjs", local: "x.mjs" }],
+      [{ remote: "scripts/engine.mjs", local: 3 }],
+      ["scripts/engine.mjs"],
+    ]) {
+      write("skill.json", JSON.stringify(engine(files)));
+      const { config, errors } = readSkillConfig(root);
+      expect(config).toBeUndefined();
+      expect(errors.join(" ")).toMatch(/engines\.w\.files/);
+    }
+    write("skill.json", JSON.stringify(engine([{ remote: "scripts/engine.mjs", local: "nested/x.mjs" }])));
+    expect(readSkillConfig(root).config?.engines.w?.files).toEqual([{ remote: "scripts/engine.mjs", local: "nested/x.mjs" }]);
+  });
+
+  it("refuses a top-level fork whose reason is not a string", () => {
+    write("skill.json", JSON.stringify({ ...CONFIG, forks: { "src/a.ts:x": 3 } }));
+    expect(readSkillConfig(root).errors.join(" ")).toMatch(/"forks"/);
+    write("skill.json", JSON.stringify({ ...CONFIG, forks: { "src/a.ts:x": "  " } }));
+    expect(readSkillConfig(root).errors.join(" ")).toMatch(/"forks"/);
+  });
+
   it("says what to run when there is no config at all", () => {
     expect(readSkillConfig(root).errors[0]).toMatch(/skill init/);
   });

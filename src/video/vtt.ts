@@ -43,9 +43,11 @@ function decode(text: string): string {
 }
 
 // Tags first, entities second: `&lt;show&gt;` is text, and must not be read as a tag.
-// Tags, and the SSA positioning codes SRT tracks carry (`{\an8}`).
+// Tags, and the SSA positioning codes SRT tracks carry (`{\an8}`). Neither
+// spans its own opener: `<[^>]*>` scanned to the end of the line from every `<`
+// of a run that never closes.
 const clean = (line: string) =>
-  decode(line.replace(/<[^>]*>/g, "").replace(/\{\\[^}]*\}/g, ""))
+  decode(line.replace(/<[^<>]*>/g, "").replace(/\{\\[^{}]*\}/g, ""))
     .replace(/\s+/g, " ")
     .trim();
 
@@ -102,7 +104,10 @@ function repeatedLead(lines: string[], previous: string[]): number {
 }
 
 // A sentence ends on . ! ? or …, possibly inside a closing quote or bracket.
-const SENTENCE_END = /[.!?…]+["'”’)\]]*(?=\s|$)/g;
+// The lookbehind starts a match only at the first mark of a run: started from
+// every mark, a run that ends nothing was rescanned once per mark.
+const SENTENCE_END = /(?<![.!?…])[.!?…]+["'”’)\]]*(?=\s|$)/g;
+const ENDS_SENTENCE = /(?<![.!?…])[.!?…]+["'”’)\]]*$/;
 const MAX_SEGMENT_S = 30;
 const MAX_SENTENCES = 3;
 const PAUSE_S = 5;
@@ -126,13 +131,31 @@ export function mergeSegments(cues: VideoSegment[], breaks: number[] = []): Vide
   // A segment never straddles a break (a chapter start): its heading would
   // otherwise land a paragraph late, or not at all.
   const crossesBreak = (from: number, to: number) => breaks.some((b) => b > from + BREAK_SLACK_S && b <= to + BREAK_SLACK_S);
+  // Counted per cue as it joins, never by reading the segment again: on a
+  // stream that never closes one, that read grew with every cue. The joining
+  // space is outside every mark class, so a cue's sentence ends and whether it
+  // ends one are the same alone as at the end of the segment. Words are what
+  // `text.split(/\s+/).length` says: one more than the whitespace runs, where
+  // the joining space merges with whitespace already on either side of it.
+  let sentences = 0;
+  let spaceRuns = 0;
+  let endsInSpace = false;
   for (const cue of cues) {
     if (cur && (cue.start - cur.end > PAUSE_S || cue.end - cur.start > MAX_SEGMENT_S || crossesBreak(cur.start, cue.start))) flush();
-    cur = cur ? { start: cur.start, end: Math.max(cur.end, cue.end), text: `${cur.text} ${cue.text}` } : { ...cue };
-    const sentences = cur.text.match(SENTENCE_END)?.length ?? 0;
-    const endsSentence = /[.!?…]+["'”’)\]]*$/.test(cur.text);
-    const words = cur.text.split(/\s+/).length;
-    if (sentences >= MAX_SENTENCES || (endsSentence && words >= WORDS_TO_CLOSE)) flush();
+    const found = cue.text.match(SENTENCE_END)?.length ?? 0;
+    const runs = cue.text.match(/\s+/g)?.length ?? 0;
+    if (cur) {
+      sentences += found;
+      spaceRuns += runs + 1 - Number(endsInSpace) - Number(/^\s/.test(cue.text));
+      endsInSpace = cue.text === "" || /\s$/.test(cue.text);
+      cur = { start: cur.start, end: Math.max(cur.end, cue.end), text: `${cur.text} ${cue.text}` };
+    } else {
+      sentences = found;
+      spaceRuns = runs;
+      endsInSpace = /\s$/.test(cue.text);
+      cur = { ...cue };
+    }
+    if (sentences >= MAX_SENTENCES || (ENDS_SENTENCE.test(cue.text) && spaceRuns + 1 >= WORDS_TO_CLOSE)) flush();
   }
   flush();
   return out;

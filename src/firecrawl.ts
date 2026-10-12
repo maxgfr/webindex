@@ -1,6 +1,7 @@
 import { brand, env, envName } from "./brand.js";
 import { cleanInline, httpJson } from "./fetch.js";
 import { baseLang, resolveRegion } from "./locale.js";
+import { trimTrailing } from "./trim.js";
 
 // Self-hosted Firecrawl client — a content-CLEANING layer in front of the
 // built-in regex extractor, plus the last rung of the search cascade.
@@ -54,7 +55,7 @@ export interface FirecrawlOptions {
 export function firecrawlBase(opts: FirecrawlOptions = {}): string | null {
   const raw = (opts.firecrawl ?? env("FIRECRAWL") ?? FIRECRAWL_DEFAULT_BASE).trim();
   if (!raw || raw.toLowerCase() === "off") return null;
-  return raw.replace(/\/+$/, "");
+  return trimTrailing(raw, "/");
 }
 
 /** True when the base came from the user (flag or env) rather than the default. */

@@ -22,13 +22,14 @@ import { cosine, embed, embedPrefixes } from "./embed.js";
 import { httpJson } from "./fetch.js";
 import { cachedProbe, type ProbeEntry } from "./probe.js";
 import { type Bm25Doc, bm25Score, buildBm25Index, rrf } from "./rank.js";
+import { trimTrailing } from "./trim.js";
 
 /** Where the local Qdrant answers. `off` disables the store. */
 export function qdrantBase(): string {
   return env("QDRANT") ?? "http://localhost:6333";
 }
 
-const clean = (base: string) => base.replace(/\/+$/, "");
+const clean = (base: string) => trimTrailing(base, "/");
 
 const probed = new Map<string, ProbeEntry>();
 
@@ -212,7 +213,7 @@ export interface HybridHit<D extends HybridDoc> {
 export async function hybridSearch<D extends HybridDoc>(
   question: string,
   docs: readonly D[],
-  opts: { limit?: number; base?: string; model?: string; k?: number; queryPrefix?: string; docPrefix?: string; maxChars?: number } = {},
+  opts: { limit?: number; base?: string; model?: string; k?: number; queryPrefix?: string; docPrefix?: string; maxChars?: number; signal?: AbortSignal } = {},
 ): Promise<{ hits: HybridHit<D>[]; note?: string }> {
   if (docs.length === 0) return { hits: [] };
   const prefixes = embedPrefixes(opts.model);
@@ -232,6 +233,7 @@ export async function hybridSearch<D extends HybridDoc>(
   const embedding = embed([queryPrefix + question, ...docs.map((d) => docPrefix + clip([d.title, d.headings, d.body].filter(Boolean).join("\n"), maxChars))], {
     ...(opts.base !== undefined ? { base: opts.base } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
+    ...(opts.signal ? { signal: opts.signal } : {}),
   });
 
   // Score each document ONCE, then sort. Scoring inside the comparator

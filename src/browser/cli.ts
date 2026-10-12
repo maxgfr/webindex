@@ -14,9 +14,8 @@
 // handlers on the one session it keeps, through `BrowserCliDeps.page`.
 
 import { existsSync, mkdirSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { brand, envName } from "../brand.js";
+import { brand, envName, userTmpDir } from "../brand.js";
 import { EXIT_HUMAN, UsageError } from "../cli-kit.js";
 import { isNoWrite, writeFileAtomic } from "../no-write.js";
 import * as actions from "./actions.js";
@@ -735,7 +734,7 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     if (isNoWrite()) throw new Error(`nothing may be written (${envName("NO_WRITE")}), and a screenshot is a file`);
     const stamp = new Date(browserDeps(ctx.deps.browser).now()).toISOString().replace(/[:.]/g, "-");
     // A screenshot shows whatever the page does, a logged-in account included: private, as the profile is.
-    const shots = join(tmpdir(), brand().name, "browser");
+    const shots = userTmpDir("browser");
     const path = ctx.flags.out !== undefined ? resolve(ctx.deps.cwd ?? process.cwd(), ctx.flags.out) : join(shots, `shot-${stamp}.png`);
     const format = /\.jpe?g$/i.test(path) ? "jpeg" : "png";
     const ref = ctx.args[0];

@@ -19,7 +19,7 @@
 // crawl is the one operation here that can inconvenience somebody else's
 // server.
 
-import { envFlag, envInt, envName } from "./brand.js";
+import { envFlag, envInt, envName, MAX_TIMER_MS } from "./brand.js";
 import { decodeEntities, type ExtractResult, fetchAndExtract, sleep } from "./fetch.js";
 import { fetchSitemap, type Sitemap } from "./feed.js";
 import { mapLimit } from "./pool.js";
@@ -41,10 +41,8 @@ export function resetHostSchedule(): void {
   holdUntil.clear();
 }
 
-// setTimeout holds at most 2^31-1 ms; a longer delay fires after 1 ms with a
+// setTimeout holds at most MAX_TIMER_MS; a longer delay fires after 1 ms with a
 // warning, so a site asking for a very long wait would get none at all.
-const MAX_TIMER_MS = 2 ** 31 - 1;
-
 async function sleepFor(ms: number, signal?: AbortSignal): Promise<void> {
   for (let left = ms; left > 0 && !signal?.aborted; left -= MAX_TIMER_MS) await sleep(Math.min(left, MAX_TIMER_MS), signal);
 }

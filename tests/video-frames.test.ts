@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -262,6 +262,85 @@ describe("extractFrames", () => {
     expect(dl.slice(1, 3)).toEqual(["--use-extractors", "default,-generic"]);
     // With no URL and a policy, an unknown page named on disk is refused outright.
     expect(await extractFrames(run.dir, { knownHostsOnly: true })).toMatchObject({ ok: false, reason: expect.stringContaining("names no page") });
+  });
+
+  it("falls back to -vsync on an ffmpeg too old for -fps_mode", async () => {
+    const run = await fetchVideoRun("https://youtu.be/jNQXAC9IVRw", root);
+    if (!run.ok) throw new Error(run.reason);
+    const base = runner();
+    // What ffmpeg 4 answers an option it does not know, before reading any input.
+    setVideoDeps({
+      run: async (cmd, args, opts) => {
+        if (cmd === "ffmpeg" && args.includes("-fps_mode"))
+          return { ok: false, status: 1, stdout: "", stderr: "Unrecognized option 'fps_mode'.\nError splitting the argument list: Option not found\n" };
+        return base(cmd, args, opts);
+      },
+      have: () => true,
+    });
+    const r = await extractFrames(run.dir, { effort: "low" });
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.candidates).toBe(5); // the three scene changes are there
+    const scene = calls.find((c) => c.some((a) => a.startsWith("select=")))!;
+    expect(scene.slice(scene.indexOf("-vsync"), scene.indexOf("-vsync") + 2)).toEqual(["-vsync", "vfr"]);
+    expect(r.note).not.toContain("scene detection failed");
+  });
+
+  it("says so when scene detection failed, instead of passing off the other frames as all there is", async () => {
+    const run = await fetchVideoRun("https://youtu.be/jNQXAC9IVRw", root);
+    if (!run.ok) throw new Error(run.reason);
+    const base = runner();
+    setVideoDeps({
+      run: async (cmd, args, opts) => {
+        if (cmd === "ffmpeg" && args.some((a) => a.startsWith("select=")))
+          return { ok: false, status: 1, stdout: "", stderr: "[mjpeg @ 0x1] Error while opening encoder for output stream #0:0\n" };
+        return base(cmd, args, opts);
+      },
+      have: () => true,
+    });
+    const r = await extractFrames(run.dir, { effort: "low" });
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.frames.length).toBeGreaterThan(0);
+    expect(r.note).toContain("scene detection failed (");
+    expect(r.note).toContain("Error while opening encoder");
+    expect(readFileSync(r.markdown, "utf8")).toContain("scene detection failed (");
+  });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("removes its half-swapped frames when the swap fails", async () => {
+    const run = await fetchVideoRun("https://youtu.be/jNQXAC9IVRw", root);
+    if (!run.ok) throw new Error(run.reason);
+    // An old frames/ that cannot be removed: the swap fails after the new set was copied in.
+    const locked = join(run.dir, "frames", "locked");
+    mkdirSync(locked, { recursive: true });
+    writeFileSync(join(locked, "x.jpg"), "old");
+    chmodSync(locked, 0o500);
+    try {
+      expect(await extractFrames(run.dir)).toMatchObject({ ok: false, reason: expect.stringContaining("cannot write the frames") });
+      expect(readdirSync(run.dir).filter((n) => n.endsWith(".new"))).toEqual([]);
+    } finally {
+      chmodSync(locked, 0o700);
+    }
+  });
+
+  it("runs two extractions of the same video one after the other", async () => {
+    const run = await fetchVideoRun("https://youtu.be/jNQXAC9IVRw", root);
+    if (!run.ok) throw new Error(run.reason);
+    const base = runner();
+    const steps: string[] = [];
+    setVideoDeps({
+      run: async (cmd, args, opts) => {
+        if (cmd === "yt-dlp" && args.includes(VIDEO_FORMAT)) steps.push("download");
+        if (args.includes("rawvideo")) steps.push("hash");
+        await new Promise((r) => setTimeout(r, 2));
+        return base(cmd, args, opts);
+      },
+      have: () => true,
+    });
+    const [a, b] = await Promise.all([extractFrames(run.dir), extractFrames(run.dir, { effort: "low" })]);
+    expect(a.ok && b.ok).toBe(true);
+    expect(steps).toEqual(["download", "hash", "download", "hash"]);
+    const frames = JSON.parse(readFileSync(join(run.dir, "frames.json"), "utf8")) as { file: string }[];
+    expect(readdirSync(join(run.dir, "frames"))).toEqual(frames.map((f) => f.file.slice("frames/".length)));
+    expect(readdirSync(run.dir).filter((n) => n.endsWith(".new"))).toEqual([]);
   });
 
   it("caps the frames by effort", async () => {

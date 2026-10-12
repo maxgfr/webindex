@@ -1,13 +1,12 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, type Stats, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import { fetchAndExtract, looksLikePdfUrl, type ExtractorId } from "./fetch.js";
 import { docFormatForUrl } from "./doc.js";
 import { knownVideo } from "./video.js";
 import { firecrawlBase, firecrawlIsExplicit, probeFirecrawl } from "./firecrawl.js";
 import { canonicalizeUrl, domainOf, fnv1a64 } from "./url.js";
 import { isNoWrite, writeFileAtomic } from "./no-write.js";
-import { brand, countFetch, env, envInt, envName } from "./brand.js";
+import { brand, countFetch, env, envInt, envName, userTmpDir } from "./brand.js";
 import { type BrowserFetchMode, browserFetchMode, worthRendering } from "./browser/mode.js";
 
 // Opt-in on-disk fetch cache (--cache). The in-process hydrate cache only spans
@@ -61,16 +60,11 @@ export function cacheDir(): string {
   // entries for you to be served. What it holds is only used once it proves to
   // be yours (see openCacheDir). An explicit directory is taken as given: a
   // shared volume is a choice.
-  return namedCacheDir() ?? join(tmpdir(), userScoped(brand().name), "cache");
+  return namedCacheDir() ?? userTmpDir("cache");
 }
 
 /** The directory the operator or the brand named, if either did. */
 const namedCacheDir = (): string | undefined => env("CACHE_DIR") ?? brand().cacheDir;
-
-function userScoped(name: string): string {
-  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-  return uid === undefined ? name : `${name}-${uid}`;
-}
 
 // domain prefix (debuggability) + 64-bit hash of the canonical URL AND the
 // Accept-Language the fetch will send. Locale is part of the key because many
@@ -187,20 +181,21 @@ function namespaceFor(result: Extract, predicted: CacheNamespace): CacheNamespac
  * which extractor produced it would defeat the point of the switch. So offline
  * looks everywhere and serves the freshest thing it finds.
  */
-function readAnyNamespace(
-  url: string,
-  acceptLanguage: string,
-  namespaces = WRITTEN_NAMESPACES,
-  variants: readonly CacheVariant[] = PLAIN,
-): CacheEntry | undefined {
-  let best: CacheEntry | undefined;
+function readAnyNamespace(read: CacheReader, namespaces = WRITTEN_NAMESPACES, variants: readonly CacheVariant[] = PLAIN): CacheEntry | undefined {
+  const found: [CacheNamespace, CacheVariant, number][] = [];
   for (const ns of namespaces) {
     for (const variant of splitByVariant(ns) ? variants : PLAIN) {
-      const hit = readCache(url, acceptLanguage, ns, variant);
-      if (hit && (!best || hit.cachedAt > best.cachedAt)) best = hit;
+      const at = read.meta(ns, variant)?.entry.cachedAt;
+      if (at !== undefined) found.push([ns, variant, at]);
     }
   }
-  return best;
+  // Newest first, ties in the order asked (a stable sort): the body of the
+  // newest is read, and an older one's only when the newest holds no text.
+  for (const [ns, variant] of found.sort((a, b) => b[2] - a[2])) {
+    const hit = read.entry(ns, variant);
+    if (hit) return hit;
+  }
+  return undefined;
 }
 
 /**
@@ -209,7 +204,8 @@ function readAnyNamespace(
  * caller that asked for Markdown is the shape mismatch `format` exists to end.
  */
 function readAnyCopy(url: string, acceptLanguage: string, variant: CacheVariant): CacheEntry | undefined {
-  return readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, [variant]) ?? readAnyNamespace(url, acceptLanguage, WRITTEN_NAMESPACES, sameFormat(variant));
+  const read = cacheReader(url, acceptLanguage);
+  return readAnyNamespace(read, WRITTEN_NAMESPACES, [variant]) ?? readAnyNamespace(read, WRITTEN_NAMESPACES, sameFormat(variant));
 }
 
 function ttlMs(): number {
@@ -300,17 +296,65 @@ function entryPaths(url: string, acceptLanguage: string, extractor: CacheNamespa
   return { meta, body: meta.replace(/\.json$/, ".body") };
 }
 
-// Read a cache entry whatever its age. Freshness is the CALLER's decision now:
-// a stale entry is no longer worthless, because its validators can turn the
-// refetch into a 304. Still undefined for missing / corrupt / empty-text
-// entries, which carry nothing worth revalidating.
-function readCache(url: string, acceptLanguage = "", extractor: CacheNamespace = "native", variant: CacheVariant = ""): CacheEntry | undefined {
-  if (!entryDir(false)) return undefined;
+/** An entry's metadata, and where its body is: all that choosing between copies needs. */
+interface CacheMeta {
+  entry: CacheEntry;
+  body: string;
+}
+
+/**
+ * One read of the cache for one URL. The directory is checked once, each
+ * entry's metadata is read once, and a body only when that entry is the one
+ * wanted — a lookup weighs up to a dozen namespaces, and reading each body
+ * first (one per namespace holding the page, megabytes for a document) was
+ * most of what a cache hit cost.
+ *
+ * An entry is read whatever its age. Freshness is the CALLER's decision: a
+ * stale entry is not worthless, because its validators can turn the refetch
+ * into a 304. Still none for missing / corrupt / empty-text entries, which
+ * carry nothing worth revalidating.
+ */
+interface CacheReader {
+  meta(ns: CacheNamespace, variant: CacheVariant): CacheMeta | undefined;
+  entry(ns: CacheNamespace, variant: CacheVariant): CacheEntry | undefined;
+}
+
+function cacheReader(url: string, acceptLanguage = ""): CacheReader {
+  const open = entryDir(false) !== undefined;
+  const metas = new Map<string, CacheMeta | undefined>();
+  const entries = new Map<string, CacheEntry | undefined>();
+  const keyOf = (ns: CacheNamespace, variant: CacheVariant) => `${ns}\u0000${splitByVariant(ns) ? variant : ""}`;
+  const meta = (ns: CacheNamespace, variant: CacheVariant): CacheMeta | undefined => {
+    const key = keyOf(ns, variant);
+    if (!metas.has(key)) metas.set(key, open ? readCacheMeta(url, acceptLanguage, ns, variant) : undefined);
+    return metas.get(key);
+  };
+  return {
+    meta,
+    entry(ns, variant) {
+      const key = keyOf(ns, variant);
+      if (!entries.has(key)) {
+        const m = meta(ns, variant);
+        entries.set(key, m && readCacheBody(m));
+      }
+      return entries.get(key);
+    },
+  };
+}
+
+function readCacheMeta(url: string, acceptLanguage: string, extractor: CacheNamespace, variant: CacheVariant): CacheMeta | undefined {
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
   if (!existsSync(meta)) return undefined;
   try {
     const entry = JSON.parse(readFileSync(meta, "utf8")) as CacheEntry;
-    if (typeof entry.cachedAt !== "number") return undefined;
+    return typeof entry.cachedAt === "number" ? { entry, body } : undefined;
+  } catch {
+    return undefined; // corrupt entry — ignore, it will be overwritten on the next success
+  }
+}
+
+function readCacheBody({ entry, body }: CacheMeta): CacheEntry | undefined {
+  try {
     // Entries written before the body moved out still carry `text` inline.
     // Reading both shapes means upgrading the engine does not silently discard a
     // warm cache directory — the entry is rewritten in the new shape on its next
@@ -319,7 +363,7 @@ function readCache(url: string, acceptLanguage = "", extractor: CacheNamespace =
     if (!text?.trim()) return undefined; // only successes are cached; ignore anything else
     return { ...entry, text };
   } catch {
-    return undefined; // corrupt entry — ignore, it will be overwritten on the next success
+    return undefined;
   }
 }
 
@@ -581,9 +625,10 @@ export async function cachedFetchAndExtract(
 // the browser, and the better read is what gets stored. Otherwise a page cached
 // once without the fallback kept its thin read for the whole TTL.
 function lookup(url: string, acceptLanguage: string, ns: CacheNamespace, variant: CacheVariant, browserFallback = false): CacheEntry | undefined {
-  const own = lookupOwn(url, acceptLanguage, ns, variant);
+  const read = cacheReader(url, acceptLanguage);
+  const own = lookupOwn(read, ns, variant);
   const best = browserFallback && own && wouldRender(own) ? undefined : own;
-  const rendered = browserFallback ? readCache(url, acceptLanguage, "browser", variant) : undefined;
+  const rendered = browserFallback ? read.entry("browser", variant) : undefined;
   return rendered && (!best || rendered.cachedAt > best.cachedAt) ? rendered : best;
 }
 
@@ -591,12 +636,12 @@ function lookup(url: string, acceptLanguage: string, ns: CacheNamespace, variant
 const wouldRender = (entry: CacheEntry): boolean =>
   !entry.browserTried && !entry.documentType && ["native", "firecrawl"].includes(entry.extractor ?? "native") && worthRendering(entry) !== undefined;
 
-function lookupOwn(url: string, acceptLanguage: string, ns: CacheNamespace, variant: CacheVariant): CacheEntry | undefined {
-  const best = readAnyNamespace(url, acceptLanguage, [...new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
+function lookupOwn(read: CacheReader, ns: CacheNamespace, variant: CacheVariant): CacheEntry | undefined {
+  const best = readAnyNamespace(read, [...new Set([ns, ...DOCUMENT_NAMESPACES])], [variant]);
   // ...and found there again, in its own variant.
-  if (ns === VIDEO_CACHE_NS && !best) return readCache(url, acceptLanguage, "native", variant);
+  if (ns === VIDEO_CACHE_NS && !best) return read.entry("native", variant);
   if (ns !== "firecrawl") return best;
-  const fallback = readCache(url, acceptLanguage, "native", variant);
+  const fallback = read.entry("native", variant);
   return fallback?.fallbackFrom === "firecrawl" && (!best || fallback.cachedAt > best.cachedAt) ? fallback : best;
 }
 

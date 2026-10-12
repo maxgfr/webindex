@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { isNoWrite, writeArtifact } from "../no-write.js";
+import { withRunLock } from "../run-lock.js";
 import { alignFrames, framesMarkdown, type FrameKind, type VideoFrame } from "./align.js";
 import { DHASH_SAME, dhashStream, hamming } from "./dhash.js";
 import { videoDeps, type VideoDeps } from "./ladder.js";
@@ -68,7 +70,7 @@ export function capFrames<T extends { time: number; kind: FrameKind }>(frames: T
 }
 
 export type FramesResult =
-  | { ok: true; dir: string; markdown: string; frames: VideoFrame[]; candidates: number; duplicates: number; effort: FrameEffort }
+  | { ok: true; dir: string; markdown: string; frames: VideoFrame[]; candidates: number; duplicates: number; effort: FrameEffort; note: string }
   | { ok: false; reason: string };
 
 interface Candidate {
@@ -113,7 +115,7 @@ export async function extractFrames(
   if (!source) return { ok: false, reason: `the run in ${runDir} names no page this may download the video from` };
   const duration = meta.duration ?? 0;
 
-  return withTempDir("frames", async (tmp) => {
+  const extract = async (tmp: string): Promise<FramesResult> => {
     const dl = await downloadMedia(["-f", VIDEO_FORMAT, "--no-playlist"], tmp, "video", {
       run: deps.run,
       url: source.url,
@@ -130,18 +132,23 @@ export async function extractFrames(
     // 1. Scene changes, their timestamps read back from showinfo.
     const sceneDir = join(tmp, "scene");
     mkdirSync(sceneDir);
-    const scenes = await ffmpeg([
+    // -fps_mode replaced -vsync in ffmpeg 5.1; ffmpeg 4 (still what some LTS
+    // distributions ship) refuses it before reading any input, so that one
+    // refusal is retried with the old spelling.
+    const sceneArgs = (sync: string[]) => [
       "-i",
       input,
       "-vf",
       `select='gt(scene,${SCENE_THRESHOLD})',showinfo,${JPEG_FILTER}`,
-      "-fps_mode",
-      "vfr",
+      ...sync,
       "-q:v",
       "3",
       join(sceneDir, "%04d.jpg"),
-    ]);
+    ];
+    let scenes = await ffmpeg(sceneArgs(["-fps_mode", "vfr"]));
+    if (!scenes.ok && /Unrecognized option 'fps_mode'/.test(scenes.stderr) && !opts.signal?.aborted) scenes = await ffmpeg(sceneArgs(["-vsync", "vfr"]));
     if (opts.signal?.aborted) return { ok: false, reason: "cancelled" };
+    const lastLine = (stderr: string) => stderr.trim().split("\n").pop();
     const times = parseShowinfo(scenes.stderr);
     const sceneFiles = readdirSync(sceneDir).sort();
     const candidates: Candidate[] = sceneFiles.slice(0, times.length).map((f, i) => ({ path: join(sceneDir, f), time: times[i]!, kind: "scene" }));
@@ -159,8 +166,7 @@ export async function extractFrames(
       for (let i = 0; i < n; i++) await single((duration * (i + 0.5)) / n, "interval");
     }
     if (opts.signal?.aborted) return { ok: false, reason: "cancelled" };
-    if (!candidates.length)
-      return { ok: false, reason: `ffmpeg took no frame from the video${scenes.ok ? "" : ` (${scenes.stderr.trim().split("\n").pop()})`}` };
+    if (!candidates.length) return { ok: false, reason: `ffmpeg took no frame from the video${scenes.ok ? "" : ` (${lastLine(scenes.stderr)})`}` };
     candidates.sort((a, b) => a.time - b.time);
 
     // 3. Near-duplicates out: one ffmpeg pass shrinks every candidate to 9×8 grey.
@@ -191,18 +197,28 @@ export async function extractFrames(
     });
     const frames = alignFrames(placed, segments, meta.chapters ?? []);
     const dropped = candidates.length - kept.length;
-    const note = `${plural(frames.length, "frame")} (effort ${effort}: at most ${FRAME_EFFORT[effort]}) from ${plural(candidates.length, "candidate")} — scene changes above ${SCENE_THRESHOLD}, one per chapter start, ${plural(dropped, "near-duplicate")} dropped`;
+    // A failed scene pass still leaves chapter and evenly spaced frames: the
+    // note says so, or the set would pass for everything that changed on screen.
+    const sceneNote = scenes.ok ? "" : `; scene detection failed (${lastLine(scenes.stderr)})`;
+    const note = `${plural(frames.length, "frame")} (effort ${effort}: at most ${FRAME_EFFORT[effort]}) from ${plural(candidates.length, "candidate")} — scene changes above ${SCENE_THRESHOLD}, one per chapter start, ${plural(dropped, "near-duplicate")} dropped${sceneNote}`;
     const framesDir = join(runDir, "frames");
+    const incoming = `${framesDir}.${process.pid}.${randomUUID()}.new`;
     try {
-      const incoming = `${framesDir}.${process.pid}.${Date.now()}.new`;
       cpSync(staged, incoming, { recursive: true });
       rmSync(framesDir, { recursive: true, force: true });
       renameSync(incoming, framesDir);
       writeArtifact(join(runDir, "frames.json"), `${JSON.stringify(frames, null, 2)}\n`);
       const markdown = writeArtifact(join(runDir, "FRAMES.md"), framesMarkdown(meta, frames, note));
-      return { ok: true, dir: framesDir, markdown, frames, candidates: candidates.length, duplicates: dropped, effort };
+      return { ok: true, dir: framesDir, markdown, frames, candidates: candidates.length, duplicates: dropped, effort, note };
     } catch (e) {
+      // A copy that never got swapped in is nobody's: left behind, every failed run would add one.
+      rmSync(incoming, { recursive: true, force: true });
       return { ok: false, reason: `cannot write the frames in ${runDir}: ${(e as Error).message}` };
     }
-  });
+  };
+
+  // One extraction per run at a time (an MCP server can have two in flight):
+  // two at once would download the same video twice and swap their sets in
+  // over each other's; the second now waits and swaps its set in after the first.
+  return withRunLock(`frames:${resolve(runDir)}`, () => withTempDir("frames", extract));
 }

@@ -437,6 +437,15 @@ describe("adversarial input", () => {
     codeMask([`\`\`\`${pad}\``, `~~~${pad}x`]);
     expect(performance.now() - started).toBeLessThan(500);
   });
+
+  it("blanks HTML comments in linear time when none of them ever closes", () => {
+    // A lazy `<!--[\s\S]*?-->` scanned to the end from every opener.
+    const hostile = "<!--".repeat(50_000);
+    const started = performance.now();
+    expect(stripHtmlComments(hostile)).toBe(hostile);
+    expect(performance.now() - started).toBeLessThan(200);
+    expect(stripHtmlComments("a<!-- x -->b<!--y-->c<!-- open")).toBe("a          b        c<!-- open");
+  });
 });
 
 describe("stripInlineCode", () => {
