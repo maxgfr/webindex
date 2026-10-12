@@ -31,6 +31,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "bench": "vitest bench --run",
+    "live": "node scripts/live-check.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "biome ci --error-on-warnings .",
     "lint:fix": "biome check --write .",
