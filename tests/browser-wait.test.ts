@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { armSettle, settle, WaitCancelledError, WaitTimeoutError, waitFor } from "../src/browser/wait.js";
+import { armSettle, awaitParsed, settle, WaitCancelledError, WaitTimeoutError, waitFor } from "../src/browser/wait.js";
 import { fakeClock, FakePage } from "./helpers/fake-page.js";
 
 /** A page whose Runtime.evaluate answers from a mutable state, by what the expression asks. */
@@ -325,6 +325,24 @@ describe("settle", () => {
     expect(await settle({ page: nav }, { deps: c2, timeoutMs: 1000 })).toEqual({ navigated: true, waitedMs: 1000 });
   });
 
+  it("says the main frame is still loading when it ran out after the navigation committed, and only then", async () => {
+    // A slow, streaming response: the new document commits, its load never comes in time.
+    const p = treePage();
+    const clock = fakeClock((t) => {
+      if (t === 1050) {
+        p.emit("Page.frameStartedLoading", { frameId: "main" });
+        p.emit("Page.frameNavigated", { frame: { id: "main", loaderId: "L2" } });
+      }
+    });
+    expect(await settle({ page: p }, { deps: clock, timeoutMs: 1000 })).toEqual({ navigated: true, waitedMs: 1000, stillLoading: true });
+    const loaded = treePage();
+    const c2 = fakeClock((t) => {
+      if (t === 1050) loaded.emit("Page.frameNavigated", { frame: { id: "main", loaderId: "L2" } });
+      if (t === 1500) loaded.emit("Page.lifecycleEvent", { frameId: "main", loaderId: "L2", name: "load" });
+    });
+    expect(await settle({ page: loaded }, { deps: c2, timeoutMs: 5000 })).not.toHaveProperty("stillLoading");
+  });
+
   it("copes with a page that cannot answer getFrameTree or Network.enable", async () => {
     const p = new FakePage();
     p.handle("Page.getFrameTree", () => {
@@ -481,6 +499,37 @@ describe("armSettle", () => {
       if (t === 2500) p.emit("Page.lifecycleEvent", { frameId: "main", loaderId: "L2", name: "load" });
     });
     expect((await settle({ page: p }, { deps: clock })).waitedMs).toBeGreaterThanOrEqual(1500 + 300);
+  });
+});
+
+describe("awaitParsed", () => {
+  /** A page whose document.readyState is whatever `state.ready` holds. */
+  const readyPage = (state: { ready: string | undefined }) => {
+    const p = new FakePage();
+    p.handle("Runtime.evaluate", (params) => (params.expression === "document.readyState" ? { result: { value: state.ready } } : {}));
+    return p;
+  };
+
+  it("returns at once for a document past loading, or one that cannot say", async () => {
+    for (const ready of ["interactive", "complete", undefined]) {
+      expect(await awaitParsed({ page: readyPage({ ready }) }, { deps: fakeClock() }), String(ready)).toEqual({ stillLoading: false, waitedMs: 0 });
+    }
+  });
+
+  it("waits for a document still loading to reach interactive", async () => {
+    const state = { ready: "loading" as string | undefined };
+    const clock = fakeClock((t) => {
+      if (t >= 1600) state.ready = "interactive";
+    });
+    const r = await awaitParsed({ page: readyPage(state) }, { deps: clock });
+    expect(r.stillLoading).toBe(false);
+    expect(r.waitedMs).toBeGreaterThanOrEqual(600);
+    expect(r.waitedMs).toBeLessThan(1000);
+  });
+
+  it("gives up after 3 s by default, and says the document is still loading", async () => {
+    expect(await awaitParsed({ page: readyPage({ ready: "loading" }) }, { deps: fakeClock() })).toEqual({ stillLoading: true, waitedMs: 3000 });
+    expect(await awaitParsed({ page: readyPage({ ready: "loading" }) }, { deps: fakeClock(), timeoutMs: 500 })).toEqual({ stillLoading: true, waitedMs: 500 });
   });
 });
 

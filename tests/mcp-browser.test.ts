@@ -647,6 +647,24 @@ describe("the other tools", () => {
     }
   });
 
+  it("says the page is still loading when its document never got past loading, rather than that it has no text", async () => {
+    const h = await host();
+    const evaluate = fake.handlerOf("Runtime.evaluate");
+    fake.handle("Runtime.evaluate", (p, sid) =>
+      p.expression === "document.readyState"
+        ? { result: { value: "loading" } }
+        : p.expression === READ_DOCUMENT
+          ? { result: { type: "object", value: { html: "<html><body></body></html>", url: "https://a.test/" } } }
+          : evaluate?.(p, sid),
+    );
+    const note =
+      "note: the page was still loading after 3000 ms, so this is only what it held so far — webindex_browser_wait with condition load, then look again";
+    const page = await h.call("webindex_browser_text", { scope: "page" });
+    expect(page.text).toContain(note);
+    expect(page.text).not.toContain("no readable text on this page");
+    expect((await h.call("webindex_browser_snapshot", { mode: "full" })).text).toContain(note);
+  });
+
   it("names a blocking challenge an action lands on in a line after the result line, and is no error", async () => {
     const h = await host();
     world.blocking = true;

@@ -330,6 +330,89 @@ describe("excerpts in Hindi, Chinese and Japanese", () => {
     expect(excerptWindows(japanese, "東京の天気", { before: 0, after: 1 })[0]).toMatchObject({ anchor: 2, score: 4 });
   });
 
+  // Cut down from nodejs.org/api/globals.html. The answer sits under a heading
+  // holding the question's rarest terms; "Node.js" is on every line of the page.
+  it("credits a passage with its heading's terms, weighted by how rare they are on the page", () => {
+    const text = [
+      "# Global objects",
+      "The objects listed here are specific to Node.js.",
+      "only if the Node.js binary was compiled with including support for the node:crypto module.",
+      "only if the Node.js binary was compiled with including support for the node:crypto module.",
+      "#### Static method: AbortSignal.abort([reason])",
+      "Added in: v15.12.0, v14.17.0",
+      "Returns a new already aborted AbortSignal.",
+      "#### Static method: AbortSignal.timeout(delay)",
+      "Added in: v17.3.0, v16.14.0",
+      "delay <number> The number of milliseconds to wait before triggering the AbortSignal.",
+      "Returns a new AbortSignal which will be aborted in delay milliseconds.",
+      "### clearTimeout(timeoutObject)",
+      "Added in: v0.0.1",
+      "clearTimeout is described in the timers section.",
+      "### setTimeout(callback, delay[, ...args])",
+      "Added in: v0.0.1",
+      "setTimeout is described in the timers section.",
+    ].join("\n");
+    const snippet = focusedSnippet(text, "When was AbortSignal.timeout added to Node.js?", { maxChars: 1200 });
+    expect(snippet).toContain("v17.3.0");
+    expect(snippet.startsWith("Static method: AbortSignal.timeout(delay) — ")).toBe(true);
+  });
+
+  // Cut down from the Rust book: the rules are a list under "Ownership Rules".
+  it("returns the passage that holds the answer, not sentences stitched from across the page", () => {
+    const text = [
+      "# What Is Ownership?",
+      "Ownership is a set of rules that govern how a Rust program manages memory.",
+      "Some languages have garbage collection; in other languages, the programmer must free the memory.",
+      "Rust uses a third approach: memory is managed through a system of ownership with a set of rules that the compiler checks.",
+      "### Ownership Rules",
+      "First, let’s take a look at the ownership rules.",
+      "Each value in Rust has an owner.",
+      "There can only be one owner at a time.",
+      "When the owner goes out of scope, the value will be dropped.",
+      "### Variable Scope",
+      "Now that we’re past basic Rust syntax, we won’t include all the fn main() code in examples.",
+    ].join("\n");
+    const snippet = focusedSnippet(text, "What are the ownership rules in Rust?", { maxChars: 1200 });
+    expect(snippet).toContain("Each value in Rust has an owner.");
+    expect(snippet.startsWith("Ownership Rules — ")).toBe(true);
+  });
+
+  // Cut down from fr.wikipedia.org/wiki/Victor_Hugo: the subject is in every
+  // sentence; only the rare term ("né") tells the answer from the rest.
+  it("lets a term rare on the page outweigh the subject every sentence names", () => {
+    const text = [
+      "# Victor Hugo",
+      "Victor Hugo, né le 7 ventôse an X (26 février 1802) à Besançon et mort le 22 mai 1885 à Paris, est un poète, dramaturge et romancier français.",
+      "## Jersey",
+      "Pendant les années d'exil, Victor Hugo réalise des dessins presque fantastiques.",
+      "Victor Hugo rassemble ses discours dans Actes et paroles, publié en trois volumes, pour les années 1841 à 1876.",
+      "## Guernesey",
+      "Victor Hugo s'installe à Hauteville House pour les années suivantes.",
+    ].join("\n");
+    expect(focusedSnippet(text, "En quelle année est né Victor Hugo ?", { maxChars: 1200 })).toContain("26 février 1802");
+  });
+
+  // Cut down from en.wikipedia.org/wiki/Python_(programming_language): an
+  // infobox comes out as one cell per line, and its cells hold the question's
+  // words as surely as the lead does — but they are not sentences.
+  it("prefers prose to the fragments of an infobox holding the same words", () => {
+    const text = [
+      "# Python (programming language)",
+      "General-purpose programming language",
+      "Multi-paradigm: object-oriented, procedural, functional",
+      "Python Software Foundation",
+      "Python is a high-level, general-purpose programming language that emphasizes code readability.[37]",
+      "Guido van Rossum began working on Python in the late 1980s as a successor to the ABC programming language.",
+    ].join("\n");
+    expect(focusedSnippet(text, "Who created the Python programming language?", { maxChars: 1200 })).toContain("Guido van Rossum began working on Python");
+  });
+
+  it("never repeats a sentence", () => {
+    const line = "Only if the binary was compiled with crypto support, the module loads.";
+    const snippet = focusedSnippet([line, line, line].join("\n"), "crypto module support", { maxChars: 1200 });
+    expect(snippet.split(line).length - 1).toBe(1);
+  });
+
   it("picks the sentence that answers for a focused snippet", () => {
     const text = [
       "# 天気予報",

@@ -65,6 +65,9 @@ async function ready(): Promise<void> {
 
 const sent = (method: string) => fake.calls.filter((c) => c.method === method);
 
+/** What a read says of a document that was still loading when it gave up waiting. */
+const STILL_LOADING = "the page was still loading after 3000 ms, so this is only what it held so far — `webindex-tests browser wait --load`, then look again";
+
 describe("usage errors exit 2", () => {
   it.each([
     ["an unknown action", "frobnicate", [], {}],
@@ -197,6 +200,26 @@ describe("attach, status, close", () => {
     expect(r.exitCode).toBe(0);
     expect(r.text).toMatch(/closed the browser/);
     expect(sent("Browser.close")).toHaveLength(1);
+  });
+
+  it("says so when the browser it closed has not exited when it stops waiting", async () => {
+    writeSession({
+      version: 1,
+      port: fake.port,
+      wsBrowserUrl: fake.browserWsUrl,
+      pid: 4242,
+      launchedByUs: true,
+      profile: "default",
+      headless: false,
+      targetId: "T1",
+      updatedAt: 1,
+    });
+    const r = await cli("close", [], { all: true }, { alive: () => true, kill: () => {} });
+    expect(r.exitCode, r.text).toBe(0);
+    expect(r.text.split("\n")).toEqual([
+      "closed the browser",
+      "note: the browser (pid 4242) was still running 5000 ms after it was told to quit: let it exit before you remove its profile or launch it again",
+    ]);
   });
 
   it("has nothing to close when no browser runs", async () => {
@@ -363,6 +386,33 @@ describe("snapshot", () => {
     expect(css.exitCode).toBe(2);
     expect(css.text).toBe("expected a ref like e12 from the latest snapshot; CSS selectors: use --selector (screenshot, snapshot, text, wait)");
   });
+
+  it("waits for a document still loading before it takes the tree, and says so when it never got past loading", async () => {
+    await cli("attach", [String(fake.port)]);
+    let state = "loading";
+    const evaluate = fake.handlerOf("Runtime.evaluate");
+    fake.handle("Runtime.evaluate", (p, sid) => (p.expression === "document.readyState" ? { result: { value: state } } : evaluate?.(p, sid)));
+    const tree = fake.handlerOf("Accessibility.getFullAXTree");
+    const seen: string[] = [];
+    fake.handle("Accessibility.getFullAXTree", (p, sid) => {
+      seen.push(state);
+      return tree?.(p, sid);
+    });
+    const clock = fakeClock((t) => {
+      if (t >= 1600) state = "interactive";
+    });
+    const r = await cli("snapshot", [], {}, clock);
+    expect(r.exitCode, r.text).toBe(0);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((s) => s === "interactive")).toBe(true);
+    expect(r.text).not.toMatch(/still loading/);
+    state = "loading";
+    const stuck = await cli("snapshot");
+    expect(stuck.exitCode, stuck.text).toBe(0);
+    expect(stuck.text.split("\n").slice(0, 3)).toEqual(["url: https://a.test/", "title: A page", `note: ${STILL_LOADING}`]);
+    expect(stuck.text).toContain('- button "Pay now" [ref=e2]');
+    expect((await cli("snapshot", [], { json: true })).json).toMatchObject({ ok: true, note: STILL_LOADING });
+  });
 });
 
 describe("text", () => {
@@ -417,6 +467,35 @@ describe("text", () => {
     const r = await cli("text");
     expect(r.exitCode).toBe(0);
     expect(r.text).toMatch(/no readable text/);
+  });
+
+  it("waits for a document still loading before it reads, and says so when it never got past loading", async () => {
+    await ready();
+    let state = "loading";
+    scriptText();
+    const evaluate = fake.handlerOf("Runtime.evaluate");
+    // While the document loads its body is still empty: what a read right after a slow navigation met.
+    fake.handle("Runtime.evaluate", (p, sid) => {
+      if (p.expression === "document.readyState") return { result: { value: state } };
+      if (p.expression === READ_DOCUMENT && state === "loading") {
+        return { result: { type: "object", value: { html: "<html><body></body></html>", url: "https://a.test/story" } } };
+      }
+      return evaluate?.(p, sid);
+    });
+    const clock = fakeClock((t) => {
+      if (t >= 1600) state = "complete";
+    });
+    const r = await cli("text", [], {}, clock);
+    expect(r.exitCode, r.text).toBe(0);
+    expect(r.text).toContain("tells the story of the match");
+    expect(r.text).not.toMatch(/no readable text|still loading/);
+    state = "loading";
+    const stuck = await cli("text");
+    expect(stuck.exitCode, stuck.text).toBe(0);
+    expect(stuck.text.split("\n").slice(0, 3)).toEqual(["url: https://a.test/story", "title: A page", `note: ${STILL_LOADING}`]);
+    expect(stuck.text).toContain("(no readable text yet: the page is still loading)");
+    expect(stuck.text).not.toContain("no readable text on this page");
+    expect((await cli("text", [], { json: true })).json).toMatchObject({ ok: true, note: STILL_LOADING });
   });
 
   it("reads one element by ref or by --selector; --markdown keeps its markup", async () => {

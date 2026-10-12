@@ -91,6 +91,39 @@ container on `:11435` over the stack's own volume (`LIVE_OLLAMA`). Afterwards
 the stack was taken down with its volumes (the pulled embedding model
 included) and the audit container removed; the images stay in Docker's cache.
 
+### Is it useful? — 15 real questions, 1.33.1
+
+Each question came with its authoritative page and a phrase that answers it
+(Node's globals, MDN 304, the Python and Alan Turing articles, RFC 6585, the
+PostgreSQL connection settings, Python's `json`, the Transformer paper's PDF,
+React's `useEffect`, SQLite WAL, the Rust book on ownership, Victor Hugo in
+French, Kubernetes pods, Effective Go, a GitHub README). Compared with what an
+agent gets with no reader at all — the page's bytes with the tags stripped:
+
+| Measure | webindex | Bytes, tags stripped |
+|---|---|---|
+| Page text holds the answer | 15/15 | 13/15 (no PDF reader; Python's docs write `indent</span><span class="o">=` and stripped tags leave "indent = None") |
+| Characters returned, all 15 pages | 748 k | 953 k |
+| A ~380-character focused snippet holds the answer | 12/15 → **14/15** after #40 | — |
+| `rank` puts the right page first among the 15 | 14/15, top 3: 15/15 (MRR 0.967) | — |
+| Median fetch / cached read | 229 ms / 1 ms | 58 ms |
+
+So an agent that reads `focusedSnippet` instead of the page reads under 1% of
+it and still has the answer 14 times out of 15. #40 got there by scoring
+passages of one section rather than stitching single sentences from across the
+page, weighting each term by how rare it is on that page, crediting a
+section's heading, preferring prose to infobox cells, and no longer cutting
+paragraphs that are hard-wrapped in their HTML (text mode now joins a newline
+inside a paragraph, as a browser and the Markdown mode always did). The
+remaining miss is lexical: in "En quelle année est né Victor Hugo ?", accent
+folding makes "né" the word "ne", which is on every line of a French page. The
+ranking miss puts Python's article, which mentions tools, formatting, source
+code and Go throughout, just above Effective Go, whose answer is the word
+`gofmt` the question never uses.
+
+The snippet costs 12 ms on a 190 000-character page (3.5 ms before): more
+work per sentence, still small next to the fetch it saves the agent reading.
+
 ### Limits seen, not fixed
 
 - The native PDF rung has no font tables, as `src/pdf/native.ts` says: on a

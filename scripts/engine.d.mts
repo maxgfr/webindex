@@ -1039,6 +1039,8 @@ interface BrowserDeps {
     detectBrowser(kind?: BrowserKind): BrowserBinary | null;
     /** Signal a process we launched in an earlier call, known only by its pid. */
     kill(pid: number, signal: NodeJS.Signals): void;
+    /** Whether the process `pid` is still running: closing waits on it. */
+    alive(pid: number): boolean;
     /** Reads `WEBINDEX_<name>` (brand-aware), like the rest of the library. */
     env(name: string): string | undefined;
     platform: NodeJS.Platform;
@@ -1839,7 +1841,7 @@ interface ActionResult {
     value?: unknown;
     /** fill or type on a password field: its value is never echoed. */
     valueHidden?: true;
-    /** The page the move landed on committed but was still loading when the wait ran out. */
+    /** The page the action or move landed on committed but was still loading when the wait ran out. */
     note?: string;
 }
 

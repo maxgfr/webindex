@@ -5233,76 +5233,12 @@ var init_discovery = __esm({
   }
 });
 
-// src/browser/deps.ts
-import { spawn as nodeSpawn } from "child_process";
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from "fs/promises";
-function defaultBrowserDeps() {
-  return {
-    spawn: (cmd, args, opts) => nodeSpawn(cmd, args, opts),
-    fs: { readFile, writeFile, rename, mkdir, rm, stat, open },
-    now: () => Date.now(),
-    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-    connectCdp: (wsUrl) => CdpClient.connect(wsUrl),
-    discovery: discovery_exports,
-    detectBrowser: (kind) => detectBrowserBinary(kind ? { kind } : {}),
-    kill: (pid, signal) => void process.kill(pid, signal),
-    env: (name) => env(name),
-    platform: process.platform
-  };
-}
-function browserDeps(own) {
-  return { ...defaultBrowserDeps(), ...own };
-}
-var init_deps = __esm({
-  "src/browser/deps.ts"() {
-    "use strict";
-    init_brand();
-    init_cdp();
-    init_detect();
-    init_discovery();
-  }
-});
-
-// src/browser/extensions.ts
-import { existsSync as existsSync5, statSync as statSync3 } from "fs";
-import { isAbsolute as isAbsolute2, join as join8 } from "path";
-function extensionDirs(raw) {
-  const name = envName("BROWSER_EXTENSIONS");
-  return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean).map((dir) => {
-    if (!isAbsolute2(dir)) throw new UsageError(`${name} takes absolute paths, not ${JSON.stringify(dir)}`);
-    let isDir = false;
-    try {
-      isDir = statSync3(dir).isDirectory();
-    } catch {
-    }
-    if (!isDir) throw new UsageError(`${name}: no such directory: ${dir}`);
-    if (!existsSync5(join8(dir, "manifest.json"))) {
-      throw new UsageError(`${name}: ${dir} has no manifest.json \u2014 name the unpacked extension's own folder, the one that holds manifest.json`);
-    }
-    return dir;
-  });
-}
-function extensionArgs(dirs) {
-  if (dirs.length === 0) return [];
-  const list = dirs.join(",");
-  return [`--load-extension=${list}`, `--disable-extensions-except=${list}`];
-}
-var unpackedIgnoredNote;
-var init_extensions = __esm({
-  "src/browser/extensions.ts"() {
-    "use strict";
-    init_brand();
-    init_cli_kit();
-    unpackedIgnoredNote = () => `Google Chrome \u2265 137 ignores unpacked extensions \u2014 use Brave (built-in ad/tracker blocking: ${envName("BROWSER_KIND")}=brave), Chromium or Chrome for Testing`;
-  }
-});
-
 // src/browser/profile.ts
-import { chmodSync, copyFileSync as copyFileSync2, existsSync as existsSync6, lstatSync, mkdirSync as mkdirSync3, readdirSync as readdirSync5, readFileSync as readFileSync7, realpathSync, rmSync as rmSync4, statSync as statSync4, writeFileSync as writeFileSync5 } from "fs";
+import { chmodSync, copyFileSync as copyFileSync2, existsSync as existsSync5, lstatSync, mkdirSync as mkdirSync3, readdirSync as readdirSync5, readFileSync as readFileSync7, realpathSync, rmSync as rmSync4, statSync as statSync3, writeFileSync as writeFileSync5 } from "fs";
 import { homedir as homedir2 } from "os";
-import { basename as basename2, join as join9, resolve as resolve3, sep } from "path";
+import { basename as basename2, join as join8, resolve as resolve3, sep } from "path";
 function browserHome() {
-  return env("BROWSER_DIR") ?? brand().browserDir ?? join9(homedir2(), `.${brand().name}`, "browser");
+  return env("BROWSER_DIR") ?? brand().browserDir ?? join8(homedir2(), `.${brand().name}`, "browser");
 }
 function checkName(name) {
   if (!PROFILE_NAME.test(name) || name === "." || name === "..") {
@@ -5311,10 +5247,10 @@ function checkName(name) {
 }
 function profileDir(name = "default") {
   checkName(name);
-  return join9(browserHome(), "profiles", name);
+  return join8(browserHome(), "profiles", name);
 }
 function profileKindFile(name = "default") {
-  return join9(profileDir(name), `.${brand().name}-kind`);
+  return join8(profileDir(name), `.${brand().name}-kind`);
 }
 function readProfileKind(name = "default") {
   try {
@@ -5358,8 +5294,8 @@ var init_profile = __esm({
 
 // src/browser/state.ts
 import { randomUUID as randomUUID2 } from "crypto";
-import { appendFileSync, closeSync, existsSync as existsSync7, linkSync, openSync, readFileSync as readFileSync8, renameSync as renameSync3, rmSync as rmSync5, statSync as statSync5, unlinkSync as unlinkSync2, writeSync } from "fs";
-import { join as join10 } from "path";
+import { appendFileSync, closeSync, existsSync as existsSync6, linkSync, openSync, readFileSync as readFileSync8, renameSync as renameSync3, rmSync as rmSync5, statSync as statSync4, unlinkSync as unlinkSync2, writeSync } from "fs";
+import { join as join9 } from "path";
 function checkTargetId(id) {
   if (!/^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(id)) throw new Error(`invalid target id: ${JSON.stringify(id)}`);
   return id;
@@ -5373,11 +5309,11 @@ function readJson2(path) {
 }
 function writeJson(dir, name, value) {
   ensurePrivateDir(dir);
-  writeFileAtomic(join10(dir, name), `${JSON.stringify(value)}
+  writeFileAtomic(join9(dir, name), `${JSON.stringify(value)}
 `, FILE_MODE);
 }
 function readSession(o) {
-  const v = readJson2(join10(homeOf(o), "session.json"));
+  const v = readJson2(join9(homeOf(o), "session.json"));
   if (!isObj(v) || v.version !== 1 || typeof v.port !== "number" || typeof v.targetId !== "string") return null;
   return v;
 }
@@ -5387,16 +5323,16 @@ function writeSession(s, o) {
 }
 function clearSession(o) {
   if (isNoWrite()) return;
-  rmSync5(join10(homeOf(o), "session.json"), { force: true });
+  rmSync5(join9(homeOf(o), "session.json"), { force: true });
 }
 function clearRefs(targetId, o) {
   const id = targetId === void 0 ? void 0 : checkTargetId(targetId);
   if (isNoWrite()) return;
-  const dir = join10(homeOf(o), "refs");
-  rmSync5(id === void 0 ? dir : join10(dir, `${id}.json`), { recursive: true, force: true });
+  const dir = join9(homeOf(o), "refs");
+  rmSync5(id === void 0 ? dir : join9(dir, `${id}.json`), { recursive: true, force: true });
 }
 function clearNetwork(targetId, o) {
-  const path = targetId === void 0 ? join10(homeOf(o), "network") : networkFile(targetId, o);
+  const path = targetId === void 0 ? join9(homeOf(o), "network") : networkFile(targetId, o);
   if (isNoWrite()) return;
   rmSync5(path, { recursive: true, force: true });
 }
@@ -5431,7 +5367,7 @@ function staleReason(path, raw, staleMs, now) {
   }
   if (Number.isNaN(at)) {
     try {
-      at = statSync5(path).mtimeMs;
+      at = statSync4(path).mtimeMs;
     } catch {
       return "gone";
     }
@@ -5473,7 +5409,7 @@ async function withBrowserLock(fn, opts = {}) {
   const { now, sleep: sleep2 } = opts.deps ?? realDeps;
   const dir = homeOf(opts);
   ensurePrivateDir(dir);
-  const path = join10(dir, "lock");
+  const path = join9(dir, "lock");
   const token = randomUUID2();
   const stamp = () => JSON.stringify({ pid: process.pid, at: now(), token });
   const deadline = now() + waitMs;
@@ -5527,11 +5463,77 @@ var init_state = __esm({
     FILE_MODE = 384;
     homeOf = (o) => o?.home ?? browserHome();
     isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-    networkFile = (targetId, o) => join10(homeOf(o), "network", `${checkTargetId(targetId)}.jsonl`);
+    networkFile = (targetId, o) => join9(homeOf(o), "network", `${checkTargetId(targetId)}.jsonl`);
     realDeps = {
       now: () => Date.now(),
       sleep: (ms) => new Promise((r) => setTimeout(r, ms))
     };
+  }
+});
+
+// src/browser/deps.ts
+import { spawn as nodeSpawn } from "child_process";
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from "fs/promises";
+function defaultBrowserDeps() {
+  return {
+    spawn: (cmd, args, opts) => nodeSpawn(cmd, args, opts),
+    fs: { readFile, writeFile, rename, mkdir, rm, stat, open },
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    connectCdp: (wsUrl) => CdpClient.connect(wsUrl),
+    discovery: discovery_exports,
+    detectBrowser: (kind) => detectBrowserBinary(kind ? { kind } : {}),
+    kill: (pid, signal) => void process.kill(pid, signal),
+    alive: pidAlive,
+    env: (name) => env(name),
+    platform: process.platform
+  };
+}
+function browserDeps(own) {
+  return { ...defaultBrowserDeps(), ...own };
+}
+var init_deps = __esm({
+  "src/browser/deps.ts"() {
+    "use strict";
+    init_brand();
+    init_cdp();
+    init_detect();
+    init_discovery();
+    init_state();
+  }
+});
+
+// src/browser/extensions.ts
+import { existsSync as existsSync7, statSync as statSync5 } from "fs";
+import { isAbsolute as isAbsolute2, join as join10 } from "path";
+function extensionDirs(raw) {
+  const name = envName("BROWSER_EXTENSIONS");
+  return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean).map((dir) => {
+    if (!isAbsolute2(dir)) throw new UsageError(`${name} takes absolute paths, not ${JSON.stringify(dir)}`);
+    let isDir = false;
+    try {
+      isDir = statSync5(dir).isDirectory();
+    } catch {
+    }
+    if (!isDir) throw new UsageError(`${name}: no such directory: ${dir}`);
+    if (!existsSync7(join10(dir, "manifest.json"))) {
+      throw new UsageError(`${name}: ${dir} has no manifest.json \u2014 name the unpacked extension's own folder, the one that holds manifest.json`);
+    }
+    return dir;
+  });
+}
+function extensionArgs(dirs) {
+  if (dirs.length === 0) return [];
+  const list = dirs.join(",");
+  return [`--load-extension=${list}`, `--disable-extensions-except=${list}`];
+}
+var unpackedIgnoredNote;
+var init_extensions = __esm({
+  "src/browser/extensions.ts"() {
+    "use strict";
+    init_brand();
+    init_cli_kit();
+    unpackedIgnoredNote = () => `Google Chrome \u2265 137 ignores unpacked extensions \u2014 use Brave (built-in ad/tracker blocking: ${envName("BROWSER_KIND")}=brave), Chromium or Chrome for Testing`;
   }
 });
 
@@ -8368,7 +8370,10 @@ function htmlToText(html, opts = {}) {
   let s = dropElements(html.includes(NUL2) ? html.split(NUL2).join("\uFFFD") : html, hidden, RAW_TEXT_ELEMENTS);
   if (!opts.fullPage) s = dropLanguageSelectors(dropLandmarks(s, CHROME_ROLES));
   const pre = [];
-  s = flattenHeadings(setAsidePre(s, pre));
+  s = setAsidePre(s, pre).replace(/[\r\n]+/g, " ").replace(PRE_SLOT_INLINE, (slot) => `
+${slot}
+`);
+  s = flattenHeadings(s);
   let prevAEnd = -1;
   s = s.replace(TAG_RE, (tag, at) => {
     const closing = tag[1] === "/";
@@ -8845,22 +8850,53 @@ function metaDescriptionOf(html) {
 }
 function focusedSnippet(text, question, opts = {}) {
   const maxChars = opts.maxChars ?? 360;
-  const maxSentences = opts.maxSentences ?? 3;
+  const maxSentences = Math.max(1, opts.maxSentences ?? 3);
   const lines = text.split("\n");
   const matcher = buildMatcher(question);
   const sentences = [];
+  const headingTerms = [/* @__PURE__ */ new Set()];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (/^#{1,6}\s/.test(line)) continue;
+    if (/^#{1,6}\s/.test(line)) {
+      headingTerms.push(matcher.matchLine(line));
+      continue;
+    }
     for (const raw of line.split(/(?<=[.!?])\s+/)) {
       const t = raw.trim();
       if (t.length < 20) continue;
-      sentences.push({ text: t, line: i, score: matcher.matchLine(t).size });
+      sentences.push({ text: t, line: i, section: headingTerms.length - 1, terms: matcher.matchLine(t), prose: PROSE_END.test(t) });
     }
   }
   if (!sentences.length) return lines.slice(0, 4).join(" ").slice(0, maxChars).trim();
-  const hits = sentences.filter((s) => s.score > 0);
-  const chosen = (hits.length ? hits : sentences).map((s, idx) => ({ s, idx })).sort((a, b) => b.s.score - a.s.score || a.idx - b.idx).slice(0, maxSentences).sort((a, b) => a.idx - b.idx).map((x) => x.s);
+  const df = /* @__PURE__ */ new Map();
+  for (const s of sentences) for (const t of s.terms) df.set(t, (df.get(t) ?? 0) + 1);
+  const weight = (t) => Math.log(1 + sentences.length / (df.get(t) ?? 0.5));
+  let best;
+  for (let start2 = 0; start2 < sentences.length; start2++) {
+    if (!sentences[start2].terms.size) continue;
+    const section = sentences[start2].section;
+    const held = /* @__PURE__ */ new Set();
+    const inProse = /* @__PURE__ */ new Set();
+    let prose = 0;
+    let chars = 0;
+    for (let end2 = start2; end2 < sentences.length && end2 - start2 < maxSentences; end2++) {
+      const s = sentences[end2];
+      if (s.section !== section || end2 > start2 && chars + s.text.length > maxChars) break;
+      chars += s.text.length + 1;
+      for (const t of s.terms) {
+        held.add(t);
+        if (s.prose) inProse.add(t);
+      }
+      let score = 0;
+      for (const t of held) score += inProse.has(t) ? weight(t) : weight(t) / 2;
+      for (const t of headingTerms[section]) score += weight(t);
+      if (s.prose) prose++;
+      if (!best || score > best.score + 1e-9 || Math.abs(score - best.score) <= 1e-9 && prose > best.prose) best = { start: start2, end: end2, score, prose };
+    }
+  }
+  const { start, end } = best ?? { start: 0, end: Math.min(sentences.length, maxSentences) - 1 };
+  const seen = /* @__PURE__ */ new Set();
+  const chosen = sentences.slice(start, end + 1).filter((s) => !seen.has(s.text) && seen.add(s.text));
   const heading = nearestHeading(lines, chosen[0].line);
   let out = chosen.map((s) => s.text).join(" ");
   if (heading && !out.startsWith(heading)) out = `${heading} \u2014 ${out}`;
@@ -8876,7 +8912,7 @@ function capExtract(text, depth) {
   const lastNl = slice.lastIndexOf("\n");
   return (lastNl > cap * 0.6 ? slice.slice(0, lastNl) : slice) + "\n\n\u2026 [truncated]";
 }
-var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, CLOSES_P, isLinkList, MIN_PROSE, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, DEAD_LINK_STATUS, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP;
+var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, PRE_SLOT_INLINE, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, CLOSES_P, isLinkList, MIN_PROSE, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, DEAD_LINK_STATUS, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP, PROSE_END;
 var init_fetch = __esm({
   "src/fetch.ts"() {
     "use strict";
@@ -8908,6 +8944,7 @@ var init_fetch = __esm({
     PRE_SLOT = (i) => `
 ${NUL2}${i}${NUL2}
 `;
+    PRE_SLOT_INLINE = new RegExp(`${NUL2}\\d+${NUL2}`, "g");
     HEADING_OPEN = /<h([1-6])(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
     HEADING_BOUNDARY = /<\/h[1-6]\s*>|<h[1-6](?=[\s/>])/gi;
     PERMALINK = /<a\b[^<>]*>\s*(?:(?:¶|#|§|🔗|&para;|&#182;|&#x[bB]6;|&sect;)\s*)?<\/a\s*>/gi;
@@ -9010,6 +9047,7 @@ ${NUL2}${i}${NUL2}
     MD_LINE_START = /^[\s>]*(?:(?:[-+*]|\d{1,9}[.)])\s+)?(?:#{1,6}\s+)?/;
     MD_DESTINATION = /\]\((?:[^()\s\\]|\\.|\([^()\s]*\))*\)/g;
     MD_MARKUP = /\\(?=[!-/:-@[-`{-~])|!?\[|\]|\*+|`+/g;
+    PROSE_END = /[.!?…:;]["'”’»)\]]*(?:\[[^\]\s]{1,12}\])*$/;
   }
 });
 
