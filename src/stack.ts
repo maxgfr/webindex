@@ -49,7 +49,7 @@ services:
     image: qdrant/qdrant:v1.18.2
     container_name: skills-qdrant
     ports:
-      - "6333:6333"
+      - "127.0.0.1:6333:6333"
     volumes:
       - qdrant:/qdrant/storage
     restart: unless-stopped
@@ -69,7 +69,7 @@ services:
     image: ollama/ollama:0.30.7
     container_name: skills-ollama
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollama:/root/.ollama
     restart: unless-stopped
@@ -88,7 +88,7 @@ services:
     image: searxng/searxng:2026.6.11-a1490676e
     container_name: skills-searxng
     ports:
-      - "8888:8080"
+      - "127.0.0.1:8888:8080"
     environment:
       - SEARXNG_BASE_URL=http://localhost:8888/
     volumes:
@@ -117,7 +117,7 @@ services:
     image: ghcr.io/firecrawl/firecrawl:2.10.5@sha256:8ce1af201332e1de046d70d5d516fbfe7f0f6229820d271d880873eeca531ea6
     container_name: skills-firecrawl
     ports:
-      - "3002:3002"
+      - "127.0.0.1:3002:3002"
     env_file:
       - ./docker/firecrawl/firecrawl.env
     environment:
@@ -485,6 +485,8 @@ function defaultHas(cmd: string): boolean {
 interface StackSpec {
   profiles: string[];
   summary: string;
+  /** The host ports it publishes: [port, service, the variable pointing the engine at it]. */
+  ports: [number, string, string][];
   /** Extra steps after a green `up`. Returns the lines appended to the report. */
   postUp?: (file: string, run: NonNullable<StackDeps["run"]>) => string[];
 }
@@ -495,10 +497,15 @@ const STACKS: Record<string, StackSpec> = {
   searxng: {
     profiles: ["search"],
     summary: "SearXNG is up (:8888) — keyless discovery, JSON API enabled.",
+    ports: [[8888, "SearXNG", "SEARXNG"]],
   },
   firecrawl: {
     profiles: ["search", "extract"],
     summary: "Firecrawl is up (:3002 · playwright · redis · rabbitmq · postgres), with SearXNG behind it.",
+    ports: [
+      [8888, "SearXNG", "SEARXNG"],
+      [3002, "Firecrawl", "FIRECRAWL"],
+    ],
     postUp: () => [
       "  keyless: USE_DB_AUTHENTICATION=false — no API key is sent or needed.",
       "  effect:  pages are now cleaned by a real browser; --firecrawl off opts out.",
@@ -507,6 +514,10 @@ const STACKS: Record<string, StackSpec> = {
   semantic: {
     profiles: ["semantic"],
     summary: "Qdrant (:6333) and Ollama (:11434) are up.",
+    ports: [
+      [6333, "Qdrant", "QDRANT"],
+      [11434, "Ollama", "OLLAMA"],
+    ],
     postUp: (file, run) => {
       // Idempotent, and embeddings do not work until it has run once. A failure
       // here is not a failed `up` — the containers are fine, one model is not
@@ -519,6 +530,12 @@ const STACKS: Record<string, StackSpec> = {
   all: {
     profiles: ["all", "extract"],
     summary: "The whole stack is up (Qdrant · Ollama · SearXNG · Firecrawl).",
+    ports: [
+      [6333, "Qdrant", "QDRANT"],
+      [11434, "Ollama", "OLLAMA"],
+      [8888, "SearXNG", "SEARXNG"],
+      [3002, "Firecrawl", "FIRECRAWL"],
+    ],
     postUp: (file, run) => STACKS.semantic!.postUp!(file, run),
   },
 };
@@ -539,6 +556,7 @@ function combine(names: string[]): StackSpec | null {
   return {
     profiles: [...new Set(found.flatMap((x) => x.profiles))],
     summary: found.map((x) => x.summary).join("\n  "),
+    ports: [...new Map(found.flatMap((x) => x.ports).map((p) => [p[0], p])).values()],
     postUp: (file, run) => found.flatMap((x) => x.postUp?.(file, run) ?? []),
   };
 }
@@ -636,7 +654,13 @@ export function stackControl(service: string | string[], action: string, deps: S
   const up = run("docker", ["compose", "-f", file, ...profiles, "up", "-d", "--wait"], { timeoutMs: UP_TIMEOUT_MS });
   if (!up.ok) {
     const why = up.timedOut ? ` — the services were not healthy within ${UP_TIMEOUT_MS / 1000}s` : "";
-    return { message: `${tag}: up failed${why}.${up.stderr ? `\n${up.stderr}` : ""}`, code: 1 };
+    // Docker's own words streamed above; what they leave out is what to do
+    // about a port another program holds — a desktop Ollama on 11434 is the
+    // usual one. That program can serve instead, through the engine's variable.
+    const taken = up.timedOut
+      ? ""
+      : `\n  a port already taken? ${spec.ports.map(([port, name, variable]) => `:${port} (${name}, ${envName(variable)})`).join(", ")} — stop what holds it, or point that variable at it and leave this service down.`;
+    return { message: `${tag}: up failed${why}.${taken}${up.stderr ? `\n${up.stderr}` : ""}`, code: 1 };
   }
 
   return { message: [`${tag}: ${spec.summary}`, ...(spec.postUp?.(file, run) ?? [])].join("\n"), code: 0 };
