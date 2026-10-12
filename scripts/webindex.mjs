@@ -6738,36 +6738,6 @@ var init_discovery = __esm({
   }
 });
 
-// src/browser/deps.ts
-import { spawn as nodeSpawn } from "child_process";
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from "fs/promises";
-function defaultBrowserDeps() {
-  return {
-    spawn: (cmd, args, opts) => nodeSpawn(cmd, args, opts),
-    fs: { readFile, writeFile, rename, mkdir, rm, stat, open },
-    now: () => Date.now(),
-    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-    connectCdp: (wsUrl) => CdpClient.connect(wsUrl),
-    discovery: discovery_exports,
-    detectBrowser: (kind) => detectBrowserBinary(kind ? { kind } : {}),
-    kill: (pid, signal) => void process.kill(pid, signal),
-    env: (name2) => env(name2),
-    platform: process.platform
-  };
-}
-function browserDeps(own) {
-  return { ...defaultBrowserDeps(), ...own };
-}
-var init_deps = __esm({
-  "src/browser/deps.ts"() {
-    "use strict";
-    init_brand();
-    init_cdp();
-    init_detect();
-    init_discovery();
-  }
-});
-
 // src/cli-kit.ts
 import { basename } from "path";
 function parseArgs(argv, spec) {
@@ -6895,46 +6865,12 @@ var init_cli_kit = __esm({
   }
 });
 
-// src/browser/extensions.ts
-import { existsSync as existsSync5, statSync as statSync3 } from "fs";
-import { isAbsolute as isAbsolute3, join as join14 } from "path";
-function extensionDirs(raw) {
-  const name2 = envName("BROWSER_EXTENSIONS");
-  return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean).map((dir) => {
-    if (!isAbsolute3(dir)) throw new UsageError(`${name2} takes absolute paths, not ${JSON.stringify(dir)}`);
-    let isDir = false;
-    try {
-      isDir = statSync3(dir).isDirectory();
-    } catch {
-    }
-    if (!isDir) throw new UsageError(`${name2}: no such directory: ${dir}`);
-    if (!existsSync5(join14(dir, "manifest.json"))) {
-      throw new UsageError(`${name2}: ${dir} has no manifest.json \u2014 name the unpacked extension's own folder, the one that holds manifest.json`);
-    }
-    return dir;
-  });
-}
-function extensionArgs(dirs) {
-  if (dirs.length === 0) return [];
-  const list = dirs.join(",");
-  return [`--load-extension=${list}`, `--disable-extensions-except=${list}`];
-}
-var unpackedIgnoredNote;
-var init_extensions = __esm({
-  "src/browser/extensions.ts"() {
-    "use strict";
-    init_brand();
-    init_cli_kit();
-    unpackedIgnoredNote = () => `Google Chrome \u2265 137 ignores unpacked extensions \u2014 use Brave (built-in ad/tracker blocking: ${envName("BROWSER_KIND")}=brave), Chromium or Chrome for Testing`;
-  }
-});
-
 // src/browser/profile.ts
-import { chmodSync, copyFileSync as copyFileSync2, existsSync as existsSync6, lstatSync, mkdirSync as mkdirSync3, readdirSync as readdirSync5, readFileSync as readFileSync12, realpathSync, rmSync as rmSync4, statSync as statSync4, writeFileSync as writeFileSync6 } from "fs";
+import { chmodSync, copyFileSync as copyFileSync2, existsSync as existsSync5, lstatSync, mkdirSync as mkdirSync3, readdirSync as readdirSync5, readFileSync as readFileSync12, realpathSync, rmSync as rmSync4, statSync as statSync3, writeFileSync as writeFileSync6 } from "fs";
 import { homedir as homedir2 } from "os";
-import { basename as basename2, join as join15, resolve as resolve3, sep } from "path";
+import { basename as basename2, join as join14, resolve as resolve3, sep } from "path";
 function browserHome() {
-  return env("BROWSER_DIR") ?? brand().browserDir ?? join15(homedir2(), `.${brand().name}`, "browser");
+  return env("BROWSER_DIR") ?? brand().browserDir ?? join14(homedir2(), `.${brand().name}`, "browser");
 }
 function checkName(name2) {
   if (!PROFILE_NAME.test(name2) || name2 === "." || name2 === "..") {
@@ -6943,10 +6879,10 @@ function checkName(name2) {
 }
 function profileDir(name2 = "default") {
   checkName(name2);
-  return join15(browserHome(), "profiles", name2);
+  return join14(browserHome(), "profiles", name2);
 }
 function profileKindFile(name2 = "default") {
-  return join15(profileDir(name2), `.${brand().name}-kind`);
+  return join14(profileDir(name2), `.${brand().name}-kind`);
 }
 function readProfileKind(name2 = "default") {
   try {
@@ -6983,7 +6919,7 @@ function realish(path) {
     return realpathSync(p);
   } catch {
     const parent = resolve3(p, "..");
-    return parent === p ? p : join15(realish(parent), basename2(p));
+    return parent === p ? p : join14(realish(parent), basename2(p));
   }
 }
 function assertInsideHome(path) {
@@ -6994,7 +6930,7 @@ function assertInsideHome(path) {
 }
 function resetProfile(name2 = "default") {
   const dir = profileDir(name2);
-  if (!existsSync6(dir)) return;
+  if (!existsSync5(dir)) return;
   assertInsideHome(dir);
   rmSync4(dir, { recursive: true, force: true });
 }
@@ -7007,38 +6943,38 @@ function userDataDir(source2, opts) {
   if (platform === "win32") {
     const local2 = opts.localAppData ?? process.env.LOCALAPPDATA;
     if (!local2) throw new Error("LOCALAPPDATA is not set, so the browser profile cannot be located");
-    return join15(local2, ...parts);
+    return join14(local2, ...parts);
   }
-  return join15(opts.homeDir ?? homedir2(), ...parts);
+  return join14(opts.homeDir ?? homedir2(), ...parts);
 }
 function copyTree(from, to, rel, tally) {
   ensurePrivateDir(to);
   for (const entry of readdirSync5(from, { withFileTypes: true })) {
     const childRel = rel ? `${rel}/${entry.name}` : entry.name;
     if (SKIP_NAMES.has(entry.name) || SKIP_PATHS.has(childRel)) continue;
-    const src = join15(from, entry.name);
-    const dst = join15(to, entry.name);
+    const src = join14(from, entry.name);
+    const dst = join14(to, entry.name);
     if (entry.isDirectory()) {
       copyTree(src, dst, childRel, tally);
     } else if (entry.isFile()) {
       copyFileSync2(src, dst);
       chmodSync(dst, 384);
       tally.files++;
-      tally.bytes += statSync4(dst).size;
+      tally.bytes += statSync3(dst).size;
     }
   }
 }
 function importProfile(source2, opts = {}) {
   const to = profileDir(opts.name ?? "default");
   const from = userDataDir(source2, opts);
-  if (!existsSync6(from)) throw new Error(`browser profile not found at ${from}`);
-  const hasState = existsSync6(join15(from, "Local State"));
-  const hasDefault = existsSync6(join15(from, "Default"));
+  if (!existsSync5(from)) throw new Error(`browser profile not found at ${from}`);
+  const hasState = existsSync5(join14(from, "Local State"));
+  const hasDefault = existsSync5(join14(from, "Default"));
   if (!hasState && !hasDefault) throw new Error(`${from} has no Local State or Default profile to import`);
   const lockNames = (opts.platform ?? process.platform) === "win32" ? ["SingletonLock", "lockfile"] : ["SingletonLock"];
   const locked = lockNames.some((n) => {
     try {
-      lstatSync(join15(from, n));
+      lstatSync(join14(from, n));
       return true;
     } catch (e) {
       if (e.code !== "ENOENT") throw e;
@@ -7048,7 +6984,7 @@ function importProfile(source2, opts = {}) {
   if (locked && !opts.force) {
     throw new Error(`the browser using ${from} appears to be running: close it, or pass force to import anyway`);
   }
-  if (existsSync6(to) && readdirSync5(to).length > 0) {
+  if (existsSync5(to) && readdirSync5(to).length > 0) {
     if (!opts.force) throw new Error(`${to} already holds a profile: pass force to replace it`);
     const a = realish(from);
     const b = realish(to);
@@ -7058,16 +6994,16 @@ function importProfile(source2, opts = {}) {
     assertInsideHome(to);
     rmSync4(to, { recursive: true, force: true });
   }
-  ensurePrivateDir(join15(browserHome(), "profiles"));
+  ensurePrivateDir(join14(browserHome(), "profiles"));
   const tally = { files: 0, bytes: 0 };
   ensurePrivateDir(to);
   if (hasState) {
-    copyFileSync2(join15(from, "Local State"), join15(to, "Local State"));
-    chmodSync(join15(to, "Local State"), 384);
+    copyFileSync2(join14(from, "Local State"), join14(to, "Local State"));
+    chmodSync(join14(to, "Local State"), 384);
     tally.files++;
-    tally.bytes += statSync4(join15(to, "Local State")).size;
+    tally.bytes += statSync3(join14(to, "Local State")).size;
   }
-  if (hasDefault) copyTree(join15(from, "Default"), join15(to, "Default"), "", tally);
+  if (hasDefault) copyTree(join14(from, "Default"), join14(to, "Default"), "", tally);
   const kind = String(source2);
   if (Object.hasOwn(USER_DATA[opts.platform ?? process.platform] ?? {}, kind) && isBrowserKind(kind)) writeProfileKind(opts.name ?? "default", kind);
   return { from, to, ...tally };
@@ -7122,8 +7058,8 @@ var init_profile = __esm({
 
 // src/browser/state.ts
 import { randomUUID as randomUUID2 } from "crypto";
-import { appendFileSync, closeSync, existsSync as existsSync7, linkSync, openSync, readFileSync as readFileSync13, renameSync as renameSync3, rmSync as rmSync5, statSync as statSync5, unlinkSync as unlinkSync2, writeSync } from "fs";
-import { join as join16 } from "path";
+import { appendFileSync, closeSync, existsSync as existsSync6, linkSync, openSync, readFileSync as readFileSync13, renameSync as renameSync3, rmSync as rmSync5, statSync as statSync4, unlinkSync as unlinkSync2, writeSync } from "fs";
+import { join as join15 } from "path";
 function checkTargetId(id) {
   if (!/^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(id)) throw new Error(`invalid target id: ${JSON.stringify(id)}`);
   return id;
@@ -7137,11 +7073,11 @@ function readJson2(path) {
 }
 function writeJson(dir, name2, value) {
   ensurePrivateDir(dir);
-  writeFileAtomic(join16(dir, name2), `${JSON.stringify(value)}
+  writeFileAtomic(join15(dir, name2), `${JSON.stringify(value)}
 `, FILE_MODE);
 }
 function readSession(o) {
-  const v = readJson2(join16(homeOf(o), "session.json"));
+  const v = readJson2(join15(homeOf(o), "session.json"));
   if (!isObj(v) || v.version !== 1 || typeof v.port !== "number" || typeof v.targetId !== "string") return null;
   return v;
 }
@@ -7151,23 +7087,23 @@ function writeSession(s, o) {
 }
 function clearSession(o) {
   if (isNoWrite()) return;
-  rmSync5(join16(homeOf(o), "session.json"), { force: true });
+  rmSync5(join15(homeOf(o), "session.json"), { force: true });
 }
 function readRefs(targetId, o) {
-  const v = readJson2(join16(homeOf(o), "refs", `${checkTargetId(targetId)}.json`));
+  const v = readJson2(join15(homeOf(o), "refs", `${checkTargetId(targetId)}.json`));
   if (!isObj(v) || typeof v.loaderId !== "string" || typeof v.url !== "string" || typeof v.next !== "number" || !isObj(v.refs)) return null;
   return v;
 }
 function writeRefs(targetId, table, o) {
   const id = checkTargetId(targetId);
   if (isNoWrite()) return;
-  writeJson(join16(homeOf(o), "refs"), `${id}.json`, table);
+  writeJson(join15(homeOf(o), "refs"), `${id}.json`, table);
 }
 function clearRefs(targetId, o) {
   const id = targetId === void 0 ? void 0 : checkTargetId(targetId);
   if (isNoWrite()) return;
-  const dir = join16(homeOf(o), "refs");
-  rmSync5(id === void 0 ? dir : join16(dir, `${id}.json`), { recursive: true, force: true });
+  const dir = join15(homeOf(o), "refs");
+  rmSync5(id === void 0 ? dir : join15(dir, `${id}.json`), { recursive: true, force: true });
 }
 function readNetwork(targetId, o) {
   let raw;
@@ -7190,9 +7126,9 @@ function readNetwork(targetId, o) {
 function appendNetwork(targetId, entries, o) {
   const file = networkFile(targetId, o);
   if (isNoWrite() || entries.length === 0) return;
-  ensurePrivateDir(join16(homeOf(o), "network"));
+  ensurePrivateDir(join15(homeOf(o), "network"));
   const lines = entries.map((e) => JSON.stringify(e));
-  const existing = existsSync7(file) ? readFileSync13(file, "utf8").split("\n").filter(Boolean) : [];
+  const existing = existsSync6(file) ? readFileSync13(file, "utf8").split("\n").filter(Boolean) : [];
   if (existing.length + lines.length <= NETWORK_CAP) {
     appendFileSync(file, `${lines.join("\n")}
 `, { mode: FILE_MODE });
@@ -7203,7 +7139,7 @@ function appendNetwork(targetId, entries, o) {
 `, FILE_MODE);
 }
 function clearNetwork(targetId, o) {
-  const path = targetId === void 0 ? join16(homeOf(o), "network") : networkFile(targetId, o);
+  const path = targetId === void 0 ? join15(homeOf(o), "network") : networkFile(targetId, o);
   if (isNoWrite()) return;
   rmSync5(path, { recursive: true, force: true });
 }
@@ -7238,7 +7174,7 @@ function staleReason(path, raw, staleMs, now) {
   }
   if (Number.isNaN(at)) {
     try {
-      at = statSync5(path).mtimeMs;
+      at = statSync4(path).mtimeMs;
     } catch {
       return "gone";
     }
@@ -7280,7 +7216,7 @@ async function withBrowserLock(fn, opts = {}) {
   const { now, sleep: sleep2 } = opts.deps ?? realDeps;
   const dir = homeOf(opts);
   ensurePrivateDir(dir);
-  const path = join16(dir, "lock");
+  const path = join15(dir, "lock");
   const token = randomUUID2();
   const stamp = () => JSON.stringify({ pid: process.pid, at: now(), token });
   const deadline = now() + waitMs;
@@ -7335,11 +7271,77 @@ var init_state = __esm({
     FILE_MODE = 384;
     homeOf = (o) => o?.home ?? browserHome();
     isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-    networkFile = (targetId, o) => join16(homeOf(o), "network", `${checkTargetId(targetId)}.jsonl`);
+    networkFile = (targetId, o) => join15(homeOf(o), "network", `${checkTargetId(targetId)}.jsonl`);
     realDeps = {
       now: () => Date.now(),
       sleep: (ms) => new Promise((r) => setTimeout(r, ms))
     };
+  }
+});
+
+// src/browser/deps.ts
+import { spawn as nodeSpawn } from "child_process";
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from "fs/promises";
+function defaultBrowserDeps() {
+  return {
+    spawn: (cmd, args, opts) => nodeSpawn(cmd, args, opts),
+    fs: { readFile, writeFile, rename, mkdir, rm, stat, open },
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    connectCdp: (wsUrl) => CdpClient.connect(wsUrl),
+    discovery: discovery_exports,
+    detectBrowser: (kind) => detectBrowserBinary(kind ? { kind } : {}),
+    kill: (pid, signal) => void process.kill(pid, signal),
+    alive: pidAlive,
+    env: (name2) => env(name2),
+    platform: process.platform
+  };
+}
+function browserDeps(own) {
+  return { ...defaultBrowserDeps(), ...own };
+}
+var init_deps = __esm({
+  "src/browser/deps.ts"() {
+    "use strict";
+    init_brand();
+    init_cdp();
+    init_detect();
+    init_discovery();
+    init_state();
+  }
+});
+
+// src/browser/extensions.ts
+import { existsSync as existsSync7, statSync as statSync5 } from "fs";
+import { isAbsolute as isAbsolute3, join as join16 } from "path";
+function extensionDirs(raw) {
+  const name2 = envName("BROWSER_EXTENSIONS");
+  return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean).map((dir) => {
+    if (!isAbsolute3(dir)) throw new UsageError(`${name2} takes absolute paths, not ${JSON.stringify(dir)}`);
+    let isDir = false;
+    try {
+      isDir = statSync5(dir).isDirectory();
+    } catch {
+    }
+    if (!isDir) throw new UsageError(`${name2}: no such directory: ${dir}`);
+    if (!existsSync7(join16(dir, "manifest.json"))) {
+      throw new UsageError(`${name2}: ${dir} has no manifest.json \u2014 name the unpacked extension's own folder, the one that holds manifest.json`);
+    }
+    return dir;
+  });
+}
+function extensionArgs(dirs) {
+  if (dirs.length === 0) return [];
+  const list = dirs.join(",");
+  return [`--load-extension=${list}`, `--disable-extensions-except=${list}`];
+}
+var unpackedIgnoredNote;
+var init_extensions = __esm({
+  "src/browser/extensions.ts"() {
+    "use strict";
+    init_brand();
+    init_cli_kit();
+    unpackedIgnoredNote = () => `Google Chrome \u2265 137 ignores unpacked extensions \u2014 use Brave (built-in ad/tracker blocking: ${envName("BROWSER_KIND")}=brave), Chromium or Chrome for Testing`;
   }
 });
 
@@ -7998,6 +8000,24 @@ async function closeAt(deps, port, host, pid) {
     await cdp.close();
   }
 }
+async function awaitExit(deps, pid) {
+  const start = deps.now();
+  let termed = false;
+  while (deps.alive(pid)) {
+    const elapsed = deps.now() - start;
+    if (elapsed >= BROWSER_EXIT_TIMEOUT_MS) return false;
+    if (!termed && elapsed >= BROWSER_EXIT_TIMEOUT_MS / 2) {
+      termed = true;
+      try {
+        deps.kill(pid, "SIGTERM");
+      } catch (e) {
+        if (deps.alive(pid)) throw e;
+      }
+    }
+    await deps.sleep(Math.min(EXIT_POLL_MS, BROWSER_EXIT_TIMEOUT_MS - elapsed));
+  }
+  return true;
+}
 async function closeBrowser(opts = {}) {
   const deps = browserDeps(opts.deps);
   const saved = readSession();
@@ -8005,9 +8025,11 @@ async function closeBrowser(opts = {}) {
   const live = !saved ? false : saved.wsBrowserUrl ? await isSameBrowser(deps, saved.port, host, saved.wsBrowserUrl) : !saved.launchedByUs && await deps.discovery.isPortAlive(saved.port, host);
   let closed = false;
   let launchedByUs = saved?.launchedByUs ?? false;
+  let note;
   if (saved?.launchedByUs && live) {
     await closeAt(deps, saved.port, host, saved.pid);
     closed = true;
+    if (saved.pid !== void 0 && !await awaitExit(deps, saved.pid)) note = exitNote(saved.pid);
   } else if (!live) {
     const own = await readActivePort(deps, join18(profileDir(opts.profile ?? saved?.profile), "DevToolsActivePort"));
     if (own && await isSameBrowser(deps, own.port, "127.0.0.1", own.path)) {
@@ -8016,7 +8038,7 @@ async function closeBrowser(opts = {}) {
     }
   }
   forget(saved ? [saved.targetId, ...Object.values(cleanTabs(saved.tabs))] : [], opts.all);
-  return { closed, launchedByUs };
+  return { closed, launchedByUs, ...note ? { note } : {} };
 }
 async function withPage(opts, fn) {
   const deps = browserDeps(opts.deps);
@@ -8034,7 +8056,7 @@ async function withPage(opts, fn) {
     { deps }
   );
 }
-var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, STATUS_TIMEOUT_MS, ATTACH_TIMEOUT_MS, TAB_ID, LIFECYCLE, NavigationTimeoutError, committedIn, stillLoading, sameTabs, tabNumber, BrowserSession;
+var NAVIGATION_TIMEOUT_MS, BROWSER_CLOSE_TIMEOUT_MS, BROWSER_EXIT_TIMEOUT_MS, EXIT_POLL_MS, STATUS_TIMEOUT_MS, ATTACH_TIMEOUT_MS, TAB_ID, LIFECYCLE, NavigationTimeoutError, committedIn, stillLoading, sameTabs, tabNumber, BrowserSession, exitNote;
 var init_session = __esm({
   "src/browser/session.ts"() {
     "use strict";
@@ -8048,6 +8070,8 @@ var init_session = __esm({
     init_state();
     NAVIGATION_TIMEOUT_MS = 3e4;
     BROWSER_CLOSE_TIMEOUT_MS = 5e3;
+    BROWSER_EXIT_TIMEOUT_MS = 5e3;
+    EXIT_POLL_MS = 100;
     STATUS_TIMEOUT_MS = 2e3;
     ATTACH_TIMEOUT_MS = 5e3;
     TAB_ID = /^t([1-9]\d*)$/;
@@ -8444,6 +8468,7 @@ var init_session = __esm({
         };
       }
     };
+    exitNote = (pid) => `the browser (pid ${pid}) was still running ${BROWSER_EXIT_TIMEOUT_MS} ms after it was told to quit: let it exit before you remove its profile or launch it again`;
   }
 });
 
@@ -8664,8 +8689,13 @@ async function armSettle(session, opts = {}) {
           if (committedElsewhere || docLoading) return await evaluate(page, "document.readyState") === "complete";
           return true;
         };
-        while (now() < deadline && !await loaded()) await step();
+        let isLoaded = await loaded();
+        while (!isLoaded && now() < deadline) {
+          await step();
+          isLoaded = await loaded();
+        }
         const navigated = sawNavigation() || committedElsewhere;
+        const stillLoading2 = !isLoaded && (committedElsewhere || mainId !== void 0 && committed.has(mainId));
         let quietSince = navigated || docLoading ? void 0 : start;
         while (now() < deadline) {
           if (net.count() > SETTLE_MAX_INFLIGHT) quietSince = void 0;
@@ -8673,7 +8703,7 @@ async function armSettle(session, opts = {}) {
           if (quietSince !== void 0 && now() - quietSince >= SETTLE_QUIET_MS) break;
           await step();
         }
-        return { navigated, waitedMs: now() - start };
+        return { navigated, waitedMs: now() - start, ...stillLoading2 ? { stillLoading: true } : {} };
       } finally {
         stop();
       }
@@ -8684,7 +8714,19 @@ async function armSettle(session, opts = {}) {
 async function settle(session, opts = {}) {
   return (await armSettle(session, opts)).done();
 }
-var WaitTimeoutError, WaitCancelledError, POLL_MS2, DEFAULT_TIMEOUT_MS3, CLEAR_TIMEOUT_MS, EVAL_TIMEOUT_MS, IDLE_MS, SETTLE_NAV_WINDOW_MS, SETTLE_STEP_MS, SETTLE_QUIET_MS, SETTLE_MAX_INFLIGHT, SETTLE_TIMEOUT_MS, KEYS;
+async function awaitParsed(session, opts = {}) {
+  const { now, sleep: sleep2 } = browserDeps(opts.deps);
+  const timeoutMs = opts.timeoutMs ?? PARSE_TIMEOUT_MS;
+  const start = now();
+  for (; ; ) {
+    const ready = await evaluate(session.page, "document.readyState");
+    const elapsed = now() - start;
+    if (ready !== "loading") return { stillLoading: false, waitedMs: elapsed };
+    if (elapsed >= timeoutMs) return { stillLoading: true, waitedMs: elapsed };
+    await sleep2(Math.min(PARSE_POLL_MS, timeoutMs - elapsed));
+  }
+}
+var WaitTimeoutError, WaitCancelledError, POLL_MS2, DEFAULT_TIMEOUT_MS3, CLEAR_TIMEOUT_MS, EVAL_TIMEOUT_MS, IDLE_MS, SETTLE_NAV_WINDOW_MS, SETTLE_STEP_MS, SETTLE_QUIET_MS, SETTLE_MAX_INFLIGHT, SETTLE_TIMEOUT_MS, KEYS, PARSE_TIMEOUT_MS, PARSE_POLL_MS;
 var init_wait = __esm({
   "src/browser/wait.ts"() {
     "use strict";
@@ -8718,6 +8760,8 @@ var init_wait = __esm({
     SETTLE_MAX_INFLIGHT = 2;
     SETTLE_TIMEOUT_MS = 5e3;
     KEYS = ["text", "gone", "selector", "url", "load", "idle", "ms", "clear"];
+    PARSE_TIMEOUT_MS = 3e3;
+    PARSE_POLL_MS = 100;
   }
 });
 
@@ -9309,7 +9353,10 @@ function htmlToText(html, opts = {}) {
   let s = dropElements(html.includes(NUL2) ? html.split(NUL2).join("\uFFFD") : html, hidden, RAW_TEXT_ELEMENTS);
   if (!opts.fullPage) s = dropLanguageSelectors(dropLandmarks(s, CHROME_ROLES));
   const pre = [];
-  s = flattenHeadings(setAsidePre(s, pre));
+  s = setAsidePre(s, pre).replace(/[\r\n]+/g, " ").replace(PRE_SLOT_INLINE, (slot) => `
+${slot}
+`);
+  s = flattenHeadings(s);
   let prevAEnd = -1;
   s = s.replace(TAG_RE, (tag, at) => {
     const closing = tag[1] === "/";
@@ -9768,7 +9815,7 @@ function metaDescriptionOf(html) {
   }
   return og;
 }
-var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, CLOSES_P, isLinkList, MIN_PROSE, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP;
+var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, PRE_SLOT_INLINE, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, CLOSES_P, isLinkList, MIN_PROSE, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP;
 var init_fetch = __esm({
   "src/fetch.ts"() {
     "use strict";
@@ -9800,6 +9847,7 @@ var init_fetch = __esm({
     PRE_SLOT = (i) => `
 ${NUL2}${i}${NUL2}
 `;
+    PRE_SLOT_INLINE = new RegExp(`${NUL2}\\d+${NUL2}`, "g");
     HEADING_OPEN = /<h([1-6])(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
     HEADING_BOUNDARY = /<\/h[1-6]\s*>|<h[1-6](?=[\s/>])/gi;
     PERMALINK = /<a\b[^<>]*>\s*(?:(?:¶|#|§|🔗|&para;|&#182;|&#x[bB]6;|&sect;)\s*)?<\/a\s*>/gi;
@@ -10790,10 +10838,17 @@ async function perform(session, opts, act) {
         const url2 = dialogs.url();
         return { navigated: false, dialog: dialogs.seen(), ...url2 !== void 0 ? { dialogUrl: url2 } : {} };
       }
-      const { navigated } = await armed.done();
+      const settled = await armed.done();
       const dialog = dialogs.seen();
       const url = dialogs.url();
-      return { navigated, ...dialog ? { dialog } : {}, ...url !== void 0 ? { dialogUrl: url } : {}, value: first.value };
+      return {
+        navigated: settled.navigated,
+        ...dialog ? { dialog } : {},
+        ...url !== void 0 ? { dialogUrl: url } : {},
+        value: first.value,
+        // A slow, streaming page outlasts the settle: said here, or the next read meets an empty body unwarned.
+        ...settled.stillLoading ? { note: stillLoading(settled.waitedMs) } : {}
+      };
     } finally {
       stopped = true;
       armed.cancel();
@@ -11197,6 +11252,7 @@ var init_actions = __esm({
     init_keys();
     init_overlay();
     init_risk();
+    init_session();
     init_snapshot();
     init_state();
     init_wait();
@@ -11731,6 +11787,17 @@ function onPage(ctx, fn, extra = {}) {
     }
   });
 }
+async function whenParsed(ctx, read3) {
+  return onPage(ctx, async (s) => {
+    const doc = await awaitParsed(s, ctx.deps.browser ? { deps: ctx.deps.browser } : {});
+    const value = await read3(s);
+    if (!doc.stillLoading) return { value };
+    return {
+      value,
+      note: `the page was still loading after ${doc.waitedMs} ms, so this is only what it held so far \u2014 ${follow(ctx).waitLoad}, then look again`
+    };
+  });
+}
 async function afterSnapshot(ctx, s) {
   if (!ctx.flags.snapshot) return {};
   const { selector } = ctx.flags;
@@ -11840,7 +11907,8 @@ var init_cli = __esm({
       waitClear: `\`${cliName()} browser wait --clear\``,
       networkList: `\`${cliName()} browser network list\``,
       capture: `\`${cliName()} browser open <url> --capture\`, or --capture on an action`,
-      textMore: "raise --max-chars, or read one element (a ref or --selector)"
+      textMore: "raise --max-chars, or read one element (a ref or --selector)",
+      waitLoad: `\`${cliName()} browser wait --load\``
     });
     USAGE = {
       open: "open <url> [--new-tab] [--headless] [--profile <n>] [--browser-kind chrome|brave|chromium|edge] [--capture] [--snapshot] [--timeout <ms>]",
@@ -11964,15 +12032,21 @@ var init_cli = __esm({
           ...ctx.deps.browser ? { deps: ctx.deps.browser } : {}
         });
         const text = r.closed ? "closed the browser" : had && !had.launchedByUs ? `forgot the browser on port ${had.port}; it is not ours, so it was left running` : "no browser to close";
-        return { json: r, text };
+        return { json: r, text: r.note ? `${text}
+note: ${r.note}` : text };
       },
       async snapshot(ctx) {
         arity(ctx, 0, 1);
         const { selector } = ctx.flags;
         if (ctx.args[0] !== void 0 && selector !== void 0) throw new UsageError("a snapshot is scoped to a ref or to a selector, not both");
         if (ctx.args[0] !== void 0) refArg(ctx);
-        const r = await onPage(ctx, (s) => takeSnapshot(s, { ...snapOpts(ctx, ctx.args[0]), ...selector !== void 0 ? { selector } : {} }));
-        return { json: r, text: r.text };
+        const { value: r, note } = await whenParsed(
+          ctx,
+          (s) => takeSnapshot(s, { ...snapOpts(ctx, ctx.args[0]), ...selector !== void 0 ? { selector } : {} })
+        );
+        if (!note) return { json: r, text: r.text };
+        const lines = r.text.split("\n");
+        return { json: { ...r, note }, text: [...lines.slice(0, 2), `note: ${note}`, ...lines.slice(2)].join("\n") };
       },
       async text(ctx) {
         arity(ctx, 0, 1);
@@ -11981,7 +12055,7 @@ var init_cli = __esm({
         if (ref2 !== void 0 && selector !== void 0) throw new UsageError("text reads the element a ref or a selector names, not both");
         if (ref2 !== void 0) refArg(ctx);
         const max = ctx.flags.maxChars ?? TEXT_MAX_CHARS;
-        const r = await onPage(
+        const { value: r, note } = await whenParsed(
           ctx,
           (s) => readPageText(s, {
             ...ref2 !== void 0 ? { ref: ref2 } : {},
@@ -11991,10 +12065,10 @@ var init_cli = __esm({
           })
         );
         const element2 = ref2 !== void 0 || selector !== void 0;
-        const body = r.text ? r.text : element2 ? "(no text in this element)" : "(no readable text on this page: take a snapshot, or read one element with a ref or a selector)";
-        const lines = [`url: ${r.url}`, `title: ${r.title}`, "", body];
+        const body = r.text ? r.text : element2 ? "(no text in this element)" : note ? "(no readable text yet: the page is still loading)" : "(no readable text on this page: take a snapshot, or read one element with a ref or a selector)";
+        const lines = [`url: ${r.url}`, `title: ${r.title}`, ...note ? [`note: ${note}`] : [], "", body];
         if (r.truncated) lines.push(`\u2026 [truncated at ${max} of ${r.chars} characters: ${follow(ctx).textMore}]`);
-        return { json: r, text: lines.join("\n") };
+        return { json: note ? { ...r, note } : r, text: lines.join("\n") };
       },
       async click(ctx) {
         arity(ctx, 1);
@@ -17442,7 +17516,8 @@ var FOLLOW_UPS = {
   waitClear: "webindex_browser_wait with condition clear",
   networkList: "webindex_browser_network with action list",
   capture: "webindex_browser_open with capture: true",
-  textMore: "raise maxChars, or read one element (scope element with a ref or a selector)"
+  textMore: "raise maxChars, or read one element (scope element with a ref or a selector)",
+  waitLoad: "webindex_browser_wait with condition load"
 };
 var DIALOG_SAFE = /* @__PURE__ */ new Set(["dialog", "status", "close", "network", "tabs"]);
 var READS = { readOnlyHint: true, destructiveHint: false, idempotentHint: true };
