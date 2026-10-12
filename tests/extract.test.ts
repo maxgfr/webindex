@@ -432,6 +432,26 @@ describe("pdfToText (dependency-free, best-effort)", () => {
   });
 });
 
+describe("htmlToText: a newline in the source is whitespace", () => {
+  // The Rust book hard-wraps its paragraphs in the HTML: every read came back
+  // in fragments ("…keep these rules in mind as we" / "work through…"), and
+  // anything scoring lines against a question scored half-sentences.
+  it("joins a paragraph wrapped in its source, as a browser renders it", () => {
+    expect(htmlToText("<main><p>Keep these rules in mind as we\nwork through the\r\nexamples.</p><p>Next.</p></main>")).toBe(
+      "Keep these rules in mind as we work through the examples.\nNext.",
+    );
+  });
+  it("still breaks lines at block tags and <br>, and keeps <pre> as written", () => {
+    const text = htmlToText(
+      "<main><h2>Rules\nof ownership</h2><p>one<br>two</p><ul><li>a\nb</li><li>c</li></ul><pre>fn main() {\n    x\n}</pre><p>after</p></main>",
+    );
+    expect(text).toBe("## Rules of ownership\none\ntwo\na b\nc\nfn main() {\n    x\n}\nafter");
+  });
+  it("keeps a <pre> inside a heading on the heading's line", () => {
+    expect(htmlToText("<main><h3>Use <pre>x\ny</pre> here</h3><p>body</p></main>")).toBe("### Use x y here\nbody");
+  });
+});
+
 describe("dropElements on self-closing foreign elements", () => {
   it("drops only the tag of a self-closing <svg/>, keeping the prose after it", () => {
     const text = htmlToText("<main><p>A <svg/> B</p><p>C</p><p><svg><path d='x'/></svg> D</p></main>");

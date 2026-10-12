@@ -713,6 +713,9 @@ export function cleanInline(s: string): string {
 // first turns the page's own NULs into U+FFFD, as a browser does.
 const NUL = "\u0000";
 const PRE_SLOT = (i: number) => `\n${NUL}${i}${NUL}\n`;
+// A slot once the newlines around it are gone. NUL appears nowhere else: the
+// page's own are replaced before anything is set aside.
+const PRE_SLOT_INLINE = new RegExp(`${NUL}\\d+${NUL}`, "g");
 function preSlotIndex(line: string): number | undefined {
   if (line.length < 3 || line[0] !== NUL || line[line.length - 1] !== NUL) return undefined;
   const i = Number(line.slice(1, -1));
@@ -808,7 +811,15 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
   // of contents, a docs theme's prev/next bar.
   if (!opts.fullPage) s = dropLanguageSelectors(dropLandmarks(s, CHROME_ROLES));
   const pre: string[] = [];
-  s = flattenHeadings(setAsidePre(s, pre));
+  // A newline in the source is whitespace, as a browser renders it: only block
+  // tags break a line. Kept, a paragraph hard-wrapped in its HTML (the Rust
+  // book's) came out in fragments, and every line-based reader after this —
+  // snippets, excerpts, the consent filter — saw half-sentences. The <pre>
+  // blocks are already set aside, and their slots get their own lines back.
+  s = setAsidePre(s, pre)
+    .replace(/[\r\n]+/g, " ")
+    .replace(PRE_SLOT_INLINE, (slot) => `\n${slot}\n`);
+  s = flattenHeadings(s);
   let prevAEnd = -1; // where the last `</a>` ended
   s = s.replace(TAG_RE, (tag: string, at: number) => {
     const closing = tag[1] === "/";
@@ -1941,35 +1952,83 @@ export function metaDescriptionOf(html: string): string | undefined {
   return og;
 }
 
-// Query-focused, multi-sentence snippet (the lead a caller shows beside a
-// DOSSIER.md). Splits the page text into sentences, scores each by how many of
-// the question's keywords it covers, and stitches together the top few (in
-// document order) under their nearest heading — so the agent reads the most
-// on-point passage rather than a single best line. Falls back to the opening
-// sentences when nothing matches.
+// A sentence ends on its punctuation, perhaps before a closing quote or
+// bracket and a citation mark ("…readability.[37]"); a cell or a label does not.
+const PROSE_END = /[.!?…:;]["'”’»)\]]*(?:\[[^\]\s]{1,12}\])*$/;
+
+// Query-focused snippet (the lead a caller shows beside a DOSSIER.md): the
+// passage of the page that best answers the question, under its heading.
+//
+// A passage is up to `maxSentences` consecutive sentences of one section. It
+// scores each question term it holds once, weighted by how rare the term is on
+// THIS page — the subject every sentence names (Node.js on Node's docs, Victor
+// Hugo on his article) weighs next to nothing, the term the question is really
+// about weighs most — and its section heading's terms once more, whether its
+// sentences repeat them or not: a heading names what the lines under it are
+// about ("Added in: v17.3.0" under `AbortSignal.timeout(delay)`), where an
+// intro sentence that mentions the same words only passes by them. Picking
+// the best single sentences instead
+// stitched fragments from three sections and missed the line that answers.
+// Falls back to the opening sentences when nothing matches.
 export function focusedSnippet(text: string, question: string, opts: { maxChars?: number; maxSentences?: number } = {}): string {
   const maxChars = opts.maxChars ?? 360;
-  const maxSentences = opts.maxSentences ?? 3;
+  const maxSentences = Math.max(1, opts.maxSentences ?? 3);
   const lines = text.split("\n");
   const matcher = buildMatcher(question);
-  const sentences: { text: string; line: number; score: number }[] = [];
+  const sentences: { text: string; line: number; section: number; terms: ReadonlySet<string>; prose: boolean }[] = [];
+  const headingTerms: ReadonlySet<string>[] = [new Set()];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    if (/^#{1,6}\s/.test(line)) continue; // headings handled separately
+    if (/^#{1,6}\s/.test(line)) {
+      headingTerms.push(matcher.matchLine(line));
+      continue;
+    }
     for (const raw of line.split(/(?<=[.!?])\s+/)) {
       const t = raw.trim();
       if (t.length < 20) continue; // skip nav crumbs / fragments
-      sentences.push({ text: t, line: i, score: matcher.matchLine(t).size });
+      sentences.push({ text: t, line: i, section: headingTerms.length - 1, terms: matcher.matchLine(t), prose: PROSE_END.test(t) });
     }
   }
   if (!sentences.length) return lines.slice(0, 4).join(" ").slice(0, maxChars).trim();
-  const hits = sentences.filter((s) => s.score > 0);
-  const chosen = (hits.length ? hits : sentences)
-    .map((s, idx) => ({ s, idx }))
-    .sort((a, b) => b.s.score - a.s.score || a.idx - b.idx)
-    .slice(0, maxSentences)
-    .sort((a, b) => a.idx - b.idx)
-    .map((x) => x.s);
+
+  // How rare each term is here: an inverse document frequency over the sentences.
+  const df = new Map<string, number>();
+  for (const s of sentences) for (const t of s.terms) df.set(t, (df.get(t) ?? 0) + 1);
+  const weight = (t: string) => Math.log(1 + sentences.length / (df.get(t) ?? 0.5));
+
+  let best: { start: number; end: number; score: number; prose: number } | undefined;
+  for (let start = 0; start < sentences.length; start++) {
+    // A passage opens on a sentence that matches: one that opens on filler
+    // spends the budget on it.
+    if (!sentences[start]!.terms.size) continue;
+    const section = sentences[start]!.section;
+    // Terms some sentence of the passage holds, and those a prose one does.
+    const held = new Set<string>();
+    const inProse = new Set<string>();
+    let prose = 0;
+    let chars = 0;
+    for (let end = start; end < sentences.length && end - start < maxSentences; end++) {
+      const s = sentences[end]!;
+      if (s.section !== section || (end > start && chars + s.text.length > maxChars)) break;
+      chars += s.text.length + 1;
+      for (const t of s.terms) {
+        held.add(t);
+        if (s.prose) inProse.add(t);
+      }
+      let score = 0;
+      // A term only a fragment holds — an infobox cell, a table row, a nav
+      // label — counts half: the same words in a sentence say something.
+      for (const t of held) score += inProse.has(t) ? weight(t) : weight(t) / 2;
+      for (const t of headingTerms[section]!) score += weight(t);
+      if (s.prose) prose++;
+      // An equal score goes to the passage with more sentences in it (the lead,
+      // not the infobox above it), then to the earlier, shorter one.
+      if (!best || score > best.score + 1e-9 || (Math.abs(score - best.score) <= 1e-9 && prose > best.prose)) best = { start, end, score, prose };
+    }
+  }
+  const { start, end } = best ?? { start: 0, end: Math.min(sentences.length, maxSentences) - 1 };
+  const seen = new Set<string>();
+  const chosen = sentences.slice(start, end + 1).filter((s) => !seen.has(s.text) && seen.add(s.text));
   const heading = nearestHeading(lines, chosen[0]!.line);
   let out = chosen.map((s) => s.text).join(" ");
   if (heading && !out.startsWith(heading)) out = `${heading} — ${out}`;
