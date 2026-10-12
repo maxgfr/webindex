@@ -258,8 +258,14 @@ describe("extraction on realistic pages", () => {
   });
 
   it.each([
-    ["closes with no opener, under many open lists", `${'<a hreflang="a">a</a><a hreflang="b">b</a><a hreflang="c">c</a>'}${"<ul>".repeat(60_000)}${"</div>".repeat(60_000)}`],
-    ["a selector nested in 40 000 others", `${"<div>".repeat(40_000)}<a hreflang="a">a</a><a hreflang="b">b</a><a hreflang="c">c</a>${"</div>".repeat(40_000)}`],
+    [
+      "closes with no opener, under many open lists",
+      `${'<a hreflang="a">a</a><a hreflang="b">b</a><a hreflang="c">c</a>'}${"<ul>".repeat(60_000)}${"</div>".repeat(60_000)}`,
+    ],
+    [
+      "a selector nested in 40 000 others",
+      `${"<div>".repeat(40_000)}<a hreflang="a">a</a><a hreflang="b">b</a><a hreflang="c">c</a>${"</div>".repeat(40_000)}`,
+    ],
   ])("finds language selectors in linear time: %s", (_label, html) => {
     const started = performance.now();
     htmlToText(html);
