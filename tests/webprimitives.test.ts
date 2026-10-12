@@ -1140,6 +1140,21 @@ describe("the remaining edges", () => {
     expect(f.items[0]!.url).toBe("https://ex.test/only");
   });
 
+  // Namespaces bind by URI, not by prefix: `atom:feed` is the same Atom feed,
+  // and read with bare names it parsed as empty.
+  it("reads an Atom feed whose elements carry a prefix", () => {
+    const f = parseFeed(
+      '<atom:feed xmlns:atom="http://www.w3.org/2005/Atom"><atom:title>Blog</atom:title>' +
+        '<atom:entry><atom:title>E</atom:title><atom:link href="/p/1"/><atom:id>urn:1</atom:id><atom:updated>2026-01-01</atom:updated><atom:summary>S</atom:summary></atom:entry></atom:feed>',
+      "https://ex.test/",
+    )!;
+    expect(f).toEqual({
+      kind: "atom",
+      title: "Blog",
+      items: [{ title: "E", url: "https://ex.test/p/1", id: "urn:1", published: "2026-01-01", summary: "S" }],
+    });
+  });
+
   it("ignores an advertised feed whose href cannot be resolved", () => {
     expect(discoverFeeds('<link rel="alternate" type="application/rss+xml" href="::::">', "not a base")).toEqual([]);
     expect(discoverFeeds('<link rel="alternate" type="application/rss+xml">', "https://ex.test/")).toEqual([]);

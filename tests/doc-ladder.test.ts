@@ -114,6 +114,11 @@ describe("extractDocument", () => {
     });
     expect(r.text).toBe("");
     expect(r.reason).toBeDefined();
+    // Live, a .docx Firecrawl could not read was reported as an "undecodable PDF stream".
+    const control = "\u0001\u0002\u0003\u0004".repeat(200);
+    const docxRead = await extractDocument(BYTES, BINARY, { engines: ["firecrawl"], firecrawl: async () => control });
+    expect(docxRead.reason).toMatch(/binary\/control characters/);
+    expect(docxRead.reason).not.toMatch(/PDF/);
   });
 
   it("reports an empty conversion as a reason instead of an empty success", async () => {

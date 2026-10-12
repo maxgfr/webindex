@@ -138,18 +138,20 @@ export function assessPdfText(text: string): PdfVerdict {
  * Judge extracted text. Returns `{ ok: true }` when the text is safe to cite,
  * else a short reason the caller can put in a dossier note. `emptyReason` names
  * what an empty extraction means for the format at hand — a PDF with no text
- * layer was probably scanned, an empty .docx conversion means something else.
+ * layer was probably scanned, an empty .docx conversion means something else —
+ * and `undecodable` what binary output does: a PDF stream left encoded, or an
+ * office converter handing back the file itself.
  *
  * Deliberately independent of length: the failure this guards against produces
  * HUNDREDS of kilobytes, which is exactly what a length-gated check misses.
  */
-export function assessExtractedText(text: string, emptyReason: string): PdfVerdict {
+export function assessExtractedText(text: string, emptyReason: string, undecodable = "undecodable PDF stream"): PdfVerdict {
   const t = text.trim();
   if (!t) return { ok: false, reason: emptyReason };
 
   const shape = scanShape(t);
   if (shape.control > CONTROL_RATIO_MAX) {
-    return { ok: false, reason: "binary/control characters in the text (undecodable PDF stream)" };
+    return { ok: false, reason: `binary/control characters in the text (${undecodable})` };
   }
   if (shape.replacement > REPLACEMENT_RATIO_MAX) {
     return { ok: false, reason: "replacement characters throughout (wrong character map)" };

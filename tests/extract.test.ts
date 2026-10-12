@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import { extractFromHtml, extractMainHtml, htmlToText, looksLikeJunkExtraction, stripConsentBoilerplate } from "../src/fetch.js";
+import { htmlToMarkdown } from "../src/markdown.js";
 import { pdfToText } from "../src/pdf.js";
 import { excerptWindows } from "../src/text.js";
 
@@ -224,6 +225,38 @@ describe("extraction on realistic pages", () => {
     expect(text).not.toMatch(/Most read|Ten things we learned|Riverside Sports 2026/);
   });
 
+  // Vector 2022 puts its language dropdown inside <main>, between the <h1>
+  // and the article: every read of en/fr.wikipedia.org opened with
+  // "163 languages" and the 163 links.
+  it("MediaWiki language selector: dropped, label and edit link included, the article kept", () => {
+    const text = extract("wiki-langs");
+    expect(text).toMatch(/^# Alan Turing\n/);
+    expect(text).toContain("Alan Mathison Turing");
+    expect(text).toContain("Bletchley Park");
+    expect(text).not.toMatch(/163 languages|Адыгабзэ|Afrikaans|Alemannisch|Edit links/);
+    // An hreflang link in a sentence is prose, not a selector.
+    expect(text).toContain("on the German Wikipedia");
+    const md = htmlToMarkdown(extractMainHtml(page("wiki-langs")), { baseUrl: "https://en.wikipedia.org/wiki/Alan_Turing" });
+    expect(md).toMatch(/^# Alan Turing\n/);
+    expect(md).not.toMatch(/163 languages|\[Afrikaans\]|Edit links/);
+    expect(md).toContain("[on the German Wikipedia](https://de.wikipedia.org/wiki/Alan_Turing)");
+  });
+
+  it("a stub with fewer links than languages keeps its article", () => {
+    const langs = Array.from({ length: 40 }, (_, i) => `<li><a href="https://l${i}.wiki.test/" hreflang="l${i}">Lang ${i}</a></li>`).join("");
+    const html = `<main><h1>Stub</h1><div class="langs"><span>40 languages</span><ul>${langs}</ul></div><div><p>Stub is a short article with a <a href="/x">link</a>.</p></div></main>`;
+    const text = htmlToText(html);
+    expect(text).toContain("Stub is a short article");
+    expect(text).not.toMatch(/40 languages|Lang 7/);
+  });
+
+  it("a list of two hreflang links stays: a selector has more choices than that", () => {
+    const text = htmlToText(
+      `<main><p>Read it in:</p><ul><li><a href="/fr" hreflang="fr">French</a></li><li><a href="/de" hreflang="de">German</a></li></ul></main>`,
+    );
+    expect(text).toContain("French");
+  });
+
   it("a listing page with no prose block still returns its cards", () => {
     const text = extract("listing-cards");
     for (const title of ["Transfer window: the five deals that never happened", "Fans vote for the player of the month"]) expect(text).toContain(title);
@@ -241,6 +274,14 @@ describe("extraction on realistic pages", () => {
     expect(text).toContain("What am I doing wrong?");
     expect(text).toContain("setInterval is not a clock.");
     expect(text).not.toMatch(/Log In|Categories|JavaScript is required/);
+  });
+
+  it("Hacker News header: links split by a closing </b> keep a space", () => {
+    const html =
+      '<table><tr><td><span class="pagetop"><b class="hnname"><a href="news">Hacker News</a></b><a href="newest">new</a> | <a href="front">past</a></span></td></tr></table>';
+    const text = htmlToText(html);
+    expect(text).toContain("Hacker News new | past");
+    expect(htmlToText("<p><span>T</span><span>h</span><b>i</b><span>s</span></p>")).toBe("This");
   });
 
   it("example.org as a browser renders it: every letter in its own <span>, read as words", () => {
@@ -373,5 +414,20 @@ describe("pdfToText (dependency-free, best-effort)", () => {
 
   it("returns empty (never throws) on non-PDF garbage", () => {
     expect(pdfToText(Buffer.from("this is not a pdf at all"))).toBe("");
+  });
+});
+
+describe("dropElements on self-closing foreign elements", () => {
+  it("drops only the tag of a self-closing <svg/>, keeping the prose after it", () => {
+    const text = htmlToText("<main><p>A <svg/> B</p><p>C</p><p><svg><path d='x'/></svg> D</p></main>");
+    expect(text).toContain("B");
+    expect(text).toContain("C");
+    expect(text).toContain("D");
+  });
+  it("drops only the tag of a self-closing <svg .../> with attributes", () => {
+    const text = htmlToText('<main><p>A <svg width="1" height="1" /> B</p><p><svg viewBox="0 0 1 1"><text>icon</text></svg> C</p></main>');
+    expect(text).toContain("B");
+    expect(text).toContain("C");
+    expect(text).not.toContain("icon");
   });
 });

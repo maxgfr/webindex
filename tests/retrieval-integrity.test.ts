@@ -235,6 +235,22 @@ describe("verbatim textual evidence", () => {
     expect((await fetchAndExtract("https://x.test/readme")).text).toBe(body);
   });
 
+  // An RFC served as text/plain opens with four blank lines: the page break
+  // layout of the printed original, not text.
+  it.each(["text/plain", "text/markdown"])("drops the blank lines around %s, and nothing inside it", async (contentType) => {
+    const inner = "    Internet Engineering Task Force (IETF)\n\n\f\n  1.  Introduction\n\tindented <T>";
+    installFetchMock(() => ({ body: `\n\n \r\n\t\n${inner}  \n\n \n`, contentType }));
+    expect((await fetchAndExtract("https://x.test/rfc9110.txt")).text).toBe(`${inner}  \n`);
+  });
+
+  it("trims a long run of blank lines in linear time", async () => {
+    installFetchMock(() => ({ body: `${"\n \t".repeat(200_000)}x${" \n".repeat(200_000)}`, contentType: "text/plain" }));
+    const started = performance.now();
+    // The last blank line's indentation is the text line's own.
+    expect((await fetchAndExtract("https://x.test/blank.txt")).text).toBe(" \tx \n");
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
   it("reads quoted descriptions without treating the opposite quote as an attribute boundary", () => {
     expect(metaDescriptionOf(`<meta name="description" content="L'article décrit la méthode">`)).toBe("L'article décrit la méthode");
     expect(metaDescriptionOf(`<meta content='The "quoted" method &amp; result' name='description'>`)).toBe('The "quoted" method & result');

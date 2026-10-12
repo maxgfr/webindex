@@ -272,8 +272,8 @@ const NOT_THE_PAGE = new Set(["self", "edit", "replies", "enclosure", "via", "re
  * `rel="related"` written before it. Only when no alternate exists is another
  * link better than nothing.
  */
-function itemUrl(block: string, base: string | undefined): string | undefined {
-  const links = openTags(block, "link").map(htmlAttributes);
+function itemUrl(block: string, base: string | undefined, link = "link"): string | undefined {
+  const links = openTags(block, link).map(htmlAttributes);
   const hrefOf = (attrs: Map<string, string>) => {
     const href = attrs.get("href");
     return href ? decodeEntities(href).trim() : undefined;
@@ -286,7 +286,7 @@ function itemUrl(block: string, base: string | undefined): string | undefined {
   const href = pick && hrefOf(pick);
   if (href) return resolveUrl(href, base);
 
-  const text = tagText(block, "link");
+  const text = tagText(block, link);
   if (text) return resolveUrl(text, base);
   // RSS's guid is a permalink unless it says otherwise — and then it is only an
   // id (`post-123`), which is no URL at all.
@@ -321,25 +321,29 @@ export function parseFeed(xml: string, baseUrl?: string): Feed | undefined {
   const kind: Feed["kind"] | undefined = root === "rss" || /(^|:)rdf$/.test(root) ? "rss" : /(^|:)feed$/.test(root) ? "atom" : undefined;
   if (!kind) return undefined;
   const atom = kind === "atom";
+  // Namespaces bind by URI, not by prefix: `<atom:feed>` writes every Atom
+  // element as `atom:…`, and bare names found none of them. RSS's own names
+  // stay bare — only Atom's take the root's prefix.
+  const a = (name: string): string => (atom ? root.slice(0, root.lastIndexOf(":") + 1) + name : name);
 
   // Atom's xml:base, on the feed and on each entry, re-roots relative links.
   const rootTag = atom ? openTags(xml, root)[0] : undefined;
   const feedBase = rootTag ? xmlBase(rootTag, baseUrl) : baseUrl;
 
-  const blocks = elements(xml, atom ? "entry" : "item");
+  const blocks = elements(xml, atom ? a("entry") : "item");
   const items: FeedItem[] = [];
   for (const block of blocks) {
     const inner = block.inner;
     const it: FeedItem = {};
-    const title = proseText(inner, atom, "title");
+    const title = proseText(inner, atom, a("title"));
     if (title) it.title = title;
-    const url = itemUrl(inner, atom ? xmlBase(block.attrs, feedBase) : feedBase);
+    const url = itemUrl(inner, atom ? xmlBase(block.attrs, feedBase) : feedBase, a("link"));
     if (url) it.url = url;
-    const published = tagText(inner, "pubDate", "published", "updated", "dc:date");
+    const published = tagText(inner, "pubDate", a("published"), a("updated"), "dc:date");
     if (published) it.published = published;
-    const summary = proseText(inner, atom, "description", "summary") ?? clip(proseText(inner, atom, "content", "content:encoded"));
+    const summary = proseText(inner, atom, "description", a("summary")) ?? clip(proseText(inner, atom, a("content"), "content:encoded"));
     if (summary) it.summary = summary;
-    const id = tagText(inner, "guid", "id");
+    const id = tagText(inner, "guid", a("id"));
     if (id) it.id = id;
     if (it.title || it.url) items.push(it);
   }
@@ -354,7 +358,7 @@ export function parseFeed(xml: string, baseUrl?: string): Feed | undefined {
     last = b.to;
   }
   head += xml.slice(last);
-  const title = proseText(head, atom, "title");
+  const title = proseText(head, atom, a("title"));
   return { kind, items, ...(title ? { title } : {}) };
 }
 

@@ -1,6 +1,5 @@
 import { decodeEntities } from "./entities.js";
-import { htmlCanonicalUrl, htmlTitle } from "./fetch.js";
-import { closeTagRe, dropElements, htmlAttributes } from "./html.js";
+import { canonicalHref, closeTagRe, dropElements, firstElementText, htmlAttributes, METADATA_HIDDEN } from "./html.js";
 
 // Structured metadata a page publishes about itself: JSON-LD, OpenGraph, and the
 // standard `<meta>` tags.
@@ -150,8 +149,13 @@ export function extractJsonLd(html: string): unknown[] {
  * or a template string in a bundle is not what the page says.
  */
 function metaEntries(html: string): [string, string][] {
+  return metaEntriesIn(dropElements(html, ["script", "style", "template"]));
+}
+
+/** metaEntries, on a copy with scripts, styles and comments already out. */
+function metaEntriesIn(clean: string): [string, string][] {
   const out: [string, string][] = [];
-  for (const m of dropElements(html, ["script", "style", "template"]).matchAll(openTag("meta"))) {
+  for (const m of clean.matchAll(openTag("meta"))) {
     const attrs = htmlAttributes(m[0]);
     const key = (attrs.get("property") ?? attrs.get("name") ?? attrs.get("itemprop"))?.trim().toLowerCase();
     const content = attrs.has("content") ? decodeEntities(attrs.get("content")!).trim() : "";
@@ -307,7 +311,10 @@ function firstString(v: unknown): string | undefined {
  * was fetched from), relative canonical and image URLs are resolved against it.
  */
 export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): PageMetadata {
-  const entries = metaEntries(html);
+  // One copy without scripts, styles, inline SVG and comments, read for the
+  // meta tags, the canonical and the title: each used to clean the page itself.
+  const clean = dropElements(html, METADATA_HIDDEN);
+  const entries = metaEntriesIn(clean);
   const meta = new Map<string, string>();
   for (const [key, content] of entries) if (!meta.has(key)) meta.set(key, content);
   const jsonLd = extractJsonLd(html);
@@ -370,7 +377,7 @@ export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): Pag
   set("publishedAt", meta.get("article:published_time") ?? meta.get("datepublished") ?? meta.get("citation_publication_date"));
   set("modifiedAt", meta.get("article:modified_time") ?? meta.get("datemodified"));
   set("imageUrl", meta.get("og:image") ?? meta.get("twitter:image"));
-  set("canonicalUrl", htmlCanonicalUrl(html) ?? sources.map((n) => firstString(n.url)).find(Boolean));
+  set("canonicalUrl", canonicalHref(clean) ?? sources.map((n) => firstString(n.url)).find(Boolean));
   // Scholarly pages give each author a tag of their own; every one counts.
   const authorKeys = new Set(["article:author", "author", "citation_author", "dc.creator"]);
   for (const [key, v] of entries) if (authorKeys.has(key)) addAuthor(v);
@@ -390,7 +397,7 @@ export function pageMetadata(html: string, opts: { baseUrl?: string } = {}): Pag
 
   // `<title>` is the last resort — it carries site chrome ("Foo — Example.com")
   // that the structured fields do not.
-  set("title", htmlTitle(html));
+  set("title", firstElementText(clean, "title"));
 
   if (opts.baseUrl) {
     for (const k of ["canonicalUrl", "imageUrl"] as const) {

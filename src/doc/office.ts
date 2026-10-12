@@ -654,6 +654,9 @@ function sheetRows(xml: string, shared: string[], styles: SheetStyles, budget: B
   const table: Rows = { rows: [] };
   let row: string[] | undefined;
   let col = 0;
+  // Where a cell without `r` goes: after the cell before it. Not row.length,
+  // which an empty cell never grows.
+  let nextCol = 0;
   let type: string | undefined;
   let style = 0;
   let value: string | undefined;
@@ -661,9 +664,12 @@ function sheetRows(xml: string, shared: string[], styles: SheetStyles, budget: B
   walkXml(xml, {
     open(name, attrs) {
       const n = local(name);
-      if (n === "row") row = [];
-      else if (n === "c" && row) {
-        col = columnOf(attr(attrs, "r")) ?? row.length;
+      if (n === "row") {
+        row = [];
+        nextCol = 0;
+      } else if (n === "c" && row) {
+        col = columnOf(attr(attrs, "r")) ?? nextCol;
+        nextCol = col + 1;
         type = attr(attrs, "t");
         style = Number(attr(attrs, "s") ?? 0);
         value = "";
@@ -675,7 +681,8 @@ function sheetRows(xml: string, shared: string[], styles: SheetStyles, budget: B
       else if (n === "c" && row && value !== undefined) {
         let shown = value;
         const kind = styles.temporal[style];
-        if (type === "s") shown = shared[Number(value)] ?? "";
+        // No value is no string: Number("") is 0, which showed the first one.
+        if (type === "s") shown = value.trim() ? (shared[Number(value)] ?? "") : "";
         else if (type === "b") shown = value === "1" ? "TRUE" : "FALSE";
         else if (kind && (type === undefined || type === "n") && value.trim()) shown = serialDate(Number(value), kind, styles.date1904) ?? value;
         // Metered here, where a shared string is shown, not where it is written.
