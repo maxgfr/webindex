@@ -4404,6 +4404,7 @@ function dropLanguageSelectors(html) {
   if (seen < MIN_LANGUAGE_LINKS) return html;
   const totals = { links: 0, lang: 0, text: 0, blocks: 0 };
   const stack = [];
+  const open2 = /* @__PURE__ */ new Map();
   const done = [];
   let inLangLink = false;
   let last = 0;
@@ -4429,11 +4430,13 @@ function dropLanguageSelectors(html) {
     if (!closing) {
       if (tag.endsWith("/>")) continue;
       stack.push({ name: name2, node: { from: m.index, to: -1, links: 0, lang: 0, text: 0, blocks: 0, parent: stack.at(-1)?.node }, at: { ...totals } });
+      open2.set(name2, (open2.get(name2) ?? 0) + 1);
       continue;
     }
+    if (!open2.get(name2)) continue;
     let i = stack.length - 1;
-    while (i >= 0 && stack[i].name !== name2) i--;
-    if (i < 0) continue;
+    while (stack[i].name !== name2) i--;
+    for (let j = i; j < stack.length; j++) open2.set(stack[j].name, open2.get(stack[j].name) - 1);
     const { node, at: at2 } = stack[i];
     stack.length = i;
     Object.assign(node, {
@@ -4446,11 +4449,13 @@ function dropLanguageSelectors(html) {
     done.push(node);
   }
   const isSelector = (n) => !!n && n.to >= 0 && n.lang >= MIN_LANGUAGE_LINKS && n.lang * 2 > n.links && n.blocks === 0 && n.text <= MAX_SELECTOR_TEXT;
+  const outermost = /* @__PURE__ */ new Map();
   const targets = /* @__PURE__ */ new Set();
-  for (const n of done) {
+  for (let k = done.length - 1; k >= 0; k--) {
+    const n = done[k];
     if (!isSelector(n)) continue;
-    let top = n;
-    while (isSelector(top.parent)) top = top.parent;
+    const top = isSelector(n.parent) ? outermost.get(n.parent) ?? n.parent : n;
+    outermost.set(n, top);
     targets.add(top);
   }
   if (!targets.size) return html;
