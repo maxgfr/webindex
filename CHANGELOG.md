@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.33.1](https://github.com/maxgfr/webindex/compare/v1.33.0...v1.33.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* **cli:** flags belong to their command, registry prefixes, stdin from a late writer ([aac4a79](https://github.com/maxgfr/webindex/commit/aac4a79cbce0a99cf3e5dc3830be1e229e907ba8))
+* **extract:** find language selectors in linear time on hostile markup ([c6a469b](https://github.com/maxgfr/webindex/commit/c6a469b795af6281c99184b535d24bb6ae11e657))
+* **extract:** what real pages showed — language selectors, run-together links, GitHub blob pages, blank lines ([b767db0](https://github.com/maxgfr/webindex/commit/b767db06343af3f36ac79234417f9bbe08e86db9))
+* hostile input, huge timeouts, shared temp dirs and other audit findings ([6879c72](https://github.com/maxgfr/webindex/commit/6879c72493b595d2d37e38c2d2dbffe1afdd07b5))
+* **mcp:** answer a null id, bound concurrent tool calls over HTTP ([374c89b](https://github.com/maxgfr/webindex/commit/374c89b60e78662c641d97bddce8392205acdeec))
+* **stack:** publish the stack's ports on loopback only ([0382eee](https://github.com/maxgfr/webindex/commit/0382eeece2380845a4c038bce21ea403a93fd88d))
+
+
+### Performance Improvements
+
+* **browser:** join a CDP frame's chunks once, not on every chunk ([238f27d](https://github.com/maxgfr/webindex/commit/238f27ddacf5392ac84137986ff68ba508fd18af))
+
 # [1.33.0](https://github.com/maxgfr/webindex/compare/v1.32.0...v1.33.0) (2026-10-08)
 
 
