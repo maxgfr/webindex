@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { type IncomingMessage, type Server, createServer } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type Frame, FrameParser, type WsClient, WsProtocolError, connectWebSocket, encodeFrame } from "../src/browser/ws.js";
 
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -66,6 +66,32 @@ describe("encodeFrame / FrameParser", () => {
     }
     expect(out.map((f) => f.payload.length)).toEqual(payloads.map((p) => p.length));
     out.forEach((f, i) => expect(f.payload.equals(payloads[i]!)).toBe(true));
+  });
+
+  it("copies a large frame once, not again on every chunk it arrives in", () => {
+    // A 4 MB screenshot read off the socket 16 KB at a time, then a small frame
+    // whose header straddles two chunks: re-joining everything buffered on each
+    // chunk would copy the frame 256 times over.
+    const big = randomBytes(4 * 1024 * 1024);
+    const wire = Buffer.concat([encodeFrame(0x1, big), encodeFrame(0x1, Buffer.from("next"), { mask: false })]);
+    const parser = new FrameParser();
+    const out: Frame[] = [];
+    const real = Buffer.concat.bind(Buffer);
+    const copied: number[] = [];
+    const concat = vi.spyOn(Buffer, "concat").mockImplementation((list: readonly Uint8Array[], totalLength?: number) => {
+      const joined = real(list, totalLength);
+      copied.push(joined.length);
+      return joined;
+    });
+    try {
+      for (let i = 0; i < wire.length; i += 16 * 1024) out.push(...parser.push(wire.subarray(i, i + 16 * 1024)));
+    } finally {
+      concat.mockRestore();
+    }
+    expect(out.map((f) => f.payload.length)).toEqual([big.length, 4]);
+    expect(out[0]?.payload.equals(big)).toBe(true);
+    expect(out[1]?.payload.toString()).toBe("next");
+    expect(copied.reduce((n, b) => n + b, 0)).toBeLessThanOrEqual(2 * wire.length);
   });
 
   it("returns several frames from one chunk", () => {
