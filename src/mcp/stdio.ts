@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { batchRefusal, type ProtocolVersion } from "./protocol.js";
 import { createServer, ERR_INVALID_REQUEST, type JsonRpcMessage, type McpAdapter, type ServerOptions } from "./server.js";
+import { MAX_IN_FLIGHT } from "./slots.js";
 
 // The stdio transport: one JSON-RPC message per line, in on stdin, out on
 // stdout. This is what `claude mcp add --transport stdio` and Claude Desktop
@@ -18,10 +19,6 @@ import { createServer, ERR_INVALID_REQUEST, type JsonRpcMessage, type McpAdapter
 // 2. A slow tool never blocks a fast one. a cold-start tool call takes
 //    tens of seconds; serializing the read loop behind it would make `ping` and
 //    `tools/list` time out. JSON-RPC explicitly permits out-of-order responses.
-
-// How many tool calls may be in flight at once. Above this, the skill's own
-// per-source concurrency and its subprocesses stop paying for themselves.
-const MAX_IN_FLIGHT = 4;
 
 export interface StdioOptions extends ServerOptions {
   input?: Readable;

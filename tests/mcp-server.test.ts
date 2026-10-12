@@ -47,6 +47,16 @@ describe("notifications", () => {
     expect(r).toBeUndefined();
   });
 
+  // MCP forbids a null id. Read as a notification, `{"id":null,"method":"ping"}`
+  // went unanswered, and the client waited for an answer that never came.
+  it("answers a request whose id is null with an invalid-request error", async () => {
+    const r = await call({ jsonrpc: "2.0", id: null, method: "ping" });
+    expect(r).toMatchObject({ jsonrpc: "2.0", id: null, error: { code: -32600 } });
+    expect((r as any).error.message).toMatch(/id/);
+    // A notification that carries one is still a notification.
+    expect(await call({ jsonrpc: "2.0", id: null, method: "notifications/initialized" })).toBeUndefined();
+  });
+
   it("suppresses only the response of an active cancelled request and cleans up", async () => {
     let finish!: () => void;
     const server = createServer(

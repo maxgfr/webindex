@@ -3,6 +3,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer as createMcpServer, ERR_INVALID_REQUEST, type JsonRpcMessage, type McpAdapter, type ServerOptions } from "./server.js";
 import { ASSUMED_HTTP_PROTOCOL, batchRefusal, isOriginAllowed, isProtocolVersion, type ProtocolVersion } from "./protocol.js";
+import { type ToolSlots, toolSlots } from "./slots.js";
 
 // The Streamable HTTP transport, in its stateless form: one endpoint, POST,
 // JSON in and JSON out.
@@ -63,8 +64,9 @@ export async function startHttpServer(adapter: McpAdapter, opts: HttpOptions = {
   // command of every consumer pay ~40 ms at start-up for a transport only
   // `mcp --transport http` uses.
   const { createServer: createHttpServer } = await import("node:http");
+  const slots = toolSlots();
   const server = createHttpServer((req, res) => {
-    void route(req, res, adapter, opts).catch((e) => {
+    void route(req, res, adapter, opts, slots).catch((e) => {
       // Only if nothing was written yet: a throw after the response started
       // (a client that hung up mid-write) must not become a second writeHead.
       if (res.headersSent) {
@@ -105,7 +107,7 @@ export async function startHttpServer(adapter: McpAdapter, opts: HttpOptions = {
   });
 }
 
-async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdapter, opts: HttpOptions): Promise<void> {
+async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdapter, opts: HttpOptions, slots: ToolSlots): Promise<void> {
   const path = (req.url ?? "").split("?")[0];
   const origin = header(req, "origin");
 
@@ -222,6 +224,20 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
     if (!res.writableFinished) lost.abort();
   });
 
+  // Every tool call, single or in a batch, waits for one of the server's
+  // slots, as over stdio; a ping or a tools/list never does. A client that
+  // hangs up while queued is never run.
+  const handle: typeof mcp.handle = async (m, reply, o) => {
+    if ((m as JsonRpcMessage | undefined)?.method !== "tools/call") return mcp.handle(m, reply, o);
+    const release = await slots.acquire(lost.signal);
+    if (!release) return;
+    try {
+      await mcp.handle(m, reply, o);
+    } finally {
+      release();
+    }
+  };
+
   // Progress needs a stream to travel on. A single request that asked for it,
   // from a client that accepts one, is answered as SSE: its progress events,
   // then its response, then the end of the stream. Everyone else gets the one
@@ -234,7 +250,7 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
     const event = (m: JsonRpcMessage) => {
       if (!res.writableEnded && !res.destroyed) res.write(`event: message\ndata: ${JSON.stringify(m)}\n\n`);
     };
-    await mcp.handle(single, event, { signal: lost.signal, notify: event });
+    await handle(single, event, { signal: lost.signal, notify: event });
     res.end();
     return;
   }
@@ -242,7 +258,7 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
   const out: JsonRpcMessage[] = [];
   const collect = (m: JsonRpcMessage) => void out.push(m);
   const messages: JsonRpcMessage[] = Array.isArray(parsed) ? (parsed as JsonRpcMessage[]) : [parsed as JsonRpcMessage];
-  for (const m of messages) await mcp.handle(m, collect, { signal: lost.signal, notify: () => {} });
+  for (const m of messages) await handle(m, collect, { signal: lost.signal, notify: () => {} });
 
   // Nothing to answer means the body held only notifications or responses —
   // `notifications/initialized` arrives exactly this way, and a 200 with a body

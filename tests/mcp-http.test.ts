@@ -157,7 +157,9 @@ describe("progress and cancellation over HTTP", () => {
         headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
         body: JSON.stringify({ ...asking, id: null }),
       });
-      expect(res.status).toBe(202);
+      // A null id is refused as one JSON error (MCP forbids it), never streamed.
+      expect(res.headers.get("content-type")).not.toMatch(/event-stream/);
+      expect((await json(res)).error.code).toBe(-32600);
     } finally {
       await s.close();
     }
@@ -176,6 +178,48 @@ describe("progress and cancellation over HTTP", () => {
     } finally {
       await s.close();
     }
+  });
+
+  // stdio runs at most four tool calls at once; HTTP ran every request it was
+  // sent, so twenty POSTs were twenty fetches, crawls or transcriptions.
+  it("runs at most as many tool calls at once as stdio does, the rest waiting their turn", async () => {
+    let running = 0;
+    let peak = 0;
+    const s = await startHttpServer(
+      testAdapter({
+        callTool: async () => {
+          peak = Math.max(peak, ++running);
+          await new Promise((r) => setTimeout(r, 40));
+          running--;
+          return { text: "done" };
+        },
+      }),
+      { port: 0 },
+    );
+    try {
+      const calls = Array.from({ length: 12 }, (_, i) =>
+        fetch(s.url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(rpc(i, "tools/call", { name: "probe_echo", arguments: { text: "x" } })),
+        }).then(json),
+      );
+      const answers = await Promise.all(calls);
+      expect(answers.every((a) => a.result?.content?.[0]?.text === "done")).toBe(true);
+      expect(peak).toBe(4);
+      // A ping is never queued behind them.
+      expect(
+        (await json(await fetch(s.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(rpc(99, "ping")) }))).result,
+      ).toEqual({});
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("answers a request whose id is null with an error, not a 202", async () => {
+    const res = await post({ jsonrpc: "2.0", id: null, method: "ping" });
+    expect(res.status).toBe(200);
+    expect((await json(res)).error.code).toBe(-32600);
   });
 
   it("aborts the tool's signal when the client hangs up before the answer", async () => {
