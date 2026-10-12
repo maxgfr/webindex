@@ -4,6 +4,8 @@
 // the SAME source — which is what makes deduplication, the fetch cache key and
 // stable source numbering agree with each other.
 
+import { trimTrailing } from "./trim.js";
+
 // Click ids and campaign tags: they name how a reader arrived, never what they
 // read. Not a bare `ref`, which looks like one (`?ref=hn`) but on forge and
 // raw-file APIs selects the branch or tag served (`?ref=v1.0`) — dropping it
@@ -27,7 +29,7 @@ export function canonicalizeUrl(raw: string): string {
     const host = u.hostname.toLowerCase().replace(/^www\./, "");
     let port = u.port;
     if ((proto === "http:" && port === "80") || (proto === "https:" && port === "443")) port = "";
-    const path = u.pathname.replace(/\/+$/, ""); // case preserved
+    const path = trimTrailing(u.pathname, "/"); // case preserved
     const keep: [string, string][] = [];
     const shareSi = SHARE_SI_HOSTS.test(host);
     for (const [k, v] of u.searchParams) {

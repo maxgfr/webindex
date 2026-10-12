@@ -218,6 +218,18 @@ export function createServer(adapter: McpAdapter, opts: ServerOptions = {}): Mcp
       return;
     }
 
+    // MCP forbids a null id. Read as a notification, `{"id":null,"method":"ping"}`
+    // was never answered, and its sender waited for good. A notification that
+    // carries one is still read as the notification it is.
+    if (msg.id === null && typeof msg.method === "string" && !msg.method.startsWith("notifications/")) {
+      send({
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: ERR_INVALID_REQUEST, message: "invalid request: `id` must not be null — omit it to send a notification" },
+      });
+      return;
+    }
+
     // A message with no id is a notification: act on it, answer nothing.
     if (msg.id === undefined || msg.id === null) {
       if (msg.method === "notifications/cancelled") {

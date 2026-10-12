@@ -21,6 +21,7 @@ import { httpJson } from "./fetch.js";
 import { mapLimit } from "./pool.js";
 import { cachedProbe, type ProbeEntry } from "./probe.js";
 import { embedModel } from "./stack.js";
+import { trimTrailing } from "./trim.js";
 
 /** Where the local Ollama answers. `off` disables the layer entirely. */
 export function ollamaBase(): string {
@@ -66,7 +67,7 @@ export function resetOllamaProbe(): void {
  * A "no" is asked again after 30 s, so a server started mid-run is found.
  */
 export async function probeOllama(base: string = ollamaBase()): Promise<boolean> {
-  const key = base.replace(/\/+$/, "");
+  const key = trimTrailing(base, "/");
   if (key.toLowerCase() === "off") return false;
   return cachedProbe(probed, key, async () => (await httpJson("GET", `${key}/api/tags`, undefined, { timeoutMs: 2_000, retries: 0 })).ok);
 }
@@ -82,11 +83,14 @@ export async function probeOllama(base: string = ollamaBase()): Promise<boolean>
  * An empty input returns immediately without probing, so a caller need not
  * special-case it.
  */
-export async function embed(texts: readonly string[], opts: { base?: string; model?: string; concurrency?: number } = {}): Promise<EmbedResult> {
+export async function embed(
+  texts: readonly string[],
+  opts: { base?: string; model?: string; concurrency?: number; signal?: AbortSignal } = {},
+): Promise<EmbedResult> {
   const model = opts.model ?? embedModel();
   if (texts.length === 0) return { vectors: [], model };
 
-  const base = (opts.base ?? ollamaBase()).replace(/\/+$/, "");
+  const base = trimTrailing(opts.base ?? ollamaBase(), "/");
   if (base.toLowerCase() === "off") return { vectors: [], model, note: "embeddings are disabled (OLLAMA=off)." };
   if (!(await probeOllama(base))) {
     return { vectors: [], model, note: `no embedding server at ${base} — \`${brand().cli} semantic up\` starts Ollama and pulls ${model}.` };
@@ -103,8 +107,8 @@ export async function embed(texts: readonly string[], opts: { base?: string; mod
   // before the note — ten minutes for a 300-document pool.
   let failed = false;
   const results = await mapLimit(batches, opts.concurrency ?? embedConcurrency(), async (batch) => {
-    if (failed) return undefined;
-    const r = await httpJson("POST", `${base}/api/embed`, { model, input: batch }, { timeoutMs: 60_000 });
+    if (failed || opts.signal?.aborted) return undefined;
+    const r = await httpJson("POST", `${base}/api/embed`, { model, input: batch }, { timeoutMs: 60_000, signal: opts.signal });
     const got = r.ok ? (r.data?.embeddings as number[][] | undefined) : undefined;
     if (!got || got.length !== batch.length) {
       failed = true;
@@ -117,6 +121,7 @@ export async function embed(texts: readonly string[], opts: { base?: string; mod
   // One failed batch invalidates the whole call rather than yielding a result
   // with holes: a caller that indexed by position would attach the wrong vector
   // to every text after the gap, and nothing downstream could detect it.
+  if (opts.signal?.aborted) return { vectors: [], model, note: "embedding cancelled." };
   if (results.some((r) => r === undefined)) return { vectors: [], model, ...(note ? { note } : {}) };
   return { vectors: results.flat() as number[][], model };
 }
@@ -170,7 +175,7 @@ export function embedPrefixes(model: string = embedModel()): { query: string; do
 }
 
 /** Embed one text. Convenience over `embed`, same degradation. */
-export async function embedOne(text: string, opts: { base?: string; model?: string } = {}): Promise<number[] | undefined> {
+export async function embedOne(text: string, opts: { base?: string; model?: string; signal?: AbortSignal } = {}): Promise<number[] | undefined> {
   const r = await embed([text], opts);
   return r.vectors[0];
 }

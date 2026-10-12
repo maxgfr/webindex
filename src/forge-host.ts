@@ -60,3 +60,22 @@ export function hostForgeKind(host: string): ForgeKind | undefined {
   if (h.includes("gitea") || h.includes("codeberg")) return "gitea";
   return undefined;
 }
+
+/**
+ * The file behind a GitHub `blob` page, served bare. github.com/<o>/<r>/blob/<ref>/<path>
+ * lives at raw.githubusercontent.com/<o>/<r>/<ref>/<path> — the same segments in the
+ * same order, so a ref with a slash in it (release/v2) needs no resolving. The query
+ * (`?plain=1`) and the line anchor are the page's, not the file's. Undefined for any
+ * other URL.
+ */
+export function githubRawUrl(url: string): string | undefined {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if ((u.protocol !== "https:" && u.protocol !== "http:") || normalizeForgeHost(u.hostname) !== "github.com") return undefined;
+  const m = /^\/([^/]+)\/([^/]+)\/blob\/([^/]+\/.+)$/.exec(u.pathname);
+  return m ? `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}` : undefined;
+}

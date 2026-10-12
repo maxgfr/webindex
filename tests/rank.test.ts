@@ -383,6 +383,16 @@ describe("simhash near-duplicate detection", () => {
     expect(hammingDistance((1n << 200n) - 1n, 0n)).toBe(200);
   });
 
+  it("reads a negative operand as the signed 64-bit form of a SimHash, and returns", () => {
+    // A SimHash stored in a signed BIGINT column comes back negative. As a bare
+    // bigint it has infinitely many set bits, and clearing them one by one never
+    // reached zero: the call spun forever.
+    expect(hammingDistance(-1n, 0n)).toBe(64);
+    expect(hammingDistance(-1n, (1n << 64n) - 1n)).toBe(0);
+    expect(hammingDistance(BigInt.asIntN(64, 0xf687b8f62c241fdcn), 0xf687b8f62c241fdcn)).toBe(0);
+    expect(hammingDistance(-(1n << 63n), 0n)).toBe(1);
+  });
+
   it("hashes 200 KB of prose well under a tenth of a second", () => {
     const big = article.repeat(200);
     expect(big.length).toBeGreaterThan(200_000);

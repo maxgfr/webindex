@@ -147,7 +147,7 @@ export async function extractDocument(bytes: Buffer, fmt: DocFormat, opts: DocLa
       continue;
     }
 
-    const verdict = assessExtractedText(got.text, "the converter produced no text");
+    const verdict = assessExtractedText(got.text, "the converter produced no text", "the converter returned the file's bytes, not its text");
     if (verdict.ok) return { text: got.text.trim(), via: id };
     lastReason = verdict.reason;
   }

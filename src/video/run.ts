@@ -1,7 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { brand, env } from "../brand.js";
+import { env, userTmpDir } from "../brand.js";
 import { ensureDir, isNoWrite, writeArtifact } from "../no-write.js";
 import { bm25Score, buildBm25Index, type Bm25Doc } from "../rank.js";
 import { transcribeVideo, videoDeps, type VideoLadderOptions, type VideoTranscriberId, type VideoTranscript } from "./ladder.js";
@@ -18,9 +17,9 @@ import { probeVideo, type VideoChapter, type VideoMeta } from "./ytdlp.js";
 // yt-dlp call at all — which is the point: a question about a talk should not
 // re-download its subtitles, let alone transcribe it again with whisper.
 
-/** Where video runs live: `--out`, else `<PREFIX>_VIDEO_DIR`, else `<tmp>/<brand>/video`. */
+/** Where video runs live: `--out`, else `<PREFIX>_VIDEO_DIR`, else `<tmp>/<brand>-<uid>/video`. */
 export function videoRoot(out?: string): string {
-  return resolve(out ?? env("VIDEO_DIR") ?? join(tmpdir(), brand().name, "video"));
+  return resolve(out ?? env("VIDEO_DIR") ?? userTmpDir("video"));
 }
 
 /** meta.json: the video's metadata plus how and when its transcript was made. */

@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { envInt } from "./brand.js";
+import { envInt, MAX_TIMER_MS } from "./brand.js";
 import { killTree } from "./process-tree.js";
 
 // Running a local command and reading what it said.
@@ -35,7 +35,7 @@ const STDOUT_CAP = 24 * 1024 * 1024;
  * clone of a large monorepo do not want the same number, and hardcoding 60s here
  * was one of the reasons two consumers kept their own `sh`.
  */
-const defaultTimeoutMs = () => envInt("SH_TIMEOUT_MS", 60_000, 1000);
+const defaultTimeoutMs = () => envInt("SH_TIMEOUT_MS", 60_000, 1000, MAX_TIMER_MS);
 
 function toResult(status: number | null, stdout: string, stderr: string, err?: NodeJS.ErrnoException): ShResult {
   const missing = err?.code === "ENOENT";
@@ -106,7 +106,9 @@ export function shAsync(
   args: string[],
   opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal } = {},
 ): Promise<ShResult> {
-  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
+  // Capped, because the timer below would read a longer ceiling as 1 ms and
+  // kill the command the moment it started.
+  const timeoutMs = Math.min(opts.timeoutMs ?? defaultTimeoutMs(), MAX_TIMER_MS);
   if (opts.signal?.aborted) return Promise.resolve({ ok: false, status: 130, stdout: "", stderr: "aborted" });
   return new Promise((resolve) => {
     let settled = false;

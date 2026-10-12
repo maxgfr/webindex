@@ -1,4 +1,5 @@
 import { contactUa, httpGet, httpJson } from "./fetch.js";
+import { trimTrailing } from "./trim.js";
 
 // Package registries: a library's NAME resolved to its actual coordinates.
 //
@@ -73,17 +74,18 @@ export function normalizeRepoUrl(raw: unknown): string | undefined {
   if (!s) return undefined;
   const short = /^(github|gitlab|bitbucket):([\w.-]+\/[\w.-]+?)(?:\.git)?(?:#.*)?$/i.exec(s);
   if (short) return `https://${SHORTHAND_HOST[short[1]!.toLowerCase()]}/${short[2]}`;
-  let out = s
-    // A fragment names a branch or an anchor, never the repository.
-    .replace(/#.*$/s, "")
-    .replace(/^git\+/i, "")
-    .replace(/^git:\/\//i, "https://")
-    // ssh://[user@]host[:port]/path, then the scp-like ssh://[user@]host:path.
-    .replace(/^ssh:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\//i, "https://$1/")
-    .replace(/^ssh:\/\/(?:[^@/]+@)?([^/:]+):/i, "https://$1/")
-    .replace(/^[\w.-]+@([^:/]+):/, "https://$1/")
-    .replace(/\/+$/, "")
-    .replace(/\.git$/i, "");
+  let out = trimTrailing(
+    s
+      // A fragment names a branch or an anchor, never the repository.
+      .replace(/#.*$/s, "")
+      .replace(/^git\+/i, "")
+      .replace(/^git:\/\//i, "https://")
+      // ssh://[user@]host[:port]/path, then the scp-like ssh://[user@]host:path.
+      .replace(/^ssh:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\//i, "https://$1/")
+      .replace(/^ssh:\/\/(?:[^@/]+@)?([^/:]+):/i, "https://$1/")
+      .replace(/^[\w.-]+@([^:/]+):/, "https://$1/"),
+    "/",
+  ).replace(/\.git$/i, "");
   if (/^[\w.-]+\/[\w.-]+$/.test(out)) out = `https://github.com/${out}`;
   return /^https?:\/\//i.test(out) ? out.replace(/^https?:\/\//i, (scheme) => scheme.toLowerCase()) : undefined;
 }
@@ -455,6 +457,18 @@ async function cratesLookup(n: string, version: string | undefined): Promise<Pac
       ...(yanked ? { deprecated: yanked } : {}),
     },
   };
+}
+
+/**
+ * A package spec's registry prefix, the way lockfiles, `npx` and package
+ * managers write one: `npm:vitest`, `pypi:requests`, `crates:serde` (any
+ * case). The rest is the name, scope included (`npm:@scope/pkg`). No prefix,
+ * or one naming no registry here, leaves the name as it is.
+ */
+export function splitRegistryPrefix(spec: string): { registry?: RegistryKind; name: string } {
+  const m = /^\s*([A-Za-z]+):(?!\/)(.+)$/.exec(spec);
+  const registry = REGISTRIES.find((r) => r === m?.[1]?.toLowerCase());
+  return m?.[2] && registry ? { registry, name: m[2].trim() } : { name: spec };
 }
 
 /**

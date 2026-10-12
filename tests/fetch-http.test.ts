@@ -42,6 +42,79 @@ describe("Accept-Language header", () => {
   });
 });
 
+describe("a transient answer that will be retried", () => {
+  // A 503's error page, read in full (up to the 16 MB document cap) during
+  // the back-off and then dropped: nobody reads the body of a retried answer.
+  const flaky = (pulled: { bytes: number }) => {
+    let calls = 0;
+    return installFetchMock(() =>
+      calls++ === 0
+        ? {
+            status: 503,
+            body: "x".repeat(200_000),
+            chunkSize: 1024,
+            headers: { "retry-after": "0" },
+            onPull: (n) => (pulled.bytes += n),
+            contentType: "text/html",
+          }
+        : { body: '{"ok":true}', contentType: "application/json" },
+    );
+  };
+
+  it("is cancelled unread by httpGet, which retries", async () => {
+    const pulled = { bytes: 0 };
+    flaky(pulled);
+    const res = await httpGet("https://flaky.test/page");
+    expect(res.status).toBe(200);
+    expect(pulled.bytes).toBe(0);
+  });
+
+  it("is cancelled unread by httpJson, which retries", async () => {
+    const pulled = { bytes: 0 };
+    flaky(pulled);
+    const res = await httpJson("GET", "https://flaky.test/api");
+    expect(res).toMatchObject({ ok: true, data: { ok: true } });
+    expect(pulled.bytes).toBe(0);
+  });
+
+  it("still reads the last attempt's body, which is the answer", async () => {
+    installFetchMock(() => ({ status: 503, body: "down for maintenance", headers: { "retry-after": "0" } }));
+    expect((await httpGet("https://down.test/")).body).toBe("down for maintenance");
+  });
+});
+
+describe("httpJson cancellation", () => {
+  // Ollama, Qdrant and the Wayback API come through httpJson; an MCP cancel
+  // stopped the tool but not the request it was waiting on.
+  it("aborts the request when the caller's signal does", async () => {
+    let seen: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_u: unknown, init?: RequestInit) => {
+        seen = init?.signal ?? undefined;
+        return new Promise((_resolve, reject) =>
+          init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }))),
+        );
+      }),
+    );
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 20);
+    const started = performance.now();
+    const res = await httpJson("POST", "https://ollama.test/api/embed", { input: ["x"] }, { signal: ctrl.signal, timeoutMs: 10_000 });
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(seen?.aborted).toBe(true);
+    expect(res).toMatchObject({ ok: false, status: 0 });
+    expect(res.error).toMatch(/cancelled/);
+  });
+
+  it("does not start when the signal has already aborted", async () => {
+    const spy = installFetchMock(() => ({ body: "{}", contentType: "application/json" }));
+    const res = await httpJson("GET", "https://x.test/", undefined, { signal: AbortSignal.abort() });
+    expect(res.error).toMatch(/cancelled/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
 describe("httpJson response cap", () => {
   it("cancels a JSON body over the cap instead of buffering it whole, and reports it", async () => {
     // httpGet streams under a cap; httpJson used res.text(), which buffers
@@ -399,6 +472,51 @@ describe("extractFromHtml", () => {
     expect(r).not.toHaveProperty("html");
     expect(extractFromHtml(page, "https://d.test/a/guide", { keepHtml: true }).html).toBe(page);
     expect(extractFromHtml(page, "https://d.test/a/guide", { format: "markdown" }).text).toContain("[ref](https://d.test/a/ref)");
+  });
+});
+
+describe("fetchAndExtract on a GitHub blob page", () => {
+  // The page wraps the file in GitHub's own interface: "Copy path", "Blame",
+  // "More file actions", the line count — all of it read before the file.
+  const blobPage =
+    "<main><h2>Repository navigation</h2><button>Copy path</button><button>Blame</button><span>More file actions</span><div>556 lines</div><article># webindex</article></main>";
+
+  it("reads the file itself from raw.githubusercontent.com, and cites the blob URL", async () => {
+    const spy = installFetchMock(
+      routes([
+        [
+          "raw.githubusercontent.com/maxgfr/webindex/main/docs/guide.md",
+          { body: "# Guide\n\nThe file, as written.\n", contentType: "text/plain; charset=utf-8" },
+        ],
+        ["github.com/maxgfr/webindex/blob/", { body: blobPage, contentType: "text/html" }],
+      ]),
+    );
+    const url = "https://github.com/maxgfr/webindex/blob/main/docs/guide.md";
+    const res = await fetchAndExtract(url, { firecrawl: "off" });
+    expect(res.text).toBe("# Guide\n\nThe file, as written.\n");
+    expect(res.text).not.toMatch(/Copy path|Blame|More file actions/);
+    expect(res.finalUrl).toBe(url);
+    expect(spy.mock.calls.map((c) => String(c[0]))).not.toContain(url);
+  });
+
+  it("keeps a ref with a slash and drops the line anchor", async () => {
+    const spy = installFetchMock(routes([["raw.githubusercontent.com/", { body: "export const x = 1;\n", contentType: "text/plain" }]]));
+    const res = await fetchAndExtract("https://github.com/o/r/blob/release/v2/src/a.ts#L10-L20", { firecrawl: "off" });
+    expect(res.text).toBe("export const x = 1;\n");
+    expect(String(spy.mock.calls[0]![0])).toBe("https://raw.githubusercontent.com/o/r/release/v2/src/a.ts");
+  });
+
+  it("falls back to the page when there is no raw file (a private repository)", async () => {
+    installFetchMock(routes([["github.com/o/private/blob/", { body: "<main><p>Sign in to see this file.</p></main>", contentType: "text/html" }]]));
+    const res = await fetchAndExtract("https://github.com/o/private/blob/main/x.md", { firecrawl: "off" });
+    expect(res.text).toContain("Sign in to see this file.");
+  });
+
+  it("leaves the whole page to fullPage, and other GitHub pages alone", async () => {
+    const spy = installFetchMock(routes([["github.com/", { body: blobPage, contentType: "text/html" }]]));
+    await fetchAndExtract("https://github.com/o/r/blob/main/x.md", { firecrawl: "off", fullPage: true });
+    await fetchAndExtract("https://github.com/o/r/tree/main/docs", { firecrawl: "off" });
+    expect(spy.mock.calls.map((c) => String(c[0])).filter((u) => u.includes("raw.githubusercontent"))).toEqual([]);
   });
 });
 

@@ -126,6 +126,36 @@ describe("what parseArgs refuses", () => {
     rejects(["search", "--json=yes"], /--json is a boolean flag and takes no value/);
   });
 
+  // `fetch --markdown` (a flag of tables and browser text) ran the fetch as
+  // plain text and said nothing: the flag existed, just not there.
+  describe("with flags declared per command", () => {
+    const scoped: CliSpec = { ...SPEC, commandFlags: { search: ["limit", "json"], fetch: ["json"] } };
+    it("refuses a declared flag the command does not take, naming the command", () => {
+      expect(() => parseArgs(["fetch", "u", "--limit", "3"], scoped)).toThrow(UsageError);
+      expect(() => parseArgs(["fetch", "u", "--limit", "3"], scoped)).toThrow(/--limit does not apply to fetch/);
+      expect(() => parseArgs(["fetch", "u", "--eco"], scoped)).toThrow(/--eco does not apply to fetch/);
+    });
+    it("takes the command's own flags, and leaves a command with no list unrestricted", () => {
+      expect(cmd(["search", "q", "--limit", "3", "--json"], scoped).values).toEqual({ limit: "3" });
+      expect(cmd(["rank", "--lang", "fr", "--eco"], scoped).bools.has("eco")).toBe(true);
+    });
+    it("still reads --help and --version as help and version where the command claims neither", () => {
+      const withVersion: CliSpec = { ...scoped, valueFlags: [...SPEC.valueFlags, "version"], commandFlags: { ...scoped.commandFlags, rank: ["version"] } };
+      expect(parseArgs(["fetch", "--version"], withVersion)).toEqual({ kind: "version" });
+      expect(cmd(["rank", "--version", "2"], withVersion).values).toEqual({ version: "2" });
+    });
+  });
+
+  it("refuses a short flag rather than reading it as part of the query", () => {
+    rejects(["search", "-x", "rust"], /unknown flag "-x"/);
+    rejects(["search", "-x", "rust"], /--/);
+    // `-` is stdin, `-3` a number, and `--` the way to pass anything else.
+    expect(cmd(["search", "-"]).positional).toEqual(["-"]);
+    expect(cmd(["search", "-3"]).positional).toEqual(["-3"]);
+    expect(cmd(["search", "--", "-x", "rust"]).positional).toEqual(["-x", "rust"]);
+    expect(parseArgs(["search", "-h"], SPEC)).toEqual({ kind: "help", command: "search" });
+  });
+
   it("carries the usage exit code, so a caller need not match on the message", () => {
     try {
       parseArgs(["nope"], SPEC);

@@ -93,6 +93,22 @@ describe("parseVtt", () => {
     expect(parseVtt(srt)).toEqual([{ start: 1.5, end: 3, text: "Top of the screen" }]);
   });
 
+  it("strips tags in linear time on a long run of brackets that never close", () => {
+    // A subtitle file is whatever the uploader sent: `<[^>]*>` scanned to the
+    // end of the line from every `<`.
+    const line = `${"<".repeat(200_000)}x`;
+    const started = performance.now();
+    expect(parseVtt(`WEBVTT\n\n00:01.000 --> 00:02.000\n${line}\n`)).toEqual([{ start: 1, end: 2, text: line }]);
+    expect(performance.now() - started).toBeLessThan(200);
+  });
+
+  it("strips positioning codes in linear time on a long run of openers that never close", () => {
+    const line = `${"{\\".repeat(100_000)}x`;
+    const started = performance.now();
+    expect(parseVtt(`1\n00:00:01,000 --> 00:00:02,000\n${line}\n`)).toEqual([{ start: 1, end: 2, text: line }]);
+    expect(performance.now() - started).toBeLessThan(200);
+  });
+
   it("returns nothing for something that is not WebVTT", () => {
     expect(parseVtt("")).toEqual([]);
     expect(parseVtt("<html>blocked</html>")).toEqual([]);
@@ -148,5 +164,34 @@ describe("mergeSegments", () => {
       { start: 3, end: 4, text: "Four." },
     ]);
     expect(segs.map((s) => s.text)).toEqual(["One. Two. Three.", "Four."]);
+  });
+
+  it("finds sentence ends in linear time on a long run of punctuation that ends nothing", () => {
+    // `[.!?…]+` followed by a failing lookahead retried from every dot of the run.
+    const text = `${".".repeat(200_000)}x`;
+    const started = performance.now();
+    expect(mergeSegments([{ start: 0, end: 1, text }])).toEqual([{ start: 0, end: 1, text }]);
+    expect(performance.now() - started).toBeLessThan(200);
+  });
+
+  it("counts sentences and words per cue, not by rescanning the segment it grows", () => {
+    // Cues that never end a sentence nor span 30 s pile into one segment; read
+    // again whole on every cue, 200 000 characters of them took seconds.
+    const cues = Array.from({ length: 20_000 }, () => ({ start: 0, end: 0, text: "word word" }));
+    const started = performance.now();
+    const segs = mergeSegments(cues);
+    expect(performance.now() - started).toBeLessThan(200);
+    expect(segs).toHaveLength(1);
+    expect(segs[0]!.text).toBe(Array.from({ length: 20_000 }, () => "word word").join(" "));
+  });
+
+  it("closes on a sentence end once the segment holds enough words, across cues", () => {
+    const words = Array.from({ length: 12 }, (_, i) => `w${i}`).join(" ");
+    const segs = mergeSegments([
+      { start: 0, end: 1, text: words },
+      { start: 1, end: 2, text: `${words} end.` },
+      { start: 2, end: 3, text: "Next." },
+    ]);
+    expect(segs.map((s) => s.text)).toEqual([`${words} ${words} end.`, "Next."]);
   });
 });

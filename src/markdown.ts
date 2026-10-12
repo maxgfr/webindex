@@ -25,6 +25,7 @@ import {
   closeTagRe,
   dropElements,
   dropLandmarks,
+  dropLanguageSelectors,
   HIDDEN_ELEMENTS,
   htmlAttributes,
   INLINE_TAGS,
@@ -74,7 +75,7 @@ export function markdownAgainst(html: string, base: string | undefined, fullPage
   const src = withoutNul(html);
   const hidden = fullPage ? HIDDEN_ELEMENTS : [...HIDDEN_ELEMENTS, ...CHROME_ELEMENTS];
   let s = dropElements(src, hidden, RAW_TEXT_ELEMENTS);
-  if (!fullPage) s = dropLandmarks(s, CHROME_ROLES);
+  if (!fullPage) s = dropLanguageSelectors(dropLandmarks(s, CHROME_ROLES));
 
   // Every table that closes, by where it opens: one stack pass for the page.
   const tables = new Map<number, Region>();
@@ -104,7 +105,8 @@ export function markdownAgainst(html: string, base: string | undefined, fullPage
     const name = tagName(t);
     // `</a><a>` with no whitespace between keeps a space; no other inline pair does.
     const adjacentLinks = name === "a" && !closing && m.index === prevAEnd;
-    prevAEnd = name === "a" && closing ? tag.lastIndex : -1;
+    // A closing inline tag right after `</a>` (`</a></b><a>`) is still between the links.
+    prevAEnd = closing && (name === "a" || (m.index === prevAEnd && INLINE_TAGS.has(name))) ? tag.lastIndex : -1;
     if (!name) continue; // a doctype or processing instruction; comments are gone
 
     if (name === "div") {

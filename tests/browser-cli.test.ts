@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { envName } from "../src/brand.js";
+import { brand, envName } from "../src/brand.js";
 import { readRenderedPage } from "../src/browser/read.js";
 import { type BrowserCliFlags, runBrowserCommand } from "../src/browser/cli.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
@@ -855,18 +855,22 @@ describe("screenshot", () => {
     expect(fake.calls.length).toBe(calls);
   });
 
-  it("defaults to a private file under the temp dir", async () => {
+  it("defaults to a private file under the user's own temp dir", async () => {
     await cli("attach", [String(fake.port)]);
+    // Per user: a shared <tmp>/<brand>/browser belonged to whichever user
+    // screenshotted first, and the next was refused it or wrote into it.
+    const uid = process.getuid?.();
+    const shots = join(tmpdir(), uid === undefined ? brand().name : `${brand().name}-${uid}`, "browser");
     // A dir left readable by an earlier run is made private.
-    mkdirSync(join(tmpdir(), "webindex-tests", "browser"), { recursive: true });
-    chmodSync(join(tmpdir(), "webindex-tests", "browser"), 0o755);
+    mkdirSync(shots, { recursive: true });
+    chmodSync(shots, 0o755);
     const r = await cli("screenshot");
     expect(r.exitCode).toBe(0);
-    expect(r.text.startsWith(join(tmpdir(), "webindex-tests", "browser", "shot-"))).toBe(true);
+    expect(r.text.startsWith(join(shots, "shot-"))).toBe(true);
     expect(existsSync(r.text)).toBe(true);
     if (process.platform !== "win32") {
       expect(statSync(r.text).mode & 0o777).toBe(0o600);
-      expect(statSync(join(tmpdir(), "webindex-tests", "browser")).mode & 0o777).toBe(0o700);
+      expect(statSync(shots).mode & 0o777).toBe(0o700);
     }
     rmSync(r.text);
   });

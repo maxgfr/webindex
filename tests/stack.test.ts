@@ -32,6 +32,13 @@ describe("the embedded assets", () => {
     expect(COMPOSE_YAML).toMatch(/^name: \w+/m);
   });
 
+  // Qdrant, Ollama and Firecrawl have no authentication: published on every
+  // interface, they were open to the whole local network.
+  it("publishes every port on loopback only", () => {
+    const published = [...COMPOSE_YAML.matchAll(/^\s+- "([^"]+)"$/gm)].map((m) => m[1]!).filter((p) => /:\d+$/.test(p));
+    expect(published.sort()).toEqual(["127.0.0.1:11434:11434", "127.0.0.1:3002:3002", "127.0.0.1:6333:6333", "127.0.0.1:8888:8080"]);
+  });
+
   it("keeps Firecrawl out of the `all` profile", () => {
     // Five containers and ~3 GB of images. Leaking it into `all` would make the
     // cheap "start the local stack" command drag the whole extractor in.
@@ -242,6 +249,21 @@ describe("stackControl", () => {
     const r = stackControl("semantic", "up", deps);
     expect(r.code).toBe(0);
     expect(r.message).toContain("pull it yourself");
+  });
+
+  // Live: a desktop Ollama on 127.0.0.1:11434 made `stack up` end in docker's
+  // "ports are not available" and a bare "up failed." — with every port now
+  // on loopback, that conflict is the likeliest failure there is.
+  it("names the ports a failed up publishes, and the variable that uses what already holds one", () => {
+    const semantic = stackControl("semantic", "up", fake({ fails: "up" }).deps);
+    expect(semantic.code).toBe(1);
+    expect(semantic.message).toContain(`:6333 (Qdrant, ${envName("QDRANT")})`);
+    expect(semantic.message).toContain(`:11434 (Ollama, ${envName("OLLAMA")})`);
+    expect(semantic.message).not.toContain(":8888");
+    const searxng = stackControl("searxng", "up", fake({ fails: "up" }).deps);
+    expect(searxng.message).toContain(`:8888 (SearXNG, ${envName("SEARXNG")})`);
+    // A timeout is not a port conflict.
+    expect(stackControl("searxng", "up", fake({ fails: "up", timedOut: true }).deps).message).not.toContain(":8888 (");
   });
 
   it("lets the consumer choose the embedding model", () => {

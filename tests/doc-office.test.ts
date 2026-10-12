@@ -204,6 +204,25 @@ describe("the spreadsheet reader", () => {
     expect(officeToText(workbook('<row r="1"><c r="A1" s="1"><v>5</v></c></row>', hostile))).toContain("| 5 |");
     expect(performance.now() - t0).toBeLessThan(2000);
   });
+
+  // `r` is optional. A cell without it follows the cell before it, written or
+  // not: an empty `<c r="B1"/>` stores nothing, and the row's length then put
+  // the next cell in B instead of C.
+  it("places a cell without a reference after the cell before it, even an empty one", () => {
+    const sheet = '<row r="1"><c r="A1"><v>1</v></c><c r="B1"/><c><v>3</v></c></row><row r="2"><c><v>4</v></c><c><v/></c><c><v>6</v></c></row>';
+    expect(officeToText(workbook(sheet, "<styleSheet/>"))).toBe("## S\n\n| 1 |  | 3 |\n| --- | --- | --- |\n| 4 |  | 6 |");
+  });
+
+  // A string cell with no value is an empty cell, not a pointer to string #0.
+  it("leaves a shared-string cell without a value empty", () => {
+    const xlsx = zip({
+      "xl/workbook.xml": '<workbook xmlns:r="r"><sheets><sheet name="S" r:id="rId1"/></sheets></workbook>',
+      "xl/_rels/workbook.xml.rels": `<Relationships>${rel("rId1", "worksheet", "sheet1.xml")}${rel("rId2", "sharedStrings", "sharedStrings.xml")}</Relationships>`,
+      "xl/sharedStrings.xml": "<sst><si><t>first</t></si><si><t>second</t></si></sst>",
+      "xl/sheet1.xml": '<worksheet><sheetData><row r="1"><c r="A1" t="s"/><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"></c></row></sheetData></worksheet>',
+    });
+    expect(officeToText(xlsx)).toBe("## S\n\n|  | second |\n| --- | --- |");
+  });
 });
 
 describe("the presentation reader", () => {

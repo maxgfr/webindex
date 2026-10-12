@@ -29,6 +29,9 @@
 // Reads are deliberately NOT memoized: tests mutate process.env between cases,
 // and one env lookup is free next to the network call it is configuring.
 
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 export interface Brand {
   /** Human-readable engine consumer, used in notes and diagnostics. */
   name: string;
@@ -155,6 +158,19 @@ export function brand(): Readonly<Brand> {
   return current;
 }
 
+/**
+ * The brand's directory under the system temp dir, PER USER where the platform
+ * has uids: `<tmp>/<brand>-<uid>/<…segments>`. One shared `<tmp>/<brand>`
+ * belongs to whichever user wrote there first; the next is refused it, or reads
+ * and writes in a directory that is not theirs. The cache, screenshots and
+ * video runs all live under it. Not exported from the library: a consumer
+ * names its own directories.
+ */
+export function userTmpDir(...segments: string[]): string {
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  return join(tmpdir(), uid === undefined ? current.name : `${current.name}-${uid}`, ...segments);
+}
+
 /** Restore the default identity. Test-only; production code configures once. */
 export function resetBrand(): void {
   current = { ...DEFAULT_BRAND };
@@ -224,3 +240,13 @@ export function envInt(suffix: string, def: number, min = 0, max = Number.MAX_SA
   if (!Number.isFinite(n)) return def;
   return Math.min(max, Math.max(min, Math.trunc(n)));
 }
+
+/**
+ * The longest delay `setTimeout` holds: 2^31-1 ms. A longer one fires after
+ * 1 ms with a warning, so a generous `*_TIMEOUT_MS` tunable read through
+ * `envInt` must be capped here or it becomes no time at all.
+ *
+ * Kept beside `envInt` because that is where such numbers come from, and out of
+ * the public index: it is a fact about Node, not part of this package's API.
+ */
+export const MAX_TIMER_MS = 2 ** 31 - 1;

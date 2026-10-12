@@ -104,17 +104,13 @@ for (const f of cliFlags) check(helpCoversFlag(help, f), `HELP names --${f}`);
 // Flags that belong to something else the docs legitimately show: the vendoring
 // script, docker compose, npx, git, tsc. Named explicitly so the gate stays a
 // gate — an unknown `--flag` is a drift until someone says otherwise here.
+// A name the CLI itself declares needs no entry here (the universe below holds
+// it), and keeping one would let it be documented after the CLI dropped it.
 const ALLOWED_FOREIGN = new Set([
-  "ref", // scripts/sync-engine.mjs
-  "check", // scripts/sync-engine.mjs
-  "url", // an example of a CONSUMER's own CLI, not webindex's
-  "profile",
   "prefer-offline",
   "layout",
-  "format",
   "noEmit",
   "write",
-  "depth",
   "filter",
   "unshallow",
   "deepen",
@@ -140,6 +136,13 @@ for (const { f, text } of docs) {
     check(false, `${f}: --${name} does not exist in the CLI`);
   }
 }
+
+// D. And the other way: every flag the CLI accepts is in the README, the one
+// document that is meant to be complete (SKILL.md points at --help instead).
+// `--searxng`, `--root` and `profile import --force` worked for releases
+// without a line there.
+const readmeFlags = new Set(documentedFlags(docs.find((d) => d.f === "README.md")?.text ?? ""));
+for (const f of cliFlags) check(readmeFlags.has(f), `README.md documents --${f}`);
 
 // ── The MCP surface ─────────────────────────────────────────────────────────
 // The browser tools (`mcp --browser`) are declared beside the browser code,

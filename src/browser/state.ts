@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, openSync, readFileSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, linkSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { isNoWrite, writeFileAtomic } from "../no-write.js";
 import type { BrowserDeps } from "./deps.js";
@@ -193,12 +193,28 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-/** Why the lock may be taken over, or null while its holder is legitimately working. */
-function staleReason(path: string, staleMs: number, now: number): string | null {
+function readOrNull(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null; // gone or unreadable: judged by file age, or not at all
+  }
+}
+
+/**
+ * Why the lock may be taken over (null while its holder is legitimately
+ * working), with the content that judgment was made on.
+ */
+function judgeLock(path: string, staleMs: number, now: number): { reason: string | null; raw: string | null } {
+  const raw = readOrNull(path);
+  return { reason: staleReason(path, raw, staleMs, now), raw };
+}
+
+function staleReason(path: string, raw: string | null, staleMs: number, now: number): string | null {
   let at: number;
   let pid: unknown;
   try {
-    const held = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown; at?: unknown };
+    const held = JSON.parse(raw ?? "") as { pid?: unknown; at?: unknown };
     pid = held.pid;
     at = typeof held.at === "number" ? held.at : Number.NaN;
   } catch {
@@ -215,6 +231,35 @@ function staleReason(path: string, staleMs: number, now: number): string | null 
   if (now - at > staleMs) return "old";
   if (typeof pid === "number" && !pidAlive(pid)) return "dead";
   return null;
+}
+
+/**
+ * Clear the way for a takeover of the lock judged stale on content `judged`.
+ * Two waiters can judge the same lock stale; deleting it outright lets the
+ * slower one delete the lock the faster one has just created, and both then
+ * run. So the lock is renamed aside first, which only one of them can do, and
+ * dropped only if it is still the very lock judged stale (`judged` carries its
+ * token). A fresh lock caught by mistake is put back, never over a newer one.
+ */
+function moveAsideStale(path: string, judged: string | null, token: string): void {
+  const aside = `${path}.${token}.stale`;
+  try {
+    renameSync(path, aside);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // someone else took it over first
+    throw e;
+  }
+  try {
+    if (readOrNull(aside) === judged) return;
+    try {
+      linkSync(aside, path);
+    } catch (e) {
+      // A third waiter created a lock in the meantime: that one holds now.
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    }
+  } finally {
+    rmSync(aside, { force: true });
+  }
 }
 
 /** Whether the lock file is still the one this holder wrote (`token` tells two holders in one process apart). */
@@ -259,12 +304,11 @@ export async function withBrowserLock<T>(fn: () => Promise<T>, opts: LockOptions
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     }
-    if (staleReason(path, staleMs, now())) {
-      try {
-        unlinkSync(path);
-      } catch {
-        /* someone else took it over first */
-      }
+    const judged = judgeLock(path, staleMs, now());
+    if (judged.reason) {
+      // Then back to the exclusive create: a lock that turned out fresh is
+      // judged again, and a waiter that got there first makes ours fail.
+      moveAsideStale(path, judged.raw, token);
       continue;
     }
     if (now() >= deadline) throw new Error(`browser busy: another webindex command holds ${path} (waited ${waitMs} ms)`);

@@ -6,13 +6,18 @@ import {
   balancedRegions,
   CHROME_ELEMENTS,
   CHROME_ROLES,
+  canonicalHref,
   closeTagRe,
   dropElements,
   dropLandmarks,
+  dropLanguageSelectors,
+  firstElementText,
   HIDDEN_ELEMENTS,
   htmlAttributes,
   INLINE_TAGS,
   LOOSE_TAG_RE,
+  METADATA_HIDDEN,
+  metaContent,
   RAW_TEXT_ELEMENTS,
   type Region,
   TAG_RE,
@@ -30,6 +35,7 @@ import { extractDocument, docFormatForUrl, docFormatForContentType, sniffDocumen
 // is where the extraction seam lives. Safe because neither module calls into the
 // other at module-evaluation time — only from inside function bodies.
 import { scrapeViaFirecrawl } from "./firecrawl.js";
+import { githubRawUrl } from "./forge-host.js";
 import { knownVideo, transcribeVideo, transcriptMarkdown } from "./video.js";
 // Only the mode is read here; the browser itself (src/browser/read.ts) is
 // imported inside the rung, so nothing of it loads unless a page needs it.
@@ -471,6 +477,20 @@ export async function httpGet(
         return { ok: false, status: res.status, body: "", bytesRead: 0, truncated: true, ...meta, error: `response too large: ${declared} bytes > ${max} cap` };
       }
 
+      // A transient answer that will be retried: nobody reads its body (a 503
+      // page, a rate limiter's HTML), which used to be downloaded in full — up
+      // to the document cap — only to be dropped during the back-off. The last
+      // attempt's body is still read below: that one is the answer.
+      const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(meta.retryAfterMs) : undefined;
+      if (wait !== undefined) {
+        await res.body?.cancel();
+        last = { ok: false, status: res.status, body: "", bytesRead: 0, truncated: false, ...meta };
+        if (wait > 0) opts.onBackOff?.(meta.url, wait);
+        // A cancel during the wait ends it, and the loop's first check answers it.
+        await sleepUnlessAborted(wait, opts.signal);
+        continue;
+      }
+
       // 304 carries no body by definition — reading it is not an error, and the
       // caller (the cache) wants the status, not an empty-body complaint.
       let { bytes, bytesRead, truncated } = res.status === 304 ? { bytes: Buffer.alloc(0), bytesRead: 0, truncated: false } : await readMeasuredBody(res, max);
@@ -510,14 +530,6 @@ export async function httpGet(
         ...meta,
         ...(filename ? { filename } : {}),
       };
-      const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(meta.retryAfterMs) : undefined;
-      if (wait !== undefined) {
-        last = result;
-        if (wait > 0) opts.onBackOff?.(result.url, wait);
-        // A cancel during the wait ends it, and the loop's first check answers it.
-        await sleepUnlessAborted(wait, opts.signal);
-        continue;
-      }
       return result;
     } catch (e) {
       if (!timedOut && opts.signal?.aborted) return cancelled();
@@ -563,6 +575,12 @@ export async function httpJson(
     retries?: number;
     /** Response cap in bytes; over it the transfer is cancelled and the call fails. Default 4 MB. */
     maxBytes?: number;
+    /**
+     * Abandons the request, and any retry after it, as httpGet's does: the
+     * answer is `error: "cancelled"`. How an MCP cancel reaches Ollama, Qdrant
+     * and the Wayback API.
+     */
+    signal?: AbortSignal;
   } = {},
 ): Promise<{
   ok: boolean;
@@ -577,8 +595,12 @@ export async function httpJson(
   const attempts = attemptsFor(opts.retries);
   let last: { ok: boolean; status: number; data: any; error?: string; timedOut?: boolean } = { ok: false, status: 0, data: undefined };
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
+  const cancelled = { ok: false, status: 0, data: undefined, error: "cancelled" };
   for (let attempt = 0; attempt < attempts; attempt++) {
+    if (opts.signal?.aborted) return cancelled;
     const ctrl = new AbortController();
+    const onCancel = () => ctrl.abort();
+    opts.signal?.addEventListener("abort", onCancel, { once: true });
     let timedOut = false;
     const t = setTimeout(() => {
       timedOut = true;
@@ -598,6 +620,14 @@ export async function httpJson(
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
       });
+      // A transient answer that will be retried is not read, as in httpGet.
+      const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(parseRetryAfter(res.headers, Number.POSITIVE_INFINITY)) : undefined;
+      if (wait !== undefined) {
+        await res.body?.cancel();
+        last = { ok: false, status: res.status, data: undefined };
+        await sleepUnlessAborted(wait, opts.signal);
+        continue;
+      }
       // Streamed under the same cap as httpGet, and cancelled at it. `res.text()`
       // buffered whatever the endpoint sent — Firecrawl, Qdrant, Ollama and the
       // Wayback API all come through here, and a runaway answer from any of
@@ -619,25 +649,20 @@ export async function httpJson(
       } catch {
         data = text;
       }
-      const result = { ok: res.ok, status: res.status, data, bytesRead, truncated };
-      const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(parseRetryAfter(res.headers, Number.POSITIVE_INFINITY)) : undefined;
-      if (wait !== undefined) {
-        last = result;
-        await sleep(wait);
-        continue;
-      }
-      return result;
+      return { ok: res.ok, status: res.status, data, bytesRead, truncated };
     } catch (e) {
+      if (!timedOut && opts.signal?.aborted) return cancelled;
       last = timedOut
         ? { ok: false, status: 0, data: undefined, error: `timed out after ${timeoutMs} ms`, timedOut: true }
         : { ok: false, status: 0, data: undefined, error: networkFailure(e) };
       if (timedOut || isPermanentFailure(e)) break;
-      if (attempt < attempts - 1) await sleep(defaultRetryMs());
+      if (attempt < attempts - 1) await sleepUnlessAborted(defaultRetryMs(), opts.signal);
     } finally {
       clearTimeout(t);
+      opts.signal?.removeEventListener("abort", onCancel);
     }
   }
-  return last;
+  return opts.signal?.aborted ? cancelled : last;
 }
 
 // The decoder lives with the shared markup primitives; this is its public name.
@@ -781,7 +806,7 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
   let s = dropElements(html.includes(NUL) ? html.split(NUL).join("\uFFFD") : html, hidden, RAW_TEXT_ELEMENTS);
   // The same chrome marked up as ARIA landmarks: a breadcrumb, a wiki's table
   // of contents, a docs theme's prev/next bar.
-  if (!opts.fullPage) s = dropLandmarks(s, CHROME_ROLES);
+  if (!opts.fullPage) s = dropLanguageSelectors(dropLandmarks(s, CHROME_ROLES));
   const pre: string[] = [];
   s = flattenHeadings(setAsidePre(s, pre));
   let prevAEnd = -1; // where the last `</a>` ended
@@ -792,7 +817,8 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
     // practically never split a word, so they keep a space. Other inline
     // pairs stay joined: per-letter <span>s spell words.
     const adjacentLinks = name === "a" && !closing && at === prevAEnd;
-    prevAEnd = name === "a" && closing ? at + tag.length : -1;
+    // A closing inline tag right after `</a>` (`</a></b><a>`) is still between the links.
+    prevAEnd = closing && (name === "a" || (at === prevAEnd && INLINE_TAGS.has(name))) ? at + tag.length : -1;
     if (/^h[1-6]$/.test(name)) {
       return closing ? "\n" : "\n" + "#".repeat(Number(name[1])) + " ";
     }
@@ -825,52 +851,18 @@ export function htmlToText(html: string, opts: { fullPage?: boolean } = {}): str
     .join("\n");
 }
 
-// Never where a page names itself: an icon's <svg><title> ("Search icon")
-// was the title of every SPA shell whose <head> had none.
-const NOT_TITLE: readonly string[] = ["script", "style", "template", "svg"];
-
-/**
- * The text of the first `<name>` element in `html`, markup out, entities
- * decoded, whitespace collapsed. The close is searched once, forward from the
- * opener, so an unclosed one costs one pass rather than a lazy regex's pass
- * per opener.
- */
-function firstElementText(html: string, name: string): string | undefined {
-  const open = new RegExp(`<${name}(?=[\\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>`, "i").exec(html);
-  if (!open) return undefined;
-  const close = closeTagRe(name);
-  close.lastIndex = open.index + open[0].length;
-  const c = close.exec(html);
-  if (!c) return undefined;
-  const inner = html.slice(open.index + open[0].length, c.index).replace(TAG_RE, (tag) => (INLINE_TAGS.has(tagName(tag)) ? "" : " "));
-  return decodeEntities(inner).replace(/\s+/g, " ").trim() || undefined;
-}
-
 // Best-effort page title from an HTML document: its `<title>`.
 export function htmlTitle(html: string): string | undefined {
-  return firstElementText(dropElements(html, NOT_TITLE), "title");
-}
-
-// The first `<meta>` content among `keys` (name or property, lower-case), by
-// the order of `keys` rather than of the document.
-function metaContent(html: string, keys: readonly string[]): string | undefined {
-  const found = new Map<string, string>();
-  for (const m of html.matchAll(/<meta(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi)) {
-    const attrs = htmlAttributes(m[0]);
-    const key = (attrs.get("property") ?? attrs.get("name"))?.toLowerCase();
-    const value = attrs.get("content")?.trim();
-    if (key && value && keys.includes(key) && !found.has(key)) found.set(key, decodeEntities(value).replace(/\s+/g, " ").trim());
-  }
-  return keys.map((k) => found.get(k)).find(Boolean);
+  return firstElementText(dropElements(html, METADATA_HIDDEN), "title");
 }
 
 /**
- * What to call a fetched page: its `<title>`, else what it tells social cards
- * (`og:title`), else its first `<h1>`. A title-less page — an SPA shell, a
- * generated doc — used to report none, although it names itself plainly.
+ * What to call a fetched page, from a copy with METADATA_HIDDEN out: its
+ * `<title>`, else what it tells social cards (`og:title`), else its first
+ * `<h1>`. A title-less page — an SPA shell, a generated doc — used to report
+ * none, although it names itself plainly.
  */
-function pageTitle(html: string): string | undefined {
-  const clean = dropElements(html, NOT_TITLE);
+function pageTitleIn(clean: string): string | undefined {
   return firstElementText(clean, "title") ?? metaContent(clean, ["og:title", "twitter:title"]) ?? firstElementText(clean, "h1");
 }
 
@@ -883,20 +875,7 @@ function pageTitle(html: string): string | undefined {
 // comments out of the way. A fixed window missed the canonical of every page
 // that inlines a large critical stylesheet first, as Next and Gatsby do.
 export function htmlCanonicalUrl(html: string): string | undefined {
-  const clean = dropElements(html, ["script", "style", "template"]);
-  const end = clean.search(/<\/head\s*>|<body(?=[\s/>])/i);
-  const head = end < 0 ? clean : clean.slice(0, end);
-  let og: string | undefined;
-  for (const m of head.matchAll(/<(link|meta)(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi)) {
-    const attrs = htmlAttributes(m[0]);
-    if (m[1]!.toLowerCase() === "link") {
-      const href = attrs.get("href")?.trim();
-      if (href && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("canonical")) return decodeEntities(href);
-    } else if (og === undefined && attrs.get("property")?.toLowerCase() === "og:url") {
-      og = attrs.get("content")?.trim() || undefined;
-    }
-  }
-  return og && decodeEntities(og);
+  return canonicalHref(dropElements(html, ["script", "style", "template"]));
 }
 
 // A declared canonical made absolute against the address the page came from.
@@ -1354,7 +1333,7 @@ export async function fetchAndExtract(
     firecrawl?: string;
     /** Extra request headers for the built-in path — how the cache sends
      *  `if-none-match` / `if-modified-since`. Firecrawl does its own fetching and
-     *  ignores these, which is why a revalidating caller skips it. */
+     *  would ignore these, so a fetch carrying them skips it. */
     headers?: Record<string, string>;
     /** Check the initial URL and each redirect; disables remote extraction. */
     authorizeUrl?: (url: string) => Promise<boolean>;
@@ -1445,6 +1424,16 @@ export async function fetchAndExtract(
       ...(t.reason ? { note: `No transcript for ${url}: ${t.reason}.` } : {}),
     };
   }
+  // A GitHub blob page wraps the file in GitHub's interface (Copy path, Blame,
+  // the line count), read before the file itself. The raw file is the file:
+  // read that, cited by the page's URL. A file with no raw copy (a private
+  // repository) falls back to the page; fullPage asked for the page.
+  const raw = opts.fullPage ? undefined : githubRawUrl(url);
+  if (raw) {
+    const file = await fetchAndExtract(raw, opts);
+    if (opts.signal?.aborted) return cancelled();
+    if (file.status === 304 || file.text.trim()) return { ...file, finalUrl: url };
+  }
   const wantsPdf = looksLikePdfUrl(url);
   // An office document skips the HTML Firecrawl path for the same reason a PDF
   // does (see looksLikePdfUrl above): handing it to Firecrawl first would
@@ -1511,7 +1500,9 @@ async function readWithoutBrowser(
   const cancelled = (): ExtractResult => ({ text: "", finalUrl: url, status: 0, note: `Fetching ${url} was cancelled.` });
   let firecrawlNote: string | undefined;
   // Firecrawl's cleaned markdown cannot recover navigation or consent text.
-  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl && !opts.fullPage) {
+  // Nor can it revalidate: it fetches on its own, without the conditional
+  // headers, and would turn every 304 into a full re-scrape.
+  if (!wantsPdf && !wantsDoc && !opts.authorizeUrl && !opts.fullPage && !opts.headers) {
     const fc = await scrapeViaFirecrawl(url, opts);
     // Firecrawl reports success even for an error page, handing back the
     // origin's 404/403 body as markdown. Accept only a 2xx/3xx: anything else
@@ -1685,7 +1676,7 @@ async function readWithoutBrowser(
   seen.page = isHtml;
   const extracted = isHtml
     ? extractFromHtml(body, res.url, opts)
-    : { text: body, consentDropped: 0, title: undefined, canonical: undefined, metaDescription: undefined };
+    : { text: trimBlankLines(body), consentDropped: 0, title: undefined, canonical: undefined, metaDescription: undefined };
   const notDocument = answeredHtml
     ? `${url} looked like ${claimsPdf ? "a PDF" : "an office document"} but the server returned HTML (a login wall or landing page?), so it was read as a web page.`
     : undefined;
@@ -1723,14 +1714,41 @@ export function extractFromHtml(
   // in `main`, and a relative one (`docs/`) applied twice is a directory off.
   const stripped = markdown ? markdownAgainst(main, documentBaseUrl(html, finalUrl), opts.fullPage) : htmlToText(main, opts);
   const consent = opts.stripConsent && !opts.fullPage ? stripConsentBoilerplate(stripped, { markdown }) : { text: stripped, dropped: 0 };
+  // One copy of the page without its scripts, styles and comments, read for
+  // all three: each used to make its own pass over the whole page.
+  const clean = dropElements(html, METADATA_HIDDEN);
   return {
     text: consent.text,
     consentDropped: consent.dropped,
-    title: pageTitle(html),
-    canonical: absoluteCanonical(htmlCanonicalUrl(html), finalUrl),
-    metaDescription: metaDescriptionOf(html),
+    title: pageTitleIn(clean),
+    canonical: absoluteCanonical(canonicalHref(clean), finalUrl),
+    metaDescription: metaDescriptionOf(clean),
     ...(opts.keepHtml ? { html } : {}),
   };
+}
+
+/**
+ * A plain-text body without the blank lines before its first line of text and
+ * after its last — an RFC opens with four, the printed page's top margin.
+ * Everything between, indentation and page breaks included, stays literal, and
+ * so does the newline that ends the last line: that is a terminator, not a line.
+ * Two scans, not a regex: a run of blank lines that ends in text is exactly
+ * what makes an anchored whitespace regex retry from every position.
+ */
+function trimBlankLines(s: string): string {
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 10) start = i + 1;
+    else if (c !== 32 && c !== 9 && c !== 13) break;
+  }
+  let end = s.length;
+  for (let i = s.length - 1; i >= start; i--) {
+    const c = s.charCodeAt(i);
+    if (c === 10) end = i + 1;
+    else if (c !== 32 && c !== 9 && c !== 13) break;
+  }
+  return start === 0 && end === s.length ? s : s.slice(start, end);
 }
 
 const HTML_TYPE_RE = /^(?:text\/html|application\/xhtml\+xml)$/;
@@ -1752,11 +1770,11 @@ export const DEAD_LINK_STATUS = new Set([404, 410, 451, 403]);
 // callers record the snapshot in meta + a note. Disable with `<PREFIX>_NO_WAYBACK`.
 export async function rescueViaWayback(
   url: string,
-  opts: { acceptLanguage?: string; firecrawl?: string; authorizeUrl?: (url: string) => Promise<boolean> } = {},
+  opts: { acceptLanguage?: string; firecrawl?: string; authorizeUrl?: (url: string) => Promise<boolean>; signal?: AbortSignal } = {},
 ): Promise<{ text: string; title?: string; snapshotUrl: string; timestamp: string } | undefined> {
   if (opts.authorizeUrl || envFlag("NO_WAYBACK")) return undefined;
   const api = `https://archive.org/wayback/available?url=${encodeURIComponent(url)}`;
-  const r = await httpJson("GET", api, undefined, { timeoutMs: 10000, userAgent: contactUa() });
+  const r = await httpJson("GET", api, undefined, { timeoutMs: 10000, userAgent: contactUa(), signal: opts.signal });
   const snap = r.ok ? r.data?.archived_snapshots?.closest : undefined;
   if (snap?.available !== true || typeof snap.url !== "string") return undefined;
   const got = await fetchAndExtract(snap.url, opts);

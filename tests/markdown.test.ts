@@ -182,6 +182,20 @@ describe("htmlToMarkdown: inline", () => {
     expect(md('<p><a href="/a">One</a> <a href="/b">Two</a></p>', "https://d.test/")).toBe("[One](https://d.test/a) [Two](https://d.test/b)");
   });
 
+  // Hacker News: <b class="hnname"><a>Hacker News</a></b><a>new</a> read
+  // "Hacker Newsnew" — the </b> sat between the two links.
+  it("separates two links when only closing inline tags sit between them", () => {
+    expect(md('<p><b><a href="/news">Hacker News</a></b><a href="/newest">new</a></p>', "https://d.test/")).toBe(
+      "**[Hacker News](https://d.test/news)** [new](https://d.test/newest)",
+    );
+    expect(md('<p><span><b><a href="/a">One</a></b></span><a href="/b">Two</a></p>', "https://d.test/")).toBe(
+      "**[One](https://d.test/a)** [Two](https://d.test/b)",
+    );
+    // An opening tag between them is a different matter: the link starts a word.
+    expect(md('<p><a href="/a">One</a><b>x</b><a href="/b">Two</a></p>', "https://d.test/")).toBe("[One](https://d.test/a)**x**[Two](https://d.test/b)");
+    expect(md("<p><span>T</span><span>h</span><b>i</b><span>s</span></p>")).toBe("Th**i**s");
+  });
+
   it("reads per-letter and per-word spans as the words they spell", () => {
     expect(md("<p><span>T</span><span>h</span><span>i</span><span>s</span><span> </span><span>d</span><span>o</span></p>")).toBe("This do");
     expect(md("<p><span>Hello</span> <span>world</span><span>!</span></p>")).toBe("Hello world!");
@@ -397,5 +411,25 @@ describe("htmlToMarkdown stays linear on hostile markup", () => {
     ["one run holding an entity's name to its end", `<p>${"&a&#".repeat(50_000)}&${"a".repeat(300_000)}<b>x</b>`],
   ])("%s", (_label, html) => {
     within(10_000, () => htmlToMarkdown(html, { baseUrl: "https://d.test/" }));
+  });
+});
+
+describe("htmlToMarkdown: a head with no </head>", () => {
+  it("ends the head at <body>, so the title stays out of the text", () => {
+    expect(md("<html><head><title>Page Title</title><meta charset=utf-8><body><p>Body text.</p></body></html>")).toBe("Body text.");
+  });
+  it("ends the head at the first content tag when <body> is omitted too", () => {
+    const out = md("<html><head><title>Page Title</title><link rel=icon href=x><h1>Heading</h1><p>Body text.</p>");
+    expect(out).not.toContain("Page Title");
+    expect(out).toContain("# Heading");
+    expect(out).toContain("Body text.");
+  });
+  it("still keeps a page whose head content never closes", () => {
+    expect(md("<head><title>never closed<p>kept")).toContain("kept");
+  });
+  it("stays linear on many unclosed heads", () => {
+    const started = performance.now();
+    htmlToMarkdown("<head><title>t</title><p>x</p>".repeat(20_000));
+    expect(performance.now() - started).toBeLessThan(10_000);
   });
 });

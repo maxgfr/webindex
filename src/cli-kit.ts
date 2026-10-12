@@ -64,6 +64,12 @@ export interface CliSpec {
   valueFlags: Iterable<string>;
   /** Flags that are present or absent: `--json`. Never take a value. */
   boolFlags: Iterable<string>;
+  /**
+   * The flags each command takes, value and boolean alike. A command listed
+   * here refuses every other declared flag; one not listed takes them all, as
+   * every command did before this table existed.
+   */
+  commandFlags?: Readonly<Record<string, Iterable<string>>>;
 }
 
 /** A parsed invocation of one command. */
@@ -93,13 +99,16 @@ export type ParsedArgs = { kind: "help"; command?: string } | { kind: "version" 
  * reports success. That silence is what this replaces — webindex's own CLI read
  * flags with `argv.indexOf("--" + name)` and accepted anything.
  *
- * Throws UsageError on: an unknown command, an unknown flag, a value flag with
+ * Throws UsageError on: an unknown command, an unknown flag, a declared flag the
+ * command does not take (with `commandFlags`), a short flag, a value flag with
  * no value, and a boolean flag given one.
  */
 export function parseArgs(argv: readonly string[], spec: CliSpec): ParsedArgs {
   const commands = new Set(spec.commands);
   const valueFlags = new Set(spec.valueFlags);
   const boolFlags = new Set(spec.boolFlags);
+  const scoped = spec.commandFlags?.[argv[0] ?? ""];
+  const takes = scoped === undefined ? undefined : new Set(scoped);
 
   // No arguments at all is a request for help, not an error. Someone typing the
   // bare command name is asking what it does.
@@ -131,12 +140,19 @@ export function parseArgs(argv: readonly string[], spec: CliSpec): ParsedArgs {
     }
 
     if (!arg.startsWith("--") && arg !== "-h" && arg !== "-v") {
+      // `-x` is a flag in every other CLI, and read as a word here it went
+      // silently into the query. `-` (stdin) and `-3` are not flags.
+      if (arg.length > 1 && arg[0] === "-" && !/^-\.?\d/.test(arg)) {
+        throw new UsageError(`unknown flag "${arg}" — flags here are long (--name); put -- before a word that starts with a dash`);
+      }
       positional.push(arg);
       continue;
     }
 
     const eq = arg.indexOf("=");
     const key = eq !== -1 ? arg.slice(2, eq) : arg.slice(2);
+    const declared = boolFlags.has(key) || valueFlags.has(key);
+    const own = declared && (takes === undefined || takes.has(key));
 
     // A DECLARED flag beats the built-in shorthand. `--version` is the version
     // word in argv[0] and a value flag everywhere else in a CLI that has a
@@ -148,9 +164,12 @@ export function parseArgs(argv: readonly string[], spec: CliSpec): ParsedArgs {
     // declared, so the shorthands are unconditional there (handled above);
     // here they only apply to names nobody claimed. `webindex search --help`
     // is what a reader types once they are already mid-command, and it works.
-    if (!boolFlags.has(key) && !valueFlags.has(key)) {
+    if (!own) {
       if (isHelpWord(arg)) return { kind: "help", command };
       if (isVersionWord(arg)) return { kind: "version" };
+    }
+    if (declared && !own) {
+      throw new UsageError(`--${key} does not apply to ${command} — run \`${command} --help\` for its options`);
     }
 
     if (boolFlags.has(key)) {

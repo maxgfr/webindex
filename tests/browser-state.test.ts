@@ -278,6 +278,44 @@ describe("withBrowserLock", () => {
     expect(existsSync(lockPath())).toBe(true); // not ours: left alone
   });
 
+  it("lets exactly one of two waiters take over the same stale lock", async () => {
+    const dead = 2_147_483_000;
+    writeFileSync(lockPath(), JSON.stringify({ pid: dead, at: Date.now(), token: "gone" }));
+    let active = 0;
+    let most = 0;
+    const order: string[] = [];
+    const work = (name: string) => async () => {
+      most = Math.max(most, ++active);
+      order.push(`${name}-start`);
+      await new Promise((r) => setTimeout(r, 40));
+      order.push(`${name}-end`);
+      active--;
+    };
+    // The other waiter takes the lock over exactly while this one is between
+    // judging it stale (its owner is dead) and taking it over: the window two
+    // processes polling the same stale lock can both land in.
+    let other: Promise<void> | undefined;
+    let started = false;
+    const kill = process.kill.bind(process);
+    const spy = vi.spyOn(process, "kill").mockImplementation((pid: number, signal?: string | number) => {
+      if (pid !== dead) return kill(pid, signal);
+      if (!started) {
+        started = true;
+        other = withBrowserLock(work("b"), { home, pollMs: 5 });
+      }
+      throw Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
+    });
+    try {
+      await withBrowserLock(work("a"), { home, pollMs: 5 });
+      await other;
+    } finally {
+      spy.mockRestore();
+    }
+    expect(most).toBe(1);
+    expect(order).toEqual(["b-start", "b-end", "a-start", "a-end"]);
+    expect(files(home)).toEqual([]);
+  });
+
   it("does not remove a lock somebody else took over meanwhile", async () => {
     await withBrowserLock(
       async () => {

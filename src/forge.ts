@@ -6,6 +6,7 @@ import { configuredForgeHosts, hostForgeKind, normalizeForgeHost } from "./forge
 import { originUrl, type RepoRef, resolveRepo } from "./repo.js";
 import { defaultRetryMs, isPermanentFailure, maxAttempts, retryDelayMs } from "./retry.js";
 import { rankedKeywords } from "./text.js";
+import { trimTrailing } from "./trim.js";
 
 // Forge APIs: asking a code host about a repository.
 //
@@ -114,7 +115,7 @@ export function forgeRef(ref: RepoRef, opts: Pick<ForgeOptions, "kind"> = {}): R
  * function grew downstream.
  */
 export function apiBase(ref: Pick<RepoRef, "host"> | string, opts: ForgeOptions = {}): string {
-  if (opts.apiBase) return opts.apiBase.replace(/\/+$/, "");
+  if (opts.apiBase) return trimTrailing(opts.apiBase, "/");
   const host = normalizeForgeHost(typeof ref === "string" ? ref : ref.host);
   const kind = forgeKind(host, opts);
   if (kind === "github") return host === "github.com" ? "https://api.github.com" : `https://${host}/api/v3`;

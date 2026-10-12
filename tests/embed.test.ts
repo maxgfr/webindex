@@ -59,6 +59,32 @@ describe("embed", () => {
     expect(r.vectors.map((v) => v[0])).toEqual([1, 2, 3, 4, 5]);
   });
 
+  // An MCP cancel stopped the tool, not the minute-long embedding request it
+  // was waiting on, nor the batches queued after it.
+  it("stops its requests, and sends no more, when the caller's signal aborts", async () => {
+    process.env[envName("EMBED_BATCH")] = "1";
+    let started = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        if (String(input).includes("/api/tags")) return new Response(JSON.stringify({ models: [] }), { headers: { "content-type": "application/json" } });
+        started++;
+        return new Promise((_resolve, reject) =>
+          init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }))),
+        );
+      }),
+    );
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 30);
+    const t0 = performance.now();
+    const r = await embed(["a", "b", "c", "d", "e", "f"], { base: OLLAMA, concurrency: 2, signal: ctrl.signal });
+    expect(performance.now() - t0).toBeLessThan(2000);
+    expect(r.vectors).toEqual([]);
+    expect(r.note).toMatch(/cancelled/);
+    expect(started).toBe(2);
+    vi.unstubAllGlobals();
+  });
+
   it("answers an empty input without asking the network anything", async () => {
     const spy = ollamaUp();
     const r = await embed([], { base: OLLAMA });

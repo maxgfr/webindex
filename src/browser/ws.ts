@@ -48,9 +48,16 @@ function unmask(payload: Buffer, key: Buffer): Buffer {
   return out;
 }
 
-/** Incremental frame parser: feed it chunks cut anywhere, get back the frames completed so far. */
+/**
+ * Incremental frame parser: feed it chunks cut anywhere, get back the frames completed so far.
+ *
+ * Chunks are kept as they arrive and joined once, when a whole frame is in: a
+ * 10 MB screenshot comes off the socket 64 KB at a time, and re-joining the
+ * buffered bytes on every chunk would copy it some 800 MB over.
+ */
 export class FrameParser {
-  private buf: Buffer = Buffer.alloc(0);
+  private chunks: Buffer[] = [];
+  private bytes = 0;
   private readonly max: number;
 
   constructor(opts: { maxMessageSize?: number } = {}) {
@@ -58,7 +65,10 @@ export class FrameParser {
   }
 
   push(chunk: Buffer): Frame[] {
-    this.buf = this.buf.length === 0 ? chunk : Buffer.concat([this.buf, chunk]);
+    if (chunk.length) {
+      this.chunks.push(chunk);
+      this.bytes += chunk.length;
+    }
     const frames: Frame[] = [];
     for (;;) {
       const frame = this.next();
@@ -67,8 +77,39 @@ export class FrameParser {
     }
   }
 
+  /** Remove the next `n` buffered bytes, joined into one buffer of their own. */
+  private take(n: number): Buffer {
+    const pieces: Buffer[] = [];
+    for (let left = n; left > 0; ) {
+      const c = this.chunks[0]!;
+      if (c.length <= left) {
+        pieces.push(c);
+        this.chunks.shift();
+        left -= c.length;
+      } else {
+        pieces.push(c.subarray(0, left));
+        this.chunks[0] = c.subarray(left);
+        left = 0;
+      }
+    }
+    this.bytes -= n;
+    return Buffer.concat(pieces, n);
+  }
+
+  /** The first chunk, grown to hold at least the first `n` buffered bytes (a header split across chunks). */
+  private peek(n: number): Buffer {
+    if (this.chunks[0]!.length < n) {
+      const head = this.take(n);
+      this.chunks.unshift(head);
+      this.bytes += n;
+    }
+    return this.chunks[0]!;
+  }
+
   private next(): Frame | undefined {
-    const b = this.buf;
+    if (this.bytes < 2) return undefined;
+    // A header is at most 14 bytes: 2, an extended length of up to 8, a mask key of 4.
+    const b = this.peek(Math.min(this.bytes, 14));
     if (b.length < 2) return undefined;
     const masked = (b[1]! & 0x80) !== 0;
     let len = b[1]! & 0x7f;
@@ -86,10 +127,15 @@ export class FrameParser {
     }
     if (len > this.max) throw new WsProtocolError("message too large", 1009);
     const total = off + (masked ? 4 : 0) + len;
-    if (b.length < total) return undefined;
-    const payload = masked ? unmask(b.subarray(off + 4, total), b.subarray(off, off + 4)) : Buffer.from(b.subarray(off, total));
-    this.buf = b.subarray(total);
-    return { fin: (b[0]! & 0x80) !== 0, opcode: b[0]! & 0x0f, payload };
+    if (this.bytes < total) return undefined;
+    const fin = (b[0]! & 0x80) !== 0;
+    const opcode = b[0]! & 0x0f;
+    const key = masked ? Buffer.from(b.subarray(off, off + 4)) : undefined;
+    this.take(off + (masked ? 4 : 0));
+    // `take` hands back a buffer of the frame's own, so it is unmasked in place.
+    const payload = this.take(len);
+    if (key) for (let i = 0; i < payload.length; i++) payload[i]! ^= key[i & 3]!;
+    return { fin, opcode, payload };
   }
 }
 

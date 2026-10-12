@@ -1,5 +1,6 @@
 import { brand } from "./brand.js";
 import { foldTerm, isStopword, type KeywordMatcher, subtokens } from "./text.js";
+import { trimTrailing } from "./trim.js";
 import { canonicalizeUrl, domainOf, fnv1a64Words, normalizeDoi } from "./url.js";
 
 // Ranking: turning a pool of candidates into a reading order.
@@ -65,14 +66,6 @@ export function rrf<T>(lists: T[][], keyOf: (item: T) => string, k = 60): Map<st
  * orders from one input — "deterministic" has to hold across machines.
  */
 const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
-
-// Trailing-character trims written as loops: `/\/+$/` backtracks once per
-// start position on a long run that does not reach the end.
-function trimTrailing(s: string, ch: string): string {
-  let end = s.length;
-  while (end > 0 && s[end - 1] === ch) end--;
-  return s.slice(0, end);
-}
 
 // ── Identity ────────────────────────────────────────────────────────────────
 
@@ -562,6 +555,10 @@ function popcount32(n: number): number {
   return Math.imul((x + (x >>> 4)) & 0x0f0f0f0f, 0x01010101) >>> 24;
 }
 
+// Only a negative value is wrapped: a positive one keeps any bits above 64,
+// which the distance must still count.
+const unsigned64 = (v: bigint): bigint => (v < 0n ? BigInt.asUintN(64, v) : v);
+
 /**
  * How many bits two SimHashes differ by.
  *
@@ -571,9 +568,13 @@ function popcount32(n: number): number {
  * silently dropped: this is an exported function, a caller may hold a wider
  * bigint, and answering "0 differing bits" for two values that differ is worse
  * than the 3 ns the guard costs.
+ *
+ * A negative operand is read as the signed 64-bit form of a SimHash — what a
+ * signed BIGINT column hands back. Taken as is, it has infinitely many set bits
+ * and the clearing loop never reached zero.
  */
 export function hammingDistance(a: bigint, b: bigint): number {
-  let x = a ^ b;
+  let x = unsigned64(a) ^ unsigned64(b);
   let count = popcount32(Number(x & MASK32)) + popcount32(Number((x >> 32n) & MASK32));
   x >>= 64n;
   while (x) {

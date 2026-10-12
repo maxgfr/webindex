@@ -25,6 +25,14 @@ describe("runWithInput", () => {
     expect(r.stdout).toBe("a PDF's bytes");
   });
 
+  // WEBINDEX_OCR_TIMEOUT_MS=3000000000 is "no limit" to an operator, and to
+  // setTimeout a value past 2^31-1 ms is 1 ms: the OCR was killed at once.
+  it("treats a timeout past what a timer can hold as the longest one, not as 1 ms", async () => {
+    const r = await runWithInput(NODE, script("setTimeout(() => process.stdout.write('done'), 100)"), Buffer.alloc(0), 3_000_000_000);
+    expect(r.error).toBeUndefined();
+    expect(r).toMatchObject({ ok: true, stdout: "done" });
+  });
+
   it("reports a non-zero exit instead of throwing", async () => {
     const r = await runWithInput(NODE, script("process.exit(3)"), Buffer.alloc(0), 30_000);
     expect(r.ok).toBe(false);

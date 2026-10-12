@@ -61,6 +61,16 @@ describe("canonicalizeUrl", () => {
     const b = canonicalizeUrl("HTTPS://example.com/doc");
     expect(a).toBe(b);
   });
+
+  it("strips trailing slashes in linear time when a long run of them stops short of the end", () => {
+    // A path is whatever the page linked to: a run of slashes that ends in a
+    // letter made `/\/+$/` retry from every slash of it.
+    const hostile = `https://x.test/${"/".repeat(200_000)}x`;
+    const started = performance.now();
+    expect(canonicalizeUrl(hostile)).toBe(hostile);
+    expect(performance.now() - started).toBeLessThan(200);
+    expect(canonicalizeUrl("https://x.test/a///")).toBe("https://x.test/a");
+  });
 });
 
 describe("domainOf", () => {

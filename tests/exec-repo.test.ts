@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { envName } from "../src/brand.js";
+import { brand, envName } from "../src/brand.js";
 import { have, resetHaveCache, sh, shAsync } from "../src/exec.js";
 import { fetchFeed, fetchSitemap } from "../src/feed.js";
 import { listTags } from "../src/forge.js";
@@ -111,6 +111,20 @@ describe("running a command without blocking", () => {
     expect(r.stderr).toMatch(/timed out after 150ms/);
   });
 
+  // setTimeout holds at most 2^31-1 ms and fires a longer delay after 1 ms, so
+  // a generous ceiling — passed in or set in the environment — killed every
+  // command the instant it started.
+  it("lets a command finish under a timeout too long for a timer", async () => {
+    const slow = ["-e", "setTimeout(() => process.stdout.write('done'), 200)"];
+    expect(await shAsync(NODE, slow, { timeoutMs: 2 ** 31 })).toMatchObject({ ok: true, status: 0, stdout: "done" });
+    vi.stubEnv(envName("SH_TIMEOUT_MS"), String(2 ** 40));
+    try {
+      expect(await shAsync(NODE, slow)).toMatchObject({ ok: true, status: 0, stdout: "done" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("kills a command its caller aborts, and never starts one already aborted", async () => {
     const ctl = new AbortController();
     const started = Date.now();
@@ -197,6 +211,11 @@ describe("git helpers over a real repository", () => {
 
   it("puts clones under the brand's own root", () => {
     expect(repoCacheRoot()).toMatch(/repos$/);
+  });
+
+  it("keeps clones per user by default, as the fetch cache does", () => {
+    const uid = process.getuid?.();
+    expect(repoCacheRoot()).toBe(join(tmpdir(), uid === undefined ? brand().name : `${brand().name}-${uid}`, "repos"));
   });
 
   it("returns the directory itself for a local ref, with no network", async () => {
@@ -820,6 +839,32 @@ describe("cloning, against a real local repository", () => {
     expect(r.ok).toBe(true);
     // Two commits reachable once it is no longer shallow.
     expect(sh("git", ["-C", dir, "rev-list", "--count", "HEAD"]).stdout.trim()).toBe("2");
+  });
+
+  it("retries a deepen that failed instead of remembering the failure", async () => {
+    writeFileSync(join(origin, "b.md"), "b\n");
+    sh("git", ["-C", origin, "add", "-A"]);
+    sh("git", ["-C", origin, "commit", "-q", "-m", "second"]);
+    const dir = await ensureClone(resolveRepo(`file://${origin}`));
+
+    // The remote is unreachable for one call — the "bad minute" of a long-lived
+    // server. That verdict is about the network, not the clone, and must not
+    // stand for the rest of the process.
+    sh("git", ["-C", dir, "remote", "set-url", "origin", `file://${join(origin, "gone")}`]);
+    expect((await ensureHistoryDepth(dir)).ok).toBe(false);
+
+    sh("git", ["-C", dir, "remote", "set-url", "origin", `file://${origin}`]);
+    expect((await ensureHistoryDepth(dir)).ok).toBe(true);
+    expect(sh("git", ["-C", dir, "rev-list", "--count", "HEAD"]).stdout.trim()).toBe("2");
+  });
+
+  it("clones under a clone timeout too long for a timer", async () => {
+    vi.stubEnv(envName("GIT_CLONE_TIMEOUT_MS"), String(2 ** 40));
+    try {
+      expect(existsSync(join(await ensureClone(resolveRepo(`file://${origin}`)), "README.md"))).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   /** A second origin repository at `rel` under a fresh parent, saying who it is. */

@@ -932,6 +932,15 @@ describe("package registries", () => {
     expect(normalizeRepoUrl("not a url")).toBeUndefined();
   });
 
+  it("trims trailing slashes in linear time when a long run of them stops short of the end", () => {
+    // The repository field is whatever the publisher typed into package.json.
+    const hostile = `https://github.com/a/b${"/".repeat(200_000)}x`;
+    const started = performance.now();
+    expect(normalizeRepoUrl(hostile)).toBe(hostile);
+    expect(performance.now() - started).toBeLessThan(200);
+    expect(normalizeRepoUrl("https://github.com/a/b.git///")).toBe("https://github.com/a/b");
+  });
+
   it("reads npm, including the deprecation that only lives on the version", async () => {
     installFetchMock(() => ({
       body: JSON.stringify({

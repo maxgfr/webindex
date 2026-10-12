@@ -1,4 +1,5 @@
 import { type SpawnOptions, spawn } from "node:child_process";
+import { MAX_TIMER_MS } from "../brand.js";
 import { killTree } from "../process-tree.js";
 
 // Run an external extractor with the PDF on stdin and its text on stdout.
@@ -97,12 +98,15 @@ export function runWithInput(cmd: string, args: string[], input: Buffer, timeout
       resolve(r);
     };
 
-    const timer = setTimeout(() => {
-      // The whole tree: npx runs the real tool as a grandchild, copyable-pdf
-      // spawns pdftoppm and tesseract (see ../process-tree.ts).
-      killTree(child);
-      done(withStderr({ ok: false, stdout: "", error: `timed out after ${Math.round(timeoutMs / 1000)}s` }));
-    }, timeoutMs);
+    const timer = setTimeout(
+      () => {
+        // The whole tree: npx runs the real tool as a grandchild, copyable-pdf
+        // spawns pdftoppm and tesseract (see ../process-tree.ts).
+        killTree(child);
+        done(withStderr({ ok: false, stdout: "", error: `timed out after ${Math.round(timeoutMs / 1000)}s` }));
+      },
+      Math.min(timeoutMs, MAX_TIMER_MS),
+    );
 
     child.stdout?.on("data", (d: Buffer) => {
       if (size >= MAX_STDOUT_BYTES) return;

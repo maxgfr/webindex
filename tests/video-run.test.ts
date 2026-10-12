@@ -56,12 +56,14 @@ afterEach(() => {
 });
 
 describe("videoRoot", () => {
-  it("takes --out, then WEBINDEX_VIDEO_DIR, then <tmp>/<brand>/video", () => {
+  it("takes --out, then WEBINDEX_VIDEO_DIR, then <tmp>/<brand>-<uid>/video", () => {
     expect(videoRoot("/x/y")).toBe("/x/y");
     process.env.WEBINDEX_TEST_VIDEO_DIR = "/from/env";
     expect(videoRoot()).toBe("/from/env");
     delete process.env.WEBINDEX_TEST_VIDEO_DIR;
-    expect(videoRoot()).toBe(join(tmpdir(), "webindex-tests", "video"));
+    // Per user, as the cache is: one shared <tmp>/<brand> served one user's runs to another.
+    const uid = process.getuid?.();
+    expect(videoRoot()).toBe(join(tmpdir(), uid === undefined ? "webindex-tests" : `webindex-tests-${uid}`, "video"));
   });
 });
 

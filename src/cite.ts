@@ -67,7 +67,19 @@ export function parseFileLine(token: string): { path: string; start: number; end
  * ground the sentence beside it.
  */
 export function stripHtmlComments(text: string): string {
-  return text.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, " "));
+  // By hand: a lazy `<!--[\s\S]*?-->` scanned to the end from every opener of
+  // a comment that never closes. Unclosed, the rest is left as it was.
+  let out = "";
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf("<!--", from);
+    if (open < 0) break;
+    const close = text.indexOf("-->", open + 4);
+    if (close < 0) break;
+    out += text.slice(from, open) + text.slice(open, close + 3).replace(/[^\n]/g, " ");
+    from = close + 3;
+  }
+  return out + text.slice(from);
 }
 
 /** Remove inline-code spans, so a `` `[S1]` `` shown as an EXAMPLE is not a citation. */

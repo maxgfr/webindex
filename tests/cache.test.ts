@@ -1,13 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Env names resolve through the brand, exactly as the engine resolves them.
 import { brand, configure, envName } from "../src/brand.js";
-import { chmodSync, chownSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { cacheClean, cacheDir, cacheStats, cachedFetchAndExtract, cachePath, setCacheMode, resetCacheMode } from "../src/cache.js";
+import { fetchAndExtract } from "../src/fetch.js";
 import { ensureComposeMaterialized } from "../src/stack.js";
 import { resetVideoLadderCache, setVideoDeps, type VideoRunner } from "../src/video.js";
 import { installFetchMock } from "./fetchmock.js";
+
+// readFileSync, observed: which files a cache read opens is the behaviour one
+// test below pins. It still reads, so every other test runs as before.
+vi.mock("node:fs", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs")>();
+  return { ...fs, readFileSync: vi.fn(fs.readFileSync) };
+});
 
 describe("the browser namespace", () => {
   it("is keyed apart from the reads made before the browser read dropped overlays and consent panels", () => {
@@ -236,6 +244,55 @@ describe("cachedFetchAndExtract (--cache)", () => {
     const fcHit = await cachedFetchAndExtract(URL, { firecrawl: base }, true, 1300);
     expect(fcHit.cached).toBe(true);
     expect(fcHit.text).toContain("firecrawl markdown");
+  });
+
+  // Every candidate's body was read — a multi-megabyte document once per
+  // namespace holding it — before their ages were compared.
+  it("reads the metadata of each copy, and the body of only the one it serves", async () => {
+    const FIRECRAWL_MD = JSON.stringify({ success: true, data: { markdown: "# Cached\n\nthe firecrawl copy", metadata: { statusCode: 200 } } });
+    const base = "http://fc-meta.test";
+    installFetchMock((url) => {
+      if (url.includes("/scrape")) return { body: FIRECRAWL_MD, contentType: "application/json" };
+      if (url === `${base}/`) return { status: 200, body: "{}" };
+      return PAGE;
+    });
+    await cachedFetchAndExtract(URL, { firecrawl: "off" }, true, 1000);
+    await cachedFetchAndExtract(URL, { firecrawl: base }, true, 1200);
+    setCacheMode({ offline: true });
+    try {
+      vi.mocked(readFileSync).mockClear();
+      const hit = await cachedFetchAndExtract(URL, { firecrawl: "off" }, true, 5000);
+      expect(hit.text).toContain("the firecrawl copy");
+      const bodies = vi
+        .mocked(readFileSync)
+        .mock.calls.map((c) => String(c[0]))
+        .filter((p) => p.endsWith(".body"));
+      expect(bodies).toHaveLength(1);
+    } finally {
+      resetCacheMode();
+    }
+  });
+
+  it("revalidates a stale entry with the origin, never through Firecrawl, which drops the validators", async () => {
+    const base = "http://fc-reval.test";
+    let scrapes = 0;
+    let conditional = 0;
+    installFetchMock((url, init) => {
+      if (url.includes("/scrape")) {
+        scrapes++;
+        return { body: JSON.stringify({ success: true, data: { markdown: "re-scraped", metadata: { statusCode: 200 } } }), contentType: "application/json" };
+      }
+      if (url === `${base}/`) return { status: 200, body: "{}" };
+      if (new Headers(init?.headers).get("if-none-match") === '"v1"') {
+        conditional++;
+        return { status: 304, body: "", headers: { etag: '"v1"' } };
+      }
+      return { ...PAGE, headers: { etag: '"v1"' } };
+    });
+    const fetched = await fetchAndExtract(URL, { firecrawl: base, headers: { "if-none-match": '"v1"' } });
+    expect(fetched.status).toBe(304);
+    expect(scrapes).toBe(0);
+    expect(conditional).toBe(1);
   });
 
   it("serves the built-in text for a page Firecrawl failed on, instead of re-scraping it every call", async () => {
