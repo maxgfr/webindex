@@ -342,6 +342,8 @@ export function dropLanguageSelectors(html: string): string {
 
   const totals = { links: 0, lang: 0, text: 0, blocks: 0 };
   const stack: { name: string; node: SelectorNode; at: typeof totals }[] = [];
+  // How many elements of each name are on the stack.
+  const open = new Map<string, number>();
   const done: SelectorNode[] = [];
   let inLangLink = false;
   let last = 0;
@@ -367,12 +369,18 @@ export function dropLanguageSelectors(html: string): string {
     if (!closing) {
       if (tag.endsWith("/>")) continue;
       stack.push({ name, node: { from: m.index, to: -1, links: 0, lang: 0, text: 0, blocks: 0, parent: stack.at(-1)?.node }, at: { ...totals } });
+      open.set(name, (open.get(name) ?? 0) + 1);
       continue;
     }
-    // Close the nearest open element of this name; any left open inside it never closed.
+    // Close the nearest open element of this name; any left open inside it
+    // never closed. A close with no open element of its name is skipped
+    // without a walk down the stack: searched every time, a run of stray
+    // </div> under thousands of open <ul> was quadratic.
+    if (!open.get(name)) continue;
     let i = stack.length - 1;
-    while (i >= 0 && stack[i]!.name !== name) i--;
-    if (i < 0) continue;
+    while (stack[i]!.name !== name) i--;
+    // Each element leaves the stack once, so the walk is paid for by the pushes.
+    for (let j = i; j < stack.length; j++) open.set(stack[j]!.name, open.get(stack[j]!.name)! - 1);
     const { node, at } = stack[i]!;
     stack.length = i;
     Object.assign(node, {
@@ -387,11 +395,17 @@ export function dropLanguageSelectors(html: string): string {
 
   const isSelector = (n: SelectorNode | undefined): n is SelectorNode =>
     !!n && n.to >= 0 && n.lang >= MIN_LANGUAGE_LINKS && n.lang * 2 > n.links && n.blocks === 0 && n.text <= MAX_SELECTOR_TEXT;
+  // The outermost selector above each one, outermost first: an element
+  // closes after everything inside it, so in reverse close order a parent is
+  // settled before its children, and each takes its parent's answer rather
+  // than climbing — a climb per node was quadratic on deeply nested selectors.
+  const outermost = new Map<SelectorNode, SelectorNode>();
   const targets = new Set<SelectorNode>();
-  for (const n of done) {
+  for (let k = done.length - 1; k >= 0; k--) {
+    const n = done[k]!;
     if (!isSelector(n)) continue;
-    let top = n;
-    while (isSelector(top.parent)) top = top.parent;
+    const top = isSelector(n.parent) ? (outermost.get(n.parent) ?? n.parent) : n;
+    outermost.set(n, top);
     targets.add(top);
   }
   if (!targets.size) return html;
