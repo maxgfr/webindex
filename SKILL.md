@@ -27,8 +27,9 @@ It is a library, a command and an MCP server.
 > installer was said to early-return on it and install that file alone. That is
 > no longer true: `skills add maxgfr/webindex` installs the repository whole,
 > `scripts/` and `references/` included. The versioned package links under
-> `skills/webindex` and `.agents/skills/webindex` expose the same canonical files
-> to Codex without editable copies.
+> `skills/webindex` expose the same canonical files without editable copies;
+> `npx skills add maxgfr/webindex` (or the path to a clone) installs it for any
+> agent, and the per-agent install output is never committed.
 
 Route by what you actually want:
 

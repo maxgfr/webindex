@@ -36,14 +36,14 @@ describe("the engine stays out of the skill-matching pool", () => {
     }
   });
 
-  it("keeps the root source canonical and exposes a complete Codex package", () => {
-    // MCP continues serving the root document. Codex discovers a versioned
-    // package made only of links to that source, its engine and references.
+  it("keeps the root source canonical and exposes a complete skill package", () => {
+    // MCP continues serving the root document. skills/webindex is a versioned
+    // package made only of links to that source, its engine and references;
+    // per-agent installs (`npx skills add`) are never committed.
     expect(existsSync(join(root, "SKILL.md"))).toBe(true);
     expect(existsSync(join(root, "skills", "webindex", "SKILL.md"))).toBe(true);
     expect(existsSync(join(root, "skills", "webindex", "scripts", "webindex.mjs"))).toBe(true);
     expect(existsSync(join(root, "skills", "webindex", "references"))).toBe(true);
-    expect(existsSync(join(root, ".agents", "skills", "webindex", "SKILL.md"))).toBe(true);
   });
 
   it("is model-invocable, but only on an explicit request", () => {
