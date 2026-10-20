@@ -1,5 +1,5 @@
-// What `orchestrate` actually writes: a Workflow script per phase, and the
-// sequential runbook that replaces it when a fan-out is not worth launching.
+// What `orchestrate` actually writes besides the contracts: the runbook (the
+// route on any host), and an optional Claude Code Workflow script per phase.
 //
 // Everything here is emitted by string concatenation with the run's constants
 // injected as JSON literals, because the harness that runs the result imposes
@@ -219,10 +219,12 @@ export function emitWorkflowScript<T>(
 }
 
 /**
- * The sequential fallback.
+ * The runbook: the primary route, on any host.
  *
- * Not a lesser path — it is the correct one for a small worklist, and the only
- * one when no subagent-capable harness is present. It lists every phase,
+ * It names each phase's batches for one subagent apiece under the
+ * `agents/<role>.md` contract, or for a single agent to play sequentially (the
+ * correct path for a small worklist, and the only one when the host has no
+ * subagents); the Workflow script comes last, as an option. It lists every phase,
  * whether it is ready, and the exact command that makes it ready, so a reader
  * can walk the whole run by hand.
  */

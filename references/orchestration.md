@@ -8,8 +8,8 @@ it enforces the two constraints the harness imposes on the emitted script.
 
 ```
 a phase is ready when its worklist parses  →  its ids are the fan-out units
-→  batch them  →  emit <phase>.workflow.mjs, the contracts it references,
-   and a sequential RUNBOOK.md as the fallback
+→  batch them  →  emit the agents/<role>.md contracts and RUNBOOK.md
+   (any host), plus an optional <phase>.workflow.mjs (Claude Code)
 ```
 
 Per-phase emission is not a detail. Each worklist only exists **after** its own
