@@ -175,7 +175,7 @@ webindex stack status
 webindex stack path        # where the compose file landed, if you want to read it
 ```
 
-## Combine with ChatGPT or Claude search
+## Combine with the host agent's own search
 
 Use the host's native search to discover current sources, pass their URLs to
 `webindex_fetch`, then rank the extracted `{url,title,text}` pool with
@@ -184,7 +184,7 @@ before answering. `webindex_search` can supplement the pool or take over when
 native search is unavailable. Already have the URL? Fetch it directly.
 
 This workflow uses the tools available in the calling host; webindex does not
-call a ChatGPT or Claude search API itself. See the
+call any provider's search API itself. See the
 [host search guide](references/host-search.md) for connection details and the
 [verification report](docs/verification.md) for the actual trials and limits.
 
@@ -542,7 +542,7 @@ a new major, which consumers adopt deliberately.
 
 ## Skill invocation on request
 
-The `webindex` skill ships **model-invocable, on request**: the agent may call it through its skill tool, but the skill's description restricts it to explicit requests, so the agent calls it when you ask, not on its own. Use `$webindex` in Codex or `/webindex` in Claude Code and OpenCode (with the plugin namespace when installed as a Claude plugin), or ask for webindex by name.
+The `webindex` skill ships **model-invocable, on request**: the agent may call it through its skill tool, but the skill's description restricts it to explicit requests, so the agent calls it when you ask, not on its own. Use `$webindex` in Codex or `/webindex` in Claude Code and OpenCode, or ask for webindex by name.
 
 Making it explicit-only is one setting per host, applied to the **installed** copy of the skill:
 
@@ -550,4 +550,4 @@ Making it explicit-only is one setting per host, applied to the **installed** co
 | --- | --- | --- |
 | Claude Code, OpenCode | no `disable-model-invocation` in `SKILL.md` | add `disable-model-invocation: true` |
 
-Claude Code can do it without touching the file: `"skillOverrides": { "webindex": "user-invocable-only" }` in `settings.json` leaves `/webindex` working while hiding the skill from the model. Plugin installs ignore `skillOverrides`, so edit the frontmatter there. Updating or reinstalling restores the shipped default, so reapply the change afterwards.
+Claude Code can do it without touching the file: `"skillOverrides": { "webindex": "user-invocable-only" }` in `settings.json` leaves `/webindex` working while hiding the skill from the model. Updating or reinstalling restores the shipped default, so reapply the change afterwards.

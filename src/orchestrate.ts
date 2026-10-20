@@ -10,8 +10,8 @@
 // What is shared is the SHAPE, and it is genuinely the same everywhere:
 //
 //   a phase is ready when its worklist parses  →  its ids are the fan-out units
-//   →  batch them  →  emit one workflow script per phase, the dispatch
-//   contracts it references, and a sequential RUNBOOK as the fallback.
+//   →  batch them  →  emit the dispatch contracts and a RUNBOOK (the route on
+//   any host), plus an optional Claude Code Workflow script per phase.
 //
 // Per-phase emission is not a detail. Each worklist only exists after its own
 // engine step has run, so a whole-pipeline script emitted up front could only
@@ -140,8 +140,8 @@ export function listPhases<T>(runDir: string, engineAbs: string, defs: readonly 
  *
  * Writes, in `<RUN>/orchestration/`:
  *   agents/<role>.md      the dispatch contracts, every role, every call
- *   <phase>.workflow.mjs  one launchable Workflow script per ready phase
- *   RUNBOOK.md            the sequential fallback
+ *   RUNBOOK.md            the batches to dispatch, or to play sequentially
+ *   <phase>.workflow.mjs  optional — one Claude Code Workflow script per ready phase
  *
  * The contracts are rewritten on every call, including under `--eco`: they
  * double as the RUNBOOK's self-pass checklists, so the sequential path needs
