@@ -165,8 +165,11 @@ export function emitWorkflowScript<T>(
   const script = [
     `export const meta = ${JSON.stringify(meta)}`,
     ``,
-    `// NOT a plain Node script: launch it with the Workflow tool —`,
+    `// Optional Claude Code fast path — NOT a plain Node script: launch it with the`,
+    `// Workflow tool for a one-call parallel fan-out:`,
     `// Workflow({ scriptPath: ${JSON.stringify(scriptPath)} }).`,
+    `// Any other host: dispatch one subagent per batch with`,
+    `// ${join(runAbs, "orchestration", "agents", `${emission.role}.md`)}, or follow RUNBOOK.md alone.`,
     `//`,
     `// Emitted by \`${cli} orchestrate\` from the CURRENT worklist. The worklist is the`,
     `// source of truth: if it changes, re-run \`${cli} orchestrate --phase ${phase.name}\``,
@@ -237,8 +240,9 @@ export function runbookMd<T>(
 
   lines.push(
     `The subagents return fragments; **you** are the sole writer. Each phase below`,
-    `either fans out through its \`*.workflow.mjs\` or runs sequentially here — the`,
-    `fold at the end of a phase is yours either way.`,
+    `fans out through its \`agents/<role>.md\` contract — one subagent per batch, on`,
+    `any host that has subagents — or runs sequentially here. The fold at the end`,
+    `of a phase is yours either way.`,
     ``,
   );
 
@@ -261,10 +265,13 @@ export function runbookMd<T>(
       const batches = phaseBatches(ph, emission, smallWorklist);
       const widest = batches.reduce((w, b) => Math.max(w, b.length), 0);
       lines.push(
-        `Fan out: \`Workflow({ scriptPath: "${join(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
-        `(${batches.length} agent(s) of at most ${widest} item(s), contract \`agents/${emission.role}.md\`).`,
+        `Fan out: dispatch one subagent per batch with the contract \`agents/${emission.role}.md\``,
+        `(${batches.length} agent(s) of at most ${widest} item(s)): ${batches.map((b) => shq(b.join(","))).join(" · ")}.`,
         ``,
         `Sequentially instead: play \`agents/${emission.role}.md\` yourself over ${shq(ph.ids.join(","))}.`,
+        ``,
+        `Optional — Claude Code: launch \`${ph.name}.workflow.mjs\` (emitted unless \`--eco\`) with the`,
+        `Workflow tool for one-call parallel fan-out — \`Workflow({ scriptPath: "${join(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\`.`,
         ``,
         `Then fold, as the sole writer:`,
         ``,

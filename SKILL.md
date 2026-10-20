@@ -42,7 +42,7 @@ Route by what you actually want:
 
 ## Combine with the host's search
 
-When ChatGPT or Claude already provides native web search, use it to discover
+When the host agent already provides native web search, use it to discover
 sources for broad or current questions, then send useful URLs to
 `webindex_fetch`. Use `webindex_search` to supplement missing coverage or when
 native search is unavailable. A supplied URL can go straight to extraction.
@@ -52,7 +52,7 @@ the original URLs and discovery provenance in the caller's records. Inspect
 the relevant passages and cite their sources. For a blocked or unreadable page,
 try the host's reader or another source and report the gap if it remains.
 
-Read `references/host-search.md` for the ChatGPT/Claude workflow, connection
+Read `references/host-search.md` for the host-search workflow, connection
 boundaries and a concrete MCP example.
 
 ## The commands
@@ -199,7 +199,7 @@ without `--allow-remote` too.
 
 ## References
 
-- `references/host-search.md` — combining ChatGPT or Claude search with extraction and ranking.
+- `references/host-search.md` — combining the host agent's own search with extraction and ranking.
 - `references/web-discovery.md` — the discovery cascade, and what each rung costs.
 - `references/provider-apis.md` — forges and package registries, and their quotas.
 - `references/ranking.md` — how a candidate pool becomes a reading order.
