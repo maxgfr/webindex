@@ -19,9 +19,9 @@ and final citations. webindex supplies discovery, extraction and ranking. Read
 the source passages before writing a conclusion; search snippets and relevance
 scores alone do not establish a claim.
 
-So it is also **not meant to compete for implicit skill selection**. The
-`agents/openai.yaml` policy disables implicit invocation while keeping explicit
-`$webindex` use available. It is a library, a command and an MCP server.
+So it is also **not meant to compete for implicit skill selection**: its
+description restricts it to explicit requests, and `$webindex` stays available.
+It is a library, a command and an MCP server.
 
 > The root `SKILL.md` used to be the second half of that argument — the
 > installer was said to early-return on it and install that file alone. That is

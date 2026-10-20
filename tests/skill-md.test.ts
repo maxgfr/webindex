@@ -51,9 +51,6 @@ describe("the engine stays out of the skill-matching pool", () => {
     // the description is what keeps it from being picked up on its own.
     expect(frontmatter).not.toMatch(/^disable-model-invocation:\s*true\s*$/m);
     expect(description).toMatch(/\bUse only when the user explicitly asks for webindex\b/);
-    const metadata = readFileSync(join(root, "agents", "openai.yaml"), "utf8");
-    // This is a host policy boolean, not a prose instruction to the model.
-    expect(metadata).toMatch(/^policy:\s*\n(?:[ \t]+[^\n]*\n)*?[ \t]+allow_implicit_invocation:\s*true\s*$/m);
   });
 
   it("says plainly what it is not, and routes elsewhere", () => {

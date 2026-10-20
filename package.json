@@ -19,8 +19,7 @@
     "src",
     "SKILL.md",
     "references",
-    ".github/workflows/skill-repin.yml",
-    "agents"
+    ".github/workflows/skill-repin.yml"
   ],
   "engines": {
     "node": ">=18"
