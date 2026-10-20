@@ -1,8 +1,6 @@
 ---
 name: webindex
 description: Extract, rank, and inspect web or local documents and query forge, package, or site metadata. Use only when the user explicitly asks for webindex or its raw fetch, extract, or rank primitives.
-metadata:
-  opencode/autoinvoke: 'true'
 ---
 
 # webindex

@@ -50,7 +50,6 @@ describe("the engine stays out of the skill-matching pool", () => {
     // The agent may call it through its skill tool when the user asks for it;
     // the description is what keeps it from being picked up on its own.
     expect(frontmatter).not.toMatch(/^disable-model-invocation:\s*true\s*$/m);
-    expect(frontmatter).not.toMatch(/opencode\/autoinvoke:\s*['"]?false['"]?\s*$/m);
     expect(description).toMatch(/\bUse only when the user explicitly asks for webindex\b/);
     const metadata = readFileSync(join(root, "agents", "openai.yaml"), "utf8");
     // This is a host policy boolean, not a prose instruction to the model.
