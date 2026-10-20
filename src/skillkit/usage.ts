@@ -52,9 +52,16 @@ const DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|
  */
 const USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']((?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs))["']/g;
 
-/** The engine's public surface, read from the vendored declarations rather than hardcoded. */
+/**
+ * The engine's public surface, read from the vendored declarations rather than hardcoded.
+ *
+ * `[^}]*` and not a lazy `[\s\S]*?`: a bundled namespace (`declare namespace x {
+ * export { … }; }`) puts an earlier `export {` in the file, and the lazy form
+ * started there and ran on to the final block, gluing its first name onto the
+ * namespace's text so that name silently dropped out of the surface.
+ */
 export function engineExports(dts: string): Set<string> {
-  const block = /export\s*\{([\s\S]*?)\}\s*;?\s*$/.exec(dts);
+  const block = /export\s*\{([^}]*)\}\s*;?\s*$/.exec(dts);
   if (!block) return new Set();
   return new Set(
     (block[1] as string)

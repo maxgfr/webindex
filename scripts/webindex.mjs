@@ -14683,7 +14683,7 @@ import { dirname as dirname3, join as join21, relative, resolve as resolve5 } fr
 var DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|enum)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm;
 var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']((?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs))["']/g;
 function engineExports(dts) {
-  const block = /export\s*\{([\s\S]*?)\}\s*;?\s*$/.exec(dts);
+  const block = /export\s*\{([^}]*)\}\s*;?\s*$/.exec(dts);
   if (!block) return /* @__PURE__ */ new Set();
   return new Set(
     block[1].split(",").map(
