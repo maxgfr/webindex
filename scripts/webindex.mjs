@@ -19893,8 +19893,14 @@ async function dispatch(argv) {
     }
     process.stderr.write(`webindex: MCP server listening on ${running.url}
 `);
-    const header2 = token ? ` --header "Authorization: Bearer $${envName("MCP_TOKEN")}"` : "";
-    process.stderr.write(`  client: claude mcp add --transport http webindex ${running.url}${header2}
+    const tokenVar = envName("MCP_TOKEN");
+    const clientHint = [
+      `  connect any MCP client to that URL, e.g.:`,
+      `    Claude Code  claude mcp add --transport http webindex ${running.url}${token ? ` --header "Authorization: Bearer $${tokenVar}"` : ""}`,
+      `    Codex        codex mcp add webindex --url ${running.url}${token ? ` --bearer-token-env-var ${tokenVar}` : ""}`,
+      `    OpenCode     opencode mcp add webindex --url ${running.url}${token ? ` --header "Authorization=Bearer $${tokenVar}"` : ""}`
+    ];
+    process.stderr.write(`${clientHint.join("\n")}
 `);
     if (allowRemote) {
       process.stderr.write(

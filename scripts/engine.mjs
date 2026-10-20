@@ -14553,8 +14553,11 @@ function emitWorkflowScript(phase, emission, runAbs, engineAbs, smallWorklist, c
   const script = [
     `export const meta = ${JSON.stringify(meta)}`,
     ``,
-    `// NOT a plain Node script: launch it with the Workflow tool \u2014`,
+    `// Optional Claude Code fast path \u2014 NOT a plain Node script: launch it with the`,
+    `// Workflow tool for a one-call parallel fan-out:`,
     `// Workflow({ scriptPath: ${JSON.stringify(scriptPath)} }).`,
+    `// Any other host: dispatch one subagent per batch with`,
+    `// ${join17(runAbs, "orchestration", "agents", `${emission.role}.md`)}, or follow RUNBOOK.md alone.`,
     `//`,
     `// Emitted by \`${cli} orchestrate\` from the CURRENT worklist. The worklist is the`,
     `// source of truth: if it changes, re-run \`${cli} orchestrate --phase ${phase.name}\``,
@@ -14606,8 +14609,9 @@ function runbookMd(phases, defs, runAbs, engineAbs, cli, preamble = [], smallWor
   if (preamble.length) lines.push(...preamble, ``);
   lines.push(
     `The subagents return fragments; **you** are the sole writer. Each phase below`,
-    `either fans out through its \`*.workflow.mjs\` or runs sequentially here \u2014 the`,
-    `fold at the end of a phase is yours either way.`,
+    `fans out through its \`agents/<role>.md\` contract \u2014 one subagent per batch, on`,
+    `any host that has subagents \u2014 or runs sequentially here. The fold at the end`,
+    `of a phase is yours either way.`,
     ``
   );
   phases.forEach((ph, i) => {
@@ -14626,10 +14630,13 @@ function runbookMd(phases, defs, runAbs, engineAbs, cli, preamble = [], smallWor
       const batches = phaseBatches(ph, emission, smallWorklist);
       const widest = batches.reduce((w, b) => Math.max(w, b.length), 0);
       lines.push(
-        `Fan out: \`Workflow({ scriptPath: "${join17(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\``,
-        `(${batches.length} agent(s) of at most ${widest} item(s), contract \`agents/${emission.role}.md\`).`,
+        `Fan out: dispatch one subagent per batch with the contract \`agents/${emission.role}.md\``,
+        `(${batches.length} agent(s) of at most ${widest} item(s)): ${batches.map((b) => shq(b.join(","))).join(" \xB7 ")}.`,
         ``,
         `Sequentially instead: play \`agents/${emission.role}.md\` yourself over ${shq(ph.ids.join(","))}.`,
+        ``,
+        `Optional \u2014 Claude Code: launch \`${ph.name}.workflow.mjs\` (emitted unless \`--eco\`) with the`,
+        `Workflow tool for one-call parallel fan-out \u2014 \`Workflow({ scriptPath: "${join17(runAbs, "orchestration", `${ph.name}.workflow.mjs`)}" })\`.`,
         ``,
         `Then fold, as the sole writer:`,
         ``,

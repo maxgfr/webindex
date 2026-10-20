@@ -17,6 +17,17 @@ engine step has run, so a whole-pipeline script emitted up front could only
 carry placeholders — which is exactly what every citation gate in this family
 exists to prevent.
 
+## Launching a phase
+
+The primary route works on any host. Dispatch one subagent per batch with the
+`agents/<role>.md` contract — `RUNBOOK.md` lists the batches — or, with a single
+agent or with `eco` set, play the contract yourself, sequentially, from
+`RUNBOOK.md`. Either way the fold that closes the phase is yours.
+
+Optional — Claude Code: launch `<phase>.workflow.mjs` with the Workflow tool for
+one-call parallel fan-out. It is the only host-specific artifact, and the two
+rules below exist because of its harness.
+
 ## What you declare
 
 A `PhaseDefinition[]`. The engine reads your worklist only through two

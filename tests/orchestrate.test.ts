@@ -321,6 +321,17 @@ describe("the runbook", () => {
     expect(rb).toContain("'Q1,Q2,Q3,Q4'");
   });
 
+  it("puts the host-neutral contract route first and the Workflow script second, as an option", () => {
+    plan(4);
+    orchestrateRun(run, ENGINE, DEFS, contracts);
+    const rb = readFileSync(join(run, "orchestration", "RUNBOOK.md"), "utf8");
+    const generic = rb.indexOf("Fan out: dispatch one subagent per batch with the contract `agents/gatherer.md`");
+    const optional = rb.indexOf("Optional — Claude Code: launch `gather.workflow.mjs`");
+    expect(generic).toBeGreaterThan(-1);
+    expect(optional).toBeGreaterThan(generic);
+    expect(rb.indexOf("Workflow({ scriptPath:")).toBeGreaterThan(optional);
+  });
+
   it("counts the agents the emitted script will actually launch", () => {
     // At or under the collapse floor the script runs ONE agent over every
     // item; the runbook batched the ids regardless and promised two.

@@ -2308,8 +2308,16 @@ async function dispatch(argv: string[]): Promise<void> {
       fail((e as Error).message);
     }
     process.stderr.write(`webindex: MCP server listening on ${running.url}\n`);
-    const header = token ? ` --header "Authorization: Bearer $${envName("MCP_TOKEN")}"` : "";
-    process.stderr.write(`  client: claude mcp add --transport http webindex ${running.url}${header}\n`);
+    // Any MCP client takes the URL; one line per common agent CLI, each with
+    // its own way of sending the bearer token.
+    const tokenVar = envName("MCP_TOKEN");
+    const clientHint = [
+      `  connect any MCP client to that URL, e.g.:`,
+      `    Claude Code  claude mcp add --transport http webindex ${running.url}${token ? ` --header "Authorization: Bearer $${tokenVar}"` : ""}`,
+      `    Codex        codex mcp add webindex --url ${running.url}${token ? ` --bearer-token-env-var ${tokenVar}` : ""}`,
+      `    OpenCode     opencode mcp add webindex --url ${running.url}${token ? ` --header "Authorization=Bearer $${tokenVar}"` : ""}`,
+    ];
+    process.stderr.write(`${clientHint.join("\n")}\n`);
     if (allowRemote) {
       process.stderr.write(
         token

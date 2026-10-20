@@ -33,12 +33,22 @@ refuses private addresses and local files unless told otherwise (README,
 [web search guide](https://developers.openai.com/api/docs/guides/tools-web-search)
 and [MCP guide](https://developers.openai.com/api/docs/guides/tools-connectors-mcp).
 
-**Claude Code.** Register the locally installed executable with
-`claude mcp add webindex -- webindex mcp`. For a checkout, use an absolute path:
-`claude mcp add webindex -- node /absolute/path/webindex/scripts/webindex.mjs mcp`.
-When native `WebSearch` is available, the agent can search there and call the
-webindex MCP tools on the resulting URLs. Model availability, permissions and
-account quotas still apply. See [Claude Code's MCP documentation](https://code.claude.com/docs/en/mcp).
+**Coding agents (Claude Code, Codex, OpenCode, …).** Register the locally
+installed executable over stdio with the agent's own MCP command:
+
+```bash
+claude mcp add webindex -- webindex mcp       # Claude Code
+codex mcp add webindex -- webindex mcp        # Codex
+opencode mcp add webindex -- webindex mcp     # OpenCode
+```
+
+For a checkout, replace `webindex mcp` with an absolute path:
+`node /absolute/path/webindex/scripts/webindex.mjs mcp`. Over HTTP,
+`webindex mcp --transport http` prints the matching `--url` commands. When the
+agent has a built-in web search tool, it can search there and call the webindex
+MCP tools on the resulting URLs. Model availability, permissions and account
+quotas still apply. See each agent's MCP documentation, e.g.
+[Claude Code's](https://code.claude.com/docs/en/mcp).
 
 ## Example: check a Node.js API version
 
