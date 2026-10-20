@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.34.0](https://github.com/maxgfr/webindex/compare/v1.33.2...v1.34.0) (2026-10-20)
+
+
+### Features
+
+* make orchestration and MCP hints agent-neutral ([#44](https://github.com/maxgfr/webindex/issues/44)) ([a2d6ea3](https://github.com/maxgfr/webindex/commit/a2d6ea38ce52ec5eeeac144d753144a89cd1e9b4))
+
 ## [1.33.2](https://github.com/maxgfr/webindex/compare/v1.33.1...v1.33.2) (2026-10-12)
 
 

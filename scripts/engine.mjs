@@ -9927,7 +9927,7 @@ var init_read = __esm({
 });
 
 // src/version.ts
-var ENGINE_VERSION = "1.33.2";
+var ENGINE_VERSION = "1.34.0";
 
 // src/index.ts
 init_brand();
