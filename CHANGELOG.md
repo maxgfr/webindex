@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.34.1](https://github.com/maxgfr/webindex/compare/v1.34.0...v1.34.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **skillkit:** read the engine surface from the final export block only ([#46](https://github.com/maxgfr/webindex/issues/46)) ([043b3a3](https://github.com/maxgfr/webindex/commit/043b3a36dda0b840d903317cb495ee7c6dfce3a8))
+
 # [1.34.0](https://github.com/maxgfr/webindex/compare/v1.33.2...v1.34.0) (2026-10-20)
 
 
