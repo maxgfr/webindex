@@ -127,6 +127,18 @@ describe("engineExports", () => {
     expect([...engineExports(dts)]).toEqual(["a", "B", "d"]);
   });
 
+  it("reads only the final block when a bundled namespace exports earlier", () => {
+    const dts = [
+      "declare namespace ns {",
+      "  export { type ns_T as T, ns_f as f };",
+      "}",
+      "declare const FIRST = 1;",
+      "export { FIRST, type B, ns };",
+      "",
+    ].join("\n");
+    expect([...engineExports(dts)]).toEqual(["FIRST", "B", "ns"]);
+  });
+
   it("returns nothing when there is no export block to read", () => {
     expect(engineExports("declare const x: 1;").size).toBe(0);
   });
