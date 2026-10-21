@@ -544,11 +544,10 @@ a new major, which consumers adopt deliberately.
 
 The `webindex` skill ships **model-invocable, on request**: the agent may call it through its skill tool, but the skill's description restricts it to explicit requests, so the agent calls it when you ask, not on its own. Use `$webindex` in Codex or `/webindex` in Claude Code and OpenCode, or ask for webindex by name.
 
-Making it explicit-only is one setting per host, applied to the **installed** copy of the skill:
+Making it explicit-only is one setting, read by Claude Code and OpenCode, applied to the **installed** copy of the skill:
 
 | Host | Shipped, on request | Explicit-only |
 | --- | --- | --- |
 | Claude Code, OpenCode | no `disable-model-invocation` in `SKILL.md` | add `disable-model-invocation: true` |
-| Codex | no `agents/openai.yaml` beside `SKILL.md` (implicit invocation allowed) | add `agents/openai.yaml` with `policy:` / `allow_implicit_invocation: false` |
 
 Claude Code can do it without touching the file: `"skillOverrides": { "webindex": "user-invocable-only" }` in `settings.json` leaves `/webindex` working while hiding the skill from the model. Updating or reinstalling restores the shipped default, so reapply the change afterwards.
