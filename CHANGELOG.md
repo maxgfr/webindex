@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.34.2](https://github.com/maxgfr/webindex/compare/v1.34.1...v1.34.2) (2026-10-24)
+
+
+### Bug Fixes
+
+* **rank:** no subterms for a stylised word with a one-letter case piece ([241aca9](https://github.com/maxgfr/webindex/commit/241aca987676c836e692115c0c3b575616db7f7b))
+
 ## [1.34.1](https://github.com/maxgfr/webindex/compare/v1.34.0...v1.34.1) (2026-10-20)
 
 
