@@ -133,6 +133,17 @@ describe("BM25F", () => {
     expect(toks).not.toContain("and");
   });
 
+  it("splits compounds into subterms, but not a stylised word with a one-letter piece", () => {
+    // A query mentioning DAgger used to carry a phantom term "agger" no page contains.
+    expect(bm25Tokenize("imitation with DAgger")).toEqual(["imitation", "dagger"]);
+    expect(bm25Tokenize("iPhone eBay")).toEqual(["iphone", "ebay"]);
+    expect(bm25Tokenize("LoopFormer")).toEqual(["loopformer", "loop", "former"]);
+    expect(bm25Tokenize("XMLParser")).toEqual(["xmlparser", "xml", "parser"]);
+    // Explicit separators and digits still split, a one-letter piece or not.
+    expect(bm25Tokenize("x_axis")).toContain("axis");
+    expect(bm25Tokenize("v2Config")).toContain("config");
+  });
+
   it("agrees with buildMatcher on what a term is — that is why it shares foldTerm", () => {
     // Not "the folding is correct", which is text.ts's business, but "both
     // scorers fold identically". A BM25 that disagrees with the matcher about

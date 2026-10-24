@@ -383,6 +383,9 @@ export function subtokens(raw: string): string[] {
   // Marks stay inside their word here too, or a Hindi word "splits" at its vowels.
   const parts = spaced.split(/[^\p{L}\p{M}\p{N}]+/u).filter(Boolean);
   if (parts.length < 2) return [];
+  // A word of letters only that the case split leaves with a one-letter piece is a stylised
+  // word, not a compound: "DAgger" is no "agger", "iPhone" no "phone", "eBay" no "bay".
+  if (/^[\p{L}\p{M}]+$/u.test(raw) && parts.some((p) => p.length === 1)) return [];
   const out: string[] = [];
   for (const p of parts) {
     const lower = p.toLowerCase();
