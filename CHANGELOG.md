@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.34.3](https://github.com/maxgfr/webindex/compare/v1.34.2...v1.34.3) (2026-10-26)
+
+
+### Bug Fixes
+
+* **rank:** match -ing, -er and -ed forms of long words in BM25 ([e21c124](https://github.com/maxgfr/webindex/commit/e21c124c248d127320cfe10a6c7f14614fdfccd9))
+
 ## [1.34.2](https://github.com/maxgfr/webindex/compare/v1.34.1...v1.34.2) (2026-10-24)
 
 

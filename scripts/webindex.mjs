@@ -12684,7 +12684,7 @@ import { basename as basename5, extname, isAbsolute as isAbsolute6, join as join
 import { fileURLToPath as fileURLToPath2, pathToFileURL } from "url";
 
 // src/version.ts
-var ENGINE_VERSION = "1.34.2";
+var ENGINE_VERSION = "1.34.3";
 
 // src/cli.ts
 init_doc();
