@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.36.0](https://github.com/maxgfr/webindex/compare/v1.35.0...v1.36.0) (2026-10-26)
+
+
+### Features
+
+* wall detector, term coverage and result fusion in the engine ([#54](https://github.com/maxgfr/webindex/issues/54)) ([219ad11](https://github.com/maxgfr/webindex/commit/219ad1149a07ef0f7b09e75e04aaa3546d236906))
+
 # [1.35.0](https://github.com/maxgfr/webindex/compare/v1.34.3...v1.35.0) (2026-10-26)
 
 
