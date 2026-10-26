@@ -39,7 +39,7 @@ import { githubRawUrl } from "./forge-host.js";
 import { knownVideo, transcribeVideo, transcriptMarkdown } from "./video.js";
 // Only the mode is read here; the browser itself (src/browser/read.ts) is
 // imported inside the rung, so nothing of it loads unless a page needs it.
-import { type BrowserFetchMode, browserFetchMode, worthRendering } from "./browser/mode.js";
+import { type BrowserFetchMode, browserFetchModeFor, type HumanHandoff, type HumanOutcome, humanWall, worthRendering } from "./browser/mode.js";
 import { looksLikeJunkExtraction } from "./junk.js";
 
 export { looksLikeJunkExtraction };
@@ -1320,6 +1320,12 @@ export interface ExtractResult {
    * rather than learn the same answer once per URL.
    */
   retryAfterMs?: number;
+  /**
+   * Only on a read asked to hand its page to a human (`human`) that met a wall
+   * one could get past: whether they did (`cleared`), ran out of time
+   * (`timeout`), or could not be shown the page at all (`no-window`).
+   */
+  handoff?: HumanOutcome;
 }
 
 // Fetch a URL and return its readable text + a title. HTML goes to Firecrawl
@@ -1392,6 +1398,17 @@ export async function fetchAndExtract(
      */
     browser?: BrowserFetchMode;
     /**
+     * Hand a page that needs a human to the human (see src/browser/read.ts): a
+     * page the browser rung renders behind a blocking challenge, or a consent or
+     * sign-in wall, is brought up in the visible dedicated browser and waited
+     * for until the human gets past it (5 minutes by default), then read from
+     * that tab; `handoff` on the result says how it went. It turns the browser
+     * rung on in `fallback` when nothing else did, and makes a page the built-in
+     * read found walled worth rendering. With no window to show (no display, a
+     * CI run) nobody is waited for. Never with what keeps the browser off.
+     */
+    human?: boolean | HumanHandoff;
+    /**
      * Abandons the fetch: the built-in request is aborted, and no extraction
      * ladder starts after it. A Firecrawl request already sent finishes — it is
      * short, and an aborted one would read to the probe as a Firecrawl that is
@@ -1455,22 +1472,28 @@ export async function fetchAndExtract(
   // follows redirects and loads subresources nobody vets, so it never runs.
   // Nor for a revalidation: conditional headers are the cache's question to
   // the origin, which only the fetch can ask.
-  const browser = opts.authorizeUrl || opts.headers || wantsPdf || wantsDoc ? "off" : browserFetchMode(opts.browser);
+  const browser = opts.authorizeUrl || opts.headers || wantsPdf || wantsDoc ? "off" : browserFetchModeFor(opts);
+  const handoff = (got: { handoff?: HumanOutcome }) => (got.handoff ? { handoff: got.handoff } : {});
   if (browser === "always") {
     const got = await renderInBrowser(url, opts);
     if (got.result) return got.result;
     const res = await readWithoutBrowser(url, opts, wantsPdf, wantsDoc, { page: false });
-    return { ...res, note: [`${got.note}; read without it.`, got.detail, res.note].filter(Boolean).join(" ") };
+    return { ...res, note: [`${got.note}; read without it.`, got.detail, res.note].filter(Boolean).join(" "), ...handoff(got) };
   }
   const seen = { page: false };
   const res = await readWithoutBrowser(url, opts, wantsPdf, wantsDoc, seen);
-  const why = browser === "fallback" && seen.page && !opts.signal?.aborted ? worthRendering(res) : undefined;
+  const walled = opts.human && res.status >= 200 && res.status < 300 ? humanWall(res.text) : undefined;
+  const why = browser === "fallback" && seen.page && !opts.signal?.aborted ? (worthRendering(res) ?? (walled ? `read a ${walled}` : undefined)) : undefined;
   if (!why) return res;
   const got = await renderInBrowser(url, opts);
   // The browser's read, unless it is no better: empty, or a challenge it was not let through.
   if (got.result?.text.trim())
     return { ...got.result, note: [`Read ${url} in the browser: the built-in fetch ${why}.`, got.result.note].filter(Boolean).join(" ") };
-  return { ...res, note: [res.note, got.result ? got.result.note : `${got.note}.`, got.detail].filter(Boolean).join(" ") || undefined };
+  return {
+    ...res,
+    note: [res.note, got.result ? got.result.note : `${got.note}.`, got.detail].filter(Boolean).join(" ") || undefined,
+    ...handoff(got.result ?? got),
+  };
 }
 
 type FetchOptions = NonNullable<Parameters<typeof fetchAndExtract>[1]>;
@@ -1484,12 +1507,16 @@ type FetchOptions = NonNullable<Parameters<typeof fetchAndExtract>[1]>;
 async function renderInBrowser(
   url: string,
   opts: FetchOptions,
-): Promise<{ result: ExtractResult; note?: undefined; detail?: undefined } | { result?: undefined; note: string; detail?: string }> {
+): Promise<
+  | { result: ExtractResult; note?: undefined; detail?: undefined; handoff?: undefined }
+  | { result?: undefined; note: string; detail?: string; handoff?: HumanOutcome }
+> {
   try {
     const { readRenderedPage } = await import("./browser/read.js");
-    const { format, fullPage, stripConsent, keepHtml, signal, timeoutMs } = opts;
-    const result = await readRenderedPage(url, { format, fullPage, stripConsent, keepHtml, signal, timeoutMs });
-    if (result.status >= 400) return { note: `The browser got HTTP ${result.status} for ${url}`, detail: result.note };
+    const { format, fullPage, stripConsent, keepHtml, signal, timeoutMs, human } = opts;
+    const result = await readRenderedPage(url, { format, fullPage, stripConsent, keepHtml, signal, timeoutMs, ...(human ? { human } : {}) });
+    if (result.status >= 400)
+      return { note: `The browser got HTTP ${result.status} for ${url}`, detail: result.note, ...(result.handoff ? { handoff: result.handoff } : {}) };
     return { result };
   } catch (e) {
     return { note: `The browser could not read ${url} (${e instanceof Error ? e.message : String(e)})` };

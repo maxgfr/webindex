@@ -535,6 +535,22 @@ describe("fetch argument handling", () => {
     }
   });
 
+  it("takes --human, and --human-timeout only with it", async () => {
+    // Long enough to be a page: a thin one would turn the browser on (--human implies the fallback) and launch a real one.
+    const long = articlePage(`<p>${"Token buckets refill at a fixed rate and spend one token per request. ".repeat(8)}</p>`);
+    installFetchMock(routes([["x.test/page", { body: long, contentType: "text/html" }]]));
+    try {
+      // A page with no wall in front of it never needs the browser, let alone a human.
+      expect(await run(["fetch", "https://x.test/page", "--human", "--human-timeout", "30"])).toBe(0);
+      expect(stdout()).toContain("Token buckets");
+      expect(await run(["fetch", "https://x.test/page", "--human-timeout", "30"])).toBe(2);
+      expect(stderr()).toMatch(/--human-timeout goes with --human/);
+      expect(await run(["fetch", "https://x.test/page", "--human", "--human-timeout", "0"])).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("says where the text came from after redirects, and what the page calls itself", async () => {
     const body = `<html><head><link rel="canonical" href="https://x.test/canonical"></head><body>${articlePage()}</body></html>`;
     installFetchMock(() => ({ body, contentType: "text/html", url: "https://x.test/final" }));

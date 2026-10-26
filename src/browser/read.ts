@@ -11,7 +11,13 @@
 // the middle of an agent's work does not move it to another tab.
 //
 // A full-page anti-bot challenge is not fought: the read comes back empty,
-// saying how a human can solve it in the visible browser. What covers the page
+// saying how a human can solve it in the visible browser. A read asked to hand
+// it over (`human`) goes one step further and asks the human itself: the tab is
+// brought to the front, a line on stderr names the page, and the read waits —
+// the challenge as `wait --clear` does, a consent or sign-in wall until the page
+// reads as a page — then reads it from that same tab. With no window anyone can
+// see (no display, a headless browser, a CI run) it waits for nobody and comes
+// back as it would have without. What covers the page
 // (a cookie wall, a consent panel, a modal) is not read for it: the page is
 // read from a copy without its overlays, dialogs and consent vendors' containers
 // (overlay.ts); --full-page reads the whole document, as it does over HTTP.
@@ -28,19 +34,26 @@
 import { brand, envInt } from "../brand.js";
 import { type ExtractResult, extractFromHtml } from "../fetch.js";
 import type { CdpHandler } from "./cdp.js";
-import { detectChallenge } from "./challenge.js";
+import { type Challenge, detectChallenge } from "./challenge.js";
 import { browserDeps, type BrowserDeps } from "./deps.js";
 import { isSameBrowser, type LaunchOptions, socketPath } from "./launch.js";
 import { loopbackSocketUrl } from "./discovery.js";
+import { canShowWindow, type HumanHandoff, humanWall } from "./mode.js";
 import { READ_DOCUMENT } from "./overlay.js";
 import { type BrowserSession, closeLaunched, openBrowserSession } from "./session.js";
 import { readSession, withBrowserLock } from "./state.js";
-import { waitFor } from "./wait.js";
+import { WaitTimeoutError, waitFor } from "./wait.js";
 
 /** How long the default read waits for a quiet network after load. */
 const IDLE_CAP_MS = 3000;
 /** What the browser may read: a PDF or a download is the fetch's document ladder's to read. */
 const WEB_PAGE = /^(?:text\/html|application\/xhtml\+xml)$/i;
+/** How long a human has to get past a wall, by default: as long as `wait --clear` gives them. */
+const HUMAN_TIMEOUT_MS = 300_000;
+/** How often a sign-in or consent wall is looked at again while the human works. */
+const WALL_POLL_MS = 1000;
+/** How long the page a cleared wall leads to may take to load before it is read as it is. */
+const AFTER_WALL_LOAD_MS = 10_000;
 
 export interface ReadPageOptions extends LaunchOptions {
   /** As fetchAndExtract's: the shape of the text. */
@@ -61,6 +74,14 @@ export interface ReadPageOptions extends LaunchOptions {
    * Waiting for quiet is never fatal: a page that keeps polling is read anyway.
    */
   waitUntil?: "load" | "idle";
+  /**
+   * Hand a page that needs a human to the human (HumanHandoff): on a blocking
+   * challenge, or a consent or sign-in wall, the read brings its tab up in the
+   * visible browser, says on stderr which page needs them, and waits for the
+   * wall to go — on top of `timeoutMs` — before reading it. The result says how
+   * that went in `handoff`. Off by default: a read never waits on anyone unasked.
+   */
+  human?: boolean | HumanHandoff;
 }
 
 // --- the per-process ration of tabs -----------------------------------------
@@ -240,31 +261,105 @@ async function render(url: string, opts: ReadPageOptions, deps: BrowserDeps, tim
       const idleMs = opts.waitUntil === "idle" ? timeoutMs / 2 : Math.min(IDLE_CAP_MS, timeoutMs);
       await waitFor(session, { idle: true }, { timeoutMs: idleMs, deps }).catch(() => {});
     }
+    // Asked at each read: the page a human gets through to is a document of its own, with its own status.
+    const statusNow = () => status ?? nav.status ?? 200;
+    const code = statusNow();
+    const take = async (): Promise<ExtractResult> => {
+      const got = await page.send<{ result?: { value?: { html?: unknown; url?: unknown } } }>(
+        "Runtime.evaluate",
+        { expression: opts.fullPage ? WHOLE_DOCUMENT : READ_DOCUMENT, returnByValue: true },
+        { timeoutMs },
+      );
+      const finalUrl = typeof got.result?.value?.url === "string" ? got.result.value.url : nav.url;
+      const html = typeof got.result?.value?.html === "string" ? got.result.value.html : "";
+      return { ...extractFromHtml(html, finalUrl, opts), finalUrl, status: statusNow(), extractor: "browser" };
+    };
     const challenge = await detectChallenge(session);
-    const got = await page.send<{ result?: { value?: { html?: unknown; url?: unknown } } }>(
-      "Runtime.evaluate",
-      { expression: opts.fullPage ? WHOLE_DOCUMENT : READ_DOCUMENT, returnByValue: true },
-      { timeoutMs },
-    );
-    const finalUrl = typeof got.result?.value?.url === "string" ? got.result.value.url : nav.url;
-    const code = status ?? nav.status ?? 200;
-    if (challenge?.blocking) {
+    const first = await take();
+    const blocked = (c: Challenge): ExtractResult => ({
+      text: "",
+      finalUrl: first.finalUrl,
+      status: code >= 400 ? code : 403,
+      extractor: "browser",
+      note: `${c.kind} challenge — open it with \`${brand().cli} browser open ${url}\` and let the human solve it`,
+    });
+    const asIs = challenge?.blocking ? blocked(challenge) : first;
+    if (!opts.human) return asIs;
+    const found = challenge?.blocking ? `${challenge.kind} challenge` : humanWall(first.text);
+    if (!found) return first;
+    const wall = `${/^[aeiou]/i.test(found) ? "an" : "a"} ${found}`;
+    // Nobody to show it to: no wait, the read as it would have been.
+    const nobody = session.headless ? "the browser runs headless" : canShowWindow(deps.platform) ? undefined : "no window can be shown here";
+    if (nobody) return { ...asIs, note: [asIs.note, `It needs a human, and ${nobody}.`].filter(Boolean).join(" "), handoff: "no-window" };
+    const human = opts.human === true ? {} : opts.human;
+    const cleared = await handOff(session, url, wall, !!challenge?.blocking, human, deps, take, opts.signal);
+    // A challenge that clears in place leaves its own 403 as the last document heard: the page is read, so it is a 200.
+    if (cleared)
       return {
-        text: "",
-        finalUrl,
-        status: code >= 400 ? code : 403,
-        extractor: "browser",
-        note: `${challenge.kind} challenge — open it with \`${brand().cli} browser open ${url}\` and let the human solve it`,
+        ...cleared,
+        status: cleared.status >= 400 ? 200 : cleared.status,
+        note: [cleared.note, `Read after a human got past ${wall}.`].filter(Boolean).join(" "),
+        handoff: "cleared",
       };
-    }
-    const html = typeof got.result?.value?.html === "string" ? got.result.value.html : "";
-    return { ...extractFromHtml(html, finalUrl, opts), finalUrl, status: code, extractor: "browser" };
+    const secs = Math.round((human.timeoutMs ?? HUMAN_TIMEOUT_MS) / 1000);
+    return { ...asIs, note: [asIs.note, `Nobody got past it within ${secs} s.`].filter(Boolean).join(" "), handoff: "timeout" };
   } finally {
     page.off("Network.responseReceived", onResponse);
     // Over HTTP, so the tab goes even when the socket already has.
     await deps.discovery.closeTarget(session.port, session.targetId, session.host).catch(() => {});
     await session.detach();
   }
+}
+
+/**
+ * Put the tab in front of the human, say which page needs them, and wait until
+ * the wall is gone: a challenge as `wait --clear` waits for it (two clear looks
+ * in a row), then — that one gone, or a consent or sign-in wall from the start —
+ * until the page reads as a page. Returns that read, or undefined when the wall
+ * was still up at the end of the human's time.
+ */
+async function handOff(
+  session: BrowserSession,
+  url: string,
+  wall: string,
+  challenged: boolean,
+  human: HumanHandoff,
+  deps: BrowserDeps,
+  take: () => Promise<ExtractResult>,
+  signal: AbortSignal | undefined,
+): Promise<ExtractResult | undefined> {
+  const tell = human.tell ?? ((m: string) => void process.stderr.write(`${m}\n`));
+  const timeoutMs = human.timeoutMs ?? HUMAN_TIMEOUT_MS;
+  const start = deps.now();
+  const left = () => timeoutMs - (deps.now() - start);
+  const { cli, name } = brand();
+  await deps.discovery.activateTarget(session.port, session.targetId, session.host).catch(() => {});
+  tell(
+    `${cli}: ${url} is behind ${wall}. It is open in the ${name} browser window (its own profile, not your browser): ` +
+      `get past it there and the read goes on by itself — waiting up to ${Math.round(timeoutMs / 1000)} s.`,
+  );
+  try {
+    if (challenged) await waitFor(session, { clear: true }, { timeoutMs, deps, ...(signal ? { signal } : {}) });
+    for (;;) {
+      // What the wall gave way to may still be loading: a bounded wait, then read it as it is.
+      await waitFor(session, { load: true }, { timeoutMs: Math.max(1, Math.min(AFTER_WALL_LOAD_MS, left())), deps }).catch(() => {});
+      const challenge = await detectChallenge(session);
+      if (!challenge?.blocking) {
+        const r = await take();
+        if (!humanWall(r.text)) {
+          tell(`${cli}: got past it — read ${url}.`);
+          return r;
+        }
+      }
+      if (left() <= 0) break;
+      if (signal?.aborted) throw new Error(`reading ${url} in the browser was cancelled`);
+      await deps.sleep(Math.min(WALL_POLL_MS, left()));
+    }
+  } catch (e) {
+    if (!(e instanceof WaitTimeoutError)) throw e;
+  }
+  tell(`${cli}: ${url} is still behind ${wall} after ${Math.round(timeoutMs / 1000)} s — read without it.`);
+  return undefined;
 }
 
 /**
@@ -283,6 +378,8 @@ async function read(url: string, opts: ReadPageOptions): Promise<ExtractResult> 
   if (signal?.aborted) throw cancelled();
   const deps = browserDeps(opts.deps);
   const timeoutMs = opts.timeoutMs ?? envInt("BROWSER_TIMEOUT_MS", 30_000, 5000, 300_000);
+  // A handoff waits for the human on top of the render: the load before it, the read after it.
+  const humanMs = opts.human ? ((opts.human === true ? undefined : opts.human.timeoutMs) ?? HUMAN_TIMEOUT_MS) : 0;
   const release = await acquire(envInt("BROWSER_CONCURRENCY", 1, 1, 4), signal, cancelled);
   if (signal?.aborted) {
     release();
@@ -297,7 +394,8 @@ async function read(url: string, opts: ReadPageOptions): Promise<ExtractResult> 
   const cut = new Promise<never>((_, reject) => {
     stop = reject;
   });
-  const timer = setTimeout(() => stop(new Error(`reading ${url} in the browser did not finish within ${timeoutMs} ms`)), timeoutMs);
+  const budgetMs = humanMs ? 2 * timeoutMs + humanMs : timeoutMs;
+  const timer = setTimeout(() => stop(new Error(`reading ${url} in the browser did not finish within ${budgetMs} ms`)), budgetMs);
   const onAbort = () => stop(cancelled());
   signal?.addEventListener("abort", onAbort, { once: true });
   try {

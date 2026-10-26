@@ -198,7 +198,9 @@ everything.
   headless browser), do not wait the 5 minutes: pass a short `--timeout`, or
   skip the wait, and tell the user the page needs them. A consent wall is no
   challenge: `browser text` and `fetch --browser` read the page behind it. After
-  a login, run `wait --url <pattern>`. Do not log in for the user.
+  a login, run `wait --url <pattern>`. Do not log in for the user. To read one
+  page a human must let you through, `fetch <url> --human` chains it all (see
+  [The human handoff](#the-human-handoff)).
 - **No anti-bot bypass of any kind**: no stealth patches, no captcha solvers,
   no fingerprint spoofing. A challenge is named and left to the human.
 - **`eval` runs in the logged-in page.** Read with it. Never use it to do what
@@ -270,6 +272,35 @@ where the human can solve a challenge. Each read uses a scratch tab that is
 closed afterwards, so your agent tab is left alone. An error page (HTTP 400 or
 higher) never counts as a browser read. Downloads are denied while a read runs,
 and `WEBINDEX_BROWSER_CONCURRENCY` limits how many pages render at once.
+
+## The human handoff
+
+`webindex fetch <url> --human [--human-timeout <s>]` is `browser open`, `wait
+--clear` and the read in one call, for a page only a person can get you
+through. When the browser meets a blocking challenge (a captcha, a bot check),
+or a consent or sign-in wall, the read's tab is brought to the front of the
+dedicated browser's window (its own profile, never the user's browser), one
+line on stderr names the page and says what to do, and the fetch waits: for the
+challenge as `wait --clear` does, for a sign-in or consent wall until the page
+reads as a page. Then it reads the page from that same tab, and its note says
+`Read after a human got past …`. `--human-timeout` (seconds, default 300) bounds
+the wait; on a timeout the fetch ends as it would have without `--human`, the
+challenge note included, plus `Nobody got past it within N s.` With no window
+anyone can see (Linux with no `DISPLAY` or `WAYLAND_DISPLAY`, a headless
+browser, `CI` set) nobody is waited for at all. `--human` turns the browser on
+in `fallback` when nothing else did, and makes a page the plain read found
+behind a sign-in wall worth rendering. A page with no wall is read as usual,
+and no one is asked anything.
+
+What you do around it: **tell the user** which page needs them and that the
+window is open, before or while the command waits — they are the one who solves
+it. Never try to solve, click through or script past a challenge yourself.
+
+A library consumer passes `human: true` (or `{ timeoutMs, tell }`) to
+`fetchAndExtract` or `readRenderedPage`; `tell` replaces the stderr line. The
+result's `handoff` says how it went: `cleared`, `timeout`, or `no-window`
+(absent when the page needed no one). `canShowBrowserWindow()` says up front
+whether anyone could be asked.
 
 A library consumer should call `closeBrowserReads()` at the end of its run. It
 closes the browser only if a read in that same process launched it, after the

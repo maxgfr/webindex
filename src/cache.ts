@@ -7,7 +7,7 @@ import { firecrawlBase, firecrawlIsExplicit, probeFirecrawl } from "./firecrawl.
 import { canonicalizeUrl, domainOf, fnv1a64 } from "./url.js";
 import { isNoWrite, writeFileAtomic } from "./no-write.js";
 import { brand, countFetch, env, envInt, envName, userTmpDir } from "./brand.js";
-import { type BrowserFetchMode, browserFetchMode, worthRendering } from "./browser/mode.js";
+import { type BrowserFetchMode, browserFetchMode, browserFetchModeFor, type HumanHandoff, worthRendering } from "./browser/mode.js";
 
 // Opt-in on-disk fetch cache (--cache). The in-process hydrate cache only spans
 // ONE gather; the deep tier fans out N separate `gather` processes (one per
@@ -523,6 +523,8 @@ export async function cachedFetchAndExtract(
     signal?: AbortSignal;
     /** The browser rung (see fetchAndExtract); its reads are cached under their own namespace. */
     browser?: BrowserFetchMode;
+    /** Hand a walled page to the human (see fetchAndExtract); a cached copy the browser could improve is not served. */
+    human?: boolean | HumanHandoff;
   } = {},
   enabled = false,
   now = Date.now(),
@@ -558,7 +560,7 @@ export async function cachedFetchAndExtract(
   // shared namespace resolved above, for the reason documented there. The
   // fallback is marked, so the next lookup — still predicting Firecrawl — can
   // find it instead of paying for the same failed scrape again.
-  const fallback = browserFetchMode(opts.browser) === "fallback";
+  const fallback = browserFetchModeFor(opts) === "fallback";
   // `tried`: the result of a plain fetch with the fallback on, which ran the browser if the read needed it.
   const store = (result: Extract, tried = false): void => {
     const target = namespaceFor(result, ns);

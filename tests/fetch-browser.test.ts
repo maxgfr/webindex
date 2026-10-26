@@ -212,6 +212,45 @@ describe("fetchAndExtract with browser: fallback", () => {
   });
 });
 
+describe("fetchAndExtract with human", () => {
+  const SIGN_IN = `<html><body><main><h1>Members</h1><p>Sign in to continue reading. ${"Our newsletter, our offers and the rest of the site. ".repeat(4)}</p></main></body></html>`;
+
+  it("turns the browser rung on in fallback, and hands it the human", async () => {
+    installFetchMock(routes([["x.test", { status: 403, body: "denied" }]]));
+    read.mockImplementation(async (url) => rendered(url, { handoff: "cleared", note: "Read after a human got past a cloudflare challenge." }));
+    const human = { timeoutMs: 60_000 };
+    const r = await fetchAndExtract("https://x.test/a", { human });
+    expect(r).toMatchObject({ text: RENDERED, extractor: "browser", handoff: "cleared" });
+    expect(read).toHaveBeenCalledWith("https://x.test/a", expect.objectContaining({ human }));
+  });
+
+  it("renders a page the built-in read found behind a sign-in wall, which it otherwise keeps", async () => {
+    installFetchMock(routes([["x.test", { body: SIGN_IN }]]));
+    expect((await fetchAndExtract("https://x.test/a", { browser: "fallback" })).text).toContain("Sign in to continue");
+    expect(read).not.toHaveBeenCalled();
+    const r = await fetchAndExtract("https://x.test/a", { browser: "fallback", human: true });
+    expect(r.text).toBe(RENDERED);
+    expect(r.note).toBe("Read https://x.test/a in the browser: the built-in fetch read a login wall.");
+  });
+
+  it("says how the handoff went when nobody got past the wall", async () => {
+    installFetchMock(routes([["x.test", { status: 403, body: "denied" }]]));
+    read.mockImplementation(async (url) =>
+      rendered(url, { text: "", status: 403, handoff: "timeout", note: "cloudflare challenge — open it with … Nobody got past it within 300 s." }),
+    );
+    const r = await fetchAndExtract("https://x.test/a", { human: true });
+    expect(r).toMatchObject({ text: "", status: 403, handoff: "timeout" });
+    expect(r.note).toContain("Nobody got past it within 300 s.");
+  });
+
+  it("keeps the browser off when the caller turned it off", async () => {
+    installFetchMock(routes([["x.test", { status: 403, body: "denied" }]]));
+    const r = await fetchAndExtract("https://x.test/a", { browser: "off", human: true });
+    expect(read).not.toHaveBeenCalled();
+    expect(r).not.toHaveProperty("handoff");
+  });
+});
+
 describe("cachedFetchAndExtract and the browser rung", () => {
   it("files an always-mode read under the browser namespace and serves it next time", async () => {
     const spy = installFetchMock(routes([["x.test", { body: LONG }]]));
@@ -274,6 +313,15 @@ describe("cachedFetchAndExtract and the browser rung", () => {
     expect(again).toMatchObject({ text: RENDERED, cached: true });
     expect(read).toHaveBeenCalledTimes(1);
     expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("never serves a cached read the browser could better when a human is asked for: it renders and hands it over", async () => {
+    installFetchMock(routes([["x.test", { body: SHORT }]]));
+    await cachedFetchAndExtract("https://x.test/a", {}, true, 1000);
+    const human = { timeoutMs: 1000 };
+    const r = await cachedFetchAndExtract("https://x.test/a", { human }, true, 2000);
+    expect(r).toMatchObject({ text: RENDERED, extractor: "browser" });
+    expect(read).toHaveBeenCalledWith("https://x.test/a", expect.objectContaining({ human }));
   });
 
   it("takes the fallback from BROWSER_FETCH for a cached read too, and leaves a good one alone", async () => {
