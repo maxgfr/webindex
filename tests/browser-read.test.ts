@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
+import { canShowWindow, humanWall } from "../src/browser/mode.js";
 import { READ_DOCUMENT } from "../src/browser/overlay.js";
 import { closeBrowserReads, readRenderedPage } from "../src/browser/read.js";
 import { profileDir } from "../src/browser/profile.js";
@@ -505,5 +506,148 @@ describe("closeBrowserReads", () => {
     expect(Date.now() - started).toBeLessThan(2000);
     held[0]?.();
     await read.catch(() => {});
+  });
+});
+
+// `human`: a page that needs a person is handed to the person, never solved.
+describe("readRenderedPage handing a walled page to the human", () => {
+  const CHALLENGE = { html: "<html><body>Just a moment...</body></html>", status: 403, probe: { title: "Just a moment..." } };
+  const SIGN_IN = { html: "<html><body><main><h1>Members</h1><p>Sign in to continue reading this article.</p></main></body></html>" };
+  let told: string[];
+  beforeEach(() => {
+    told = [];
+    // A window anyone can see: a desktop session, not a CI job.
+    vi.stubEnv("CI", "");
+    // The page a human gets through to has loaded by the time it is looked at.
+    const evaluate = fake.handlerOf("Runtime.evaluate");
+    fake.handle("Runtime.evaluate", (p: { expression: string }, sessionId) =>
+      p.expression === 'document.readyState === "complete"' ? { result: { type: "boolean", value: true } } : evaluate?.(p, sessionId),
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+  const tell = (m: string) => void told.push(m);
+  const activations = () => fake.requests.filter((q) => q.startsWith("GET /json/activate/"));
+  const navigations = () => fake.calls.filter((c) => c.method === "Page.navigate").length;
+
+  it("brings a blocking challenge to the human, waits until it clears, then reads the page from the same tab", async () => {
+    pages["https://walled.test/"] = CHALLENGE;
+    // The human solves it 20 s in: the challenge goes, the article is there.
+    const clock = fakeClock((t) => {
+      if (t >= 21_000) pages["https://walled.test/"] = { html: ARTICLE, status: 403 };
+    });
+    const r = await readRenderedPage("https://walled.test/", {
+      cdp: fake.port,
+      waitUntil: "load",
+      human: { timeoutMs: 60_000, tell },
+      deps: deps({ platform: "darwin", now: clock.now, sleep: clock.sleep }),
+    });
+    expect(r).toMatchObject({ status: 200, extractor: "browser", handoff: "cleared" });
+    expect(r.text).toContain("Inserted by script");
+    expect(r.note).toBe("Read after a human got past a cloudflare challenge.");
+    // Shown in the window, asked for once by name, and never navigated again: the human's tab is the one read.
+    expect(activations()).toHaveLength(1);
+    expect(navigations()).toBe(1);
+    expect(told[0]).toMatch(/^webindex-tests: https:\/\/walled\.test\/ is behind a cloudflare challenge\. It is open in the webindex-tests browser window/);
+    expect(told[0]).toContain("waiting up to 60 s");
+    expect(told[1]).toBe("webindex-tests: got past it — read https://walled.test/.");
+    expect(clock.at()).toBeLessThan(30_000);
+    expect(ids()).toEqual([]);
+  });
+
+  it("comes back as it does without a human when nobody clears it in time", async () => {
+    pages["https://walled.test/"] = CHALLENGE;
+    const clock = fakeClock();
+    const r = await readRenderedPage("https://walled.test/", {
+      cdp: fake.port,
+      waitUntil: "load",
+      human: { timeoutMs: 5000, tell },
+      deps: deps({ platform: "darwin", now: clock.now, sleep: clock.sleep }),
+    });
+    expect(r).toMatchObject({ text: "", status: 403, extractor: "browser", handoff: "timeout" });
+    expect(r.note).toContain("cloudflare challenge — open it with `webindex-tests browser open https://walled.test/` and let the human solve it");
+    expect(r.note).toContain("Nobody got past it within 5 s.");
+    expect(told).toHaveLength(2);
+    expect(told[1]).toBe("webindex-tests: https://walled.test/ is still behind a cloudflare challenge after 5 s — read without it.");
+    expect(clock.at() - 1000).toBeGreaterThanOrEqual(5000);
+  });
+
+  it("waits for nobody where no window can be shown: no display, or a CI run", async () => {
+    pages["https://walled.test/"] = CHALLENGE;
+    vi.stubEnv("DISPLAY", "");
+    vi.stubEnv("WAYLAND_DISPLAY", "");
+    const clock = fakeClock();
+    const linux = await readRenderedPage("https://walled.test/", {
+      cdp: fake.port,
+      waitUntil: "load",
+      human: { tell },
+      deps: deps({ platform: "linux", now: clock.now, sleep: clock.sleep }),
+    });
+    expect(linux).toMatchObject({ text: "", status: 403, handoff: "no-window" });
+    expect(linux.note).toContain("cloudflare challenge — open it with");
+    expect(linux.note).toContain("It needs a human, and no window can be shown here.");
+    vi.stubEnv("CI", "true");
+    const ci = await readRenderedPage("https://walled.test/", {
+      cdp: fake.port,
+      waitUntil: "load",
+      human: { tell },
+      deps: deps({ platform: "darwin", now: clock.now, sleep: clock.sleep }),
+    });
+    expect(ci).toMatchObject({ text: "", handoff: "no-window" });
+    expect(told).toEqual([]);
+    expect(activations()).toEqual([]);
+    expect(clock.at()).toBe(1000);
+  });
+
+  it("waits out a sign-in wall until the page reads as a page", async () => {
+    pages["https://members.test/"] = SIGN_IN;
+    const clock = fakeClock((t) => {
+      if (t >= 9000) pages["https://members.test/"] = { html: ARTICLE };
+    });
+    const r = await readRenderedPage("https://members.test/", {
+      cdp: fake.port,
+      waitUntil: "load",
+      human: { timeoutMs: 60_000, tell },
+      deps: deps({ platform: "darwin", now: clock.now, sleep: clock.sleep }),
+    });
+    expect(r).toMatchObject({ status: 200, handoff: "cleared" });
+    expect(r.text).toContain("Inserted by script");
+    expect(r.note).toBe("Read after a human got past a login wall.");
+    expect(told[0]).toContain("is behind a login wall");
+  });
+
+  it("asks nobody for a page with no wall", async () => {
+    pages["https://spa.test/"] = { html: ARTICLE };
+    const r = await readRenderedPage("https://spa.test/", { cdp: fake.port, waitUntil: "load", human: { tell }, deps: deps({ platform: "darwin" }) });
+    expect(r.text).toContain("Inserted by script");
+    expect(r).not.toHaveProperty("handoff");
+    expect(told).toEqual([]);
+    expect(activations()).toEqual([]);
+  });
+});
+
+describe("canShowWindow", () => {
+  it("is true on a desktop, false on Linux without a display and in any CI run", () => {
+    expect(canShowWindow("darwin", {})).toBe(true);
+    expect(canShowWindow("win32", {})).toBe(true);
+    expect(canShowWindow("linux", {})).toBe(false);
+    expect(canShowWindow("linux", { DISPLAY: ":0" })).toBe(true);
+    expect(canShowWindow("linux", { WAYLAND_DISPLAY: "wayland-0" })).toBe(true);
+    expect(canShowWindow("darwin", { CI: "true" })).toBe(false);
+    expect(canShowWindow("linux", { CI: "1", DISPLAY: ":99" })).toBe(false);
+    expect(canShowWindow("darwin", { CI: "false" })).toBe(true);
+  });
+});
+
+describe("humanWall", () => {
+  it("names the walls a human can get past, and not a JavaScript shell or a page", () => {
+    expect(humanWall("Members\nSign in to continue reading this article.")).toBe("login wall");
+    expect(humanWall("You must be logged in to view this page.")).toBe("login wall");
+    expect(humanWall("Checking your browser before accessing the site. Please verify you are human.")).toBe("anti-bot interstitial");
+    expect(humanWall("We use cookies. Accept all cookies to continue.")).toBe("cookie/consent wall");
+    expect(humanWall("Please enable JavaScript to view this site.")).toBeUndefined();
+    expect(humanWall(`${"A long article about access control. ".repeat(50)} Sign in to continue.`)).toBeUndefined();
+    expect(humanWall("")).toBeUndefined();
   });
 });

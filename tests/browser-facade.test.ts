@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as facade from "../src/browser.js";
 import * as index from "../src/index.js";
 import { classifyChallenge } from "../src/browser/challenge.js";
+import { canShowWindow } from "../src/browser/mode.js";
 import { renderSnapshot } from "../src/browser/snapshot.js";
 
 const FUNCTIONS = [
@@ -12,6 +13,7 @@ const FUNCTIONS = [
   "classifyBrowserChallenge",
   "detectBrowserBinary",
   "browserHome",
+  "canShowBrowserWindow",
 ] as const;
 
 describe("browser façade", () => {
@@ -23,6 +25,7 @@ describe("browser façade", () => {
   it("aliases the unprefixed internals", () => {
     expect(facade.renderBrowserSnapshot).toBe(renderSnapshot);
     expect(facade.classifyBrowserChallenge).toBe(classifyChallenge);
+    expect(facade.canShowBrowserWindow).toBe(canShowWindow);
   });
 
   it("is re-exported by the package index, and nothing else browser-ish leaks", () => {

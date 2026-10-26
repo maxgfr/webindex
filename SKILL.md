@@ -89,6 +89,7 @@ webindex browser text [<ref>|--selector <css>] [--markdown]  # the current tab's
 webindex browser click|fill|select|type|upload|scroll <ref> …  # act on a ref; --snapshot returns the new tree, --selector <css> scopes that tree
 webindex browser press <key>         # Enter, Escape, Control+A… on the focused element
 webindex browser wait --text <s>|--url <p>|--clear  # check the result; --clear waits for the human to solve a challenge
+webindex fetch <url> --human  # open, wait for the human, read: one page behind a captcha or a sign-in
 webindex browser network list|get <n>  # the JSON fetched during each command given --capture; the log grows until network clear
 webindex browser screenshot [<ref>|--selector <css>]  # an element by ref (a table, a figure…) or by CSS selector
 webindex browser eval|tabs|back|status|close  # close shuts down only a browser webindex launched
@@ -168,6 +169,14 @@ needed for that. `wait --clear` needs a human and can hold the browser for up to
 the page needs them. A consent wall needs no one: `browser text` and `fetch
 --browser` read the page behind it. Read `references/browser.md` before driving
 it.
+
+**The human handoff.** For one page a person must let you through (a captcha,
+a bot check, a sign-in), `webindex fetch <url> --human [--human-timeout <s>]`
+brings it up in the dedicated browser's window, waits until they are past it
+(5 minutes by default) and reads it from that tab. Tell the user which page
+needs them and that the window is open, then let the command wait; never solve,
+click through or script past the challenge yourself. With no window to show (no
+display, a CI run) it waits for nobody and returns what a plain fetch would.
 
 ## Three rules that constrain every change
 

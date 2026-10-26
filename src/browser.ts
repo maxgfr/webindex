@@ -8,7 +8,9 @@
 // walls), `network.ts` and `read.ts` (a rendered page as readable text).
 //
 // Callers want `openBrowserSession`, or `readRenderedPage` for a one-shot read
-// (and `closeBrowserReads` at the end of their run).
+// (and `closeBrowserReads` at the end of their run). A read given `human` hands
+// a walled page to the human at the window and waits for them
+// (`BrowserHumanHandoff`); `canShowBrowserWindow` says whether anyone is there.
 // Names are prefixed `Browser*` so vendoring skills do not collide.
 
 export { openBrowserSession, type BrowserSession, type OpenOptions as BrowserOpenOptions } from "./browser/session.js";
@@ -31,6 +33,11 @@ export {
   type Challenge as BrowserChallenge,
   type ChallengeSignature as BrowserChallengeSignature,
 } from "./browser/challenge.js";
+export {
+  canShowWindow as canShowBrowserWindow,
+  type HumanHandoff as BrowserHumanHandoff,
+  type HumanOutcome as BrowserHumanOutcome,
+} from "./browser/mode.js";
 export { detectBrowserBinary, type BrowserBinary, type BrowserKind, type DetectOptions as BrowserDetectOptions } from "./browser/detect.js";
 export { browserHome } from "./browser/profile.js";
 export type { NetworkEntry as BrowserNetworkEntry } from "./browser/network.js";

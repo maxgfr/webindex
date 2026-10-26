@@ -117,6 +117,7 @@ USAGE
   webindex fetch <url> [<url> …] [--json] [--format text|markdown]
                        [--firecrawl <base>|off] [--lang <tag>] [--full-page] [--cache]
                        [--refresh] [--offline] [--timeout <ms>] [--browser]
+                       [--human] [--human-timeout <s>]
   webindex extract <file|-> [--json] [--format text|markdown] [--full-page]
   webindex rank --query <q> [--docs <file.json|->] [--limit <n>] [--dense] [--json]
   webindex repo <ref> [--forge github|gitlab|gitea] [--json]
@@ -212,6 +213,15 @@ COMMANDS
              --browser renders the page in the dedicated browser (see browser),
              for a page only JavaScript fills; WEBINDEX_BROWSER_FETCH=fallback
              does it only when the plain read is refused, walled or near empty.
+             --human hands a page that needs a person to the person: when the
+             browser meets a blocking challenge (a captcha, a bot check) or a
+             consent or sign-in wall, its tab comes up in that browser's
+             window, stderr says which page needs them, and the fetch waits —
+             up to --human-timeout seconds (default 300) — until they are past
+             it, then reads the page from that tab. It turns the browser on in
+             fallback when nothing else did. Nothing is ever solved for them,
+             and with no window to show (no display, a CI run) nobody is
+             waited for: the fetch ends as it would have without --human.
   extract    Same extraction, on a file already on disk (- reads stdin),
              recognised by its bytes when its name says otherwise. --full-page
              keeps the whole HTML page, navigation and consent banners included;
@@ -455,6 +465,7 @@ Every optional helper degrades to a note. Nothing here needs an API key.`;
 // reported success.
 export const VALUE_FLAGS = [
   "root",
+  "human-timeout",
   "ref",
   "engine",
   "depth",
@@ -521,6 +532,7 @@ export const BOOL_FLAGS = [
   "clear",
   "full",
   "browser",
+  "human",
   "force",
 ];
 export const COMMANDS = [
@@ -587,7 +599,7 @@ const BROWSER_FLAGS = [
 ];
 export const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   search: ["json", "limit", "pages", "lang", "region", "engine", "searxng", "firecrawl", "timeout"],
-  fetch: ["json", "format", "firecrawl", "lang", "full-page", "cache", "refresh", "offline", "timeout", "browser"],
+  fetch: ["json", "format", "firecrawl", "lang", "full-page", "cache", "refresh", "offline", "timeout", "browser", "human", "human-timeout"],
   extract: ["json", "format", "full-page"],
   rank: ["json", "query", "docs", "limit", "dense"],
   repo: ["json", "forge"],
@@ -666,6 +678,16 @@ function argFormat(args: CommandArgs): "text" | "markdown" {
 }
 
 /** `--timeout <ms>`: a positive whole number of milliseconds, or absent for the default. */
+/** `--human [--human-timeout <s>]`, as fetchAndExtract's `human`; nothing without --human. */
+function argHuman(args: CommandArgs): { human?: { timeoutMs?: number } } {
+  const secs = argInt(args, "human-timeout", { min: 1, max: 3600 });
+  if (!argBool(args, "human")) {
+    if (secs !== undefined) usage("--human-timeout goes with --human: it is how long the human has to get past the wall");
+    return {};
+  }
+  return { human: secs !== undefined ? { timeoutMs: secs * 1000 } : {} };
+}
+
 function argTimeout(args: CommandArgs): number | undefined {
   const ms = argInt(args, "timeout");
   if (ms !== undefined && ms < 1) throw new UsageError(`--timeout expects a positive number of milliseconds, got "${ms}"`);
@@ -2209,6 +2231,7 @@ async function dispatch(argv: string[]): Promise<void> {
       timeoutMs: argTimeout(args),
       // A flag, not a value: `--browser` is a switch on mcp too. Fallback mode is WEBINDEX_BROWSER_FETCH's.
       ...(argBool(args, "browser") ? { browser: "always" as const } : {}),
+      ...argHuman(args),
     };
     const cache = argBool(args, "cache") || refresh;
     const json = argBool(args, "json");
