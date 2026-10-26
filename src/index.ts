@@ -97,6 +97,11 @@ export * from "./url.js";
 // evidence.
 export * from "./rank.js";
 
+// ── Walls: is a read content at all? ────────────────────────────────────────
+// The layer over looksLikeJunkExtraction: cookie/JS walls it rates weak, a
+// prose-outweighs-wall override, and the near-empty floor. Pure.
+export * from "./walls.js";
+
 // ── Is this URL worth citing, and where does its text live? ─────────────────
 // Whether a URL addresses a specific document or is a bare API endpoint, and
 // how to turn a landing page into the readable version of the same work.
