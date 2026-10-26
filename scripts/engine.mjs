@@ -10035,7 +10035,7 @@ var init_read = __esm({
 });
 
 // src/version.ts
-var ENGINE_VERSION = "1.34.3";
+var ENGINE_VERSION = "1.35.0";
 
 // src/index.ts
 init_brand();

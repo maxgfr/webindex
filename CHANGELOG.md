@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.35.0](https://github.com/maxgfr/webindex/compare/v1.34.3...v1.35.0) (2026-10-26)
+
+
+### Features
+
+* **browser:** hand a walled page to the human with fetch --human ([#52](https://github.com/maxgfr/webindex/issues/52)) ([b906b54](https://github.com/maxgfr/webindex/commit/b906b540b8a9bbb49d536269deabad78d65a84e8))
+
 ## [1.34.3](https://github.com/maxgfr/webindex/compare/v1.34.2...v1.34.3) (2026-10-26)
 
 
