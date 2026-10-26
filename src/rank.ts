@@ -859,3 +859,82 @@ export function externalHosts(url: string, text: string): Set<string> {
   }
   return out;
 }
+
+// ── Fusion and coverage over a consumer's own result lists ──────────────────
+
+/** What `fuse` needs from a result: `Ranked` plus an optional metadata bag. */
+export interface Fusable extends Ranked {
+  meta?: Record<string, unknown>;
+}
+
+/**
+ * Merge ranked lists (one per backend, or the agent's own web-search hits next
+ * to the engines') into one ranking by Reciprocal Rank Fusion over an identity
+ * key — canonical URL by default, a DOI or arXiv id when the caller knows one —
+ * so the same page surfaced by several lists collapses to one entry. On a
+ * collision the copy that already carries text wins and the metadata merges.
+ * `meta.foundBy` records how many independent lists surfaced each identity:
+ * agreement no single engine can manufacture. Recorded, never scored — RRF
+ * already rewards it through rank.
+ */
+export function fuse<T extends Fusable>(lists: T[][], keyOf: (item: T) => string = (item) => canonicalizeUrl(item.url)): T[] {
+  const fused = rrf(lists, keyOf);
+  const best = new Map<string, T>();
+  const foundBy = new Map<string, number>();
+  for (const list of lists) {
+    const seenInList = new Set<string>();
+    for (const it of list) {
+      const key = keyOf(it);
+      if (!seenInList.has(key)) {
+        seenInList.add(key);
+        foundBy.set(key, (foundBy.get(key) ?? 0) + 1);
+      }
+      const prev = best.get(key);
+      if (!prev) {
+        best.set(key, { ...it });
+      } else if (!prev.text && it.text) {
+        best.set(key, { ...it, meta: { ...prev.meta, ...it.meta } });
+      } else if (it.meta) {
+        prev.meta = { ...it.meta, ...prev.meta };
+      }
+    }
+  }
+  for (const [key, it] of best) it.meta = { ...it.meta, foundBy: foundBy.get(key) ?? 1 };
+  const merged = [...best.values()];
+  for (const it of merged) it.score = fused.get(keyOf(it)) ?? 0;
+  merged.sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
+  return merged;
+}
+
+/** A term below this many of the top sources is under-covered (`underCovered`). */
+export const UNDER_COVERED_MIN = 2;
+
+/**
+ * How many of the top sources `termCoverage` reads: 10, or one per question term
+ * when the question has more. A broad question spreads its facets over the
+ * ranking, so a fixed top 10 held by one facet called every other facet
+ * under-covered while several sources below rank 10 named it.
+ */
+export function coverageWindow(nTerms: number): number {
+  return Math.max(10, nTerms);
+}
+
+/**
+ * Per-term coverage of a question's query terms across the TOP sources: how
+ * many of them actually contain each term (BM25 tokens of `text`, else
+ * `snippet`). Pure and in-memory — what turns "enrich the thin areas" from
+ * prose into a worklist.
+ */
+export function termCoverage(
+  items: readonly { text?: string; snippet?: string }[],
+  queryTerms: readonly string[],
+  top = coverageWindow(queryTerms.length),
+): { term: string; sources: number }[] {
+  const toks = items.slice(0, Math.min(top, items.length)).map((it) => new Set(bm25Tokenize(it.text || it.snippet || "")));
+  return queryTerms.map((term) => ({ term, sources: toks.reduce((n, t) => n + (t.has(term) ? 1 : 0), 0) }));
+}
+
+/** The enrichment worklist: terms fewer than `min` of the top sources mention. */
+export function underCovered(cov: readonly { term: string; sources: number }[], min = UNDER_COVERED_MIN): string[] {
+  return cov.filter((c) => c.sources < min).map((c) => c.term);
+}

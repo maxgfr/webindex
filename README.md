@@ -19,7 +19,7 @@ npx skills add maxgfr/webindex             # add -a <agent> to target one agent 
 
 ## Everything it does
 
-Three surfaces over one engine: **375 library exports**, **29 CLI commands**, **20 MCP
+Three surfaces over one engine: **386 library exports**, **29 CLI commands**, **20 MCP
 tools**. Nothing below needs an API key, and every optional helper degrades to a note
 rather than an error.
 
@@ -335,7 +335,8 @@ A library of **primitives**, not a pipeline.
 | Discovery | the SearXNG JSON API and Firecrawl's `/search`, with pagination, cross-page dedupe, and throttled-upstream detection |
 | Retrieval | HTTP with retry, **streaming** byte caps and conditional GET, HTML→text, HTML→Markdown (`htmlToMarkdown`), main-content extraction, consent-banner stripping, Firecrawl, the PDF ladder (`pdf-inspector` → `anydoc` → Firecrawl → `pdftotext` → native → OCR), the office-document ladder (`anydoc` → Firecrawl → built-in), explicit Wayback rescue, the revalidating fetch cache |
 | Text | keyword extraction, accent- and plural-folded matching, camelCase splitting, excerpting, URL canonicalisation and identity |
-| Ranking | RRF fusion, BM25F with field weighting and a relevance floor, SimHash near-duplicate collapse, MMR diversification, DOI/arXiv identity, pool-relative recency |
+| Ranking | RRF fusion, `fuse` over the caller's own result lists, BM25F with field weighting and a relevance floor, SimHash near-duplicate collapse, MMR diversification, DOI/arXiv identity, pool-relative recency, per-term coverage (`termCoverage`, `underCovered`) |
+| Walls | `looksLikeWall` — cookie/JS walls the junk detector rates weak, a prose-outweighs-wall override, a near-empty floor (`MIN_USEFUL_CHARS`) |
 | MCP | the whole protocol — negotiation, cancellation, progress, schema validation, response capping, the error taxonomy — plus the stdio and HTTP transports |
 | Browser | a DevTools Protocol client over an in-house WebSocket, browser detection and dedicated profiles, accessibility snapshots with stable refs, ref-based actions behind an irreversibility guard, challenge detection, waits, network capture, and a rendered-page read for `fetch` |
 

@@ -72,6 +72,27 @@ tail so a rank-40 cannot outvote a couple of top-tens. An item counts once per
 list, at its best rank: one engine repeating a URL (a tracking-param variant, a
 pagination overlap) is not two engines agreeing on it.
 
+`fuse` is RRF applied to whole results: lists from several engines — or the
+agent's own web-search hits beside them — collapse on an identity key (the
+canonical URL, or the caller's DOI/arXiv key), the copy that already carries text
+wins, metadata merges, and `meta.foundBy` records how many lists agreed. Recorded,
+never scored: rank already rewards agreement.
+
+## Coverage
+
+`termCoverage` counts, per query term, how many of the top sources
+(`coverageWindow`: 10, or one per term for a broad question) contain it;
+`underCovered` keeps the terms below two of them. That is the worklist a second
+search round goes after — "enrich the thin areas" as data, not prose.
+
+## Walls
+
+`looksLikeWall` is the reader-side net over `looksLikeJunkExtraction`: cookie and
+JavaScript walls the junk detector only rates weak (tried on short texts only), an
+override when three long lines of real prose outweigh a banner, and a floor —
+fewer than `MIN_USEFUL_CHARS` characters of prose is no document. `isWordedWall`
+tells a wall by wording from a merely thin page.
+
 ## Deterministic means on every machine
 
 Ties are broken by comparing URLs code unit by code unit, never with the
