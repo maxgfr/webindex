@@ -315,6 +315,15 @@ describe("cachedFetchAndExtract and the browser rung", () => {
     expect(spy).toHaveBeenCalledTimes(2);
   });
 
+  it("never serves a cached read the browser could better when a human is asked for: it renders and hands it over", async () => {
+    installFetchMock(routes([["x.test", { body: SHORT }]]));
+    await cachedFetchAndExtract("https://x.test/a", {}, true, 1000);
+    const human = { timeoutMs: 1000 };
+    const r = await cachedFetchAndExtract("https://x.test/a", { human }, true, 2000);
+    expect(r).toMatchObject({ text: RENDERED, extractor: "browser" });
+    expect(read).toHaveBeenCalledWith("https://x.test/a", expect.objectContaining({ human }));
+  });
+
   it("takes the fallback from BROWSER_FETCH for a cached read too, and leaves a good one alone", async () => {
     installFetchMock(
       routes([

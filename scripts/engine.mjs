@@ -7985,6 +7985,10 @@ function browserFetchMode(explicit) {
   const m = (explicit ?? env("BROWSER_FETCH"))?.toLowerCase();
   return m === "always" || m === "fallback" ? m : "off";
 }
+function browserFetchModeFor(opts) {
+  const m = browserFetchMode(opts.browser);
+  return m === "off" && opts.human && opts.browser !== "off" ? "fallback" : m;
+}
 function worthRendering(res) {
   if (RENDER_STATUS.has(res.status)) return res.status ? `got HTTP ${res.status}` : "got no answer";
   if (res.status < 200 || res.status >= 300) return void 0;
@@ -8633,9 +8637,7 @@ async function fetchAndExtract(url, opts = {}) {
   }
   const wantsPdf = looksLikePdfUrl(url);
   const wantsDoc = wantsPdf ? void 0 : docFormatForUrl(url);
-  const asked = browserFetchMode(opts.browser);
-  const mode2 = asked === "off" && opts.human && opts.browser !== "off" ? "fallback" : asked;
-  const browser = opts.authorizeUrl || opts.headers || wantsPdf || wantsDoc ? "off" : mode2;
+  const browser = opts.authorizeUrl || opts.headers || wantsPdf || wantsDoc ? "off" : browserFetchModeFor(opts);
   const handoff = (got2) => got2.handoff ? { handoff: got2.handoff } : {};
   if (browser === "always") {
     const got2 = await renderInBrowser(url, opts);
@@ -13004,7 +13006,7 @@ async function cachedFetchAndExtract(url, opts = {}, enabled = false, now = Date
     return { text: "", finalUrl: url, status: 0, note: `Offline: ${url} is not in the cache (drop --offline, or warm it with a normal run).` };
   }
   const ns = await currentExtractor(opts, url);
-  const fallback = browserFetchMode(opts.browser) === "fallback";
+  const fallback = browserFetchModeFor(opts) === "fallback";
   const store = (result, tried = false) => {
     const target = namespaceFor(result, ns);
     let entry = ns === "firecrawl" && target === "native" ? { ...result, fallbackFrom: "firecrawl" } : result;

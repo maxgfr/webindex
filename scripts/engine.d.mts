@@ -3584,6 +3584,8 @@ declare function cachedFetchAndExtract(url: string, opts?: {
     signal?: AbortSignal;
     /** The browser rung (see fetchAndExtract); its reads are cached under their own namespace. */
     browser?: BrowserFetchMode;
+    /** Hand a walled page to the human (see fetchAndExtract); a cached copy the browser could improve is not served. */
+    human?: boolean | HumanHandoff;
 }, enabled?: boolean, now?: number): Promise<Extract & {
     cached?: boolean;
 }>;

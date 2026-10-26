@@ -10,6 +10,17 @@ export function browserFetchMode(explicit?: BrowserFetchMode): BrowserFetchMode 
   return m === "always" || m === "fallback" ? m : "off";
 }
 
+/**
+ * The mode one read runs in: the caller's choice, else the env's — except that
+ * asking for a human (`human`) turns a rung nobody turned on to `fallback`, since
+ * there is no handing a page over without a browser to show it in. A caller's
+ * explicit "off" stays off.
+ */
+export function browserFetchModeFor(opts: { browser?: BrowserFetchMode; human?: unknown }): BrowserFetchMode {
+  const m = browserFetchMode(opts.browser);
+  return m === "off" && opts.human && opts.browser !== "off" ? "fallback" : m;
+}
+
 /** Statuses a real browser may get past: refused, throttled, or no answer at all. */
 const RENDER_STATUS = new Set([0, 401, 403, 429, 503]);
 

@@ -39,7 +39,7 @@ import { githubRawUrl } from "./forge-host.js";
 import { knownVideo, transcribeVideo, transcriptMarkdown } from "./video.js";
 // Only the mode is read here; the browser itself (src/browser/read.ts) is
 // imported inside the rung, so nothing of it loads unless a page needs it.
-import { type BrowserFetchMode, browserFetchMode, type HumanHandoff, type HumanOutcome, humanWall, worthRendering } from "./browser/mode.js";
+import { type BrowserFetchMode, browserFetchModeFor, type HumanHandoff, type HumanOutcome, humanWall, worthRendering } from "./browser/mode.js";
 import { looksLikeJunkExtraction } from "./junk.js";
 
 export { looksLikeJunkExtraction };
@@ -1472,10 +1472,7 @@ export async function fetchAndExtract(
   // follows redirects and loads subresources nobody vets, so it never runs.
   // Nor for a revalidation: conditional headers are the cache's question to
   // the origin, which only the fetch can ask.
-  const asked = browserFetchMode(opts.browser);
-  // A human to hand a walled page to needs the browser: asking for one turns the fallback on, unless the caller said off.
-  const mode = asked === "off" && opts.human && opts.browser !== "off" ? "fallback" : asked;
-  const browser = opts.authorizeUrl || opts.headers || wantsPdf || wantsDoc ? "off" : mode;
+  const browser = opts.authorizeUrl || opts.headers || wantsPdf || wantsDoc ? "off" : browserFetchModeFor(opts);
   const handoff = (got: { handoff?: HumanOutcome }) => (got.handoff ? { handoff: got.handoff } : {});
   if (browser === "always") {
     const got = await renderInBrowser(url, opts);
