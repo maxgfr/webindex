@@ -315,12 +315,41 @@ function subtermsCached(raw: string, folded: string): readonly string[] {
 
 // Field-weighted token stream: body once, headings ×headingWeight, title
 // ×titleWeight — a query term in the title outranks the same term buried deep.
+// BM25's matching key of a token: the -ing, -er and -ed endings of a long lowercase word are
+// folded, so a question about a "forecaster" meets pages about "forecasting" and "forecasts"
+// (and "encoder" meets "encoding"). Without it a relevant page shared none of the question's
+// rare terms, ranked low and was flagged off-topic. It is a key, not a token: `bm25Tokenize`,
+// SimHash and the keyword lists keep their words, and `queryTerms` / `bm25MatchedTerms` report
+// the question's own words. At least five letters stay, so "string", "paper", "nothing" or
+// "morning" are left whole; tokens with digits are identifiers or numbers and are left too.
+const STEM_CACHE_MAX = 50_000;
+const stemCache = new Map<string, string>();
+
+function bm25Stem(t: string): string {
+  if (t.length < 7) return t;
+  const hit = stemCache.get(t);
+  if (hit !== undefined) return hit;
+  let out = t;
+  if (/^[a-z]+$/.test(t)) {
+    for (const suffix of ["ing", "er", "ed"]) {
+      if (t.endsWith(suffix) && t.length - suffix.length >= 5) {
+        out = t.slice(0, -suffix.length);
+        break;
+      }
+    }
+  }
+  if (stemCache.size >= STEM_CACHE_MAX) stemCache.clear();
+  stemCache.set(t, out);
+  return out;
+}
+
 function docTokens(doc: Bm25Doc, titleWeight: number, headingWeight: number, body?: readonly string[]): string[] {
   const out = body ? [...body] : bm25Tokenize(doc.body);
   const headings = bm25Tokenize(doc.headings);
   for (let r = 0; r < headingWeight; r++) out.push(...headings);
   const title = bm25Tokenize(doc.title);
   for (let r = 0; r < titleWeight; r++) out.push(...title);
+  for (let i = 0; i < out.length; i++) out[i] = bm25Stem(out[i] as string);
   return out;
 }
 
@@ -381,7 +410,7 @@ export function buildBm25Index(
       idf.set(t, 1);
       continue;
     }
-    const dfi = df.get(t) ?? 0;
+    const dfi = df.get(bm25Stem(t)) ?? 0;
     idf.set(t, Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5)));
   }
   const index = { idf, avgdl, N, queryTerms, k1, b, titleWeight, headingWeight };
@@ -409,20 +438,21 @@ export function bm25Score(index: Bm25Index, doc: Bm25Doc): number {
   const { k1, b, avgdl } = index;
   const lenNorm = 1 - b + b * (avgdl ? dl / avgdl : 1);
   let score = 0;
-  for (const term of index.queryTerms) {
-    const f = tf.get(term);
-    if (!f) continue;
+  const stems = index.queryTerms.map(bm25Stem);
+  index.queryTerms.forEach((term, i) => {
+    const f = tf.get(stems[i] as string);
+    if (!f) return;
     const idf = index.idf.get(term) ?? 0;
     score += (idf * (f * (k1 + 1))) / (f + k1 * lenNorm);
-  }
-  return score * (1 + proximityBonus(toks, index.queryTerms));
+  });
+  return score * (1 + proximityBonus(toks, stems));
 }
 
 /** Which distinct query terms actually occur in a document. */
 export function bm25MatchedTerms(index: Bm25Index, doc: Bm25Doc): string[] {
   if (!index.queryTerms.length) return [];
   const present = new Set(indexedDocTokens(index, doc));
-  return index.queryTerms.filter((t) => present.has(t));
+  return index.queryTerms.filter((t) => present.has(bm25Stem(t)));
 }
 
 /**

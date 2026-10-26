@@ -123,6 +123,28 @@ describe("dedupeByUrl", () => {
 });
 
 describe("BM25F", () => {
+  it("matches -ing / -er / -ed forms of a long word, and reports the question's own words", () => {
+    const docs = [
+      { id: "a", title: "Zero-shot forecasting", headings: "", body: "Forecasting models and their forecasts." },
+      { id: "b", title: "Encoding", headings: "", body: "A trained encoder for images." },
+      { id: "c", title: "Cats", headings: "", body: "An unrelated sentence about cats and strings." },
+    ];
+    const index = buildBm25Index("tiny forecaster with a training encoding", docs);
+    expect(index.queryTerms).toContain("forecaster");
+    expect(bm25MatchedTerms(index, docs[0]!)).toEqual(["forecaster"]);
+    expect(bm25MatchedTerms(index, docs[1]!).sort()).toEqual(["encoding", "training"]);
+    expect(bm25MatchedTerms(index, docs[2]!)).toEqual([]);
+    expect(bm25Score(index, docs[0]!)).toBeGreaterThan(0);
+    // the key only: tokens keep their words
+    expect(bm25Tokenize("forecasting")).toEqual(["forecasting"]);
+    // short words and short stems keep their ending
+    const guard = buildBm25Index("nothing morning paper", [
+      { id: "n", title: "", headings: "", body: "noth morn pap" },
+      { id: "m", title: "", headings: "", body: "nothing at all this morning" },
+    ]);
+    expect(bm25MatchedTerms(guard, { id: "n", title: "", headings: "", body: "noth morn pap" })).toEqual([]);
+  });
+
   const doc = (id: string, title: string, headings: string, body: string): Bm25Doc => ({ id, title, headings, body });
 
   it("folds plurals and accents, and drops stopwords, like the matcher does", () => {
