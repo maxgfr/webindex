@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.36.1](https://github.com/maxgfr/webindex/compare/v1.36.0...v1.36.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **walls:** treat anti-bot challenge pages and challenge redirects as walls ([50e5643](https://github.com/maxgfr/webindex/commit/50e56434e5cd738bff2338f281c466ce29723ee7))
+
 # [1.36.0](https://github.com/maxgfr/webindex/compare/v1.35.0...v1.36.0) (2026-10-26)
 
 
