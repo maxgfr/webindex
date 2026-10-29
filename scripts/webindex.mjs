@@ -5761,8 +5761,16 @@ var init_forge_host = __esm({
 });
 
 // src/junk.ts
+function challengePage(text) {
+  const t = text.trim();
+  if (!t || t.length >= CHALLENGE_MAX_CHARS) return void 0;
+  const head = t.slice(0, 800);
+  return CHALLENGE_PAGES.find(([re]) => re.test(head))?.[1];
+}
 function looksLikeJunkExtraction(text) {
   const t = text.trim();
+  const challenge = challengePage(t);
+  if (challenge) return challenge;
   if (t.length >= 2e3) return void 0;
   const head = t.slice(0, 800);
   const hits = JUNK_PATTERNS.filter(([re]) => re.test(head));
@@ -5772,7 +5780,7 @@ function looksLikeJunkExtraction(text) {
   const prose = t.split("\n").filter((l) => l.trim().length >= 60 && !JUNK_PATTERNS.some(([re]) => re.test(l))).length;
   return prose < 3 ? strong[1] : void 0;
 }
-var JUNK_PATTERNS;
+var JUNK_PATTERNS, CHALLENGE_PAGES, CHALLENGE_MAX_CHARS;
 var init_junk = __esm({
   "src/junk.ts"() {
     "use strict";
@@ -5784,7 +5792,7 @@ var init_junk = __esm({
       [/\b(please )?enable javascript\b/i, "JavaScript-required shell", "strong"],
       [/\bjavascript is (disabled|required|not enabled)\b/i, "JavaScript-required shell", "strong"],
       [
-        /\bverify(ing)? (that )?(you are|you're) (a )?(human|not a (ro)?bot)\b|\bare you a (human|robot)\b|\bhuman verification\b/i,
+        /\bverify(ing)? (that )?(you are|you're) (a )?(human|not a (ro)?bot)\b|\bmaking sure (you are|you're) not a (ro)?bot\b|\bare you a (human|robot)\b|\bhuman verification\b/i,
         "anti-bot interstitial",
         "strong"
       ],
@@ -5800,6 +5808,14 @@ var init_junk = __esm({
       [/\bnous utilisons des cookies\b|\baccepter (tous )?les cookies\b|\bactiver javascript\b/i, "cookie/consent wall (fr)", "strong"],
       [/\bwir verwenden cookies\b|\bcookies akzeptieren\b|\bjavascript aktivieren\b/i, "cookie/consent wall (de)", "strong"]
     ];
+    CHALLENGE_PAGES = [
+      // Anubis (TecharoHQ): its <h1>, and its explanation of itself.
+      [/^\W*(?:#+\s*)?making sure you(?:'|’| a)re not a bot\b/i, "anti-bot proof-of-work challenge"],
+      [/\bset up anubis to protect (?:the|this) server\b|\bprotected by anubis\b/i, "anti-bot proof-of-work challenge"],
+      // Apple's forums interstitial and its kin.
+      [/^\W*(?:#+\s*)?security verification in progress\b|\bplease wait while we verify your browser\b/i, "anti-bot interstitial"]
+    ];
+    CHALLENGE_MAX_CHARS = 4e3;
   }
 });
 
@@ -5840,6 +5856,45 @@ var init_mode = __esm({
     RENDER_STATUS = /* @__PURE__ */ new Set([0, 401, 403, 429, 503]);
     LOGIN_WALL = /\b(?:sign|log) ?in (?:to (?:continue|read|view|see|access|keep reading)|or (?:sign up|register|create an account))\b|\byou (?:must|need to|have to) (?:be )?(?:signed|logged) ?in\b|\bplease (?:sign|log) ?in\b/i;
     LOGIN_WALL_MAX = 1500;
+  }
+});
+
+// src/walls.ts
+function challengeUrl(url) {
+  let target;
+  try {
+    const u = new URL(url);
+    target = `${u.pathname}${u.search}`;
+  } catch {
+    return void 0;
+  }
+  return CHALLENGE_URLS.some((re) => re.test(target)) ? "anti-bot challenge page" : void 0;
+}
+var CHALLENGE_URLS;
+var init_walls = __esm({
+  "src/walls.ts"() {
+    "use strict";
+    init_junk();
+    CHALLENGE_URLS = [
+      /\/apology_objects?\//i,
+      // fda.gov and other Akamai-fronted sites: abuse-detection-apology.html
+      /\/abuse[-_]detection\b/i,
+      /\/verify[-_]human\//i,
+      // developer.apple.com/forums/verify-human/verify.html
+      /\/cdn-cgi\/challenge-platform\//i,
+      // Cloudflare
+      /[?&]__cf_chl_\w*=/i,
+      /\/\.within\.website\/x\/cmd\/anubis\//i,
+      // Anubis
+      /\/\.well-known\/sgcaptcha\b/i,
+      // SiteGround
+      /\/_incapsula_resource\b/i,
+      // Imperva
+      /\/distil_r_(?:captcha|blocked)\b/i,
+      // Distil
+      // A gate at the site's root; anywhere deeper (/wiki/CAPTCHA) it is a topic.
+      /^\/(?:captcha|bot[-_]?check|are[-_]you[-_](?:a[-_])?(?:human|robot))(?:\/|\.html?\b|$|\?)/i
+    ];
   }
 });
 
@@ -9740,8 +9795,22 @@ async function readWithoutBrowser(url, opts, wantsPdf, wantsDoc, seen) {
   let res = await httpGet(url, fetchOpts);
   if (opts.signal?.aborted) return cancelled();
   const toldToWait = (res.retryAfterMs ?? 0) > RETRY_AFTER_CAP_MS;
-  if (!res.ok && !toldToWait && brand().defaultUa === "contact" && (res.status === 403 || res.status === 429)) {
+  let asBrowser = brand().defaultUa !== "contact";
+  if (!res.ok && !toldToWait && !asBrowser && (res.status === 403 || res.status === 429)) {
     res = await httpGet(url, { ...fetchOpts, userAgent: browserUa(), acceptLanguage: opts.acceptLanguage ?? "en-US,en;q=0.9" });
+    asBrowser = true;
+  }
+  if (!toldToWait && challengeUrl(res.url) && !challengeUrl(url)) {
+    const again = await httpGet(
+      url,
+      asBrowser ? { ...fetchOpts, userAgent: contactUa() } : { ...fetchOpts, userAgent: browserUa(), acceptLanguage: opts.acceptLanguage ?? "en-US,en;q=0.9" }
+    );
+    if (opts.signal?.aborted) return cancelled();
+    if (!challengeUrl(again.url)) res = again;
+  }
+  if (challengeUrl(res.url)) {
+    seen.page = true;
+    return { text: "", finalUrl: res.url, status: res.status, note: `Could not read ${url}: it was redirected to an anti-bot challenge (${res.url}).` };
   }
   if (res.status === 304) {
     return { text: "", finalUrl: res.url, status: 304, etag: res.etag ?? opts.headers?.["if-none-match"], lastModified: res.lastModified };
@@ -9942,6 +10011,7 @@ var init_fetch = __esm({
     init_video();
     init_mode();
     init_junk();
+    init_walls();
     DEFAULT_BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
     RETRY_STATUS = /* @__PURE__ */ new Set([429, 503, 502, 504]);
     defaultTimeoutMs2 = () => envInt("TIMEOUT_MS", 2e4, 1e3, 3e5);

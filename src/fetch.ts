@@ -40,9 +40,10 @@ import { knownVideo, transcribeVideo, transcriptMarkdown } from "./video.js";
 // Only the mode is read here; the browser itself (src/browser/read.ts) is
 // imported inside the rung, so nothing of it loads unless a page needs it.
 import { type BrowserFetchMode, browserFetchModeFor, type HumanHandoff, type HumanOutcome, humanWall, worthRendering } from "./browser/mode.js";
-import { looksLikeJunkExtraction } from "./junk.js";
+import { challengePage, looksLikeJunkExtraction } from "./junk.js";
+import { challengeUrl } from "./walls.js";
 
-export { looksLikeJunkExtraction };
+export { challengePage, looksLikeJunkExtraction };
 
 // ── Tunables ────────────────────────────────────────────────────────────────
 //
@@ -1578,8 +1579,28 @@ async function readWithoutBrowser(
   // A server that named a wait longer than httpGet would sleep through meant
   // it, whatever the UA; asking again at once would be ducking the limit.
   const toldToWait = (res.retryAfterMs ?? 0) > RETRY_AFTER_CAP_MS;
-  if (!res.ok && !toldToWait && brand().defaultUa === "contact" && (res.status === 403 || res.status === 429)) {
+  let asBrowser = brand().defaultUa !== "contact";
+  if (!res.ok && !toldToWait && !asBrowser && (res.status === 403 || res.status === 429)) {
     res = await httpGet(url, { ...fetchOpts, userAgent: browserUa(), acceptLanguage: opts.acceptLanguage ?? "en-US,en;q=0.9" });
+    asBrowser = true;
+  }
+  // A host that parks one User-Agent on an anti-bot challenge often serves the
+  // other: fda.gov redirects a browser-like UA to its abuse-detection apology
+  // (a 404) and hands a plain client the page. So a read redirected to a
+  // challenge is asked once more under the other UA; one both get stays one.
+  if (!toldToWait && challengeUrl(res.url) && !challengeUrl(url)) {
+    const again = await httpGet(
+      url,
+      asBrowser ? { ...fetchOpts, userAgent: contactUa() } : { ...fetchOpts, userAgent: browserUa(), acceptLanguage: opts.acceptLanguage ?? "en-US,en;q=0.9" },
+    );
+    if (opts.signal?.aborted) return cancelled();
+    if (!challengeUrl(again.url)) res = again;
+  }
+  // Whatever its status — Apple's verify-human page is a 200 — a read that
+  // ended on a challenge did not reach the page: its text is the challenge's.
+  if (challengeUrl(res.url)) {
+    seen.page = true;
+    return { text: "", finalUrl: res.url, status: res.status, note: `Could not read ${url}: it was redirected to an anti-bot challenge (${res.url}).` };
   }
   // 304 is a SUCCESS with no body: the caller sent validators and the origin
   // confirmed nothing changed. Reported as-is so a cache can serve what it

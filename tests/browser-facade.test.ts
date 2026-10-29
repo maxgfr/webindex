@@ -30,8 +30,9 @@ describe("browser façade", () => {
 
   it("is re-exported by the package index, and nothing else browser-ish leaks", () => {
     for (const name of FUNCTIONS) expect((index as Record<string, unknown>)[name]).toBe((facade as Record<string, unknown>)[name]);
-    // browserUa and looksLikeChallenge predate the CDP layer (fetch.ts).
-    const OLD = ["browserUa", "looksLikeChallenge"];
+    // browserUa and looksLikeChallenge predate the CDP layer (fetch.ts);
+    // challengePage and challengeUrl are the walls layer's (junk.ts, walls.ts).
+    const OLD = ["browserUa", "looksLikeChallenge", "challengePage", "challengeUrl"];
     const found = Object.keys(index).filter((k) => /browser|cdp|challenge|snapshot|session|rendered/i.test(k) && !OLD.includes(k));
     expect(found.sort()).toEqual([...FUNCTIONS].sort());
   });

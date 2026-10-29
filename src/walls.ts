@@ -1,4 +1,4 @@
-import { looksLikeJunkExtraction } from "./junk.js";
+import { challengePage, looksLikeJunkExtraction } from "./junk.js";
 
 // What a read must carry before it is worth citing — the layer over
 // `looksLikeJunkExtraction` that consumers kept to themselves.
@@ -78,6 +78,9 @@ export function proseOutweighsWall(text: string): boolean {
 export function wallPattern(text: string): string | undefined {
   const t = text.trim();
   if (!t) return undefined;
+  // A challenge template carries prose of its own; it never outweighs the page being one.
+  const challenge = challengePage(t);
+  if (challenge) return challenge;
   const junk = looksLikeJunkExtraction(t);
   const local = junk || t.length >= WALL_MAX_CHARS ? undefined : LOCAL_WALLS.find(([re]) => re.test(t.slice(0, 800)))?.[1];
   const wall = junk ?? local;
@@ -99,4 +102,38 @@ export function looksLikeWall(text: string): string | undefined {
 /** True when `looksLikeWall`'s verdict is a wall by wording, not just a thin page. */
 export function isWordedWall(reason: string | undefined): boolean {
   return !!reason && !reason.startsWith("near-empty page");
+}
+
+// Where a read lands when the host put a challenge in front of the page: the
+// path of an anti-bot interstitial, an "abuse detection" apology or a CAPTCHA
+// gate, never of a document. Matched on the path (and the query, where some
+// vendors put their marker), so a page ABOUT CAPTCHAs is not one.
+const CHALLENGE_URLS: RegExp[] = [
+  /\/apology_objects?\//i, // fda.gov and other Akamai-fronted sites: abuse-detection-apology.html
+  /\/abuse[-_]detection\b/i,
+  /\/verify[-_]human\//i, // developer.apple.com/forums/verify-human/verify.html
+  /\/cdn-cgi\/challenge-platform\//i, // Cloudflare
+  /[?&]__cf_chl_\w*=/i,
+  /\/\.within\.website\/x\/cmd\/anubis\//i, // Anubis
+  /\/\.well-known\/sgcaptcha\b/i, // SiteGround
+  /\/_incapsula_resource\b/i, // Imperva
+  /\/distil_r_(?:captcha|blocked)\b/i, // Distil
+  // A gate at the site's root; anywhere deeper (/wiki/CAPTCHA) it is a topic.
+  /^\/(?:captcha|bot[-_]?check|are[-_]you[-_](?:a[-_])?(?:human|robot))(?:\/|\.html?\b|$|\?)/i,
+];
+
+/**
+ * "anti-bot challenge page" when a URL is where a host parks a request it will
+ * not serve — the address a blocked read was redirected to — or undefined. A
+ * read that ends there did not reach the page it asked for, whatever its status.
+ */
+export function challengeUrl(url: string): string | undefined {
+  let target: string;
+  try {
+    const u = new URL(url);
+    target = `${u.pathname}${u.search}`;
+  } catch {
+    return undefined;
+  }
+  return CHALLENGE_URLS.some((re) => re.test(target)) ? "anti-bot challenge page" : undefined;
 }

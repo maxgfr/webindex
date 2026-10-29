@@ -91,7 +91,13 @@ search round goes after — "enrich the thin areas" as data, not prose.
 JavaScript walls the junk detector only rates weak (tried on short texts only), an
 override when three long lines of real prose outweigh a banner, and a floor —
 fewer than `MIN_USEFUL_CHARS` characters of prose is no document. `isWordedWall`
-tells a wall by wording from a merely thin page.
+tells a wall by wording from a merely thin page. A challenge page in its
+template's own words (`challengePage`: Anubis's "Making sure you're not a bot!",
+a "Security verification in progress" interstitial) is a wall whatever prose the
+template carries. `challengeUrl` names the addresses hosts park a blocked
+request on (an abuse-detection apology, `/verify-human/`, Cloudflare's challenge
+platform): `fetchAndExtract` asks a page redirected there once more under the
+other User-Agent, and returns no text when that lands there too.
 
 ## Deterministic means on every machine
 
