@@ -16,6 +16,15 @@
 // client sends no Origin header, so none is needed) — and headless only when
 // asked: the point is a browser a human can also look at and sign in to.
 //
+// Headed, it is still kept out of the way of whoever is at the machine. Three
+// flags keep a page that is out of sight rendering as if it were shown (an
+// occluded window or a background tab is otherwise "hidden": no
+// requestAnimationFrame, throttled timers, and a JS shell that never hydrates).
+// A launch for reads (`quiet`) opens no window on macOS (--no-startup-window):
+// a window opening there activates the browser app and takes the keyboard from
+// whatever the user was typing in, so the reads open their own window, in the
+// background (session.ts). Elsewhere it opens at the reads' window size.
+//
 // Which browser: BROWSER_BIN, else the kind asked for (`--browser-kind`, else
 // BROWSER_KIND, else the kind the profile belongs to), else the first found. A
 // profile belongs to the kind it was first launched with (profile.ts): another
@@ -51,6 +60,13 @@ export interface LaunchOptions {
    * background. Ours is used, or launched, instead. An explicit `cdp` still wins.
    */
   ownOnly?: boolean;
+  /**
+   * Launch for reads in the background, out of the way of whoever is at the
+   * machine: no window of its own on macOS (the reads open one without
+   * activating the browser), elsewhere one at the reads' window size. Only a
+   * browser this call starts is launched so; a running one is used as it is.
+   */
+  quiet?: boolean;
   deps?: Partial<BrowserDeps>;
 }
 
@@ -115,7 +131,17 @@ export async function resolveEndpoint(opts: LaunchOptions = {}): Promise<Endpoin
     clearSession(); // its browser is gone (or is someone else's now); the one launched below replaces it
   }
 
-  return launch(deps, opts.binary, profile, headless, opts.kind);
+  return launch(deps, opts.binary, profile, headless, opts.kind, opts.quiet === true);
+}
+
+/** What keeps a page out of sight rendering as a shown one would: not an automation flag, nothing a page can see. */
+export const KEEP_RENDERING = ["--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding", "--disable-background-timer-throttling"];
+
+/** The size of the window reads work in: BROWSER_WINDOW (`<width>x<height>`), 800x600 by default. */
+export function readWindowSize(deps: Pick<BrowserDeps, "env">): { width: number; height: number } {
+  const m = /^\s*(\d{3,4})\s*[x,]\s*(\d{3,4})\s*$/i.exec(deps.env("BROWSER_WINDOW") ?? "");
+  const clamp = (n: number) => Math.min(4000, Math.max(200, n));
+  return m ? { width: clamp(Number(m[1])), height: clamp(Number(m[2])) } : { width: 800, height: 600 };
 }
 
 /** The kind to launch: the one asked for, else BROWSER_KIND, else the profile's own; undefined when none is named. */
@@ -126,7 +152,14 @@ function wantedKind(deps: BrowserDeps, kind: BrowserKind | undefined, profile: s
   return asked && isBrowserKind(asked) ? asked : readProfileKind(profile);
 }
 
-async function launch(deps: BrowserDeps, binary: string | undefined, profile: string, headless: boolean, kind?: BrowserKind): Promise<Endpoint> {
+async function launch(
+  deps: BrowserDeps,
+  binary: string | undefined,
+  profile: string,
+  headless: boolean,
+  kind: BrowserKind | undefined,
+  quiet: boolean,
+): Promise<Endpoint> {
   const wanted = binary ? undefined : wantedKind(deps, kind, profile);
   const found: BrowserBinary | null = binary ? { kind: kindOf(binary), path: binary } : deps.detectBrowser(wanted);
   // A kind named (or the profile's own) is that kind or nothing: another one would be locked to the profile.
@@ -172,8 +205,12 @@ async function launch(deps: BrowserDeps, binary: string | undefined, profile: st
     "--no-default-browser-check",
     ...(dropped ? [] : extensionArgs(extensions)),
   ];
-  if (headless) args.push("--headless=new");
-  args.push("about:blank");
+  if (headless) args.push("--headless=new", "about:blank");
+  else if (quiet && deps.platform === "darwin") args.push(...KEEP_RENDERING, "--no-startup-window");
+  else if (quiet) {
+    const { width, height } = readWindowSize(deps);
+    args.push(...KEEP_RENDERING, `--window-size=${width},${height}`, "about:blank");
+  } else args.push(...KEEP_RENDERING, "about:blank");
   // Detached and unreferenced: the browser outlives this CLI call, and the next
   // call reconnects to it.
   const child = deps.spawn(bin, args, { detached: true, stdio: "ignore" });

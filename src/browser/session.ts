@@ -20,7 +20,7 @@ import { UsageError } from "../cli-kit.js";
 import { CdpError, type CdpClient, type CdpHandler, type CdpSession } from "./cdp.js";
 import { type BrowserDeps, browserDeps } from "./deps.js";
 import { loopbackSocketUrl, type TargetInfo } from "./discovery.js";
-import { type Endpoint, isSameBrowser, type LaunchOptions, readActivePort, resolveEndpoint } from "./launch.js";
+import { type Endpoint, isSameBrowser, type LaunchOptions, readActivePort, readWindowSize, resolveEndpoint } from "./launch.js";
 import { profileDir } from "./profile.js";
 import { clearNetwork, clearRefs, clearSession, readSession, withBrowserLock, writeSession } from "./state.js";
 
@@ -38,6 +38,8 @@ const STATUS_TIMEOUT_MS = 2000;
  */
 const ATTACH_TIMEOUT_MS = 5000;
 const TAB_ID = /^t([1-9]\d*)$/;
+/** The window a page handed to a person is shown in, at least, within the screen. */
+const HUMAN_WINDOW = { width: 1100, height: 860 };
 
 export interface OpenOptions extends LaunchOptions {
   /** Work in a fresh tab instead of the one used last time. */
@@ -200,9 +202,78 @@ export function assertOpenableUrl(url: string): void {
   if (!ok) throw new UsageError(`only http(s) URLs (and about:blank) can be opened — use \`${brand().cli} extract <path>\` for local files`);
 }
 
-async function createTarget(cdp: CdpClient): Promise<string> {
-  const { targetId } = await cdp.send<{ targetId: string }>("Target.createTarget", { url: "about:blank" });
+/**
+ * Open a blank tab. In the foreground by default, which on macOS also
+ * activates the browser app; `background` opens it behind the window's current
+ * tab without taking the focus, and `window` in a window of its own, of that
+ * size, without taking it either.
+ */
+async function createTarget(cdp: CdpClient, opts: { background?: boolean; window?: { width: number; height: number } } = {}): Promise<string> {
+  const params = { url: "about:blank", ...(opts.background ? { background: true } : {}), ...(opts.window ? { newWindow: true, ...opts.window } : {}) };
+  const { targetId } = await cdp.send<{ targetId: string }>("Target.createTarget", params);
   return targetId;
+}
+
+interface ScreenArea {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+const SCREEN_AREA = "({ left: screen.availLeft, top: screen.availTop, width: screen.availWidth, height: screen.availHeight })";
+
+function screenArea(v: unknown): ScreenArea | undefined {
+  const a = v as Partial<ScreenArea> | undefined;
+  const ok = (n: unknown) => typeof n === "number" && Number.isFinite(n);
+  return a && ok(a.left) && ok(a.top) && ok(a.width) && ok(a.height) && (a.width as number) > 0 && (a.height as number) > 0 ? (a as ScreenArea) : undefined;
+}
+
+/** The window a tab is in, and its bounds; undefined when the browser does not say (headless, an old browser). */
+async function windowOf(cdp: CdpClient, targetId: string): Promise<{ windowId: number; bounds: WindowBounds } | undefined> {
+  const got = await cdp.send<{ windowId?: number; bounds?: WindowBounds }>("Browser.getWindowForTarget", { targetId }).catch(() => undefined);
+  return typeof got?.windowId === "number" && got.bounds ? { windowId: got.windowId, bounds: got.bounds } : undefined;
+}
+
+interface WindowBounds {
+  left?: number;
+  top?: number;
+  width?: number;
+  height?: number;
+  windowState?: string;
+}
+
+async function setBounds(cdp: CdpClient, windowId: number, bounds: WindowBounds): Promise<void> {
+  // Bounds only apply to a normal window: a maximized or minimized one is restored first.
+  await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } });
+  await cdp.send("Browser.setWindowBounds", { windowId, bounds });
+}
+
+/**
+ * Move the window `targetId` is in to the bottom-right corner of its screen, at
+ * the reads' window size. Best effort: a browser that cannot say where its
+ * screen is keeps the window where it opened.
+ */
+async function tuckAway(cdp: CdpClient, targetId: string, size: { width: number; height: number }): Promise<void> {
+  try {
+    const win = await windowOf(cdp, targetId);
+    if (!win) return;
+    const { sessionId } = await cdp.send<{ sessionId: string }>("Target.attachToTarget", { targetId, flatten: true });
+    let area: ScreenArea | undefined;
+    try {
+      const got = await cdp
+        .session(sessionId)
+        .send<{ result?: { value?: unknown } }>("Runtime.evaluate", { expression: SCREEN_AREA, returnByValue: true }, { timeoutMs: STATUS_TIMEOUT_MS });
+      area = screenArea(got.result?.value);
+    } finally {
+      await cdp.send("Target.detachFromTarget", { sessionId }).catch(() => {});
+    }
+    if (!area) return;
+    const width = Math.min(size.width, area.width);
+    const height = Math.min(size.height, area.height);
+    await setBounds(cdp, win.windowId, { left: area.left + area.width - width, top: area.top + area.height - height, width, height });
+  } catch {
+    /* left where it opened */
+  }
 }
 
 /** Attach in flat mode and enable what every later command relies on. Network stays off: the recorder turns it on. */
@@ -318,6 +389,48 @@ export class BrowserSession {
   }
   get headless(): boolean {
     return this.endpoint.headless;
+  }
+
+  /**
+   * Bring this session's tab to the front for a person: its window at a size
+   * one can work in (the reads keep it small, in a corner), the tab shown, the
+   * browser activated. Resolves with what puts the window back as it was. Best
+   * effort, all of it: a window that cannot be resized is still brought up.
+   */
+  async showToHuman(): Promise<() => Promise<void>> {
+    let restore = async (): Promise<void> => {};
+    const win = await windowOf(this.cdp, this.targetId);
+    if (win) {
+      try {
+        const got = await this.page.send<{ result?: { value?: unknown } }>(
+          "Runtime.evaluate",
+          { expression: SCREEN_AREA, returnByValue: true },
+          { timeoutMs: STATUS_TIMEOUT_MS },
+        );
+        const area = screenArea(got.result?.value);
+        const { width = 0, height = 0 } = win.bounds;
+        if (area && (width < HUMAN_WINDOW.width || height < HUMAN_WINDOW.height)) {
+          const w = Math.min(Math.max(width, HUMAN_WINDOW.width), area.width);
+          const h = Math.min(Math.max(height, HUMAN_WINDOW.height), area.height);
+          await setBounds(this.cdp, win.windowId, {
+            left: area.left + Math.round((area.width - w) / 2),
+            top: area.top + Math.round((area.height - h) / 2),
+            width: w,
+            height: h,
+          });
+          const { windowState, ...was } = win.bounds;
+          restore = async () => {
+            await setBounds(this.cdp, win.windowId, was).catch(() => {});
+            if (windowState && windowState !== "normal")
+              await this.cdp.send("Browser.setWindowBounds", { windowId: win.windowId, bounds: { windowState } }).catch(() => {});
+          };
+        }
+      } catch {
+        /* shown at the size it has */
+      }
+    }
+    await this.deps.discovery.activateTarget(this.port, this.targetId, this.host).catch(() => {});
+    return restore;
   }
   /** What the launch had to say (extensions the browser will not load), once: the next call gets nothing. */
   takeNotes(): string[] {
@@ -697,7 +810,8 @@ export class BrowserSession {
  */
 export async function openBrowserSession(opts: OpenOptions = {}): Promise<BrowserSession> {
   const deps = browserDeps(opts.deps);
-  const endpoint = await resolveEndpoint({ ...opts, deps });
+  // A scratch tab is a read's: a browser it has to start is started out of the way.
+  const endpoint = await resolveEndpoint({ ...opts, deps, quiet: opts.quiet ?? opts.scratch === true });
   // Read after resolving: a dead session has just been cleared, and a saved
   // session only says something about the browser on the same port.
   const saved = readSession();
@@ -708,7 +822,18 @@ export async function openBrowserSession(opts: OpenOptions = {}): Promise<Browse
   try {
     const pages = await deps.discovery.listPages(endpoint.port, endpoint.host);
     let targetId: string;
-    if (opts.newTab || opts.scratch) targetId = created = await createTarget(cdp);
+    if (opts.scratch && !endpoint.headless) {
+      // A read works out of the way of whoever is at the machine: in a
+      // background tab (a foreground one activates the browser on macOS), of a
+      // window in a corner. A browser launched for reads on macOS has no window
+      // yet: it gets one here, in the background too.
+      const size = readWindowSize(deps);
+      let holder = pages[0]?.id;
+      const fresh = holder === undefined && endpoint.launchedByUs;
+      if (fresh) holder = await createTarget(cdp, { background: true, window: size });
+      if (holder !== undefined && (fresh || endpoint.spawned)) await tuckAway(cdp, holder, size);
+      targetId = created = await createTarget(cdp, { background: true });
+    } else if (opts.newTab || opts.scratch) targetId = created = await createTarget(cdp);
     else if (same && pages.some((p) => p.id === same.targetId)) targetId = same.targetId;
     else targetId = pages[0]?.id ?? (await createTarget(cdp));
     const sessionId = await attachPage(cdp, targetId);

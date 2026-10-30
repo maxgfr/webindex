@@ -50,6 +50,8 @@ const IDLE_CAP_MS = 3000;
 const WEB_PAGE = /^(?:text\/html|application\/xhtml\+xml)$/i;
 /** How long a human has to get past a wall, by default: as long as `wait --clear` gives them. */
 const HUMAN_TIMEOUT_MS = 300_000;
+/** The default wait for a human: HUMAN_TIMEOUT_MS, 10 s to an hour, 5 minutes unset. Read at each read: the env may change between them. */
+const humanTimeoutMs = (): number => envInt("HUMAN_TIMEOUT_MS", HUMAN_TIMEOUT_MS, 10_000, 3_600_000);
 /** How often a sign-in or consent wall is looked at again while the human works. */
 const WALL_POLL_MS = 1000;
 /** How long the page a cleared wall leads to may take to load before it is read as it is. */
@@ -301,7 +303,7 @@ async function render(url: string, opts: ReadPageOptions, deps: BrowserDeps, tim
         note: [cleared.note, `Read after a human got past ${wall}.`].filter(Boolean).join(" "),
         handoff: "cleared",
       };
-    const secs = Math.round((human.timeoutMs ?? HUMAN_TIMEOUT_MS) / 1000);
+    const secs = Math.round((human.timeoutMs ?? humanTimeoutMs()) / 1000);
     return { ...asIs, note: [asIs.note, `Nobody got past it within ${secs} s.`].filter(Boolean).join(" "), handoff: "timeout" };
   } finally {
     page.off("Network.responseReceived", onResponse);
@@ -329,11 +331,12 @@ async function handOff(
   signal: AbortSignal | undefined,
 ): Promise<ExtractResult | undefined> {
   const tell = human.tell ?? ((m: string) => void process.stderr.write(`${m}\n`));
-  const timeoutMs = human.timeoutMs ?? HUMAN_TIMEOUT_MS;
+  const timeoutMs = human.timeoutMs ?? humanTimeoutMs();
   const start = deps.now();
   const left = () => timeoutMs - (deps.now() - start);
   const { cli, name } = brand();
-  await deps.discovery.activateTarget(session.port, session.targetId, session.host).catch(() => {});
+  // Only now does the browser come forward: the reads keep it in the background, small, in a corner.
+  const restore = await session.showToHuman();
   tell(
     `${cli}: ${url} is behind ${wall}. It is open in the ${name} browser window (its own profile, not your browser): ` +
       `get past it there and the read goes on by itself — waiting up to ${Math.round(timeoutMs / 1000)} s.`,
@@ -357,6 +360,8 @@ async function handOff(
     }
   } catch (e) {
     if (!(e instanceof WaitTimeoutError)) throw e;
+  } finally {
+    await restore();
   }
   tell(`${cli}: ${url} is still behind ${wall} after ${Math.round(timeoutMs / 1000)} s — read without it.`);
   return undefined;
@@ -379,7 +384,7 @@ async function read(url: string, opts: ReadPageOptions): Promise<ExtractResult> 
   const deps = browserDeps(opts.deps);
   const timeoutMs = opts.timeoutMs ?? envInt("BROWSER_TIMEOUT_MS", 30_000, 5000, 300_000);
   // A handoff waits for the human on top of the render: the load before it, the read after it.
-  const humanMs = opts.human ? ((opts.human === true ? undefined : opts.human.timeoutMs) ?? HUMAN_TIMEOUT_MS) : 0;
+  const humanMs = opts.human ? ((opts.human === true ? undefined : opts.human.timeoutMs) ?? humanTimeoutMs()) : 0;
   const release = await acquire(envInt("BROWSER_CONCURRENCY", 1, 1, 4), signal, cancelled);
   if (signal?.aborted) {
     release();

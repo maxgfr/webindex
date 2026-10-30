@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { envName } from "../src/brand.js";
 import { UsageError } from "../src/cli-kit.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
-import { resolveEndpoint } from "../src/browser/launch.js";
+import { KEEP_RENDERING, readWindowSize, resolveEndpoint } from "../src/browser/launch.js";
 import * as discovery from "../src/browser/discovery.js";
 import { profileDir, profileKindFile, readProfileKind, writeProfileKind } from "../src/browser/profile.js";
 import { readSession, type Session, writeSession } from "../src/browser/state.js";
@@ -162,7 +162,14 @@ describe("spawning a separate browser", () => {
     await resolveEndpoint({ profile: "work", deps: launchDeps(spawn) });
     const dir = profileDir("work");
     expect(calls[0]?.cmd).toBe("/fake/chrome");
-    expect(calls[0]?.args).toEqual(["--remote-debugging-port=0", `--user-data-dir=${dir}`, "--no-first-run", "--no-default-browser-check", "about:blank"]);
+    expect(calls[0]?.args).toEqual([
+      "--remote-debugging-port=0",
+      `--user-data-dir=${dir}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      ...KEEP_RENDERING,
+      "about:blank",
+    ]);
     expect(calls[0]?.args.join(" ")).not.toMatch(/automation|disable-blink-features|headless|remote-allow-origins/);
     expect(calls[0]?.opts).toMatchObject({ detached: true, stdio: "ignore" });
     expect(children[0]?.unrefed).toBe(true);
@@ -184,6 +191,39 @@ describe("spawning a separate browser", () => {
       "about:blank",
     ]);
     expect(ep.headless).toBe(true);
+  });
+
+  it("keeps a page out of sight rendering, with flags no page can see", () => {
+    expect(KEEP_RENDERING).toEqual(["--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding", "--disable-background-timer-throttling"]);
+    expect(KEEP_RENDERING.join(" ")).not.toMatch(/automation|disable-blink-features|headless|remote-allow-origins/);
+  });
+
+  it("launches for reads with no window on macOS, where opening one would take the focus", async () => {
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    await resolveEndpoint({ quiet: true, deps: launchDeps(spawn, { platform: "darwin" }) });
+    expect(calls[0]?.args.slice(4)).toEqual([...KEEP_RENDERING, "--no-startup-window"]);
+    expect(calls[0]?.args).not.toContain("about:blank");
+  });
+
+  it("launches for reads elsewhere at the reads' window size, BROWSER_WINDOW when it is set", async () => {
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    await resolveEndpoint({ quiet: true, deps: launchDeps(spawn, { platform: "linux", env: (k) => (k === "BROWSER_WINDOW" ? "1024x700" : undefined) }) });
+    expect(calls[0]?.args.slice(4)).toEqual([...KEEP_RENDERING, "--window-size=1024,700", "about:blank"]);
+  });
+
+  it("launches headless with no window flag, quiet or not", async () => {
+    const { spawn, calls } = fakeSpawn({ port: fake.port });
+    await resolveEndpoint({ headless: true, quiet: true, deps: launchDeps(spawn, { platform: "darwin" }) });
+    expect(calls[0]?.args.slice(4)).toEqual(["--headless=new", "about:blank"]);
+  });
+
+  it("reads the window size from BROWSER_WINDOW, 800x600 when unset or unreadable", () => {
+    const size = (v?: string) => readWindowSize({ env: (k) => (k === "BROWSER_WINDOW" ? v : undefined) });
+    expect(size()).toEqual({ width: 800, height: 600 });
+    expect(size("1280x900")).toEqual({ width: 1280, height: 900 });
+    expect(size(" 640 , 480 ")).toEqual({ width: 640, height: 480 });
+    expect(size("9999x100")).toEqual({ width: 4000, height: 200 });
+    expect(size("big")).toEqual({ width: 800, height: 600 });
   });
 
   it("prefers an explicit binary over detection", async () => {
@@ -300,6 +340,7 @@ describe("unpacked extensions and the browser kind", () => {
       "--no-default-browser-check",
       `--load-extension=${a},${b}`,
       `--disable-extensions-except=${a},${b}`,
+      ...KEEP_RENDERING,
       "about:blank",
     ]);
     // Chromium loads them: nothing to say.
