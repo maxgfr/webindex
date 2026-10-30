@@ -259,6 +259,61 @@ describe("readRenderedPage", () => {
     expect(fake.calls.map((c) => c.method)).toContain("Browser.close");
   });
 
+  describe("out of the way of whoever is at the machine", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+    const AREA = { left: 0, top: 25, width: 1800, height: 1000 };
+    /** Answer the screen-area probe and the window lookup as a desktop browser would. */
+    const desktop = (bounds = { left: 22, top: 61, width: 800, height: 600, windowState: "normal" }) => {
+      const page = fake.handlerOf("Runtime.evaluate") as FakeHandler;
+      fake.handle("Runtime.evaluate", (p: { expression: string }, s) =>
+        p.expression.includes("screen.availLeft") ? { result: { type: "object", value: AREA } } : page(p, s),
+      );
+      fake.handle("Browser.getWindowForTarget", () => ({ windowId: 7, bounds }));
+    };
+    const targets = () => fake.calls.filter((c) => c.method === "Target.createTarget").map((c) => c.params);
+    const bounds = () => fake.calls.filter((c) => c.method === "Browser.setWindowBounds").map((c) => (c.params as { bounds: unknown }).bounds);
+
+    it("reads in a background tab, so the browser never takes the focus", async () => {
+      fake.addTarget("https://agent.test/");
+      writeSession(agentSession());
+      pages["https://spa.test/"] = { html: ARTICLE };
+      await readRenderedPage("https://spa.test/", { cdp: fake.port, waitUntil: "load", deps: deps() });
+      expect(targets()).toEqual([{ url: "about:blank", background: true }]);
+      // A browser it did not launch: its windows stay where they are.
+      expect(bounds()).toEqual([]);
+    });
+
+    it("gives a browser it launched with no window one of its own, in the background, tucked in the bottom-right corner", async () => {
+      desktop();
+      pages["https://spa.test/"] = { html: ARTICLE };
+      const spawned = fakeSpawn({ port: fake.port });
+      const r = await readRenderedPage("https://spa.test/", { waitUntil: "load", deps: deps({ spawn: spawned.spawn, platform: "darwin" }) });
+      expect(r.text).toContain("Inserted by script");
+      expect(spawned.calls[0]?.args).toContain("--no-startup-window");
+      expect(targets()).toEqual([
+        { url: "about:blank", background: true, newWindow: true, width: 800, height: 600 },
+        { url: "about:blank", background: true },
+      ]);
+      expect(bounds()).toEqual([{ windowState: "normal" }, { left: 1000, top: 425, width: 800, height: 600 }]);
+      // The read's tab is closed; the window it worked in stays for the next read.
+      expect(ids()).toEqual(["T1"]);
+    });
+
+    it("tucks away the window a browser it launched opened, at BROWSER_WINDOW's size", async () => {
+      desktop();
+      vi.stubEnv(envName("BROWSER_WINDOW"), "600x400");
+      fake.addTarget();
+      pages["https://spa.test/"] = { html: ARTICLE };
+      const spawned = fakeSpawn({ port: fake.port });
+      await readRenderedPage("https://spa.test/", { waitUntil: "load", deps: deps({ spawn: spawned.spawn, platform: "linux" }) });
+      expect(spawned.calls[0]?.args).toContain("--window-size=600,400");
+      expect(targets()).toEqual([{ url: "about:blank", background: true }]);
+      expect(bounds()).toEqual([{ windowState: "normal" }, { left: 1200, top: 625, width: 600, height: 400 }]);
+    });
+  });
+
   it("never reads in a browser it was only attached to: it launches the dedicated one, and the attached session stays", async () => {
     const attached = await FakeCdp.start();
     try {
@@ -615,6 +670,49 @@ describe("readRenderedPage handing a walled page to the human", () => {
     expect(r.text).toContain("Inserted by script");
     expect(r.note).toBe("Read after a human got past a login wall.");
     expect(told[0]).toContain("is behind a login wall");
+  });
+
+  it("brings the small window forward at a size a person can work in, and puts it back after", async () => {
+    pages["https://walled.test/"] = CHALLENGE;
+    const page = fake.handlerOf("Runtime.evaluate") as FakeHandler;
+    fake.handle("Runtime.evaluate", (p: { expression: string }, s) =>
+      p.expression.includes("screen.availLeft") ? { result: { type: "object", value: { left: 0, top: 25, width: 1800, height: 1000 } } } : page(p, s),
+    );
+    fake.handle("Browser.getWindowForTarget", () => ({ windowId: 7, bounds: { left: 1000, top: 425, width: 800, height: 600, windowState: "normal" } }));
+    const clock = fakeClock((t) => {
+      if (t >= 6000) pages["https://walled.test/"] = { html: ARTICLE, status: 403 };
+    });
+    const r = await readRenderedPage("https://walled.test/", {
+      cdp: fake.port,
+      waitUntil: "load",
+      human: { timeoutMs: 60_000, tell },
+      deps: deps({ platform: "darwin", now: clock.now, sleep: clock.sleep }),
+    });
+    expect(r).toMatchObject({ handoff: "cleared" });
+    const bounds = fake.calls.filter((c) => c.method === "Browser.setWindowBounds").map((c) => (c.params as { bounds: unknown }).bounds);
+    expect(bounds).toEqual([
+      { windowState: "normal" },
+      { left: 350, top: 95, width: 1100, height: 860 },
+      { windowState: "normal" },
+      { left: 1000, top: 425, width: 800, height: 600 },
+    ]);
+    expect(activations()).toHaveLength(1);
+  });
+
+  it("waits HUMAN_TIMEOUT_MS by default, when the read names no timeout", async () => {
+    pages["https://walled.test/"] = CHALLENGE;
+    vi.stubEnv(envName("HUMAN_TIMEOUT_MS"), "20000");
+    const clock = fakeClock();
+    const r = await readRenderedPage("https://walled.test/", {
+      cdp: fake.port,
+      waitUntil: "load",
+      human: { tell },
+      deps: deps({ platform: "darwin", now: clock.now, sleep: clock.sleep }),
+    });
+    expect(r).toMatchObject({ handoff: "timeout" });
+    expect(told[0]).toContain("waiting up to 20 s");
+    expect(r.note).toContain("Nobody got past it within 20 s.");
+    expect(clock.at() - 1000).toBeGreaterThanOrEqual(20_000);
   });
 
   it("asks nobody for a page with no wall", async () => {

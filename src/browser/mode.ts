@@ -48,7 +48,7 @@ export function worthRendering(res: { status: number; text: string }): string | 
  * waits until the wall is gone, then reads the page from that same tab.
  */
 export interface HumanHandoff {
-  /** How long the human has to get past the wall; 5 minutes by default. */
+  /** How long the human has to get past the wall; HUMAN_TIMEOUT_MS (ms), else 5 minutes, by default. */
   timeoutMs?: number;
   /** Where the request to the human goes: a line on stderr by default. */
   tell?: (message: string) => void;

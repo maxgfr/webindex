@@ -267,9 +267,14 @@ office documents and videos never go to the browser, and neither do MCP
 servers run with `--public-only` or `--allow-remote`. A browser you attached to
 is never used for these reads: they go to the dedicated browser unless `cdp`
 names one. When no browser is running, the read launches the **same headed
-browser** `browser open` would, so a window appears. That shared profile is
-where the human can solve a challenge. Each read uses a scratch tab that is
-closed afterwards, so your agent tab is left alone. An error page (HTTP 400 or
+browser** `browser open` would, on the shared profile where the human can
+solve a challenge, but **out of the way** of whoever is at the machine: a small
+window (`WEBINDEX_BROWSER_WINDOW`, 800x600) in the bottom-right corner of the
+screen, that never takes the focus. On macOS, where a window opening activates
+the browser and takes the keyboard, it starts with no window and the reads open
+theirs in the background. Each read uses a background scratch tab that is
+closed afterwards, so your agent tab is left alone; the page still renders as a
+shown one would (the browser is told not to throttle what is out of sight). An error page (HTTP 400 or
 higher) never counts as a browser read. Downloads are denied while a read runs,
 and `WEBINDEX_BROWSER_CONCURRENCY` limits how many pages render at once.
 
@@ -279,12 +284,14 @@ and `WEBINDEX_BROWSER_CONCURRENCY` limits how many pages render at once.
 --clear` and the read in one call, for a page only a person can get you
 through. When the browser meets a blocking challenge (a captcha, a bot check),
 or a consent or sign-in wall, the read's tab is brought to the front of the
-dedicated browser's window (its own profile, never the user's browser), one
+dedicated browser's window (its own profile, never the user's browser) —
+only then does the browser come forward, its window enlarged to a size one can
+work in and put back afterwards — one
 line on stderr names the page and says what to do, and the fetch waits: for the
 challenge as `wait --clear` does, for a sign-in or consent wall until the page
 reads as a page. Then it reads the page from that same tab, and its note says
-`Read after a human got past …`. `--human-timeout` (seconds, default 300) bounds
-the wait; on a timeout the fetch ends as it would have without `--human`, the
+`Read after a human got past …`. `--human-timeout` (seconds, default 300, or
+`WEBINDEX_HUMAN_TIMEOUT_MS`) bounds the wait; on a timeout the fetch ends as it would have without `--human`, the
 challenge note included, plus `Nobody got past it within N s.` With no window
 anyone can see (Linux with no `DISPLAY` or `WAYLAND_DISPLAY`, a headless
 browser, `CI` set) nobody is waited for at all. `--human` turns the browser on
@@ -372,6 +379,8 @@ that matters.
 | `WEBINDEX_BROWSER_FETCH` | `always`, `fallback` or `off` (default): whether `fetch` renders pages in the browser |
 | `WEBINDEX_BROWSER_CONCURRENCY` | pages the fetch rung renders at once (default 1, at most 4) |
 | `WEBINDEX_BROWSER_TIMEOUT_MS` | how long the fetch rung gives one page (default 30000) |
+| `WEBINDEX_BROWSER_WINDOW` | the size of the window the fetch rung reads in, `<width>x<height>` (default `800x600`) |
+| `WEBINDEX_HUMAN_TIMEOUT_MS` | how long a handoff waits for the human when no timeout is named (default 300000) |
 
 ## Over MCP
 
