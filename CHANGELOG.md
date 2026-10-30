@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+# [1.37.0](https://github.com/maxgfr/webindex/compare/v1.36.2...v1.37.0) (2026-10-30)
+
+
+### Features
+
+* **human:** ask the person before a handoff brings the browser forward ([#58](https://github.com/maxgfr/webindex/issues/58)) ([9ad848a](https://github.com/maxgfr/webindex/commit/9ad848acd3497880529e1dddaf1fd51e41d2e939))
+
 ## [1.36.2](https://github.com/maxgfr/webindex/compare/v1.36.1...v1.36.2) (2026-10-30)
 
 
