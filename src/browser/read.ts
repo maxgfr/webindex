@@ -12,8 +12,10 @@
 //
 // A full-page anti-bot challenge is not fought: the read comes back empty,
 // saying how a human can solve it in the visible browser. A read asked to hand
-// it over (`human`) goes one step further and asks the human itself: the tab is
-// brought to the front, a line on stderr names the page, and the read waits —
+// it over (`human`) goes one step further and asks the human itself: first a
+// native dialog (src/ask.ts, `<PREFIX>_HUMAN_ASK`) asks whether to bring it
+// forward now — once for this process's reads, never inside the page — and on
+// a yes the tab is brought to the front, a line on stderr names the page, and the read waits —
 // the challenge as `wait --clear` does, a consent or sign-in wall until the page
 // reads as a page — then reads it from that same tab. With no window anyone can
 // see (no display, a headless browser, a CI run) it waits for nobody and comes
@@ -31,7 +33,8 @@
 // calls closeBrowserReads(), which closes it only if a read of this very process
 // started it and it is still that browser.
 
-import { brand, envInt } from "../brand.js";
+import { type HumanAnswer, humanAskMode, humanAskTimeoutMs } from "../ask.js";
+import { brand, envInt, envName } from "../brand.js";
 import { type ExtractResult, extractFromHtml } from "../fetch.js";
 import type { CdpHandler } from "./cdp.js";
 import { type Challenge, detectChallenge } from "./challenge.js";
@@ -80,8 +83,9 @@ export interface ReadPageOptions extends LaunchOptions {
    * Hand a page that needs a human to the human (HumanHandoff): on a blocking
    * challenge, or a consent or sign-in wall, the read brings its tab up in the
    * visible browser, says on stderr which page needs them, and waits for the
-   * wall to go — on top of `timeoutMs` — before reading it. The result says how
-   * that went in `handoff`. Off by default: a read never waits on anyone unasked.
+   * wall to go — on top of `timeoutMs` — before reading it. The person is asked
+   * first (`ask`, `<PREFIX>_HUMAN_ASK`). The result says how that went in
+   * `handoff`. Off by default: a read never waits on anyone unasked.
    */
   human?: boolean | HumanHandoff;
 }
@@ -294,7 +298,22 @@ async function render(url: string, opts: ReadPageOptions, deps: BrowserDeps, tim
     const nobody = session.headless ? "the browser runs headless" : canShowWindow(deps.platform) ? undefined : "no window can be shown here";
     if (nobody) return { ...asIs, note: [asIs.note, `It needs a human, and ${nobody}.`].filter(Boolean).join(" "), handoff: "no-window" };
     const human = opts.human === true ? {} : opts.human;
+    // Asked before anything comes forward: once for this process's reads, never inside the page.
+    const asks = askFirst(human, deps);
+    const answer = asks === "never" ? "never" : asks === "ask" ? await answerFor(url, found, deps) : "unavailable";
+    if (answer === "never" || answer === "later" || answer === "no-answer") {
+      const why =
+        answer === "never"
+          ? `It needs a human, and handoffs are off (${envName("HUMAN_ASK")}=never).`
+          : answer === "later"
+            ? "It needs a human, who chose to get past it later."
+            : "It needs a human, and nobody answered the question whether to bring it forward.";
+      return { ...asIs, note: [asIs.note, why].filter(Boolean).join(" "), handoff: "declined" };
+    }
     const cleared = await handOff(session, url, wall, !!challenge?.blocking, human, deps, take, opts.signal);
+    // Said yes, and nobody got past it: nobody is there now, and the next page is not brought forward either.
+    if (answer === "solve" && !cleared) answered = { answer: "no-answer", at: deps.now() };
+    if (answer === "solve" && cleared) await deps.notifyHuman(1, 1).catch(() => false);
     // A challenge that clears in place leaves its own 403 as the last document heard: the page is read, so it is a 200.
     if (cleared)
       return {
@@ -311,6 +330,46 @@ async function render(url: string, opts: ReadPageOptions, deps: BrowserDeps, tim
     await deps.discovery.closeTarget(session.port, session.targetId, session.host).catch(() => {});
     await session.detach();
   }
+}
+
+// --- asking the person first ---------------------------------------------------
+
+/** How long one answer holds for the reads of this process: one question per batch, not one per page. */
+const ANSWER_HOLDS_MS = 600_000;
+/** How long past the question's own give-up time a read waits for its answer. */
+const ASK_GRACE_MS = 15_000;
+let answered: { answer: HumanAnswer; at: number } | undefined;
+let asking: Promise<HumanAnswer> | undefined;
+
+/** Whether this handoff asks first (`ask`), hands the page over unasked (`hand`), or hands nothing over (`never`). */
+function askFirst(human: HumanHandoff, deps: BrowserDeps): "ask" | "hand" | "never" {
+  if (human.ask === false) return "hand";
+  if (human.ask === true) return "ask";
+  const mode = humanAskMode(deps.env("HUMAN_ASK") ?? "ask");
+  return mode === "always" ? "hand" : mode;
+}
+
+/**
+ * The person's answer for this process's reads: asked once (reads in flight
+ * together share the one question), then held for ANSWER_HOLDS_MS.
+ */
+function answerFor(url: string, check: string, deps: BrowserDeps): Promise<HumanAnswer> {
+  if (answered && deps.now() - answered.at < ANSWER_HOLDS_MS) return Promise.resolve(answered.answer);
+  asking ??= deps
+    .askHuman([{ url, check }])
+    .catch((): HumanAnswer => "unavailable")
+    .then((answer) => {
+      answered = { answer, at: deps.now() };
+      asking = undefined;
+      return answer;
+    });
+  return asking;
+}
+
+/** Test seam: forget the person's last answer. */
+export function forgetHumanAnswer(): void {
+  answered = undefined;
+  asking = undefined;
 }
 
 /**
@@ -384,7 +443,9 @@ async function read(url: string, opts: ReadPageOptions): Promise<ExtractResult> 
   const deps = browserDeps(opts.deps);
   const timeoutMs = opts.timeoutMs ?? envInt("BROWSER_TIMEOUT_MS", 30_000, 5000, 300_000);
   // A handoff waits for the human on top of the render: the load before it, the read after it.
-  const humanMs = opts.human ? ((opts.human === true ? undefined : opts.human.timeoutMs) ?? humanTimeoutMs()) : 0;
+  const human = opts.human === true ? {} : opts.human || undefined;
+  // …and, when it asks first, on top of the question.
+  const humanMs = human ? (human.timeoutMs ?? humanTimeoutMs()) + (askFirst(human, deps) === "ask" ? humanAskTimeoutMs() + ASK_GRACE_MS : 0) : 0;
   const release = await acquire(envInt("BROWSER_CONCURRENCY", 1, 1, 4), signal, cancelled);
   if (signal?.aborted) {
     release();

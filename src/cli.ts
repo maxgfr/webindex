@@ -215,8 +215,10 @@ COMMANDS
              does it only when the plain read is refused, walled or near empty.
              --human hands a page that needs a person to the person: when the
              browser meets a blocking challenge (a captcha, a bot check) or a
-             consent or sign-in wall, its tab comes up in that browser's
-             window, stderr says which page needs them, and the fetch waits —
+             consent or sign-in wall, a native dialog first asks them whether
+             to solve it now (WEBINDEX_HUMAN_ASK: ask, always, never). On yes
+             its tab comes up in that browser's window, stderr says which page
+             needs them, and the fetch waits —
              up to --human-timeout seconds (default 300) — until they are past
              it, then reads the page from that tab. It turns the browser on in
              fallback when nothing else did. Nothing is ever solved for them,
