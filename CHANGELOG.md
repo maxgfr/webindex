@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.36.2](https://github.com/maxgfr/webindex/compare/v1.36.1...v1.36.2) (2026-10-30)
+
+
+### Bug Fixes
+
+* **browser:** read out of the way, and bring a page forward only for the human ([#56](https://github.com/maxgfr/webindex/issues/56)) ([a9af004](https://github.com/maxgfr/webindex/commit/a9af004b62a7fd49c37d4c4e25090685ccf4b969))
+
 ## [1.36.1](https://github.com/maxgfr/webindex/compare/v1.36.0...v1.36.1) (2026-10-29)
 
 
