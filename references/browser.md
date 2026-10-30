@@ -283,7 +283,20 @@ and `WEBINDEX_BROWSER_CONCURRENCY` limits how many pages render at once.
 `webindex fetch <url> --human [--human-timeout <s>]` is `browser open`, `wait
 --clear` and the read in one call, for a page only a person can get you
 through. When the browser meets a blocking challenge (a captcha, a bot check),
-or a consent or sign-in wall, the read's tab is brought to the front of the
+or a consent or sign-in wall, the person is asked first, before anything comes
+forward: a native dialog titled with the tool's name says which site is
+stopped and by what (a CAPTCHA, a Cloudflare check…) and how many pages wait,
+with **Later** and **Solve it** (the default) and a sound — `osascript` on
+macOS, `zenity`, `kdialog` or a `notify-send` notification with actions on
+Linux, a PowerShell popup on Windows — in French or English after the locale
+(`LC_ALL`, `LC_MESSAGES`, `LANG`, else macOS's `AppleLocale`). It gives up after
+`WEBINDEX_HUMAN_ASK_TIMEOUT_MS` (120000), so a run nobody watches never hangs.
+The answer holds for every read of the process for 10 minutes: one question per
+batch, never one per page, and nothing is ever put into the challenged page.
+On **Later**, or no answer, nothing comes forward: the read comes back as it
+would have without `--human`, `handoff: "declined"`. With no tool to ask with
+it hands the page over as below. `WEBINDEX_HUMAN_ASK=always` skips the
+question, `never` hands nothing over. On **Solve it** the read's tab is brought to the front of the
 dedicated browser's window (its own profile, never the user's browser) —
 only then does the browser come forward, its window enlarged to a size one can
 work in and put back afterwards — one
@@ -303,11 +316,14 @@ What you do around it: **tell the user** which page needs them and that the
 window is open, before or while the command waits — they are the one who solves
 it. Never try to solve, click through or script past a challenge yourself.
 
-A library consumer passes `human: true` (or `{ timeoutMs, tell }`) to
+A library consumer passes `human: true` (or `{ timeoutMs, tell, ask }`) to
 `fetchAndExtract` or `readRenderedPage`; `tell` replaces the stderr line. The
-result's `handoff` says how it went: `cleared`, `timeout`, or `no-window`
-(absent when the page needed no one). `canShowBrowserWindow()` says up front
-whether anyone could be asked.
+result's `handoff` says how it went: `cleared`, `timeout`, `no-window` or
+`declined` (absent when the page needed no one). `canShowBrowserWindow()` says up front
+whether anyone could be asked. A consumer that hands over a batch of its own
+asks once with `askHuman(pages)` (`solve`, `later`, `no-answer` or
+`unavailable`), passes `ask: false` on each read, and may end with
+`notifyHumanDone(cleared, total)`; `humanAskMode()` reads `<PREFIX>_HUMAN_ASK`.
 
 A library consumer should call `closeBrowserReads()` at the end of its run. It
 closes the browser only if a read in that same process launched it, after the
@@ -381,6 +397,8 @@ that matters.
 | `WEBINDEX_BROWSER_TIMEOUT_MS` | how long the fetch rung gives one page (default 30000) |
 | `WEBINDEX_BROWSER_WINDOW` | the size of the window the fetch rung reads in, `<width>x<height>` (default `800x600`) |
 | `WEBINDEX_HUMAN_TIMEOUT_MS` | how long a handoff waits for the human when no timeout is named (default 300000) |
+| `WEBINDEX_HUMAN_ASK` | `ask` (default): a native dialog asks the human before the browser comes forward; `always`: hand over without asking; `never`: hand nothing over |
+| `WEBINDEX_HUMAN_ASK_TIMEOUT_MS` | how long that dialog waits for an answer (default 120000) |
 
 ## Over MCP
 

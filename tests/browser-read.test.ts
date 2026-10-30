@@ -2,11 +2,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { HumanAnswer } from "../src/ask.js";
 import { envName } from "../src/brand.js";
 import type { BrowserDeps } from "../src/browser/deps.js";
 import { canShowWindow, humanWall } from "../src/browser/mode.js";
 import { READ_DOCUMENT } from "../src/browser/overlay.js";
-import { closeBrowserReads, readRenderedPage } from "../src/browser/read.js";
+import { closeBrowserReads, forgetHumanAnswer, readRenderedPage } from "../src/browser/read.js";
 import { profileDir } from "../src/browser/profile.js";
 import { closeBrowser } from "../src/browser/session.js";
 import { readSession, type Session, writeSession } from "../src/browser/state.js";
@@ -585,6 +586,117 @@ describe("readRenderedPage handing a walled page to the human", () => {
   const tell = (m: string) => void told.push(m);
   const activations = () => fake.requests.filter((q) => q.startsWith("GET /json/activate/"));
   const navigations = () => fake.calls.filter((c) => c.method === "Page.navigate").length;
+
+  // The person is asked first, with a native dialog (src/ask.ts), faked here as deps.askHuman.
+  describe("asking the person first", () => {
+    let asked: { url: string; check?: string }[][];
+    let notified: [number, number][];
+    beforeEach(() => {
+      asked = [];
+      notified = [];
+      forgetHumanAnswer();
+      vi.stubEnv(envName("HUMAN_ASK"), "ask");
+    });
+    afterEach(() => forgetHumanAnswer());
+    const asking = (answer: HumanAnswer, over: Partial<BrowserDeps> = {}) =>
+      deps({
+        platform: "darwin",
+        askHuman: async (p) => {
+          asked.push(p);
+          return answer;
+        },
+        notifyHuman: async (c, t) => {
+          notified.push([c, t]);
+          return true;
+        },
+        ...over,
+      });
+
+    it("brings nothing forward when the person says later: the read comes back declined", async () => {
+      pages["https://walled.test/"] = CHALLENGE;
+      const r = await readRenderedPage("https://walled.test/", {
+        cdp: fake.port,
+        waitUntil: "load",
+        human: { timeoutMs: 60_000, tell },
+        deps: asking("later"),
+      });
+      expect(asked).toEqual([[{ url: "https://walled.test/", check: "cloudflare challenge" }]]);
+      expect(r).toMatchObject({ text: "", status: 403, handoff: "declined" });
+      expect(r.note).toContain("It needs a human, who chose to get past it later.");
+      expect(activations()).toHaveLength(0);
+      expect(told).toEqual([]);
+      expect(notified).toEqual([]);
+    });
+
+    it("says nobody answered when the question gave up, and brings nothing forward", async () => {
+      pages["https://walled.test/"] = CHALLENGE;
+      const r = await readRenderedPage("https://walled.test/", { cdp: fake.port, waitUntil: "load", human: { tell }, deps: asking("no-answer") });
+      expect(r).toMatchObject({ handoff: "declined" });
+      expect(r.note).toContain("nobody answered");
+      expect(activations()).toHaveLength(0);
+    });
+
+    it("hands the page over on yes, and says so in a notification once it is through", async () => {
+      pages["https://walled.test/"] = CHALLENGE;
+      const clock = fakeClock((t) => {
+        if (t >= 6000) pages["https://walled.test/"] = { html: ARTICLE, status: 403 };
+      });
+      const r = await readRenderedPage("https://walled.test/", {
+        cdp: fake.port,
+        waitUntil: "load",
+        human: { timeoutMs: 60_000, tell },
+        deps: asking("solve", { now: clock.now, sleep: clock.sleep }),
+      });
+      expect(r).toMatchObject({ status: 200, handoff: "cleared" });
+      expect(asked).toHaveLength(1);
+      expect(activations()).toHaveLength(1);
+      expect(notified).toEqual([[1, 1]]);
+    });
+
+    it("asks once for the reads of the process, not once per page", async () => {
+      pages["https://walled.test/"] = CHALLENGE;
+      pages["https://walled2.test/"] = CHALLENGE;
+      const d = asking("later");
+      await readRenderedPage("https://walled.test/", { cdp: fake.port, waitUntil: "load", human: { tell }, deps: d });
+      const second = await readRenderedPage("https://walled2.test/", { cdp: fake.port, waitUntil: "load", human: { tell }, deps: d });
+      expect(asked).toHaveLength(1);
+      expect(second.handoff).toBe("declined");
+      expect(activations()).toHaveLength(0);
+    });
+
+    it("hands the page over as before when nobody can be asked (no tool to ask with)", async () => {
+      pages["https://walled.test/"] = CHALLENGE;
+      const clock = fakeClock();
+      const r = await readRenderedPage("https://walled.test/", {
+        cdp: fake.port,
+        waitUntil: "load",
+        human: { timeoutMs: 5000, tell },
+        deps: asking("unavailable", { now: clock.now, sleep: clock.sleep }),
+      });
+      expect(r.handoff).toBe("timeout");
+      expect(activations()).toHaveLength(1);
+      expect(notified).toEqual([]);
+    });
+
+    it("never asks with ask: false — the caller asked already — and hands nothing over under never", async () => {
+      pages["https://walled.test/"] = CHALLENGE;
+      const clock = fakeClock();
+      const unasked = await readRenderedPage("https://walled.test/", {
+        cdp: fake.port,
+        waitUntil: "load",
+        human: { timeoutMs: 5000, tell, ask: false },
+        deps: asking("later", { now: clock.now, sleep: clock.sleep }),
+      });
+      expect(unasked.handoff).toBe("timeout");
+      expect(asked).toEqual([]);
+      vi.stubEnv(envName("HUMAN_ASK"), "never");
+      const never = await readRenderedPage("https://walled.test/", { cdp: fake.port, waitUntil: "load", human: { tell }, deps: asking("solve") });
+      expect(never.handoff).toBe("declined");
+      expect(never.note).toContain(`handoffs are off (${envName("HUMAN_ASK")}=never)`);
+      expect(asked).toEqual([]);
+      expect(activations()).toHaveLength(1);
+    });
+  });
 
   it("brings a blocking challenge to the human, waits until it clears, then reads the page from the same tab", async () => {
     pages["https://walled.test/"] = CHALLENGE;

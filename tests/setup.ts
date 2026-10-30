@@ -48,6 +48,9 @@ beforeEach(() => {
   process.env[`${TEST_PREFIX}_RETRY_MS`] = "0";
   process.env[`${TEST_PREFIX}_POLITE_DELAY_MS`] = "0";
   process.env[`${TEST_PREFIX}_PAGE_DELAY_MS`] = "0";
+  // A handoff never asks the developer anything: a suite that tests the
+  // question sets `ask` and fakes the dialog (deps.askHuman, or askHuman's `run`).
+  process.env[`${TEST_PREFIX}_HUMAN_ASK`] = "always";
 
   // Own cache dir, so a run never reads or writes the real one and a second run
   // inside the 24h TTL is not served a page from disk instead of the mock.

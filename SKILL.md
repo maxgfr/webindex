@@ -172,11 +172,15 @@ it.
 
 **The human handoff.** For one page a person must let you through (a captcha,
 a bot check, a sign-in), `webindex fetch <url> --human [--human-timeout <s>]`
-brings it up in the dedicated browser's window, waits until they are past it
-(5 minutes by default) and reads it from that tab. Tell the user which page
-needs them and that the window is open, then let the command wait; never solve,
-click through or script past the challenge yourself. With no window to show (no
-display, a CI run) it waits for nobody and returns what a plain fetch would.
+first asks the user with a native dialog (Later / Solve it, gives up after
+`WEBINDEX_HUMAN_ASK_TIMEOUT_MS`, 2 minutes). On yes it brings the page up in the
+dedicated browser's window, waits until they are past it (5 minutes by default)
+and reads it from that tab; on Later or no answer nothing comes forward and the
+result's `handoff` is `declined`. Tell the user a dialog may ask them, then let
+the command wait; never solve, click through or script past the challenge
+yourself. `WEBINDEX_HUMAN_ASK=always` hands the page over without asking,
+`never` hands nothing over. With no window to show (no display, a CI run) it
+waits for nobody and returns what a plain fetch would.
 
 ## Three rules that constrain every change
 

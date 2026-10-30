@@ -52,15 +52,26 @@ export interface HumanHandoff {
   timeoutMs?: number;
   /** Where the request to the human goes: a line on stderr by default. */
   tell?: (message: string) => void;
+  /**
+   * Whether the person is asked first, with a native dialog (askHuman), before
+   * the browser comes forward. Unset, `<PREFIX>_HUMAN_ASK` decides: `ask` (the
+   * default) asks once for every read of this process for the next 10 minutes,
+   * `always` hands the page over without asking, `never` hands nothing over.
+   * `false` hands it over without asking, whatever the env says: for a caller
+   * that asked the person already, about its whole batch.
+   */
+  ask?: boolean;
 }
 
 /**
  * How a handoff went, on a read that met a wall a human could get past:
  * `cleared` the human got past it and the page was read, `timeout` the wall was
  * still up when the time ran out, `no-window` nobody could be shown the page
- * (no display, a headless browser, a CI run) so nobody was waited for.
+ * (no display, a headless browser, a CI run) so nobody was waited for,
+ * `declined` the person was asked and said later, or did not answer — or
+ * `<PREFIX>_HUMAN_ASK=never` — so nothing came forward.
  */
-export type HumanOutcome = "cleared" | "timeout" | "no-window";
+export type HumanOutcome = "cleared" | "timeout" | "no-window" | "declined";
 
 /**
  * Whether a window this process opens has someone to look at it: macOS and

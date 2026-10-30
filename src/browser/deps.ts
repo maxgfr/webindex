@@ -1,5 +1,6 @@
 import { type ChildProcess, type SpawnOptions, spawn as nodeSpawn } from "node:child_process";
 import { type FileHandle, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { askHuman, type HumanAnswer, type HumanAskPage, notifyHumanDone } from "../ask.js";
 import { env as brandEnv } from "../brand.js";
 import { CdpClient } from "./cdp.js";
 import { type BrowserBinary, type BrowserKind, detectBrowserBinary } from "./detect.js";
@@ -47,6 +48,10 @@ export interface BrowserDeps {
   /** Reads `WEBINDEX_<name>` (brand-aware), like the rest of the library. */
   env(name: string): string | undefined;
   platform: NodeJS.Platform;
+  /** Ask the person before a handoff brings the browser forward (askHuman). */
+  askHuman(pages: HumanAskPage[]): Promise<HumanAnswer>;
+  /** Tell the person, in a notification, that they got past `cleared` of `total` pages (notifyHumanDone). */
+  notifyHuman(cleared: number, total: number): Promise<boolean>;
 }
 
 export function defaultBrowserDeps(): BrowserDeps {
@@ -62,6 +67,8 @@ export function defaultBrowserDeps(): BrowserDeps {
     alive: pidAlive,
     env: (name) => brandEnv(name),
     platform: process.platform,
+    askHuman: (pages) => askHuman(pages),
+    notifyHuman: (cleared, total) => notifyHumanDone(cleared, total),
   };
 }
 

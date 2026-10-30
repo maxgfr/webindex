@@ -19,7 +19,7 @@ npx skills add maxgfr/webindex             # add -a <agent> to target one agent 
 
 ## Everything it does
 
-Three surfaces over one engine: **388 library exports**, **29 CLI commands**, **20 MCP
+Three surfaces over one engine: **397 library exports**, **29 CLI commands**, **20 MCP
 tools**. Nothing below needs an API key, and every optional helper degrades to a note
 rather than an error.
 
@@ -136,6 +136,8 @@ default, and one out of range is clamped to it.
 | `WEBINDEX_BROWSER_TIMEOUT_MS` | how long the fetch rung gives one page to render (default 30000) |
 | `WEBINDEX_BROWSER_WINDOW` | the size of the window the fetch rung reads in, `<width>x<height>` (default `800x600`); a browser a read launched keeps it in the bottom-right corner of the screen |
 | `WEBINDEX_HUMAN_TIMEOUT_MS` | how long a handoff waits for the human when the read names no timeout (`fetch --human` without `--human-timeout`; default 300000, 10000 to 3600000) |
+| `WEBINDEX_HUMAN_ASK` | what a handoff does about the human before the browser comes forward: `ask` (default) asks first with a native dialog (macOS `osascript`, Linux `zenity` / `kdialog` / `notify-send`, Windows a PowerShell popup), once for the reads of the next 10 minutes; `always` hands the page over without asking; `never` hands nothing over |
+| `WEBINDEX_HUMAN_ASK_TIMEOUT_MS` | how long that question waits for an answer before it gives up, and nothing comes forward (default 120000, 10000 to 3600000) |
 | `WEBINDEX_GIT_CLONE_TIMEOUT_MS`, `WEBINDEX_GIT_FETCH_TIMEOUT_MS`, `WEBINDEX_GIT_HISTORY_TIMEOUT_MS` | budgets for a clone (300000), a fetch (120000) and deepening history (300000) |
 | `WEBINDEX_SH_TIMEOUT_MS` | the default budget of a local command run through `sh` (60000) |
 | `WEBINDEX_OLLAMA`, `WEBINDEX_QDRANT` | embedding server and vector store base URLs, or `off` (defaults `http://localhost:11434`, `http://localhost:6333`) |

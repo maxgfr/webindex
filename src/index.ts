@@ -42,6 +42,14 @@ export * from "./video.js";
 // a dedicated profile, accessibility snapshots with stable refs, anti-bot detection.
 export * from "./browser.js";
 
+// Asking the person at the machine before a human handoff brings the browser
+// forward: a native dialog (osascript, zenity / kdialog / notify-send, a
+// PowerShell popup) in their language, once per batch, that gives up on its
+// own; and the notification once they are through. The browser's own handoff
+// asks through it; a consumer that hands over a batch of its own asks once
+// with `askHuman`, then passes `ask: false` on each read.
+export * from "./ask.js";
+
 // Running an external converter on stdin. Exported because the ladders' rungs
 // are pinned npx specs that consumers surface in their `doctor` output.
 export { ANYDOC_SPEC, PDF_INSPECTOR_SPEC, runWithInput } from "./pdf/exec.js";
