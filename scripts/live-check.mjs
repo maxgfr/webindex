@@ -345,7 +345,7 @@ const CASES = [
   A("search", "search-short-timeout", ["search", "kubernetes operator pattern", "--timeout", "1", "--json"], {
     code: [0, 1],
     stream: "all",
-    mustContain: /reached|timeout|time/i,
+    mustContain: /budget|reached|timeout|time/i,
   }),
   A(
     "search",
