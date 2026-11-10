@@ -8623,13 +8623,15 @@ async function authorizedGet(url, init, authorize) {
     failure: { ok: false, status: 0, body: "", contentType: "", url: target, error, ...redirectFailed ? { redirectFailed } : {} }
   });
   const headers = { ...init.headers };
+  let method = (init.method ?? "GET").toUpperCase();
+  let body = init.body;
   for (let redirects = 0; ; redirects++) {
     try {
       if (!await authorize(target)) return fail(`URL not authorized: ${target}`);
     } catch (e) {
       return fail(`URL authorization failed for ${target}: ${e.message}`);
     }
-    const response = await fetch(target, { ...init, headers, redirect: "manual" });
+    const response = await fetch(target, { ...init, method, body, headers: { ...headers }, redirect: "manual" });
     const location = response.headers.get("location");
     if (!REDIRECT_STATUS.has(response.status) || !location) return { response };
     await response.body?.cancel().catch(() => {
@@ -8638,10 +8640,11 @@ async function authorizedGet(url, init, authorize) {
     try {
       const next = new URL(location, target);
       if (!/^https?:$/.test(next.protocol)) return fail(`Unsupported redirect protocol: ${next.protocol}`, true);
-      if (next.origin !== new URL(target).origin) {
-        delete headers.authorization;
-        delete headers.cookie;
-        delete headers["proxy-authorization"];
+      if (next.origin !== new URL(target).origin) for (const h of CREDENTIAL_HEADERS) delete headers[h];
+      if (response.status === 303 ? method !== "HEAD" && method !== "GET" : (response.status === 301 || response.status === 302) && method === "POST") {
+        method = "GET";
+        body = void 0;
+        delete headers["content-type"];
       }
       target = next.href;
     } catch {
@@ -8693,7 +8696,7 @@ async function httpGet(url, opts = {}) {
         const allowed = await opts.authorizeUrl(target);
         if (allowed) resumeTimeout();
         return allowed;
-      }) : { response: await fetch(url, init) };
+      }) : carriesCredential(headers) ? await authorizedGet(url, init, anyUrl) : { response: await fetch(url, init) };
       if ("failure" in requested) return requested.failure;
       const res = requested.response;
       const meta = {
@@ -8793,12 +8796,13 @@ async function httpJson(method, url, body, opts = {}) {
       };
       if (opts.acceptLanguage) headers["accept-language"] = opts.acceptLanguage;
       for (const [k, v] of Object.entries(opts.headers ?? {})) headers[k.toLowerCase()] = v;
-      const res = await fetch(url, {
-        method,
-        signal: ctrl.signal,
-        headers,
-        body: body === void 0 ? void 0 : JSON.stringify(body)
-      });
+      const init = { method, signal: ctrl.signal, headers, body: body === void 0 ? void 0 : JSON.stringify(body) };
+      const requested = carriesCredential(headers) ? await authorizedGet(url, init, anyUrl) : { response: await fetch(url, init) };
+      if ("failure" in requested) {
+        last = { ok: false, status: 0, data: void 0, error: requested.failure.error };
+        break;
+      }
+      const res = requested.response;
       const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(parseRetryAfter(res.headers, Number.POSITIVE_INFINITY)) : void 0;
       if (wait !== void 0) {
         await res.body?.cancel();
@@ -9473,7 +9477,7 @@ function capExtract(text, depth) {
   const lastNl = slice.lastIndexOf("\n");
   return (lastNl > cap * 0.6 ? slice.slice(0, lastNl) : slice) + "\n\n\u2026 [truncated]";
 }
-var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, PRE_SLOT_INLINE, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, CLOSES_P, isLinkList, MIN_PROSE, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, DEAD_LINK_STATUS, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP, PROSE_END;
+var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, CREDENTIAL_HEADERS, carriesCredential, anyUrl, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, PRE_SLOT_INLINE, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, CLOSES_P, isLinkList, MIN_PROSE, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, DEAD_LINK_STATUS, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP, PROSE_END;
 var init_fetch = __esm({
   "src/fetch.ts"() {
     "use strict";
@@ -9500,6 +9504,9 @@ var init_fetch = __esm({
     mimeOf = (contentType) => contentType.split(";")[0].trim().toLowerCase();
     namesDocument = (filename) => filename !== void 0 && (PDF_URL_RE.test(filename) || docFormatForUrl(filename) !== void 0);
     REDIRECT_STATUS = /* @__PURE__ */ new Set([301, 302, 303, 307, 308]);
+    CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization"];
+    carriesCredential = (headers) => CREDENTIAL_HEADERS.some((h) => headers[h] !== void 0);
+    anyUrl = async () => true;
     INLINE_FORMAT = /* @__PURE__ */ new Set([...INLINE_TAGS, "br", "scp"]);
     INLINE_FORMAT_TAG = /<(\/?)([a-zA-Z][\w.-]*(?::[\w.-]+)?)(?=[\s/>])([^<>]*)>/g;
     NUL2 = "\0";

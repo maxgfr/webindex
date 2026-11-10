@@ -310,8 +310,17 @@ const namesDocument = (filename: string | undefined): boolean =>
 
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 
-// A crawler's policy must run before each request, including redirect hops.
-// Authorization failures are returned, not thrown into the network retry loop.
+/** The request headers that are a credential: sent to the origin they were meant for, and no further. */
+const CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization"];
+const carriesCredential = (headers: Record<string, string>): boolean => CREDENTIAL_HEADERS.some((h) => headers[h] !== undefined);
+const anyUrl = async (): Promise<boolean> => true;
+
+// Redirects walked by hand, one request per hop. Two callers need that: a
+// crawler's policy must run before each request, redirect hops included
+// (authorization failures are returned, not thrown into the network retry
+// loop); and a request carrying a credential must not hand it to another
+// origin — what the runtime's own redirect handling does with Authorization
+// has changed between releases of it.
 async function authorizedGet(
   url: string,
   init: RequestInit,
@@ -322,13 +331,15 @@ async function authorizedGet(
     failure: { ok: false, status: 0, body: "", contentType: "", url: target, error, ...(redirectFailed ? { redirectFailed } : {}) },
   });
   const headers = { ...(init.headers as Record<string, string>) };
+  let method = (init.method ?? "GET").toUpperCase();
+  let body = init.body;
   for (let redirects = 0; ; redirects++) {
     try {
       if (!(await authorize(target))) return fail(`URL not authorized: ${target}`);
     } catch (e) {
       return fail(`URL authorization failed for ${target}: ${(e as Error).message}`);
     }
-    const response = await fetch(target, { ...init, headers, redirect: "manual" });
+    const response = await fetch(target, { ...init, method, body, headers: { ...headers }, redirect: "manual" });
     const location = response.headers.get("location");
     if (!REDIRECT_STATUS.has(response.status) || !location) return { response };
     await response.body?.cancel().catch(() => {});
@@ -336,10 +347,12 @@ async function authorizedGet(
     try {
       const next = new URL(location, target);
       if (!/^https?:$/.test(next.protocol)) return fail(`Unsupported redirect protocol: ${next.protocol}`, true);
-      if (next.origin !== new URL(target).origin) {
-        delete headers.authorization;
-        delete headers.cookie;
-        delete headers["proxy-authorization"];
+      if (next.origin !== new URL(target).origin) for (const h of CREDENTIAL_HEADERS) delete headers[h];
+      // As fetch does: a 303, or a 301/302 answering a POST, is followed with a GET and no body.
+      if (response.status === 303 ? method !== "HEAD" && method !== "GET" : (response.status === 301 || response.status === 302) && method === "POST") {
+        method = "GET";
+        body = undefined;
+        delete headers["content-type"];
       }
       target = next.href;
     } catch {
@@ -436,7 +449,9 @@ export async function httpGet(
             if (allowed) resumeTimeout();
             return allowed;
           })
-        : { response: await fetch(url, init) };
+        : carriesCredential(headers)
+          ? await authorizedGet(url, init, anyUrl)
+          : { response: await fetch(url, init) };
       if ("failure" in requested) return requested.failure;
       const res = requested.response;
       const meta = {
@@ -615,12 +630,14 @@ export async function httpJson(
       };
       if (opts.acceptLanguage) headers["accept-language"] = opts.acceptLanguage;
       for (const [k, v] of Object.entries(opts.headers ?? {})) headers[k.toLowerCase()] = v;
-      const res = await fetch(url, {
-        method,
-        signal: ctrl.signal,
-        headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
+      const init: RequestInit = { method, signal: ctrl.signal, headers, body: body === undefined ? undefined : JSON.stringify(body) };
+      // A credential (a Firecrawl key, a caller's bearer token) stays on its origin: see authorizedGet.
+      const requested = carriesCredential(headers) ? await authorizedGet(url, init, anyUrl) : { response: await fetch(url, init) };
+      if ("failure" in requested) {
+        last = { ok: false, status: 0, data: undefined, error: requested.failure.error };
+        break;
+      }
+      const res = requested.response;
       // A transient answer that will be retried is not read, as in httpGet.
       const wait = RETRY_STATUS.has(res.status) && attempt < attempts - 1 ? retryDelayMs(parseRetryAfter(res.headers, Number.POSITIVE_INFINITY)) : undefined;
       if (wait !== undefined) {

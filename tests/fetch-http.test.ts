@@ -42,6 +42,52 @@ describe("Accept-Language header", () => {
   });
 });
 
+describe("a request that carries a credential, across a redirect", () => {
+  // Left to fetch, the redirect is followed by the runtime, and what it does
+  // with Authorization on another origin has changed between releases of it
+  // (the forge client walks its own for that reason). A Firecrawl key or a
+  // caller's bearer token goes to the origin it was meant for, and no further.
+  const headersOf = (call: unknown[]) => ((call[1] as RequestInit).headers ?? {}) as Record<string, string>;
+  const hop = (location: string, status = 307) => ({ status, body: "", headers: { location } });
+
+  it("httpJson follows it by hand and drops the credential when the origin changes", async () => {
+    const spy = installFetchMock((url) =>
+      url.startsWith("https://api.fc.test/") ? hop("https://elsewhere.test/v2/search") : { body: '{"ok":true}', contentType: "application/json" },
+    );
+    const r = await httpJson("POST", "https://api.fc.test/v2/search", { query: "q" }, { headers: { authorization: "Bearer fc-KEY" } });
+    expect(r).toMatchObject({ ok: true, data: { ok: true } });
+    expect(spy.mock.calls.map((c) => String(c[0]))).toEqual(["https://api.fc.test/v2/search", "https://elsewhere.test/v2/search"]);
+    expect(headersOf(spy.mock.calls[0]!).authorization).toBe("Bearer fc-KEY");
+    expect(headersOf(spy.mock.calls[1]!).authorization).toBeUndefined();
+    expect((spy.mock.calls[1]![1] as RequestInit).method).toBe("POST"); // a 307 keeps the method and the body
+  });
+
+  it("keeps the credential on a redirect within the same origin, and turns a 303 into a GET", async () => {
+    const spy = installFetchMock((url) => (url.endsWith("/old") ? hop("/new", 303) : { body: "{}", contentType: "application/json" }));
+    await httpJson("POST", "https://api.fc.test/old", { query: "q" }, { headers: { authorization: "Bearer fc-KEY" } });
+    const second = spy.mock.calls[1]![1] as RequestInit;
+    expect(String(spy.mock.calls[1]![0])).toBe("https://api.fc.test/new");
+    expect(headersOf(spy.mock.calls[1]!).authorization).toBe("Bearer fc-KEY");
+    expect(second.method).toBe("GET");
+    expect(second.body).toBeUndefined();
+  });
+
+  it("httpGet does the same for a header its caller passed", async () => {
+    const spy = installFetchMock((url) => (url.startsWith("https://a.test/") ? hop("https://b.test/page", 302) : { body: "<p>moved</p>" }));
+    const r = await httpGet("https://a.test/page", { headers: { Authorization: "Bearer T", Cookie: "s=1" } });
+    expect(r).toMatchObject({ ok: true, url: "https://b.test/page" });
+    const sent = Object.fromEntries(Object.entries(headersOf(spy.mock.calls[1]!)).map(([k, v]) => [k.toLowerCase(), v]));
+    expect(sent.authorization).toBeUndefined();
+    expect(sent.cookie).toBeUndefined();
+  });
+
+  it("leaves a request with no credential to fetch, as before", async () => {
+    const spy = installFetchMock(() => ({ body: "{}", contentType: "application/json" }));
+    await httpJson("GET", "https://x.test/j");
+    expect((spy.mock.calls[0]![1] as RequestInit).redirect).toBeUndefined();
+  });
+});
+
 describe("a transient answer that will be retried", () => {
   // A 503's error page, read in full (up to the 16 MB document cap) during
   // the back-off and then dropped: nobody reads the body of a retried answer.
