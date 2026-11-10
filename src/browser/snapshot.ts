@@ -262,12 +262,23 @@ class Renderer {
     this.refs = { ...table.refs };
     this.containers = new Set(table.containers ?? []);
     this.next = table.next;
+    // The first ref of each node, as scanning the table in order found it.
+    for (const [k, v] of Object.entries(this.refs)) if (!this.refOf.has(v)) this.refOf.set(v, k);
   }
 
+  /**
+   * The ref of a node, by its backendDOMNodeId. Looked up in a map built once:
+   * scanning the table for every node made a snapshot quadratic in its refs,
+   * and a single-page app's table only grows — 5000 refs took seconds.
+   */
+  private readonly refOf = new Map<number, string>();
+
   private refFor(backendId: number): string {
-    for (const [k, v] of Object.entries(this.refs)) if (v === backendId) return k;
+    const known = this.refOf.get(backendId);
+    if (known !== undefined) return known;
     const k = `e${this.next++}`;
     this.refs[k] = backendId;
+    this.refOf.set(backendId, k);
     return k;
   }
 

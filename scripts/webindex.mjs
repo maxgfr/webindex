@@ -11217,6 +11217,7 @@ var init_snapshot = __esm({
         this.refs = { ...table.refs };
         this.containers = new Set(table.containers ?? []);
         this.next = table.next;
+        for (const [k, v] of Object.entries(this.refs)) if (!this.refOf.has(v)) this.refOf.set(v, k);
       }
       frames;
       hints;
@@ -11228,10 +11229,18 @@ var init_snapshot = __esm({
       controls = [];
       seen = /* @__PURE__ */ new Set();
       trees = /* @__PURE__ */ new Map();
+      /**
+       * The ref of a node, by its backendDOMNodeId. Looked up in a map built once:
+       * scanning the table for every node made a snapshot quadratic in its refs,
+       * and a single-page app's table only grows — 5000 refs took seconds.
+       */
+      refOf = /* @__PURE__ */ new Map();
       refFor(backendId) {
-        for (const [k2, v] of Object.entries(this.refs)) if (v === backendId) return k2;
+        const known = this.refOf.get(backendId);
+        if (known !== void 0) return known;
         const k = `e${this.next++}`;
         this.refs[k] = backendId;
+        this.refOf.set(backendId, k);
         return k;
       }
       frameTree(backendId) {
