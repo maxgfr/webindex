@@ -65,6 +65,14 @@ describe("videoRoot", () => {
     const uid = process.getuid?.();
     expect(videoRoot()).toBe(join(tmpdir(), uid === undefined ? "webindex-tests" : `webindex-tests-${uid}`, "video"));
   });
+
+  it("reads a blank --out as none, never as the current directory", () => {
+    // `--out=` (a shell variable that was empty) resolved "" — the directory the
+    // command was run from — and the runs were written there.
+    process.env.WEBINDEX_TEST_VIDEO_DIR = "/from/env";
+    expect(videoRoot("")).toBe("/from/env");
+    expect(videoRoot("  ")).toBe("/from/env");
+  });
 });
 
 describe("fetchVideoRun", () => {

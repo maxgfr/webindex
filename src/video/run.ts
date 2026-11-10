@@ -19,7 +19,9 @@ import { probeVideo, type VideoChapter, type VideoMeta } from "./ytdlp.js";
 
 /** Where video runs live: `--out`, else `<PREFIX>_VIDEO_DIR`, else `<tmp>/<brand>-<uid>/video`. */
 export function videoRoot(out?: string): string {
-  return resolve(out ?? env("VIDEO_DIR") ?? userTmpDir("video"));
+  // A blank `--out=` is none, as a blank variable is unset: resolve("") is the
+  // current directory, and the runs were written wherever the command ran.
+  return resolve((out?.trim() ? out : undefined) ?? env("VIDEO_DIR") ?? userTmpDir("video"));
 }
 
 /** meta.json: the video's metadata plus how and when its transcript was made. */

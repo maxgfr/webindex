@@ -3886,7 +3886,7 @@ var init_rank = __esm({
 import { existsSync as existsSync3, readdirSync as readdirSync3, readFileSync as readFileSync5, statSync } from "fs";
 import { join as join5, resolve } from "path";
 function videoRoot(out) {
-  return resolve(out ?? env("VIDEO_DIR") ?? userTmpDir("video"));
+  return resolve((out?.trim() ? out : void 0) ?? env("VIDEO_DIR") ?? userTmpDir("video"));
 }
 function servesLang(meta, lang) {
   if (!lang) return true;
