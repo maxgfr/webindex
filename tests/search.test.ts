@@ -55,6 +55,28 @@ describe("probeSearxng", () => {
     await expect(probeSearxng(nextBase(), true)).resolves.toBe(true);
   });
 
+  it("reads no more of the answer than /healthz would ever send", async () => {
+    // Port 8888 is whatever listens there, and its body was read whole to be
+    // compared with "OK".
+    // A real Response over a counting stream: the suite's fetch mock answers
+    // text() without pulling its stream, so it cannot show what was read.
+    let produced = 0;
+    const chunk = new Uint8Array(64 * 1024).fill(0x61);
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (produced >= 8 * 1024 * 1024) return controller.close();
+        produced += chunk.length;
+        controller.enqueue(chunk);
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(body, { headers: { "content-type": "text/plain" } })),
+    );
+    await expect(probeSearxng(nextBase())).resolves.toBe(false);
+    expect(produced).toBeLessThan(1024 * 1024);
+  });
+
   it("does not take whatever answers on the default port for SearXNG", async () => {
     // 8888 is also Jupyter's default port. Taken for SearXNG, doctor reported
     // "answering" and every search blamed SearXNG's JSON setting. SearXNG's

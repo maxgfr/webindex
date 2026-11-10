@@ -8192,7 +8192,10 @@ function probeFirecrawl(base2, explicit = false) {
     const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS2);
     try {
       const res = await fetch(`${base2}/`, { signal: ctrl.signal });
-      const body = await res.text().catch(() => "");
+      const body = await readCappedBytes(res, PROBE_BODY_BYTES).then(
+        (b) => b.toString("utf8"),
+        () => ""
+      );
       return explicit || looksLikeFirecrawl(res.headers.get("content-type"), body);
     } catch {
       return false;
@@ -8335,7 +8338,7 @@ async function searchViaFirecrawl(query, limit, opts = {}) {
   }
   return { hits: mapSearchResponse(r.data) };
 }
-var FIRECRAWL_DEFAULT_BASE, PROBE_TIMEOUT_MS2, SCRAPE_TIMEOUT_MS, SEARCH_TIMEOUT_MS, SERVER_MARGIN_MS, SCRAPE_MAX_AGE_MS, PROBE_DOWN_TTL_MS, ProbeMemo, probeCache, prefixCache;
+var FIRECRAWL_DEFAULT_BASE, PROBE_TIMEOUT_MS2, PROBE_BODY_BYTES, SCRAPE_TIMEOUT_MS, SEARCH_TIMEOUT_MS, SERVER_MARGIN_MS, SCRAPE_MAX_AGE_MS, PROBE_DOWN_TTL_MS, ProbeMemo, probeCache, prefixCache;
 var init_firecrawl = __esm({
   "src/firecrawl.ts"() {
     "use strict";
@@ -8345,6 +8348,7 @@ var init_firecrawl = __esm({
     init_trim();
     FIRECRAWL_DEFAULT_BASE = "http://localhost:3002";
     PROBE_TIMEOUT_MS2 = 2e3;
+    PROBE_BODY_BYTES = 4096;
     SCRAPE_TIMEOUT_MS = 45e3;
     SEARCH_TIMEOUT_MS = 3e4;
     SERVER_MARGIN_MS = { scrape: 5e3, search: 2e3 };
@@ -13135,6 +13139,7 @@ init_trim();
 init_url();
 var SEARXNG_DEFAULT_BASE = "http://localhost:8888";
 var PROBE_TIMEOUT_MS4 = 2e3;
+var PROBE_BODY_BYTES2 = 4096;
 var QUERY_TIMEOUT_MS = 8e3;
 function searxngBase(opts = {}) {
   const raw = (opts.searxng ?? env("SEARXNG") ?? SEARXNG_DEFAULT_BASE).trim();
@@ -13154,7 +13159,10 @@ function probeSearxng(base2, explicit = false) {
     const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS4);
     try {
       const res = await fetch(`${base2}/healthz`, { signal: ctrl.signal });
-      const body = await res.text().catch(() => "");
+      const body = await readCappedBytes(res, PROBE_BODY_BYTES2).then(
+        (b) => b.toString("utf8"),
+        () => ""
+      );
       return explicit || res.ok && /^\s*ok\s*$/i.test(body);
     } catch {
       return false;

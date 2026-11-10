@@ -1,5 +1,5 @@
 import { brand, countOption, env, envName } from "./brand.js";
-import { httpGet, pageDelayMs, sleep } from "./fetch.js";
+import { httpGet, pageDelayMs, readCappedBytes, sleep } from "./fetch.js";
 import { firecrawlBase, ProbeMemo, searchViaFirecrawl, type FirecrawlHit } from "./firecrawl.js";
 import { acceptLanguageHeader, searxngLanguage } from "./locale.js";
 import { trimTrailing } from "./trim.js";
@@ -22,6 +22,8 @@ import { isKeylessEngine, KEYLESS_ENGINES, keylessEngines, searchViaKeyless, unk
 export const SEARXNG_DEFAULT_BASE = "http://localhost:8888";
 
 const PROBE_TIMEOUT_MS = 2000;
+// How much of a probe's answer is read: more than it is ever judged on.
+const PROBE_BODY_BYTES = 4096;
 const QUERY_TIMEOUT_MS = 8000;
 
 export interface SearchHit {
@@ -157,7 +159,13 @@ export function probeSearxng(base: string, explicit = false): Promise<boolean> {
     const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
     try {
       const res = await fetch(`${base}/healthz`, { signal: ctrl.signal });
-      const body = await res.text().catch(() => ""); // drain so the socket is released
+      // /healthz answers "OK": nothing past the first bytes can make it one.
+      // Cancelling at the cap releases the socket, and whatever else listens
+      // on the default port is not read whole.
+      const body = await readCappedBytes(res, PROBE_BODY_BYTES).then(
+        (b) => b.toString("utf8"),
+        () => "",
+      );
       return explicit || (res.ok && /^\s*ok\s*$/i.test(body));
     } catch {
       return false;

@@ -1,5 +1,5 @@
 import { brand, env, envName } from "./brand.js";
-import { cleanInline, httpJson } from "./fetch.js";
+import { cleanInline, httpJson, readCappedBytes } from "./fetch.js";
 import { baseLang, resolveRegion } from "./locale.js";
 import { trimTrailing } from "./trim.js";
 
@@ -28,6 +28,8 @@ export const FIRECRAWL_DEFAULT_BASE = "http://localhost:3002";
 // The probe's hard ceiling. Deliberately small: a dead localhost must cost
 // milliseconds (connection refused), and a blackholed host at most this.
 const PROBE_TIMEOUT_MS = 2000;
+// How much of a probe's answer is read: more than it is ever judged on.
+const PROBE_BODY_BYTES = 4096;
 // A scrape drives a real browser, so it needs a far longer budget than a plain
 // httpGet. Firecrawl is also told to give up (`timeout` in the request body) so
 // it doesn't keep working on a page we stopped waiting for — and to give up
@@ -178,7 +180,13 @@ export function probeFirecrawl(base: string, explicit = false): Promise<boolean>
     const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
     try {
       const res = await fetch(`${base}/`, { signal: ctrl.signal });
-      const body = await res.text().catch(() => ""); // drain so the socket is released
+      // Only what looksLikeFirecrawl reads, then the transfer is cancelled (which
+      // releases the socket): this goes to localhost:3002 by default, and
+      // whatever listens there was read whole — as much as two seconds deliver.
+      const body = await readCappedBytes(res, PROBE_BODY_BYTES).then(
+        (b) => b.toString("utf8"),
+        () => "",
+      );
       return explicit || looksLikeFirecrawl(res.headers.get("content-type"), body);
     } catch {
       return false;

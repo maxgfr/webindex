@@ -118,6 +118,30 @@ describe("probeFirecrawl", () => {
     expect(spy).toHaveBeenCalledTimes(1); // memoised: one probe per process
   });
 
+  it("reads no more of the answer than it looks at", async () => {
+    // The probe goes to localhost:3002 by default — whatever listens there.
+    // The body was read whole (as much as two seconds deliver) to look at its
+    // first 4096 characters.
+    const base = nextBase();
+    // A real Response over a counting stream: the suite's fetch mock answers
+    // text() without pulling its stream, so it cannot show what was read.
+    let produced = 0;
+    const chunk = new Uint8Array(64 * 1024).fill(0x61);
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (produced >= 8 * 1024 * 1024) return controller.close();
+        produced += chunk.length;
+        controller.enqueue(chunk);
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(body, { headers: { "content-type": "text/html" } })),
+    );
+    expect(await probeFirecrawl(base)).toBe(false);
+    expect(produced).toBeLessThan(1024 * 1024);
+  });
+
   it("is down (never throws) when the connection is refused", async () => {
     const base = nextBase();
     vi.stubGlobal(
