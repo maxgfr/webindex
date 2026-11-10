@@ -9087,7 +9087,15 @@ async function fetchAndExtract(url, opts = {}) {
   if (opts.signal?.aborted) return cancelled();
   const video = opts.video === false ? void 0 : knownVideo(url);
   if (video) {
-    if (opts.authorizeUrl && !await opts.authorizeUrl(url)) return { text: "", finalUrl: url, status: 0, note: `Refused ${url}: not a public address.` };
+    if (opts.authorizeUrl) {
+      let refusal2;
+      try {
+        if (!await opts.authorizeUrl(url)) refusal2 = "the URL is not authorized";
+      } catch (e) {
+        refusal2 = `its authorization failed (${e.message})`;
+      }
+      if (refusal2) return { text: "", finalUrl: url, status: 0, note: `Refused ${url}: ${refusal2}.` };
+    }
     const t = await transcribeVideo(url, {
       lang: opts.acceptLanguage?.split(/[,;]/)[0]?.trim() || void 0,
       signal: opts.signal,

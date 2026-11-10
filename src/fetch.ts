@@ -1426,7 +1426,18 @@ export async function fetchAndExtract(
   // approved first, as any other would be, since yt-dlp is about to fetch it.
   const video = opts.video === false ? undefined : knownVideo(url);
   if (video) {
-    if (opts.authorizeUrl && !(await opts.authorizeUrl(url))) return { text: "", finalUrl: url, status: 0, note: `Refused ${url}: not a public address.` };
+    if (opts.authorizeUrl) {
+      // The check is the caller's (an address policy, robots.txt, an origin
+      // rule), so the note does not say which; one that throws is a refusal
+      // too, as it is for a page (authorizedGet), never a rejected read.
+      let refusal: string | undefined;
+      try {
+        if (!(await opts.authorizeUrl(url))) refusal = "the URL is not authorized";
+      } catch (e) {
+        refusal = `its authorization failed (${(e as Error).message})`;
+      }
+      if (refusal) return { text: "", finalUrl: url, status: 0, note: `Refused ${url}: ${refusal}.` };
+    }
     const t = await transcribeVideo(url, {
       lang: opts.acceptLanguage?.split(/[,;]/)[0]?.trim() || undefined,
       signal: opts.signal,

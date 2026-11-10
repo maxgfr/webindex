@@ -1451,5 +1451,29 @@ describe("fetchAndExtract on a YouTube video", () => {
     const r = await fetchAndExtract("https://www.youtube.com/watch?v=jNQXAC9IVRw", { authorizeUrl: async () => false });
     expect(calls).toEqual([]);
     expect(r.note).toMatch(/^Refused/);
+    // The check is the caller's — robots.txt, an origin rule, an address
+    // policy — so the note does not claim to know which one said no.
+    expect(r.note).not.toMatch(/public address/);
+  });
+
+  it("reports an authorizeUrl that throws on a video URL, as it does on a page", async () => {
+    // Uncaught, it rejected fetchAndExtract — and with it a whole crawl, whose
+    // pool stops at the first rejection.
+    const calls: string[] = [];
+    setVideoDeps({
+      run: async (cmd) => {
+        calls.push(cmd);
+        return { ok: true, status: 0, stdout: "{}", stderr: "" };
+      },
+      have: () => true,
+    });
+    const r = await fetchAndExtract("https://www.youtube.com/watch?v=jNQXAC9IVRw", {
+      authorizeUrl: async () => {
+        throw new Error("resolver down");
+      },
+    });
+    expect(calls).toEqual([]);
+    expect(r).toMatchObject({ text: "", status: 0 });
+    expect(r.note).toMatch(/^Refused .*resolver down/);
   });
 });
