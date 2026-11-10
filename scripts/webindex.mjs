@@ -12244,7 +12244,7 @@ __export(cli_exports, {
   statusText: () => statusText,
   tabLines: () => tabLines
 });
-import { existsSync as existsSync13, mkdirSync as mkdirSync7, statSync as statSync11 } from "fs";
+import { existsSync as existsSync13, mkdirSync as mkdirSync8, statSync as statSync11 } from "fs";
 import { dirname as dirname5, join as join27, resolve as resolve10 } from "path";
 function arity(ctx, min, max = min) {
   if (ctx.args.length < min || ctx.args.length > max) throw usageError(ctx.action);
@@ -12761,7 +12761,7 @@ note: ${r.note}` : text };
           })
         );
         if (ctx.flags.out === void 0) ensurePrivateDir(shots);
-        else mkdirSync7(dirname5(path), { recursive: true });
+        else mkdirSync8(dirname5(path), { recursive: true });
         writeFileAtomic(path, bytes, 384);
         return { json: { ok: true, path, bytes: bytes.length, format }, text: path, image: { path } };
       },
@@ -13218,7 +13218,7 @@ async function repinSkill(root, config) {
 // src/cli.ts
 init_brand();
 init_charset();
-import { existsSync as existsSync14, mkdirSync as mkdirSync8, readFileSync as readFileSync19, readSync, realpathSync as realpathSync4, statSync as statSync12 } from "fs";
+import { existsSync as existsSync14, mkdirSync as mkdirSync9, readFileSync as readFileSync19, readSync, realpathSync as realpathSync4, statSync as statSync12 } from "fs";
 import { isIP as isIP2 } from "net";
 import { basename as basename5, extname, isAbsolute as isAbsolute6, join as join28, relative as relative4, resolve as resolve12 } from "path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL } from "url";
@@ -13241,7 +13241,7 @@ init_firecrawl();
 // src/stack.ts
 init_brand();
 import { spawnSync as spawnSync3 } from "child_process";
-import { existsSync as existsSync9, lstatSync as lstatSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync15, statSync as statSync7, writeFileSync as writeFileSync7 } from "fs";
+import { existsSync as existsSync9, lstatSync as lstatSync3, mkdirSync as mkdirSync6, readFileSync as readFileSync15, statSync as statSync7, writeFileSync as writeFileSync7 } from "fs";
 import { dirname as dirname2, join as join20, resolve as resolve4 } from "path";
 
 // src/cache.ts
@@ -13251,10 +13251,49 @@ init_video();
 init_firecrawl();
 init_url();
 init_no_write();
+import { existsSync as existsSync8, mkdirSync as mkdirSync5, readFileSync as readFileSync14, readdirSync as readdirSync6, rmSync as rmSync6, statSync as statSync6 } from "fs";
+import { join as join19 } from "path";
+
+// src/private-dir.ts
+init_no_write();
+import { chmodSync as chmodSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync4 } from "fs";
+import { dirname } from "path";
+function openPrivateTmpDir(dir, create) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
+  if (create) mkdirSync4(dirname(dirname(dir)), { recursive: true });
+  for (const p of [dirname(dir), dir]) {
+    if (create) mkdirPrivate(p);
+    let st;
+    try {
+      st = lstatSync2(p);
+    } catch (e) {
+      if (e.code === "ENOENT") return {};
+      return { refused: `${p} cannot be inspected (${e.message})` };
+    }
+    if (st.isSymbolicLink()) return { refused: `${p} is a symbolic link` };
+    if (!st.isDirectory()) return { refused: `${p} is not a directory` };
+    if (st.uid !== uid) return { refused: `${p} belongs to another user` };
+    if (st.mode & 18) return { refused: `${p} is writable by other users` };
+    if (st.mode & 63 && !isNoWrite()) {
+      try {
+        chmodSync2(p, 448);
+      } catch {
+      }
+    }
+  }
+  return { dir };
+}
+function mkdirPrivate(p) {
+  try {
+    mkdirSync4(p, { mode: 448 });
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+  }
+}
+
+// src/cache.ts
 init_brand();
 init_mode();
-import { chmodSync as chmodSync2, existsSync as existsSync8, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync14, readdirSync as readdirSync6, rmSync as rmSync6, statSync as statSync6 } from "fs";
-import { dirname, join as join19 } from "path";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
   return namedCacheDir() ?? userTmpDir("cache");
@@ -13402,45 +13441,16 @@ function writeCache(url, res, now, acceptLanguage = "", extractor = "native", va
 var ensured = /* @__PURE__ */ new Set();
 function ensureDir2(dir) {
   if (ensured.has(dir)) return;
-  mkdirSync4(dir, { recursive: true });
+  mkdirSync5(dir, { recursive: true });
   ensured.add(dir);
 }
 function openCacheDir(create) {
   const dir = cacheDir();
-  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
-  if (namedCacheDir() !== void 0 || uid === void 0) {
+  if (namedCacheDir() !== void 0 || typeof process.getuid !== "function") {
     if (create) ensureDir2(dir);
     return { dir };
   }
-  if (create) mkdirSync4(dirname(dirname(dir)), { recursive: true });
-  for (const p of [dirname(dir), dir]) {
-    if (create) mkdirPrivate(p);
-    let st;
-    try {
-      st = lstatSync2(p);
-    } catch (e) {
-      if (e.code === "ENOENT") return {};
-      return { refused: `${p} cannot be inspected (${e.message})` };
-    }
-    if (st.isSymbolicLink()) return { refused: `${p} is a symbolic link` };
-    if (!st.isDirectory()) return { refused: `${p} is not a directory` };
-    if (st.uid !== uid) return { refused: `${p} belongs to another user` };
-    if (st.mode & 18) return { refused: `${p} is writable by other users` };
-    if (st.mode & 63 && !isNoWrite()) {
-      try {
-        chmodSync2(p, 448);
-      } catch {
-      }
-    }
-  }
-  return { dir };
-}
-function mkdirPrivate(p) {
-  try {
-    mkdirSync4(p, { mode: 448 });
-  } catch (e) {
-    if (e.code !== "EEXIST") throw e;
-  }
+  return openPrivateTmpDir(dir, create);
 }
 var announced = /* @__PURE__ */ new Set();
 function entryDir(create) {
@@ -13923,7 +13933,7 @@ function untrustedStack() {
 function writeIfChanged(path, content) {
   try {
     if (existsSync9(path) && readFileSync15(path, "utf8") === content) return;
-    mkdirSync5(dirname2(path), { recursive: true, mode: 448 });
+    mkdirSync6(dirname2(path), { recursive: true, mode: 448 });
     writeFileSync7(path, content);
   } catch {
   }
@@ -16276,10 +16286,10 @@ function resolveUrl2(url, base2) {
 init_brand();
 init_exec2();
 init_forge_host();
-init_text();
 import { createHash as createHash4, randomBytes as randomBytes2 } from "crypto";
-import { existsSync as existsSync11, mkdirSync as mkdirSync6, readdirSync as readdirSync9, renameSync as renameSync4, rmSync as rmSync7, statSync as statSync9 } from "fs";
+import { existsSync as existsSync11, mkdirSync as mkdirSync7, readdirSync as readdirSync9, renameSync as renameSync4, rmSync as rmSync7, statSync as statSync9 } from "fs";
 import { basename as basename3, join as join24, resolve as resolve6 } from "path";
+init_text();
 function resolveRepo(raw, opts = {}) {
   const trimmed = raw.trim();
   if (trimmed && opts.local !== false) {
@@ -19609,7 +19619,7 @@ function webindexAdapter(policy = {}) {
     if (!/^[A-Za-z0-9._-]+$/.test(named) || named === "." || named === "..") {
       throw new ToolError(`\`dir\` must be the name of a directory inside ${base2} on this server, not a path.`);
     }
-    mkdirSync8(base2, { recursive: true });
+    mkdirSync9(base2, { recursive: true });
     const target = join28(base2, named);
     if (existsSync14(target) && relative4(realpathSync4(base2), realpathSync4(target)).startsWith("..")) {
       throw new ToolError(`${named} leads outside ${base2}, the only directory this server writes videos to.`);

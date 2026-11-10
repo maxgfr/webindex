@@ -126,7 +126,7 @@ default, and one out of range is clamped to it.
 | `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_TOKEN`, `GITEA_TOKEN` | optional forge tokens (`WEBINDEX_GITHUB_TOKEN`, `WEBINDEX_GITLAB_TOKEN`, `WEBINDEX_GITEA_TOKEN` win over them); each goes only to its own forge's host |
 | `WEBINDEX_FORGE_HOSTS` | self-hosted forges, e.g. `salsa.debian.org=gitlab,git.corp=github`: each is queried as that forge and receives that forge's token |
 | `WEBINDEX_NO_GH` | never reach for the `gh` CLI on github.com — plain HTTP only |
-| `WEBINDEX_REPO_DIR` | where `ensureClone` keeps working trees (library; default `<tmp>/webindex-<uid>/repos`) |
+| `WEBINDEX_REPO_DIR` | where `ensureClone` keeps working trees (library; default `<tmp>/webindex-<uid>/repos`, created private to you; one another user created first, or may write, is not used) |
 | `WEBINDEX_BROWSER_DIR` | where the dedicated browser keeps its profiles and session (default `~/.webindex/browser`, under the consumer's own name when vendored; private to you, and under the home dir on purpose so a tmp sweeper never logs you out) |
 | `WEBINDEX_BROWSER_BIN` | the Chrome, Brave, Chromium or Edge binary to drive, instead of the first one found |
 | `WEBINDEX_BROWSER_KIND` | the kind of browser to launch when no binary is named: `chrome`, `brave` (blocks ads and trackers on its own), `chromium` or `edge`; `browser open --browser-kind` wins. A kind named is that kind or an error, never another browser; a profile stays with the kind it was first launched with |

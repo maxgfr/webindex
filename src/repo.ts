@@ -1,10 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { brand, env, envInt, MAX_TIMER_MS, userTmpDir } from "./brand.js";
+import { brand, env, envInt, envName, MAX_TIMER_MS, userTmpDir } from "./brand.js";
 import { have, sh, shAsync } from "./exec.js";
 import type { ForgeKind } from "./forge.js";
 import { hostForgeKind, normalizeForgeHost } from "./forge-host.js";
+import { openPrivateTmpDir } from "./private-dir.js";
 import { slugify } from "./text.js";
 
 // Naming a repository, and getting a working tree for it.
@@ -42,6 +43,24 @@ export interface RepoRef {
  */
 export function repoCacheRoot(): string {
   return env("REPO_DIR") ?? brand().repoDir ?? userTmpDir("repos");
+}
+
+/**
+ * The clone cache root, once it may be used. A named one (`REPO_DIR`, or a
+ * consumer's `repoDir`) is taken as given. The default sits under the shared
+ * temp dir, at a path any local user can predict and create first: it is made
+ * private (0700, whatever the umask — a clone of a private repository was
+ * readable by every user of the machine), and refused when it or the per-user
+ * directory above it is a link, another user's, or writable by others — a
+ * tree planted under a slug was returned as the repository, and git then ran
+ * inside it.
+ */
+function openRepoCache(): string {
+  const root = repoCacheRoot();
+  if (env("REPO_DIR") !== undefined || brand().repoDir !== undefined || typeof process.getuid !== "function") return root;
+  const { refused } = openPrivateTmpDir(root, true);
+  if (refused) throw new Error(`the clone cache is not used: ${refused}. Remove it, or set ${envName("REPO_DIR")} to a directory only you can write.`);
+  return root;
 }
 
 // Each capped at what a timer can hold: past it, "wait a very long time" fires
@@ -285,7 +304,12 @@ export async function ensureClone(ref: RepoRef, opts: { refresh?: boolean; branc
   // may begin with one — so such a "branch" is refused before it reaches git.
   if (branch?.startsWith("-")) throw new Error(`"${branch}" is not a branch name`);
 
-  const dir = join(repoCacheRoot(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
+  // A RepoRef is a plain object any caller can build, and its slug becomes a
+  // directory name under the cache root — one that is cloned into, and cleared
+  // with rmSync when an interrupted clone is found there. It must be one name.
+  if (!ref.slug || ref.slug === "." || ref.slug === ".." || /[/\\\0]/.test(ref.slug)) throw new Error(`"${ref.slug}" is not a repository slug`);
+
+  const dir = join(openRepoCache(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
   // One clone per directory at a time, in this process: concurrent callers all
   // saw "not cloned yet", each ran `git clone` into the same directory, and the
   // losers deleted the winner's half-written tree before retrying.

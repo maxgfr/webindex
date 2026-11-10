@@ -11019,12 +11019,58 @@ init_exec2();
 init_brand();
 init_exec2();
 init_forge_host();
-init_text();
 import { createHash as createHash2, randomBytes as randomBytes2 } from "crypto";
-import { existsSync as existsSync8, mkdirSync as mkdirSync4, readdirSync as readdirSync6, renameSync as renameSync4, rmSync as rmSync6, statSync as statSync6 } from "fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync5, readdirSync as readdirSync6, renameSync as renameSync4, rmSync as rmSync6, statSync as statSync6 } from "fs";
 import { basename as basename3, join as join13, resolve as resolve4 } from "path";
+
+// src/private-dir.ts
+init_no_write();
+import { chmodSync as chmodSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync4 } from "fs";
+import { dirname } from "path";
+function openPrivateTmpDir(dir, create) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
+  if (create) mkdirSync4(dirname(dirname(dir)), { recursive: true });
+  for (const p of [dirname(dir), dir]) {
+    if (create) mkdirPrivate(p);
+    let st;
+    try {
+      st = lstatSync2(p);
+    } catch (e) {
+      if (e.code === "ENOENT") return {};
+      return { refused: `${p} cannot be inspected (${e.message})` };
+    }
+    if (st.isSymbolicLink()) return { refused: `${p} is a symbolic link` };
+    if (!st.isDirectory()) return { refused: `${p} is not a directory` };
+    if (st.uid !== uid) return { refused: `${p} belongs to another user` };
+    if (st.mode & 18) return { refused: `${p} is writable by other users` };
+    if (st.mode & 63 && !isNoWrite()) {
+      try {
+        chmodSync2(p, 448);
+      } catch {
+      }
+    }
+  }
+  return { dir };
+}
+function mkdirPrivate(p) {
+  try {
+    mkdirSync4(p, { mode: 448 });
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+  }
+}
+
+// src/repo.ts
+init_text();
 function repoCacheRoot() {
   return env("REPO_DIR") ?? brand().repoDir ?? userTmpDir("repos");
+}
+function openRepoCache() {
+  const root = repoCacheRoot();
+  if (env("REPO_DIR") !== void 0 || brand().repoDir !== void 0 || typeof process.getuid !== "function") return root;
+  const { refused } = openPrivateTmpDir(root, true);
+  if (refused) throw new Error(`the clone cache is not used: ${refused}. Remove it, or set ${envName("REPO_DIR")} to a directory only you can write.`);
+  return root;
 }
 var cloneTimeoutMs = () => envInt("GIT_CLONE_TIMEOUT_MS", 3e5, 1e3, MAX_TIMER_MS);
 var fetchTimeoutMs = () => envInt("GIT_FETCH_TIMEOUT_MS", 12e4, 1e3, MAX_TIMER_MS);
@@ -11143,7 +11189,8 @@ async function ensureClone(ref, opts = {}) {
   if (!have("git")) throw new Error(`git is not installed or not on PATH \u2014 cannot clone ${shownUrl(ref.cloneUrl)}`);
   const branch = opts.branch?.trim() || void 0;
   if (branch?.startsWith("-")) throw new Error(`"${branch}" is not a branch name`);
-  const dir = join13(repoCacheRoot(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
+  if (!ref.slug || ref.slug === "." || ref.slug === ".." || /[/\\\0]/.test(ref.slug)) throw new Error(`"${ref.slug}" is not a repository slug`);
+  const dir = join13(openRepoCache(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
   const pending = inflight2.get(dir);
   if (pending && !opts.refresh) {
     return pending.catch((e) => {
@@ -11218,7 +11265,7 @@ function sweepStaging(staging) {
 }
 async function freshClone(ref, dir, branch) {
   const staging = join13(repoCacheRoot(), ".partial");
-  mkdirSync4(staging, { recursive: true });
+  mkdirSync5(staging, { recursive: true });
   sweepStaging(staging);
   const attempt = async (filter) => {
     const tmp = join13(staging, `${basename3(dir)}-${process.pid}-${randomBytes2(4).toString("hex")}`);
@@ -13316,7 +13363,7 @@ function closingNote(rungs, cancelled) {
 // src/stack.ts
 init_brand();
 import { spawnSync as spawnSync3 } from "child_process";
-import { existsSync as existsSync10, lstatSync as lstatSync3, mkdirSync as mkdirSync6, readFileSync as readFileSync10, statSync as statSync8, writeFileSync as writeFileSync6 } from "fs";
+import { existsSync as existsSync10, lstatSync as lstatSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync10, statSync as statSync8, writeFileSync as writeFileSync6 } from "fs";
 import { dirname as dirname2, join as join15, resolve as resolve6 } from "path";
 
 // src/cache.ts
@@ -13326,10 +13373,10 @@ init_video();
 init_firecrawl();
 init_url();
 init_no_write();
+import { existsSync as existsSync9, mkdirSync as mkdirSync6, readFileSync as readFileSync9, readdirSync as readdirSync7, rmSync as rmSync7, statSync as statSync7 } from "fs";
+import { join as join14 } from "path";
 init_brand();
 init_mode();
-import { chmodSync as chmodSync2, existsSync as existsSync9, lstatSync as lstatSync2, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync as readdirSync7, rmSync as rmSync7, statSync as statSync7 } from "fs";
-import { dirname, join as join14 } from "path";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
   return namedCacheDir() ?? userTmpDir("cache");
@@ -13483,45 +13530,16 @@ function writeCache(url, res, now, acceptLanguage = "", extractor = "native", va
 var ensured = /* @__PURE__ */ new Set();
 function ensureDir2(dir) {
   if (ensured.has(dir)) return;
-  mkdirSync5(dir, { recursive: true });
+  mkdirSync6(dir, { recursive: true });
   ensured.add(dir);
 }
 function openCacheDir(create) {
   const dir = cacheDir();
-  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
-  if (namedCacheDir() !== void 0 || uid === void 0) {
+  if (namedCacheDir() !== void 0 || typeof process.getuid !== "function") {
     if (create) ensureDir2(dir);
     return { dir };
   }
-  if (create) mkdirSync5(dirname(dirname(dir)), { recursive: true });
-  for (const p of [dirname(dir), dir]) {
-    if (create) mkdirPrivate(p);
-    let st;
-    try {
-      st = lstatSync2(p);
-    } catch (e) {
-      if (e.code === "ENOENT") return {};
-      return { refused: `${p} cannot be inspected (${e.message})` };
-    }
-    if (st.isSymbolicLink()) return { refused: `${p} is a symbolic link` };
-    if (!st.isDirectory()) return { refused: `${p} is not a directory` };
-    if (st.uid !== uid) return { refused: `${p} belongs to another user` };
-    if (st.mode & 18) return { refused: `${p} is writable by other users` };
-    if (st.mode & 63 && !isNoWrite()) {
-      try {
-        chmodSync2(p, 448);
-      } catch {
-      }
-    }
-  }
-  return { dir };
-}
-function mkdirPrivate(p) {
-  try {
-    mkdirSync5(p, { mode: 448 });
-  } catch (e) {
-    if (e.code !== "EEXIST") throw e;
-  }
+  return openPrivateTmpDir(dir, create);
 }
 var announced = /* @__PURE__ */ new Set();
 function entryDir(create) {
@@ -14004,7 +14022,7 @@ function untrustedStack() {
 function writeIfChanged(path, content) {
   try {
     if (existsSync10(path) && readFileSync10(path, "utf8") === content) return;
-    mkdirSync6(dirname2(path), { recursive: true, mode: 448 });
+    mkdirSync7(dirname2(path), { recursive: true, mode: 448 });
     writeFileSync6(path, content);
   } catch {
   }

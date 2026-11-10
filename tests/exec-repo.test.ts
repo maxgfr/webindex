@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { brand, envName } from "../src/brand.js";
 import { have, resetHaveCache, sh, shAsync } from "../src/exec.js";
@@ -800,6 +800,78 @@ describe("cloning, against a real local repository", () => {
   it("reports both attempts when a clone cannot succeed", async () => {
     const missing = resolveRepo(`file://${join(origin, "nope")}`);
     await expect(ensureClone(missing)).rejects.toThrow(/git clone failed[\s\S]*attempt 1[\s\S]*attempt 2/);
+  });
+
+  it("refuses a ref whose slug names a path, before anything is cloned or removed", async () => {
+    // A RepoRef is a plain object any caller can build. Joined to the cache
+    // root as it was, a slug of "../x" put the clone — and the rmSync that
+    // clears an interrupted one — outside the root.
+    const outside = join(dirname(cacheDir), "wi-escape-target");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "KEEP"), "x");
+    try {
+      for (const slug of ["../wi-escape-target", "..", ".", "a/b", "a\\b", ""]) {
+        await expect(ensureClone({ ...resolveRepo(`file://${origin}`), slug }), slug).rejects.toThrow(/not a repository slug/);
+      }
+      expect(existsSync(join(outside, "KEEP"))).toBe(true);
+      expect(readdirSync(cacheDir)).toEqual([]);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  describe("the default clone cache, under the temp dir", () => {
+    // <tmp>/<brand>-<uid>/repos is a name any local user can predict and create
+    // first. The fetch cache beside it has refused such a directory since 1.22;
+    // the clones — private repositories among them — were made with the umask's
+    // mode, and a tree planted there was returned as the repository.
+    const SETUP_TMPDIR = process.env.TMPDIR;
+    const hasUids = typeof process.getuid === "function";
+    let tmp: string;
+    beforeEach(() => {
+      tmp = mkdtempSync(join(tmpdir(), "wi-tmp-"));
+      process.env.TMPDIR = tmp;
+      delete process.env[envName("REPO_DIR")];
+    });
+    afterEach(() => {
+      if (SETUP_TMPDIR === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = SETUP_TMPDIR;
+      rmSync(tmp, { recursive: true, force: true });
+    });
+
+    it.runIf(hasUids)("is created private to the caller, and used", async () => {
+      const umask = process.umask(0o022);
+      try {
+        const dir = await ensureClone(resolveRepo(`file://${origin}`));
+        expect(dir.startsWith(repoCacheRoot())).toBe(true);
+        expect(existsSync(join(dir, "README.md"))).toBe(true);
+      } finally {
+        process.umask(umask);
+      }
+      expect(statSync(repoCacheRoot()).mode & 0o777).toBe(0o700);
+      expect(statSync(dirname(repoCacheRoot())).mode & 0o777).toBe(0o700);
+    });
+
+    it.runIf(hasUids)("is not used when other users may write it", async () => {
+      const ref = resolveRepo(`file://${origin}`);
+      // What an attacker leaves there: the directory, and a tree under the slug.
+      mkdirSync(join(repoCacheRoot(), ref.slug, ".git"), { recursive: true });
+      chmodSync(dirname(repoCacheRoot()), 0o777);
+      chmodSync(repoCacheRoot(), 0o777);
+      const err = await ensureClone(ref).then(
+        () => undefined,
+        (e: Error) => e,
+      );
+      expect(err?.message).toMatch(/writable by other users/);
+      expect(err?.message).toContain(envName("REPO_DIR"));
+    });
+
+    it.runIf(hasUids)("creates nothing through a symbolic link planted above it", async () => {
+      const elsewhere = mkdtempSync(join(tmp, "elsewhere-"));
+      symlinkSync(elsewhere, dirname(repoCacheRoot()));
+      await expect(ensureClone(resolveRepo(`file://${origin}`))).rejects.toThrow(/symbolic link/);
+      expect(readdirSync(elsewhere)).toEqual([]);
+    });
   });
 
   it("keeps a clone URL's credential out of the error it reports", async () => {

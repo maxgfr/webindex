@@ -1,11 +1,12 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, type Stats, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { fetchAndExtract, looksLikePdfUrl, type ExtractorId } from "./fetch.js";
 import { docFormatForUrl } from "./doc.js";
 import { knownVideo } from "./video.js";
 import { firecrawlBase, firecrawlIsExplicit, probeFirecrawl } from "./firecrawl.js";
 import { canonicalizeUrl, domainOf, fnv1a64 } from "./url.js";
 import { isNoWrite, writeFileAtomic } from "./no-write.js";
+import { openPrivateTmpDir } from "./private-dir.js";
 import { brand, countFetch, env, envInt, envName, userTmpDir } from "./brand.js";
 import { type BrowserFetchMode, browserFetchMode, browserFetchModeFor, type HumanHandoff, worthRendering } from "./browser/mode.js";
 
@@ -441,43 +442,11 @@ function ensureDir(dir: string): void {
  */
 function openCacheDir(create: boolean): { dir?: string; refused?: string } {
   const dir = cacheDir();
-  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-  if (namedCacheDir() !== undefined || uid === undefined) {
+  if (namedCacheDir() !== undefined || typeof process.getuid !== "function") {
     if (create) ensureDir(dir);
     return { dir };
   }
-  if (create) mkdirSync(dirname(dirname(dir)), { recursive: true }); // the temp dir itself
-  for (const p of [dirname(dir), dir]) {
-    if (create) mkdirPrivate(p);
-    let st: Stats;
-    try {
-      st = lstatSync(p);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return {}; // nothing cached yet
-      return { refused: `${p} cannot be inspected (${(e as Error).message})` };
-    }
-    if (st.isSymbolicLink()) return { refused: `${p} is a symbolic link` };
-    if (!st.isDirectory()) return { refused: `${p} is not a directory` };
-    if (st.uid !== uid) return { refused: `${p} belongs to another user` };
-    if (st.mode & 0o022) return { refused: `${p} is writable by other users` };
-    if (st.mode & 0o077 && !isNoWrite()) {
-      try {
-        chmodSync(p, 0o700);
-      } catch {
-        /* still writable by nobody else, so still usable */
-      }
-    }
-  }
-  return { dir };
-}
-
-/** mkdir, private, and never through whatever already has the name. */
-function mkdirPrivate(p: string): void {
-  try {
-    mkdirSync(p, { mode: 0o700 });
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-  }
+  return openPrivateTmpDir(dir, create);
 }
 
 // Each refusal is announced once per process, as an unknown ladder rung is:
