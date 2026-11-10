@@ -2,6 +2,39 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.37.1](https://github.com/maxgfr/webindex/compare/v1.37.0...v1.37.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **browser:** find a bare BROWSER_BIN on a Windows PATH ([aa2d761](https://github.com/maxgfr/webindex/commit/aa2d761f04c262ec63010b60dfef6213c5f24d31))
+* **browser:** read a control's whole label, and through characters not shown ([0ef5148](https://github.com/maxgfr/webindex/commit/0ef5148316b66ff210caaf07762ebc1cf30ec7d1))
+* **browser:** snapshot a container with hundreds of thousands of children ([40bfd59](https://github.com/maxgfr/webindex/commit/40bfd59b91cdb3c2bd9893544a534190a0e374c7))
+* **cli:** print the whole result to a pipe before a failing exit ([2c27284](https://github.com/maxgfr/webindex/commit/2c272842a01773a065b3d38a8c62ea533e6f2687))
+* **doc:** read an OpenDocument file with a negative count ([c75f127](https://github.com/maxgfr/webindex/commit/c75f1271793208a1b454a01f51b3f2c282686505))
+* **feed:** keep only http(s) locations from an XML sitemap ([8dd4cd4](https://github.com/maxgfr/webindex/commit/8dd4cd44019e6f3aba90e850c006d3a6c3efd2fc))
+* **fetch:** do not render a document refused for its size in the browser ([3260f77](https://github.com/maxgfr/webindex/commit/3260f77b530c42fc2a890e9d06862c9b3853c019))
+* **fetch:** keep the challenge when the retry under the other UA gets no answer ([d8c7533](https://github.com/maxgfr/webindex/commit/d8c753396efd7d970e3d7472c2c2e93d68921c7a))
+* **fetch:** treat a throwing authorizeUrl on a video URL as a refusal ([0c797f0](https://github.com/maxgfr/webindex/commit/0c797f0e367a89e68b058ef42f2c45dff41d0a93))
+* **mcp:** accept a video directory whose name begins with two dots ([a30ed13](https://github.com/maxgfr/webindex/commit/a30ed134515df429f9c2ac228ec1cdf9c03dd3f5))
+* **mcp:** cap the budgets a client may ask a tool for ([5493de1](https://github.com/maxgfr/webindex/commit/5493de19a81ce8571645aa1b928504cac9007540))
+* **orchestrate:** emit only identifiers as constants, and comments on one line ([b7ac6d0](https://github.com/maxgfr/webindex/commit/b7ac6d0b0fcec47be5351717f454b447e2db5201))
+* **rank:** break ties in fuse and the video search in code-unit order ([0b42b20](https://github.com/maxgfr/webindex/commit/0b42b20f53456e3771d661840e7dcb16d43f0778))
+* **rank:** index a document whose title or headings are very long ([cd70ae3](https://github.com/maxgfr/webindex/commit/cd70ae361f4e4bbe9c1ba9f919a61151d682cc65))
+* **repo:** keep a clone URL's credential out of clone and refresh errors ([2a04f3f](https://github.com/maxgfr/webindex/commit/2a04f3f69386741871ad6a9cba58ff24624890e2))
+* **repo:** keep the default clone cache private, and a slug to one name ([8496385](https://github.com/maxgfr/webindex/commit/8496385776c1b89b5b0a875a31e1796ec1cd5ce2))
+* **search:** send the request when pages or limit is not a number ([5a37661](https://github.com/maxgfr/webindex/commit/5a37661b607530536015aec0639f18ffac3173f2))
+* **skill:** never overwrite an existing file when scaffolding ([42e4439](https://github.com/maxgfr/webindex/commit/42e44390efc219988578a5cd8781afe201a597b7))
+* **skill:** walk a source tree that holds a dangling or looping link ([379f4d2](https://github.com/maxgfr/webindex/commit/379f4d256236cebb03910b9ab94a56f18be2399a))
+* **text:** bound the keyword a matcher is built from ([d605b3b](https://github.com/maxgfr/webindex/commit/d605b3b41ad4d49b603e4d7e08021d8d2cd1b65e))
+* **video:** read a blank --out as none, not as the current directory ([350ef6c](https://github.com/maxgfr/webindex/commit/350ef6cde97dcf1972de6b9fd54d27ff19d4fea1))
+
+
+### Performance Improvements
+
+* **browser:** look a snapshot's refs up in a map, not by scanning the table ([68a5372](https://github.com/maxgfr/webindex/commit/68a5372542137fe1c5c575aa78f1dce8401bdcc8))
+* **search:** read only the first 4 KiB of an availability probe's answer ([4dd9558](https://github.com/maxgfr/webindex/commit/4dd955826d950a71e191d5fa9723a53aa39bedb6))
+
 # [1.37.0](https://github.com/maxgfr/webindex/compare/v1.36.2...v1.37.0) (2026-10-30)
 
 
