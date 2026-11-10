@@ -440,13 +440,20 @@ export function bm25Score(index: Bm25Index, doc: Bm25Doc): number {
   const { k1, b, avgdl } = index;
   const lenNorm = 1 - b + b * (avgdl ? dl / avgdl : 1);
   let score = 0;
-  const stems = index.queryTerms.map(bm25Stem);
-  index.queryTerms.forEach((term, i) => {
-    const f = tf.get(stems[i] as string);
-    if (!f) return;
+  // One contribution per STEM. queryTerms are distinct words, and two of them
+  // ("encoder", "encoding") can share a matching key: counted per word, that
+  // key scored twice and the proximity bonus divided by a term too many. The
+  // two words have the same IDF, which is computed from the stem's frequency.
+  const stems: string[] = [];
+  for (const term of index.queryTerms) {
+    const stem = bm25Stem(term);
+    if (stems.includes(stem)) continue;
+    stems.push(stem);
+    const f = tf.get(stem);
+    if (!f) continue;
     const idf = index.idf.get(term) ?? 0;
     score += (idf * (f * (k1 + 1))) / (f + k1 * lenNorm);
-  });
+  }
   return score * (1 + proximityBonus(toks, stems));
 }
 

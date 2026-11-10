@@ -139,6 +139,22 @@ describe("BM25F", () => {
     expect(bm25Score(index, docs[1]!)).toBe(0);
   });
 
+  it("scores a stem once, however many of its forms the question holds", () => {
+    // Query terms are de-duplicated as words, and matched by stem: "encoder"
+    // and "encoding" are two words and one stem, so a page about encoding was
+    // credited twice for it, and the proximity bonus divided by a term too many.
+    const docs = [
+      { id: "a", title: "Encoding", headings: "", body: "A trained encoder for images, and how encoding speed is measured." },
+      { id: "b", title: "Speed", headings: "", body: "Raw speed, measured on a track." },
+      { id: "c", title: "Cats", headings: "", body: "An unrelated sentence about cats." },
+      { id: "d", title: "Dogs", headings: "", body: "Another unrelated sentence." },
+    ];
+    const both = buildBm25Index("encoder encoding speed", docs);
+    const one = buildBm25Index("encoder speed", docs);
+    expect(both.queryTerms).toEqual(["encoder", "encoding", "speed"]); // the question's own words stay
+    for (const d of docs) expect(bm25Score(both, d), d.id).toBeCloseTo(bm25Score(one, d), 10);
+  });
+
   it("matches -ing / -er / -ed forms of a long word, and reports the question's own words", () => {
     const docs = [
       { id: "a", title: "Zero-shot forecasting", headings: "", body: "Forecasting models and their forecasts." },
