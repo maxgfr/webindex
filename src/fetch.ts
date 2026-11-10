@@ -1620,7 +1620,9 @@ async function readWithoutBrowser(
     return { text: "", finalUrl: res.url, status: 304, etag: res.etag ?? opts.headers?.["if-none-match"], lastModified: res.lastModified };
   }
   if (!res.ok) {
-    seen.page = true;
+    // A 2xx refused unread is a document or media declared over its cap
+    // (httpGet): not a page, and nothing a browser would read better.
+    seen.page = !(res.truncated && res.status >= 200 && res.status < 300);
     const wait = res.retryAfterMs !== undefined ? `, retry after ${Math.ceil(res.retryAfterMs / 1000)} s` : "";
     const why = res.status === 429 ? `rate-limited (HTTP 429${wait})` : `status ${res.status}${res.error ? ", " + res.error : ""}${wait}`;
     return {

@@ -9211,7 +9211,7 @@ async function readWithoutBrowser(url, opts, wantsPdf, wantsDoc, seen) {
     return { text: "", finalUrl: res.url, status: 304, etag: res.etag ?? opts.headers?.["if-none-match"], lastModified: res.lastModified };
   }
   if (!res.ok) {
-    seen.page = true;
+    seen.page = !(res.truncated && res.status >= 200 && res.status < 300);
     const wait = res.retryAfterMs !== void 0 ? `, retry after ${Math.ceil(res.retryAfterMs / 1e3)} s` : "";
     const why = res.status === 429 ? `rate-limited (HTTP 429${wait})` : `status ${res.status}${res.error ? ", " + res.error : ""}${wait}`;
     return {

@@ -143,6 +143,20 @@ describe("fetchAndExtract with browser: fallback", () => {
     expect(r.note).toBe(`Read https://x.test/a in the browser: the built-in fetch ${why}.`);
   });
 
+  // A PDF or a video behind a URL that does not say so, declared over the cap,
+  // is refused unread: a 200 with no text. That is not a thin page, and a
+  // browser asked to "render" it downloads the file.
+  it.each([
+    ["a document", "application/pdf"],
+    ["media", "video/mp4"],
+  ])("does not render %s refused for its declared size", async (_what, contentType) => {
+    installFetchMock(routes([["x.test", { bytes: Buffer.alloc(1024), contentType, headers: { "content-length": String(200 * 1024 * 1024) } }]]));
+    const r = await fetchAndExtract("https://x.test/download?id=7", { browser: "fallback" });
+    expect(read).not.toHaveBeenCalled();
+    expect(r.text).toBe("");
+    expect(r.note).toMatch(/too large/);
+  });
+
   it("retries a fetch that got no answer at all", async () => {
     vi.stubGlobal("fetch", async () => {
       throw new TypeError("fetch failed");
