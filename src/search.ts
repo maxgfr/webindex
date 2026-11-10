@@ -1,4 +1,4 @@
-import { brand, env, envName } from "./brand.js";
+import { brand, countOption, env, envName } from "./brand.js";
 import { httpGet, pageDelayMs, sleep } from "./fetch.js";
 import { firecrawlBase, ProbeMemo, searchViaFirecrawl, type FirecrawlHit } from "./firecrawl.js";
 import { acceptLanguageHeader, searxngLanguage } from "./locale.js";
@@ -193,8 +193,8 @@ export async function searchViaSearxng(query: string, opts: SearchOptions = {}):
     );
   }
 
-  const pages = Math.max(1, opts.pages ?? 1);
-  const limit = Math.max(1, opts.limit ?? 10);
+  const pages = countOption(opts.pages, 1);
+  const limit = countOption(opts.limit, 10);
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
   // The only locale knob SearXNG has, so an explicit region rides on it.
   const language = searxngLanguage(opts.lang, opts.region);
@@ -432,7 +432,7 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
   return { hits, notes, rungs, searched: rungs.some((r) => answered(r.outcome)) };
 }
 
-const limitOf = (opts: SearchOptions) => Math.max(1, opts.limit ?? 10);
+const limitOf = (opts: SearchOptions) => countOption(opts.limit, 10);
 
 // Firecrawl's hits, held to the rules every other rung keeps: canonical dedupe,
 // then the limit.

@@ -361,6 +361,19 @@ describe("where a token is sent", () => {
     return seen;
   }
 
+  it("asks for a whole page size when the limit is a fraction or not a number", async () => {
+    const urls: string[] = [];
+    installFetchMock((url) => {
+      urls.push(url);
+      return { body: "[]", contentType: "application/json" };
+    });
+    const ref = resolveRepo("https://gitlab.com/o/r");
+    await listTags(ref, { limit: 2.5 });
+    await listTags(ref, { limit: Number.NaN });
+    const sizes = urls.map((u) => /[?&]per_page=([^&]+)/.exec(u)?.[1]).filter(Boolean);
+    expect(sizes).toEqual(["2", "50"]);
+  });
+
   it("never sends a token to a host that only looks like its forge", async () => {
     // A prompt-injected link is enough to route an agent here, and the forge
     // KIND was all it took to hand over the user's token.

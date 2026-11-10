@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { countFetch, env, envFlag, envName } from "./brand.js";
+import { countFetch, countOption, env, envFlag, envName } from "./brand.js";
 import { have, shAsync } from "./exec.js";
 import { contactUa, parseRetryAfter, readCappedBytes, sleep } from "./fetch.js";
 import { configuredForgeHosts, hostForgeKind, normalizeForgeHost } from "./forge-host.js";
@@ -644,7 +644,7 @@ function relaxTerms(terms: string[]): string[] | undefined {
 }
 
 async function searchOnce(ref: RepoRef, forge: ForgeKind, repoAt: string, terms: string[], kind: "issue" | "pr", opts: ForgeOptions): Promise<ForgeResult> {
-  const limit = Math.max(1, opts.limit ?? 10);
+  const limit = countOption(opts.limit, 10);
   const q = terms.join(" ");
 
   if (forge === "github") {
@@ -703,7 +703,7 @@ export async function listReleases(ref: RepoRef, opts: ForgeOptions = {}): Promi
   const forge = forgeKind(ref.host, opts);
   const repoAt = forge && repoPath(ref, forge);
   if (!forge || !repoAt) return { items: [], note: `Cannot list releases for "${ref.raw}".` };
-  const limit = Math.max(1, opts.limit ?? 20);
+  const limit = countOption(opts.limit, 20);
   const url = `${apiBase(ref, opts)}/${repoAt}/releases?per_page=${limit}${forge === "gitlab" ? "" : `&limit=${limit}`}`;
   const r = await forgeGet(url, forge, ref, opts);
   if (!r.ok) return failed(r, forge, ref, "Listing releases", opts);
@@ -727,7 +727,7 @@ export async function listTags(ref: RepoRef, opts: ForgeOptions = {}): Promise<F
   const forge = forgeKind(ref.host, opts);
   const repoAt = forge && repoPath(ref, forge);
   if (!forge || !repoAt) return { items: [], note: `Cannot list tags for "${ref.raw}".` };
-  const limit = Math.max(1, opts.limit ?? 50);
+  const limit = countOption(opts.limit, 50);
   const url =
     forge === "gitlab"
       ? `${apiBase(ref, opts)}/${repoAt}/repository/tags?per_page=${limit}`

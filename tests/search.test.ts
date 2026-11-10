@@ -184,6 +184,16 @@ describe("searchViaSearxng", () => {
     expect(r.hits).toHaveLength(2);
   });
 
+  it("asks SearXNG when pages or limit is not a number", async () => {
+    // A NaN bound ran the page loop zero times: the rung came back "empty"
+    // without one request.
+    const base = nextBase();
+    const spy = installFetchMock(routes([["/search", page([hit("https://a.test/1")])]]));
+    const r = await searchViaSearxng("q", { searxng: base, pages: Number.NaN, limit: Number.NaN });
+    expect(spy.mock.calls.some((c) => String(c[0]).includes("/search"))).toBe(true);
+    expect(r.hits.map((h) => h.url)).toEqual(["https://a.test/1"]);
+  });
+
   it("walks pages and dedupes across them by canonical URL", async () => {
     // Page 2 repeats page 1's link with tracking params. Counting it twice
     // would push a genuinely new result off the end of the limit.

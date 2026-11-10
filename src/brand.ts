@@ -242,6 +242,18 @@ export function envInt(suffix: string, def: number, min = 0, max = Number.MAX_SA
 }
 
 /**
+ * A caller's count option — result pages, a limit — as a whole number of at
+ * least 1, or `def` when it is absent or not a number. `Math.max(1, NaN)` is
+ * NaN, and a loop bounded by NaN never runs: a search asked for `pages: NaN`
+ * sent nothing and reported that it had searched and found nothing.
+ *
+ * Out of the public index, like MAX_TIMER_MS below.
+ */
+export function countOption(value: number | undefined, def: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(1, Math.floor(value)) : def;
+}
+
+/**
  * The longest delay `setTimeout` holds: 2^31-1 ms. A longer one fires after
  * 1 ms with a warning, so a generous `*_TIMEOUT_MS` tunable read through
  * `envInt` must be capped here or it becomes no time at all.

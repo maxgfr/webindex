@@ -256,6 +256,15 @@ describe("searchViaKeyless", () => {
     expect(String(spy.mock.calls[0]![0])).toContain("q=token%20bucket");
   });
 
+  it("asks the engine when pages or limit is not a number", async () => {
+    // Math.max(1, NaN) is NaN and the page loop never ran: nothing was sent,
+    // and the rung answered "searched, no results".
+    const spy = installFetchMock(() => ({ body: DDG_LITE }));
+    const r = await searchViaKeyless("ddglite", "token bucket", { pages: Number.NaN, limit: Number.NaN });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(r.hits.map((h) => h.url)).toEqual(LITE_URLS);
+  });
+
   it("reports a throttle as retryable and a 404 as not", async () => {
     installFetchMock(() => ({ status: 429, body: "" }));
     const limited = await searchViaKeyless("ddg", "x");

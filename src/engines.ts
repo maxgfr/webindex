@@ -1,4 +1,4 @@
-import { env } from "./brand.js";
+import { countOption, env } from "./brand.js";
 import { decodeEntities, httpGet, pageDelayMs, sleep } from "./fetch.js";
 import { acceptLanguageHeader, baseLang, ddgRegion, resolveRegion } from "./locale.js";
 import { canonicalizeUrl } from "./url.js";
@@ -456,8 +456,8 @@ export async function searchViaKeyless(
   const q = query.trim();
   if (!q) return { hits: [], note: "Empty query." };
 
-  const pages = Math.max(1, opts.pages ?? 1);
-  const limit = Math.max(1, opts.limit ?? 10);
+  const pages = countOption(opts.pages, 1);
+  const limit = countOption(opts.limit, 10);
   // Only pass a locale on when the caller actually asked for one. `ddgRegion`
   // has a default to fall back on; a search-time preference does not need one,
   // and inventing "us-en" for a caller who said nothing would bias every

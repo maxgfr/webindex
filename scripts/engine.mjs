@@ -65,6 +65,9 @@ function envInt(suffix, def, min = 0, max = Number.MAX_SAFE_INTEGER) {
   if (!Number.isFinite(n)) return def;
   return Math.min(max, Math.max(min, Math.trunc(n)));
 }
+function countOption(value, def) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(1, Math.floor(value)) : def;
+}
 var DEFAULT_BRAND, current, MAX_TIMER_MS;
 var init_brand = __esm({
   "src/brand.ts"() {
@@ -11589,7 +11592,7 @@ function relaxTerms(terms) {
   return [...best, ...qualifiers];
 }
 async function searchOnce(ref, forge, repoAt, terms, kind, opts) {
-  const limit = Math.max(1, opts.limit ?? 10);
+  const limit = countOption(opts.limit, 10);
   const q = terms.join(" ");
   if (forge === "github") {
     const canon = await canonicalLookup(ref, opts);
@@ -11639,7 +11642,7 @@ async function listReleases(ref, opts = {}) {
   const forge = forgeKind(ref.host, opts);
   const repoAt = forge && repoPath(ref, forge);
   if (!forge || !repoAt) return { items: [], note: `Cannot list releases for "${ref.raw}".` };
-  const limit = Math.max(1, opts.limit ?? 20);
+  const limit = countOption(opts.limit, 20);
   const url = `${apiBase(ref, opts)}/${repoAt}/releases?per_page=${limit}${forge === "gitlab" ? "" : `&limit=${limit}`}`;
   const r = await forgeGet(url, forge, ref, opts);
   if (!r.ok) return failed(r, forge, ref, "Listing releases", opts);
@@ -11661,7 +11664,7 @@ async function listTags(ref, opts = {}) {
   const forge = forgeKind(ref.host, opts);
   const repoAt = forge && repoPath(ref, forge);
   if (!forge || !repoAt) return { items: [], note: `Cannot list tags for "${ref.raw}".` };
-  const limit = Math.max(1, opts.limit ?? 50);
+  const limit = countOption(opts.limit, 50);
   const url = forge === "gitlab" ? `${apiBase(ref, opts)}/${repoAt}/repository/tags?per_page=${limit}` : `${apiBase(ref, opts)}/${repoAt}/tags?per_page=${limit}&limit=${limit}`;
   const r = await forgeGet(url, forge, ref, opts);
   if (!r.ok) return failed(r, forge, ref, "Listing tags", opts);
@@ -12995,8 +12998,8 @@ async function searchViaKeyless(engine, query, opts = {}) {
   const spec = SPECS[engine];
   const q = query.trim();
   if (!q) return { hits: [], note: "Empty query." };
-  const pages = Math.max(1, opts.pages ?? 1);
-  const limit = Math.max(1, opts.limit ?? 10);
+  const pages = countOption(opts.pages, 1);
+  const limit = countOption(opts.limit, 10);
   const localised = !!(opts.lang || opts.region);
   const kl = localised ? ddgRegion(opts.lang, opts.region) : "wt-wt";
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
@@ -13105,8 +13108,8 @@ async function searchViaSearxng(query, opts = {}) {
       ]
     );
   }
-  const pages = Math.max(1, opts.pages ?? 1);
-  const limit = Math.max(1, opts.limit ?? 10);
+  const pages = countOption(opts.pages, 1);
+  const limit = countOption(opts.limit, 10);
   const acceptLanguage = acceptLanguageHeader(opts.lang, opts.region);
   const language = searxngLanguage(opts.lang, opts.region);
   const root = `${base2}/search?q=${encodeURIComponent(query)}&format=json&safesearch=1` + (language ? `&language=${encodeURIComponent(language)}` : "");
@@ -13271,7 +13274,7 @@ async function search(query, opts = {}) {
   if (!hits.length) notes.push(closingNote(rungs, opts.signal?.aborted === true));
   return { hits, notes, rungs, searched: rungs.some((r) => answered2(r.outcome)) };
 }
-var limitOf = (opts) => Math.max(1, opts.limit ?? 10);
+var limitOf = (opts) => countOption(opts.limit, 10);
 function firecrawlHits(found, limit) {
   const seen = /* @__PURE__ */ new Set();
   const hits = [];
