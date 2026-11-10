@@ -219,7 +219,7 @@ opencode mcp add webindex --url http://127.0.0.1:7340/mcp
 | `webindex_package` | `name` (required), `registry`, `version` | The registry's own record: repository, homepage, docs, current version, licence and any deprecation. |
 | `webindex_meta` | `url` (required) | The page's JSON-LD, OpenGraph and meta tags: author, dates, type, site name, canonical URL. |
 | `webindex_robots` | `url` (required) | Whether robots.txt allows the URL, any crawl-delay, and the sitemaps it advertises. Advisory: `webindex_fetch` does not consult it. |
-| `webindex_sitemap` | `url` (required), `max` | Page URLs with their last-modified dates, reading at most `max` sitemap documents (default 3); the children it did not reach come back in `unfetched`. |
+| `webindex_sitemap` | `url` (required), `max` | Page URLs with their last-modified dates, reading at most `max` sitemap documents (default 3, at most 50); the children it did not reach come back in `unfetched`. |
 | `webindex_feed` | `url` (required) | A feed parsed — RSS, Atom or JSON Feed — or the feeds a page advertises, with dated entries and absolute links. |
 | `webindex_tables` | `url` (required), `markdown` | Every `<table>` as headers and rows with `colspan`/`rowspan` resolved, or as markdown. |
 | `webindex_embed` | `texts` (required) | One vector per text from the local Ollama, in input order. Fails with a note naming the command that starts it when no embedding server answers. |

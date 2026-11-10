@@ -1320,6 +1320,27 @@ describe("the MCP tools", () => {
       expect(spy).not.toHaveBeenCalled();
     });
 
+    it("caps the sitemap budget a model may ask for", async () => {
+      // `max` went through as given: a million documents, each up to 50 MB, for
+      // whoever could reach the server. A crawl's budget was already capped.
+      const children = Array.from({ length: 80 }, (_, i) => `https://smcap.test/part-${i}.xml`);
+      const spy = installFetchMock((url) => {
+        if (url.includes("robots.txt")) return { status: 404, body: "", contentType: "text/plain" };
+        if (url === "https://smcap.test/sitemap.xml") {
+          return { body: `<sitemapindex>${children.map((c) => `<sitemap><loc>${c}</loc></sitemap>`).join("")}</sitemapindex>`, contentType: "application/xml" };
+        }
+        return { body: `<urlset><url><loc>${url.replace(".xml", "/page")}</loc></url></urlset>`, contentType: "application/xml" };
+      });
+      const out = JSON.parse((await adapter.callTool("webindex_sitemap", { url: "https://smcap.test/", max: 1_000_000 })).text as string);
+      const documents = spy.mock.calls.map((c) => String(c[0])).filter((u) => u.endsWith(".xml"));
+      expect(documents).toHaveLength(50);
+      expect(out.unfetched).toHaveLength(31);
+      // A fraction is a whole number of documents, not a request for 2.5 of them.
+      spy.mockClear();
+      await adapter.callTool("webindex_sitemap", { url: "https://smcap.test/", max: 2.5 });
+      expect(spy.mock.calls.map((c) => String(c[0])).filter((u) => u.endsWith(".xml"))).toHaveLength(2);
+    });
+
     it("does not tell a caller what a refused name resolves to", async () => {
       // "localhost resolves to 127.0.0.1" made the wall a split-horizon DNS
       // oracle for internal names, which is the view it exists to hide.
@@ -1996,6 +2017,14 @@ describe("the forge, registry and page-metadata commands", () => {
     const r = await webindexAdapter().callTool("webindex_tags", { repo: "gitlab.com/gnutls/gnutls", limit: 2 });
     expect(JSON.parse(r.text).items.map((i: { title: string }) => i.title)).toEqual(["3.8.13", "3.8.12"]);
     await expect(webindexAdapter().callTool("webindex_releases", { repo: "gitlab.com/gnutls/gnutls" })).rejects.toThrow(/webindex_tags/);
+  });
+
+  it("asks a forge for a whole page size, however a model spelled the limit", async () => {
+    const spy = installFetchMock((url) => (url.includes("/tags") ? json([{ name: "1.0.0" }]) : json({ full_name: "a/b" })));
+    await webindexAdapter().callTool("webindex_tags", { repo: "gitlab.com/gnutls/gnutls", limit: 2.5 });
+    await webindexAdapter().callTool("webindex_tags", { repo: "gitlab.com/gnutls/gnutls", limit: 1_000_000 });
+    const sizes = spy.mock.calls.map((c) => /[?&]per_page=([^&]+)/.exec(String(c[0]))?.[1]).filter(Boolean);
+    expect(sizes).toEqual(["2", "100"]);
   });
 
   it("queries a self-hosted forge as the forge --forge names", async () => {

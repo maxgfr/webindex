@@ -19484,6 +19484,8 @@ function parseRankDocs(value, where2) {
 }
 var CLOSED_WORLD_TOOLS = /* @__PURE__ */ new Set(["webindex_extract", "webindex_rank", "webindex_embed", "webindex_video_search"]);
 var CRAWL_TOOL_MAX = 100;
+var SITEMAP_TOOL_MAX = 50;
+var LIST_TOOL_MAX = 100;
 function toolLimit(raw, def, max = 50) {
   const n = typeof raw === "number" ? Math.trunc(raw) : Number.NaN;
   return Number.isFinite(n) ? Math.min(max, Math.max(1, n)) : def;
@@ -19785,7 +19787,7 @@ function webindexAdapter(policy = {}) {
           type: "object",
           properties: {
             url: { type: "string", description: "Any URL on the site." },
-            max: { type: "number", description: "Sitemap documents to fetch (default 3)." }
+            max: { type: "number", description: "Sitemap documents to fetch (default 3, at most 50)." }
           },
           required: ["url"]
         }
@@ -19974,7 +19976,7 @@ ${trailer.join("\n")}` };
         if (raw !== void 0 && !isKeylessEngine(raw)) throw new ToolError(`unknown engine "${raw}" \u2014 expected one of ${KEYLESS_ENGINES.join(", ")}`);
         const engines = raw === void 0 ? void 0 : [raw];
         const r = await search(q, {
-          limit: typeof args.limit === "number" ? args.limit : void 0,
+          limit: typeof args.limit === "number" ? toolLimit(args.limit, 10, LIST_TOOL_MAX) : void 0,
           lang: args.lang ? String(args.lang) : void 0,
           region: args.region ? String(args.region) : void 0,
           // Clamped, not refused: every page is another request to an engine
@@ -20046,7 +20048,7 @@ extractor: ${r.extractor}` };
         const ref2 = forgeRef(repoRef(raw, kind), kind);
         if (ref2.host === "generic") throw new ToolError(`"${raw}" does not name a repository.`);
         await refuseForgeHost(ref2, forge);
-        const limit = typeof args.limit === "number" ? args.limit : void 0;
+        const limit = typeof args.limit === "number" ? toolLimit(args.limit, 10, LIST_TOOL_MAX) : void 0;
         const authorizeUrl = forgeGuard(ref2, forge);
         const opts = { ...limit ? { limit } : {}, ...forge ? { kind: forge } : {}, ...authorizeUrl ? { authorizeUrl } : {} };
         if (name2 === "webindex_repo") {
@@ -20078,13 +20080,13 @@ extractor: ${r.extractor}` };
         }
         if (name2 === "webindex_sitemap") {
           const robots = await fetchRobots(url, robotsOpts);
-          const max = typeof args.max === "number" ? args.max : void 0;
+          const max = toolLimit(args.max, 3, SITEMAP_TOOL_MAX);
           const s = await fetchSitemap(url, {
             sitemaps: robots.sitemaps,
             max,
             signal,
             authorizeUrl: guard,
-            onDocument: (doc, fetched) => ctx?.progress(fetched, max ?? 3, doc)
+            onDocument: (doc, fetched) => ctx?.progress(fetched, max, doc)
           });
           if (!s.urls.length && !s.sitemaps.length) throw new ToolError(`No sitemap found for ${url}.${s.notes?.length ? ` ${s.notes.join(" ")}` : ""}`);
           return { text: JSON.stringify(s, null, 2) };

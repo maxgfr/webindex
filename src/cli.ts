@@ -1139,6 +1139,10 @@ const CLOSED_WORLD_TOOLS = new Set(["webindex_extract", "webindex_rank", "webind
 /** A tool's count argument: a whole number from 1 to `max`, else the default. */
 // The most pages webindex_crawl walks for a client, at up to 3 requests each.
 const CRAWL_TOOL_MAX = 100;
+// The most sitemap documents webindex_sitemap reads for a client: each may be 50 MB.
+const SITEMAP_TOOL_MAX = 50;
+// The most results a search or a forge listing returns for a client — a forge's own largest page.
+const LIST_TOOL_MAX = 100;
 
 function toolLimit(raw: unknown, def: number, max = 50): number {
   const n = typeof raw === "number" ? Math.trunc(raw) : Number.NaN;
@@ -1570,7 +1574,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & {
             type: "object",
             properties: {
               url: { type: "string", description: "Any URL on the site." },
-              max: { type: "number", description: "Sitemap documents to fetch (default 3)." },
+              max: { type: "number", description: "Sitemap documents to fetch (default 3, at most 50)." },
             },
             required: ["url"],
           },
@@ -1786,7 +1790,7 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & {
         if (raw !== undefined && !isKeylessEngine(raw)) throw new ToolError(`unknown engine "${raw}" — expected one of ${KEYLESS_ENGINES.join(", ")}`);
         const engines: KeylessEngine[] | undefined = raw === undefined ? undefined : [raw];
         const r = await search(q, {
-          limit: typeof args.limit === "number" ? args.limit : undefined,
+          limit: typeof args.limit === "number" ? toolLimit(args.limit, 10, LIST_TOOL_MAX) : undefined,
           lang: args.lang ? String(args.lang) : undefined,
           region: args.region ? String(args.region) : undefined,
           // Clamped, not refused: every page is another request to an engine
@@ -1855,7 +1859,8 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & {
         const ref = forgeRef(repoRef(raw, kind), kind);
         if (ref.host === "generic") throw new ToolError(`"${raw}" does not name a repository.`);
         await refuseForgeHost(ref, forge);
-        const limit = typeof args.limit === "number" ? args.limit : undefined;
+        // A whole number the forge's own page size allows: 2.5 went out as `per_page=2.5`.
+        const limit = typeof args.limit === "number" ? toolLimit(args.limit, 10, LIST_TOOL_MAX) : undefined;
         const authorizeUrl = forgeGuard(ref, forge);
         const opts = { ...(limit ? { limit } : {}), ...(forge ? { kind: forge } : {}), ...(authorizeUrl ? { authorizeUrl } : {}) };
         if (name === "webindex_repo") {
@@ -1896,13 +1901,14 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & {
         }
         if (name === "webindex_sitemap") {
           const robots = await fetchRobots(url, robotsOpts);
-          const max = typeof args.max === "number" ? args.max : undefined;
+          // A model's budget, capped as a crawl's is: each document may be 50 MB.
+          const max = toolLimit(args.max, 3, SITEMAP_TOOL_MAX);
           const s = await fetchSitemap(url, {
             sitemaps: robots.sitemaps,
             max,
             signal,
             authorizeUrl: guard,
-            onDocument: (doc, fetched) => ctx?.progress(fetched, max ?? 3, doc),
+            onDocument: (doc, fetched) => ctx?.progress(fetched, max, doc),
           });
           if (!s.urls.length && !s.sitemaps.length) throw new ToolError(`No sitemap found for ${url}.${s.notes?.length ? ` ${s.notes.join(" ")}` : ""}`);
           return { text: JSON.stringify(s, null, 2) };
