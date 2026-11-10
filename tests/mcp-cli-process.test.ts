@@ -50,6 +50,32 @@ describe("the built CLI as a process", () => {
     expect(child.stderr).not.toMatch(/EPIPE|Unhandled|node:events/);
   });
 
+  it("prints the whole --json result to a pipe before it exits 1", () => {
+    // `fetch <urls…> --json | jq` with every URL failing: the array was
+    // written, then process.exit() ended the run at once, and a pipe got the
+    // first 64 KiB of it — JSON cut mid-record. Port 1 on loopback refuses at
+    // once, so nothing here reaches the network.
+    const urls = Array.from({ length: 800 }, (_, i) => `http://127.0.0.1:1/page-number-${i}`);
+    const child = spawnSync(process.execPath, [binary, "fetch", ...urls, "--json"], {
+      encoding: "utf8",
+      timeout: 60_000,
+      maxBuffer: 16 * 1024 * 1024,
+      env: {
+        ...process.env,
+        WEBINDEX_CACHE_DIR: dir,
+        WEBINDEX_RETRY_MS: "0",
+        WEBINDEX_MAX_ATTEMPTS: "1",
+        WEBINDEX_FETCH_CONCURRENCY: "16",
+        WEBINDEX_FIRECRAWL: "off",
+        WEBINDEX_BROWSER_FETCH: "off",
+      },
+    });
+    expect(child.status).toBe(1);
+    expect(child.stderr).toMatch(/none of the 800 URLs had anything readable/);
+    expect(child.stdout.length).toBeGreaterThan(64 * 1024);
+    expect(JSON.parse(child.stdout)).toHaveLength(800);
+  }, 70_000);
+
   it("reads a page or a document from stdin for `-`", () => {
     const env = { ...process.env, WEBINDEX_CACHE_DIR: dir, WEBINDEX_NO_NPX: "1" };
     const tables = spawnSync(process.execPath, [binary, "tables", "-", "--json"], {

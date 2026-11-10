@@ -19219,6 +19219,11 @@ function fail(msg) {
 `);
   process.exit(EXIT_FAILURE);
 }
+function failAfterOutput(msg) {
+  process.stderr.write(`webindex: ${msg}
+`);
+  exitAfterOutput(EXIT_FAILURE);
+}
 function usage(msg) {
   process.stderr.write(`webindex: ${msg}
 `);
@@ -20317,7 +20322,7 @@ ${r.text}
     const records = results.map((r, i) => record2(urls[i], r));
     process.stdout.write(JSON.stringify(records, null, 2) + "\n");
   }
-  if (results.every((r) => !r.text)) fail(`none of the ${urls.length} URLs had anything readable`);
+  if (results.every((r) => !r.text)) failAfterOutput(`none of the ${urls.length} URLs had anything readable`);
 }
 function positionalLimit(args) {
   const cmd = args.command;
@@ -20890,7 +20895,8 @@ async function dispatch(argv) {
       const r = await fetchVideoRun(url, root, { refresh: argBool(args, "refresh"), lang: argValue(args, "lang") });
       if (!r.ok) {
         if (asJson) process.stdout.write(jsonLine(r));
-        fail(`no transcript for ${url}: ${r.reason}`);
+        failAfterOutput(`no transcript for ${url}: ${r.reason}`);
+        return;
       }
       const summary = { ...r, title: r.meta.title, via: r.meta.via, duration: r.meta.duration };
       if (asJson) process.stdout.write(jsonLine(summary));
@@ -20923,7 +20929,7 @@ async function dispatch(argv) {
 ${rows.join("\n")}
 `);
       }
-      if (!r.videos.some((v) => v.dir)) fail("none of the listed videos had a transcript");
+      if (!r.videos.some((v) => v.dir)) failAfterOutput("none of the listed videos had a transcript");
       return;
     }
     if (action === "frames") {
@@ -20941,7 +20947,8 @@ ${rows.join("\n")}
       const r = await extractFrames(runDir, { effort });
       if (!r.ok) {
         if (asJson) process.stdout.write(jsonLine(r));
-        fail(r.reason);
+        failAfterOutput(r.reason);
+        return;
       }
       if (asJson) process.stdout.write(jsonLine(r));
       else {

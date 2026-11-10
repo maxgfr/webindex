@@ -645,7 +645,8 @@ const YTDLP_STALE_DAYS = 60;
  * process at once, and a write to a pipe (`webindex … | jq`) is asynchronous:
  * a result over the pipe's buffer (64 KiB) was cut off there, while a file or a
  * terminal got all of it. Every path that printed a result returns after this
- * instead; fail() and usage() print one line of their own.
+ * instead (failAfterOutput when it also failed); fail() and usage() print one
+ * line of their own, and nothing before it.
  */
 function exitAfterOutput(code: number): void {
   process.exitCode = code;
@@ -654,6 +655,15 @@ function exitAfterOutput(code: number): void {
 function fail(msg: string): never {
   process.stderr.write(`webindex: ${msg}\n`);
   process.exit(EXIT_FAILURE);
+}
+
+/**
+ * fail(), for a path that has already printed its result: the line on stderr,
+ * then exit 1 once stdout is out (see exitAfterOutput). The caller returns.
+ */
+function failAfterOutput(msg: string): void {
+  process.stderr.write(`webindex: ${msg}\n`);
+  exitAfterOutput(EXIT_FAILURE);
 }
 
 /**
@@ -2138,7 +2148,7 @@ async function fetchSeveral<R>(
     const records = results.map((r, i) => record(urls[i]!, r));
     process.stdout.write(JSON.stringify(records, null, 2) + "\n");
   }
-  if (results.every((r) => !r.text)) fail(`none of the ${urls.length} URLs had anything readable`);
+  if (results.every((r) => !r.text)) failAfterOutput(`none of the ${urls.length} URLs had anything readable`);
 }
 
 /**
@@ -2784,7 +2794,8 @@ async function dispatch(argv: string[]): Promise<void> {
       const r = await fetchVideoRun(url, root, { refresh: argBool(args, "refresh"), lang: argValue(args, "lang") });
       if (!r.ok) {
         if (asJson) process.stdout.write(jsonLine(r));
-        fail(`no transcript for ${url}: ${r.reason}`);
+        failAfterOutput(`no transcript for ${url}: ${r.reason}`);
+        return;
       }
       const summary = { ...r, title: r.meta.title, via: r.meta.via, duration: r.meta.duration };
       if (asJson) process.stdout.write(jsonLine(summary));
@@ -2817,7 +2828,7 @@ async function dispatch(argv: string[]): Promise<void> {
         const rows = r.videos.map((v) => `  ${v.label.padEnd(4)}${v.dir ? `${v.via?.padEnd(12)}${v.title}` : `not read — ${v.reason}`}`);
         process.stdout.write(`${r.corpus}\n${rows.join("\n")}\n`);
       }
-      if (!r.videos.some((v) => v.dir)) fail("none of the listed videos had a transcript");
+      if (!r.videos.some((v) => v.dir)) failAfterOutput("none of the listed videos had a transcript");
       return;
     }
 
@@ -2838,7 +2849,8 @@ async function dispatch(argv: string[]): Promise<void> {
       const r = await extractFrames(runDir, { effort: effort as FrameEffort });
       if (!r.ok) {
         if (asJson) process.stdout.write(jsonLine(r));
-        fail(r.reason);
+        failAfterOutput(r.reason);
+        return;
       }
       if (asJson) process.stdout.write(jsonLine(r));
       else {
