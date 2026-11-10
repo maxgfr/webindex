@@ -131,6 +131,19 @@ describe("detectBrowserBinary: explicit override", () => {
     expect(r).toEqual({ kind: "brave", path: "/usr/bin/brave-browser" });
   });
 
+  it("resolves a bare command name on a Windows PATH", () => {
+    // Split on ":" and joined with "/", `C:\Tools;D:\Apps` became three
+    // directories, none of them real, and a browser that was on PATH was "not
+    // an executable file".
+    const win = { platform: "win32" as const, processEnv: { PATH: "C:\\Windows\\system32;C:\\Tools\\Brave" } };
+    expect(detectBrowserBinary({ ...win, env: () => "brave.exe", exists: only("C:\\Tools\\Brave\\brave.exe") })).toEqual({
+      kind: "brave",
+      path: "C:\\Tools\\Brave\\brave.exe",
+    });
+    // As a shell there finds it: without the extension too.
+    expect(detectBrowserBinary({ ...win, env: () => "brave", exists: only("C:\\Tools\\Brave\\brave.exe") })?.path).toBe("C:\\Tools\\Brave\\brave.exe");
+  });
+
   it("refuses an override that points at nothing, instead of silently using another browser", () => {
     expect(() => detectBrowserBinary({ ...base, env: () => "/nope/chrome", exists: only("/usr/bin/google-chrome") })).toThrow(/BROWSER_BIN.*\/nope\/chrome/);
   });

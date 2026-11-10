@@ -5459,7 +5459,9 @@ function detectBrowserBinary(opts = {}) {
   const explicit = opts.env ? opts.env("BROWSER_BIN") : env("BROWSER_BIN");
   if (explicit) {
     const bare = !/[\\/]/.test(explicit);
-    const options = bare ? (sys.PATH ?? "").split(":").filter(Boolean).map((d) => posix.join(d, explicit)) : [explicit];
+    const win = platform === "win32";
+    const names = win && !/\.[a-z0-9]+$/i.test(explicit) ? [explicit, `${explicit}.exe`] : [explicit];
+    const options = bare ? (sys.PATH ?? (win ? sys.Path : void 0) ?? "").split(win ? ";" : ":").filter(Boolean).flatMap((d) => names.map((n) => (win ? win32 : posix).join(d, n))) : [explicit];
     const found = options.find(exists);
     if (!found) throw new Error(`BROWSER_BIN points at "${explicit}", which is not an executable file`);
     return { kind: kindOf(found), path: found };
