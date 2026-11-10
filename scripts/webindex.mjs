@@ -11005,7 +11005,8 @@ function renderSnapshot(nodes, opts) {
       if (opts.interactive) flat(over, lines, opts.refs.url);
       else nested(over, 1, lines);
       if (lines.length === 0) continue;
-      all.push({ text: OVERLAY_HEADER, ref: false }, ...opts.interactive ? lines.map((l) => ({ ...l, text: `  ${l.text}` })) : lines);
+      all.push({ text: OVERLAY_HEADER, ref: false });
+      for (const l of lines) all.push(opts.interactive ? { ...l, text: `  ${l.text}` } : l);
     }
     if (main2.root) items = merge(r.collect(main2, main2.root));
   }
@@ -11262,7 +11263,7 @@ var init_snapshot = __esm({
         const out = [];
         for (const id of n.childIds ?? []) {
           const c = tree.byId.get(id);
-          if (c) out.push(...this.collect(tree, c, parent));
+          if (c) for (const item of this.collect(tree, c, parent)) out.push(item);
         }
         return out;
       }

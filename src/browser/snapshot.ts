@@ -303,7 +303,9 @@ class Renderer {
     const out: Item[] = [];
     for (const id of n.childIds ?? []) {
       const c = tree.byId.get(id);
-      if (c) out.push(...this.collect(tree, c, parent));
+      // One by one: push(...items) passes each item as an argument, and a
+      // plain container of a few hundred thousand rows is more than a call takes.
+      if (c) for (const item of this.collect(tree, c, parent)) out.push(item);
     }
     return out;
   }
@@ -434,7 +436,8 @@ export function renderSnapshot(nodes: AXNode[], opts: RenderOptions): RenderResu
       if (opts.interactive) flat(over, lines, opts.refs.url);
       else nested(over, 1, lines);
       if (lines.length === 0) continue;
-      all.push({ text: OVERLAY_HEADER, ref: false }, ...(opts.interactive ? lines.map((l) => ({ ...l, text: `  ${l.text}` })) : lines));
+      all.push({ text: OVERLAY_HEADER, ref: false });
+      for (const l of lines) all.push(opts.interactive ? { ...l, text: `  ${l.text}` } : l);
     }
     if (main.root) items = merge(r.collect(main, main.root));
   }

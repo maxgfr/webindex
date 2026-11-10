@@ -73,6 +73,29 @@ describe("hints on unclear form controls", () => {
 });
 
 describe("renderSnapshot", () => {
+  it("renders a container with hundreds of thousands of children", () => {
+    // A log viewer or a long results page: one plain <div> holding every row.
+    // Its items were appended to its parent's with push(...items), which passes
+    // each one as an argument — past ~120k that is "Maximum call stack size
+    // exceeded", and the page could not be snapshotted at all.
+    const rows = 200_000;
+    const kids: AXNode[] = Array.from({ length: rows }, (_, i) => ({
+      nodeId: String(i + 2),
+      role: { type: "role", value: "button" },
+      name: { type: "computedString", value: `Row ${i}` },
+      childIds: [],
+      backendDOMNodeId: 100 + i,
+    }));
+    const nodes: AXNode[] = [
+      { nodeId: "0", role: { type: "role", value: "RootWebArea" }, childIds: ["1"], backendDOMNodeId: 1 },
+      { nodeId: "1", role: { type: "role", value: "generic" }, childIds: kids.map((k) => k.nodeId), backendDOMNodeId: 2 },
+      ...kids,
+    ];
+    const r = renderSnapshot(nodes, { refs: fresh(), maxChars: 200 });
+    expect(r.text.split("\n")[0]).toBe('- button "Row 0" [ref=e1]');
+    expect(Object.keys(r.refs.refs)).toHaveLength(rows);
+  });
+
   it("renders a login form: roles, names, values, states, urls, merged text", () => {
     const r = renderSnapshot(fixture("login-form"), { refs: fresh() });
     expect(r.text).toBe(
