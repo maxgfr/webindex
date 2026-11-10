@@ -39,7 +39,9 @@ const AREAS = value("area")?.split(",").filter(Boolean);
 const ID = value("id");
 const WITH_DOCKER = flag("with-docker");
 const WITH_BROWSER = flag("with-browser");
-const JOBS = Math.max(1, Number(value("jobs") ?? 6));
+// `--jobs abc` is NaN, and Array.from({ length: NaN }) starts no worker: every
+// result was then undefined and the report crashed on the first one.
+const JOBS = Math.max(1, Math.trunc(Number(value("jobs") ?? 6)) || 6);
 const KEEP = flag("keep");
 const OUT = value("out") ?? join(root, ".ultraeval", "live", new Date().toISOString().slice(0, 10));
 

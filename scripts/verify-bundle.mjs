@@ -7,14 +7,17 @@
 // reachable from the library, and simply absent from the program. Nothing was
 // looking, so nothing said so.
 //
-// Two assertions, in both directions:
-//   A. every `--flag` and `webindex <cmd>` named in the docs exists in the CLI
-//   B. every command the CLI dispatches is named in HELP
+// What it asserts, each stated again where it is checked below:
+//   A. every command the parser accepts is named in HELP
+//   B. every `cmd === "x"` dispatch branch is a command the parser accepts
+//   C. every flag the CLI accepts is named in HELP, and every `--flag` a doc
+//      names is one the CLI accepts
+//   D. every flag the CLI accepts is in the README
 //
 // Plus the MCP surface, which is the part an agent actually sees: every declared
-// tool needs a required argument and a capAdvice, because an oversized response
-// is WITHHELD rather than truncated and the replacement has to name the argument
-// to narrow.
+// tool, the browser ones included, needs a capAdvice, because an oversized
+// response is WITHHELD rather than truncated and the replacement has to name
+// the argument to narrow.
 
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
