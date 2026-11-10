@@ -345,10 +345,12 @@ function bm25Stem(t: string): string {
 
 function docTokens(doc: Bm25Doc, titleWeight: number, headingWeight: number, body?: readonly string[]): string[] {
   const out = body ? [...body] : bm25Tokenize(doc.body);
+  // Appended one by one: push(...tokens) passes each token as an argument, and
+  // a field of a few hundred thousand of them is more than a call takes.
   const headings = bm25Tokenize(doc.headings);
-  for (let r = 0; r < headingWeight; r++) out.push(...headings);
+  for (let r = 0; r < headingWeight; r++) for (const t of headings) out.push(t);
   const title = bm25Tokenize(doc.title);
-  for (let r = 0; r < titleWeight; r++) out.push(...title);
+  for (let r = 0; r < titleWeight; r++) for (const t of title) out.push(t);
   for (let i = 0; i < out.length; i++) out[i] = bm25Stem(out[i] as string);
   return out;
 }

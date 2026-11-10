@@ -3496,9 +3496,9 @@ function bm25Stem(t) {
 function docTokens(doc, titleWeight, headingWeight, body) {
   const out = body ? [...body] : bm25Tokenize(doc.body);
   const headings = bm25Tokenize(doc.headings);
-  for (let r = 0; r < headingWeight; r++) out.push(...headings);
+  for (let r = 0; r < headingWeight; r++) for (const t of headings) out.push(t);
   const title = bm25Tokenize(doc.title);
-  for (let r = 0; r < titleWeight; r++) out.push(...title);
+  for (let r = 0; r < titleWeight; r++) for (const t of title) out.push(t);
   for (let i = 0; i < out.length; i++) out[i] = bm25Stem(out[i]);
   return out;
 }

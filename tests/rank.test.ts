@@ -123,6 +123,21 @@ describe("dedupeByUrl", () => {
 });
 
 describe("BM25F", () => {
+  it("indexes a document whose headings or title run to hundreds of thousands of words", () => {
+    // The weighted fields were appended with push(...tokens): past ~120k of
+    // them that is more arguments than a call takes, and the whole ranking
+    // failed with "Maximum call stack size exceeded".
+    const long = Array.from({ length: 300_000 }, (_, i) => `word${i % 977}`).join(" ");
+    const docs = [
+      { id: "a", title: "Token bucket", headings: long, body: "A token bucket refills at a fixed rate." },
+      { id: "b", title: long, headings: "", body: "An unrelated sentence about cats." },
+      { id: "c", title: "Cats", headings: "", body: "Another unrelated sentence." },
+    ];
+    const index = buildBm25Index("token bucket", docs);
+    expect(bm25Score(index, docs[0]!)).toBeGreaterThan(0);
+    expect(bm25Score(index, docs[1]!)).toBe(0);
+  });
+
   it("matches -ing / -er / -ed forms of a long word, and reports the question's own words", () => {
     const docs = [
       { id: "a", title: "Zero-shot forecasting", headings: "", body: "Forecasting models and their forecasts." },
