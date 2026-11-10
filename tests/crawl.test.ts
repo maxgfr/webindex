@@ -2,18 +2,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envName } from "../src/brand.js";
 import { awaitHostSlot, backOffHost, crawlSite, hostDelayMs, linksFrom, resetHostSchedule } from "../src/crawl.js";
 import { resetRobotsCache } from "../src/robots.js";
+import { resetVideoLadderCache, setVideoDeps } from "../src/video.js";
 import { installFetchMock } from "./fetchmock.js";
 import { CPU_BUDGET_MS } from "./budget.js";
 
 beforeEach(() => {
   resetHostSchedule();
   resetRobotsCache();
+  setVideoDeps();
+  resetVideoLadderCache();
 });
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   resetHostSchedule();
   resetRobotsCache();
+  setVideoDeps();
+  resetVideoLadderCache();
 });
 
 const html = (body: string) => ({ status: 200, body: `<html><body>${body}</body></html>`, contentType: "text/html" });
@@ -211,6 +216,27 @@ describe("crawlSite", () => {
     site({ "https://s.test/": '<a href="/a">a</a><a href="https://other.test/x">out</a>' });
     const r = await crawlSite("https://s.test/", { maxPages: 10, maxDepth: 1, useSitemap: false, delayMs: 0 });
     expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/", "https://s.test/a"]);
+  });
+
+  it("reads a video link as the page it is, never through the transcript ladder", async () => {
+    // fetchAndExtract hands a video URL to yt-dlp, and to whisper after it: a
+    // crawl that crossed origins transcribed every video a page linked to,
+    // inside the walk's worker slots. A crawl enumerates pages.
+    const ran: string[] = [];
+    setVideoDeps({
+      run: async (cmd) => {
+        ran.push(cmd);
+        return { ok: false, status: 1, stdout: "", stderr: "" };
+      },
+      have: () => true,
+    });
+    site({
+      "https://s.test/": '<a href="https://www.youtube.com/watch?v=jNQXAC9IVRw">a talk</a>',
+      "https://www.youtube.com/watch?v=jNQXAC9IVRw": "<p>The watch page, as any other page.</p>",
+    });
+    const r = await crawlSite("https://s.test/", { maxPages: 10, maxDepth: 1, useSitemap: false, crossOrigin: true, delayMs: 0 });
+    expect(ran).toEqual([]);
+    expect(r.pages.map((p) => p.url)).toEqual(["https://s.test/", "https://www.youtube.com/watch?v=jNQXAC9IVRw"]);
   });
 
   it("crosses origins when asked", async () => {

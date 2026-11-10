@@ -589,6 +589,10 @@ export async function crawlSite(seed: string, opts: CrawlOptions = {}): Promise<
     const isSeed = item === seedItem;
     const got = await fetchAndExtract(item.url, {
       keepHtml: item.depth < maxDepth,
+      // A crawl enumerates pages. A video link is read as the page it is: the
+      // transcript ladder (yt-dlp, then whisper) would run once per link, in
+      // the walk's own worker slots.
+      video: false,
       authorizeUrl: isSeed ? authorizeSeed : authorizeUrl,
       // A short Retry-After is waited out and retried inside httpGet; the rest
       // of this host's queue must wait with it, not go out meanwhile.
