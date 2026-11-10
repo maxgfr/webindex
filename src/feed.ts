@@ -458,13 +458,19 @@ export function parseSitemap(xml: string): Sitemap {
     return out;
   }
   const isIndex = /<sitemapindex(?=[\s/>])/i.test(body);
+  // A <loc> is whatever the site wrote: only an http(s) one is a page or a
+  // sitemap to fetch, as on a plain-text line above.
+  const httpLoc = (inner: string): string | undefined => {
+    const loc = tagText(inner, "loc");
+    return loc && /^https?:\/\//i.test(loc) ? loc : undefined;
+  };
   for (const el of elements(body, "sitemap")) {
-    const loc = tagText(el.inner, "loc");
+    const loc = httpLoc(el.inner);
     if (loc) out.sitemaps.push(loc);
   }
   if (isIndex) return out;
   for (const el of elements(body, "url")) {
-    const loc = tagText(el.inner, "loc");
+    const loc = httpLoc(el.inner);
     if (!loc) continue;
     const lastmod = tagText(el.inner, "lastmod");
     out.urls.push({ loc, ...(lastmod ? { lastmod } : {}) });

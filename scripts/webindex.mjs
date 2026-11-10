@@ -14520,13 +14520,17 @@ function parseSitemap(xml) {
     return out;
   }
   const isIndex = /<sitemapindex(?=[\s/>])/i.test(body);
+  const httpLoc = (inner) => {
+    const loc = tagText(inner, "loc");
+    return loc && /^https?:\/\//i.test(loc) ? loc : void 0;
+  };
   for (const el of elements(body, "sitemap")) {
-    const loc = tagText(el.inner, "loc");
+    const loc = httpLoc(el.inner);
     if (loc) out.sitemaps.push(loc);
   }
   if (isIndex) return out;
   for (const el of elements(body, "url")) {
-    const loc = tagText(el.inner, "loc");
+    const loc = httpLoc(el.inner);
     if (!loc) continue;
     const lastmod = tagText(el.inner, "lastmod");
     out.urls.push({ loc, ...lastmod ? { lastmod } : {} });

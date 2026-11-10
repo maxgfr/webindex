@@ -1119,6 +1119,20 @@ describe("sitemaps", () => {
     expect(s.urls).toEqual([]);
   });
 
+  it("keeps only http(s) locations from an XML sitemap, as it does from a plain-text one", () => {
+    // A <loc> is whatever the site wrote. The plain-text form already kept
+    // http(s) lines only; the XML form listed `javascript:` and `file:` URLs as
+    // pages, and queued a `file:` child sitemap to be fetched.
+    const pages = parseSitemap(
+      "<urlset><url><loc>https://ex.test/a</loc></url><url><loc>javascript:alert(1)</loc></url><url><loc>file:///etc/passwd</loc></url><url><loc>/relative</loc></url><url><loc>HTTP://ex.test/b</loc></url></urlset>",
+    );
+    expect(pages.urls.map((u) => u.loc)).toEqual(["https://ex.test/a", "HTTP://ex.test/b"]);
+    const index = parseSitemap(
+      "<sitemapindex><sitemap><loc>file:///etc/passwd</loc></sitemap><sitemap><loc>https://ex.test/s1.xml</loc></sitemap></sitemapindex>",
+    );
+    expect(index.sitemaps).toEqual(["https://ex.test/s1.xml"]);
+  });
+
   it("returns empty for anything unrecognised", () => {
     expect(parseSitemap("<html></html>")).toEqual({ urls: [], sitemaps: [] });
   });
