@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -153,6 +153,19 @@ describe("auditEngineUsage", () => {
     const r = auditEngineUsage(root, config(), DTS);
     expect(r.collisions).toEqual([]);
     expect(r.imported.sort()).toEqual(["fetchAndExtract", "mapLimit", "rrf", "slugify"]);
+  });
+
+  it("walks a tree holding a dangling link and a link back up the tree", () => {
+    // statSync follows links: a dangling one threw and `skill check` died with
+    // a stack trace, and `src/loop -> ..` was descended into until the path
+    // was too long to stat.
+    write("src/util.ts", "export function rrf() {}\n");
+    symlinkSync(join(root, "nowhere.ts"), join(root, "src", "dead.ts"));
+    symlinkSync(join(root, "src"), join(root, "src", "loop"));
+    symlinkSync(join(root, "src", "util.ts"), join(root, "src", "alias.ts"));
+    const r = auditEngineUsage(root, config(), DTS);
+    // The linked file is read as the file it names; the linked directory is not entered.
+    expect(r.collisions.map((c) => c.file).sort()).toEqual([join("src", "alias.ts"), join("src", "util.ts")]);
   });
 
   it("flags a module that DECLARES a name the engine exports", () => {

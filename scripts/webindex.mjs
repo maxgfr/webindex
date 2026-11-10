@@ -15255,7 +15255,7 @@ async function hasChanged(url, previous, opts = {}) {
 }
 
 // src/skillkit/usage.ts
-import { readdirSync as readdirSync7, readFileSync as readFileSync16, statSync as statSync8 } from "fs";
+import { lstatSync as lstatSync4, readdirSync as readdirSync7, readFileSync as readFileSync16, statSync as statSync8 } from "fs";
 import { dirname as dirname3, join as join21, relative, resolve as resolve5 } from "path";
 var DECL = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|class|interface|enum)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm;
 var USES_ENGINE = /(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']((?:\.{1,2}\/)*(?:engine\.js|vendor\/[^"']+-engine\.mjs))["']/g;
@@ -15277,9 +15277,18 @@ function walkSources(dir, skip = "vendor", out = []) {
   }
   for (const e of entries) {
     const p = join21(dir, e);
-    if (statSync8(p).isDirectory()) {
+    let isDir = false;
+    let isFile = false;
+    try {
+      const st = lstatSync4(p);
+      isDir = st.isDirectory();
+      isFile = st.isSymbolicLink() ? statSync8(p).isFile() : st.isFile();
+    } catch {
+      continue;
+    }
+    if (isDir) {
       if (e !== skip) walkSources(p, skip, out);
-    } else if (e.endsWith(".ts")) out.push(p);
+    } else if (isFile && e.endsWith(".ts")) out.push(p);
   }
   return out;
 }

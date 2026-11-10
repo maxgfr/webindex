@@ -19,7 +19,7 @@
 // A floor on distinct imported symbols rides along, so deleting the last use of
 // a layer has to be a decision someone makes on purpose.
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import type { SkillConfig } from "./config.js";
 
@@ -87,9 +87,22 @@ export function walkSources(dir: string, skip = "vendor", out: string[] = []): s
   }
   for (const e of entries) {
     const p = join(dir, e);
-    if (statSync(p).isDirectory()) {
+    // lstat, not stat: a link is looked at before it is followed. A linked
+    // directory is not entered (`src/loop -> ..` never ends), a linked file is
+    // read as the file it names, and one that names nothing is skipped — stat
+    // threw on it, and the whole check died with a stack trace.
+    let isDir = false;
+    let isFile = false;
+    try {
+      const st = lstatSync(p);
+      isDir = st.isDirectory();
+      isFile = st.isSymbolicLink() ? statSync(p).isFile() : st.isFile();
+    } catch {
+      continue;
+    }
+    if (isDir) {
       if (e !== skip) walkSources(p, skip, out);
-    } else if (e.endsWith(".ts")) out.push(p);
+    } else if (isFile && e.endsWith(".ts")) out.push(p);
   }
   return out;
 }
