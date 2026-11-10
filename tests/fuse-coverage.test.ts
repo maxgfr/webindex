@@ -55,6 +55,14 @@ describe("termCoverage / underCovered", () => {
 });
 
 describe("fuse", () => {
+  it("breaks a tie by URL in code-unit order, whatever the locale", () => {
+    // Two lists, one result each: the same fused score. localeCompare put "a"
+    // before "B" under an English locale and after it under others.
+    const out = fuse([[src("https://t.test/a", "one")], [src("https://t.test/B", "two")]]);
+    expect(out[0]!.score).toBe(out[1]!.score);
+    expect(out.map((o) => o.url)).toEqual(["https://t.test/B", "https://t.test/a"]);
+  });
+
   it("collapses the same canonical URL across lists, preferring text and merging meta", () => {
     const a: Hit = { url: "https://example.test/page?utm_source=x", score: 3, meta: { engine: "ddg" } };
     const b: Hit = { url: "https://example.test/page", score: 2, text: "the page", meta: { year: 2020 } };

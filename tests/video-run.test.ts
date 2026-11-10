@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -144,6 +144,22 @@ describe("searchVideoRuns", () => {
     expect(searchVideoRuns(root, "education", { limit: 1 })).toHaveLength(1);
     const labelled = searchVideoRuns(root, "elephants", { labels: new Map([["jNQXAC9IVRw", "V2"]]) });
     expect(labelled[0]!.label).toBe("V2");
+  });
+
+  it("orders passages that score the same by video id in code-unit order, whatever the locale", async () => {
+    // localeCompare reads the ICU locale from LANG: "a" sorts before "B" in
+    // English, and two machines printed one search in two orders. A YouTube
+    // id mixes cases, so the tie is ordinary.
+    await fetchVideoRun(ZOO, root);
+    for (const key of ["akey0000000", "Bkey0000000"]) {
+      cpSync(join(root, "jNQXAC9IVRw"), join(root, key), { recursive: true });
+      const meta = JSON.parse(readFileSync(join(root, key, "meta.json"), "utf8"));
+      writeFileSync(join(root, key, "meta.json"), JSON.stringify({ ...meta, id: key, key }));
+    }
+    rmSync(join(root, "jNQXAC9IVRw"), { recursive: true });
+    const hits = searchVideoRuns(root, "elephants trunks");
+    expect(hits[0]!.score).toBe(hits[1]!.score);
+    expect(hits.slice(0, 2).map((h) => h.videoId)).toEqual(["Bkey0000000", "akey0000000"]);
   });
 
   it("finds nothing in a directory with no runs", () => {

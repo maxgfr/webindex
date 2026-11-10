@@ -3817,7 +3817,7 @@ function searchVideoRuns(dir, query, opts = {}) {
     }
   }
   const index = buildBm25Index(query, docs);
-  const scored = docs.map((d) => ({ d, score: Math.round(bm25Score(index, d) * 1e3) / 1e3 })).filter((x) => x.score > 0).sort((a, b) => b.score - a.score || a.d.key.localeCompare(b.d.key) || a.d.parts[0].start - b.d.parts[0].start).slice(0, opts.limit ?? 10);
+  const scored = docs.map((d) => ({ d, score: Math.round(bm25Score(index, d) * 1e3) / 1e3 })).filter((x) => x.score > 0).sort((a, b) => b.score - a.score || (a.d.key < b.d.key ? -1 : a.d.key > b.d.key ? 1 : 0) || a.d.parts[0].start - b.d.parts[0].start).slice(0, opts.limit ?? 10);
   return scored.map(({ d, score }) => {
     let best = d.parts[0];
     let top = 0;

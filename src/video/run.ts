@@ -238,7 +238,8 @@ export function searchVideoRuns(dir: string, query: string, opts: { limit?: numb
   const scored = docs
     .map((d) => ({ d, score: Math.round(bm25Score(index, d) * 1000) / 1000 }))
     .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score || a.d.key.localeCompare(b.d.key) || a.d.parts[0]!.start - b.d.parts[0]!.start)
+    // Ties by id in code-unit order: localeCompare reads LANG, and two machines printed two orders.
+    .sort((a, b) => b.score - a.score || (a.d.key < b.d.key ? -1 : a.d.key > b.d.key ? 1 : 0) || a.d.parts[0]!.start - b.d.parts[0]!.start)
     .slice(0, opts.limit ?? 10);
   return scored.map(({ d, score }) => {
     // The stamp a reader cites: the segment inside the passage that matches

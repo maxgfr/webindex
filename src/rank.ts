@@ -904,7 +904,7 @@ export function fuse<T extends Fusable>(lists: T[][], keyOf: (item: T) => string
   for (const [key, it] of best) it.meta = { ...it.meta, foundBy: foundBy.get(key) ?? 1 };
   const merged = [...best.values()];
   for (const it of merged) it.score = fused.get(keyOf(it)) ?? 0;
-  merged.sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
+  merged.sort((a, b) => b.score - a.score || byCodeUnit(a.url, b.url));
   return merged;
 }
 
