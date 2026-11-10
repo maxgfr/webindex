@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMatcher, excerptWindows, foldTerm, isStopword, keywords, matcherFromTokens, nearestHeading, rankedKeywords } from "../src/text.js";
+import { buildMatcher, excerptWindows, foldTerm, isStopword, keywords, matcherFromTokens, nearestHeading, rankedKeywords, subtokens } from "../src/text.js";
 import { focusedSnippet } from "../src/fetch.js";
 import { bm25Tokenize } from "../src/rank.js";
 import { configure, resetBrand } from "../src/brand.js";
@@ -173,6 +173,24 @@ describe("keywords", () => {
     const started = performance.now();
     keywords(question);
     expect(performance.now() - started).toBeLessThan(10_000);
+  });
+
+  it("builds a matcher for a question holding one huge capitalised word, and matches with it", () => {
+    // Two failures in one input. subtokens() splits camelCase with a regex that
+    // backtracks over a run of capitals: 200k of them took 36 s. And the word
+    // itself became a pattern too large for V8 to compile, thrown from matchLine.
+    const question = `${"A".repeat(200_000)} retry budget`;
+    const started = performance.now();
+    const m = buildMatcher(question);
+    expect([...m.matchLine("the retry budget is spent")]).toEqual(["retry", "budget"]);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
+  it("does not split a word no identifier is as long as", () => {
+    const started = performance.now();
+    expect(subtokens(`${"A".repeat(200_000)}b`)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(subtokens("connectTimeout")).toEqual(["connect", "timeout"]);
   });
 
   it("drops 'vs' and German question scaffolding", () => {

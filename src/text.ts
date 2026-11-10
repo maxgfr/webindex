@@ -374,7 +374,17 @@ export function foldTerm(raw: string): string {
   return foldPlural(deaccent(raw.toLowerCase()));
 }
 
+/**
+ * Real identifiers are short. Past this length a "word" is not split: the
+ * camelCase regexes below backtrack on a long run of capitals (quadratic), and
+ * a hostile 200 KB word in a question held the process for tens of seconds.
+ * The same bound rank.ts keeps for its own tokens; not exported, since every
+ * export of this module is part of the library's surface.
+ */
+const MAX_IDENT = 64;
+
 export function subtokens(raw: string): string[] {
+  if (raw.length > MAX_IDENT) return [];
   const spaced = raw
     .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, "$1 $2")
     .replace(/(\p{Lu}+)(\p{Lu}\p{Ll})/gu, "$1 $2")
@@ -408,12 +418,17 @@ export interface ExpandedKeyword {
 }
 
 const MAX_PATTERNS = 24;
+// A keyword becomes a pattern with one character class per letter. No word is
+// this long, and past ~50k characters the pattern is one V8 refuses to compile
+// ("regular expression too large") — thrown from matchLine, on the first line read.
+const MAX_KEYWORD_CHARS = 256;
 const VARIANT_PRIORITY: Record<KeywordVariant["kind"], number> = { original: 0, folded: 1, subtoken: 2 };
 
 export function expandTokens(tokens: string[], max = 8): ExpandedKeyword[] {
   const byCanonical = new Map<string, ExpandedKeyword>();
   for (const raw of tokens) {
     if (byCanonical.size >= max) break;
+    if (raw.length > MAX_KEYWORD_CHARS) continue;
     const canonical = foldTerm(raw);
     if (!canonical || byCanonical.has(canonical)) continue;
     const plain = deaccent(raw.toLowerCase());

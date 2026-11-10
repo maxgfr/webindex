@@ -2933,6 +2933,7 @@ function foldTerm(raw) {
   return foldPlural(deaccent(raw.toLowerCase()));
 }
 function subtokens(raw) {
+  if (raw.length > MAX_IDENT) return [];
   const spaced = raw.replace(new RegExp("([\\p{Ll}\\p{N}])(\\p{Lu})", "gu"), "$1 $2").replace(new RegExp("(\\p{Lu}+)(\\p{Lu}\\p{Ll})", "gu"), "$1 $2").replace(new RegExp("(\\p{L})(\\p{N})", "gu"), "$1 $2").replace(new RegExp("(\\p{N})(\\p{L})", "gu"), "$1 $2");
   const parts = spaced.split(/[^\p{L}\p{M}\p{N}]+/u).filter(Boolean);
   if (parts.length < 2) return [];
@@ -2950,6 +2951,7 @@ function expandTokens(tokens, max = 8) {
   const byCanonical = /* @__PURE__ */ new Map();
   for (const raw of tokens) {
     if (byCanonical.size >= max) break;
+    if (raw.length > MAX_KEYWORD_CHARS) continue;
     const canonical = foldTerm(raw);
     if (!canonical || byCanonical.has(canonical)) continue;
     const plain2 = deaccent(raw.toLowerCase());
@@ -3103,7 +3105,7 @@ function slugify(input, opts = {}) {
   const head = readable.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");
   return head ? `${head}-${tag}` : tag;
 }
-var STOPWORDS, LOCALE_STOPWORDS, extraSets, TOKEN_RE, CJK_CHAR, CJK_RUNS, ACCENT_CLASSES, BASE_OF, NON_ASCII, MAX_PATTERNS, VARIANT_PRIORITY, LIGATURE_SPELLING, LIGATURE_OF, SHORT_VARIANT, ATX_OPEN, ATX_CLOSE, MD_ESCAPE;
+var STOPWORDS, LOCALE_STOPWORDS, extraSets, TOKEN_RE, CJK_CHAR, CJK_RUNS, ACCENT_CLASSES, BASE_OF, NON_ASCII, MAX_IDENT, MAX_PATTERNS, MAX_KEYWORD_CHARS, VARIANT_PRIORITY, LIGATURE_SPELLING, LIGATURE_OF, SHORT_VARIANT, ATX_OPEN, ATX_CLOSE, MD_ESCAPE;
 var init_text = __esm({
   "src/text.ts"() {
     "use strict";
@@ -3323,7 +3325,9 @@ var init_text = __esm({
       for (const ch of cls) BASE_OF.set(ch, base2);
     }
     NON_ASCII = /[\u0080-\uffff]/;
+    MAX_IDENT = 64;
     MAX_PATTERNS = 24;
+    MAX_KEYWORD_CHARS = 256;
     VARIANT_PRIORITY = { original: 0, folded: 1, subtoken: 2 };
     LIGATURE_SPELLING = { \u0153: "oe", \u00E6: "ae", \u00DF: "ss" };
     LIGATURE_OF = { oe: "\u0153", ae: "\xE6", ss: "\xDF" };
@@ -3437,7 +3441,7 @@ function pushTerm(raw, out, expand2) {
   const t = foldCached(raw);
   if (t.length < 2) return;
   out.push(t);
-  if (!expand2 || raw.length > MAX_IDENT) return;
+  if (!expand2 || raw.length > MAX_IDENT2) return;
   for (const sub of subtermsCached(raw, t)) out.push(sub);
 }
 function pushBigrams(run, out) {
@@ -3842,7 +3846,7 @@ function termCoverage(items, queryTerms, top = coverageWindow(queryTerms.length)
 function underCovered(cov, min = UNDER_COVERED_MIN) {
   return cov.filter((c) => c.sources < min).map((c) => c.term);
 }
-var byCodeUnit, indexTokenCache, WORD_SPLIT, NON_ASCII2, CJK_CHAR2, CJK_RUNS2, IDENT_BOUNDARY, MAX_IDENT, FOLD_CACHE_MAX, foldCache, NO_SUBTERMS, subtermCache, subtermExtras, STEM_CACHE_MAX, stemCache, MASK32, unsigned64, PAIR_CACHE_MAX, URL_IN_TEXT, UNDER_COVERED_MIN;
+var byCodeUnit, indexTokenCache, WORD_SPLIT, NON_ASCII2, CJK_CHAR2, CJK_RUNS2, IDENT_BOUNDARY, MAX_IDENT2, FOLD_CACHE_MAX, foldCache, NO_SUBTERMS, subtermCache, subtermExtras, STEM_CACHE_MAX, stemCache, MASK32, unsigned64, PAIR_CACHE_MAX, URL_IN_TEXT, UNDER_COVERED_MIN;
 var init_rank = __esm({
   "src/rank.ts"() {
     "use strict";
@@ -3857,7 +3861,7 @@ var init_rank = __esm({
     CJK_CHAR2 = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
     CJK_RUNS2 = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
     IDENT_BOUNDARY = new RegExp("_|[\\p{Ll}\\p{N}]\\p{Lu}|\\p{Lu}\\p{Lu}\\p{Ll}|\\p{L}\\p{N}|\\p{N}\\p{L}", "u");
-    MAX_IDENT = 64;
+    MAX_IDENT2 = 64;
     FOLD_CACHE_MAX = 5e4;
     foldCache = /* @__PURE__ */ new Map();
     NO_SUBTERMS = [];
