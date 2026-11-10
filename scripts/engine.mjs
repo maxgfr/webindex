@@ -15225,12 +15225,21 @@ function assertWorkflowSafe(script, phaseName) {
     }
   }
 }
+var OWN_CONSTANTS = /* @__PURE__ */ new Set(["meta", "RUN", "ENGINE", "WORKLIST", "AGENTS", "BATCHES", "SCHEMA", "contract", "results"]);
+var oneLine = (s) => s.replace(/[\r\n\u2028\u2029]+/g, " ");
 function emitWorkflowScript(phase, emission, runAbs, engineAbs, smallWorklist, constants2 = {}) {
   const cli = brand().cli;
   const scriptPath = join17(runAbs, "orchestration", `${phase.name}.workflow.mjs`);
   const meta = { name: `${cli}-${phase.name}`, description: emission.description(phase.items), phases: [{ title: emission.title }] };
   const batches = phaseBatches(phase, emission, smallWorklist);
   const hint = emission.applyHint(runAbs, engineAbs, phase);
+  for (const name of Object.keys(constants2)) {
+    if (!/^[A-Za-z_$][\w$]*$/.test(name) || OWN_CONSTANTS.has(name)) {
+      throw new Error(
+        `workflow script for phase "${phase.name}": "${name}" is not a usable constant name \u2014 an identifier, other than ${[...OWN_CONSTANTS].join(", ")}.`
+      );
+    }
+  }
   const script = [
     `export const meta = ${JSON.stringify(meta)}`,
     ``,
@@ -15238,10 +15247,10 @@ function emitWorkflowScript(phase, emission, runAbs, engineAbs, smallWorklist, c
     `// Workflow tool for a one-call parallel fan-out:`,
     `// Workflow({ scriptPath: ${JSON.stringify(scriptPath)} }).`,
     `// Any other host: dispatch one subagent per batch with`,
-    `// ${join17(runAbs, "orchestration", "agents", `${emission.role}.md`)}, or follow RUNBOOK.md alone.`,
+    `// ${oneLine(join17(runAbs, "orchestration", "agents", `${emission.role}.md`))}, or follow RUNBOOK.md alone.`,
     `//`,
     `// Emitted by \`${cli} orchestrate\` from the CURRENT worklist. The worklist is the`,
-    `// source of truth: if it changes, re-run \`${cli} orchestrate --phase ${phase.name}\``,
+    `// source of truth: if it changes, re-run \`${cli} orchestrate --phase ${oneLine(phase.name)}\``,
     `// before launching this.`,
     ``,
     `// Constants for THIS run, injected at emit time \u2014 the harness forbids reading`,
@@ -15278,7 +15287,7 @@ function emitWorkflowScript(phase, emission, runAbs, engineAbs, smallWorklist, c
     ``,
     `// One-writer rule: this workflow only COLLECTS the subagents' fragments.`,
     `// The main agent runs the fold itself:`,
-    ...hint.map((l) => `//   ${l}`),
+    ...hint.map((l) => `//   ${oneLine(l)}`),
     `return { phase: ${JSON.stringify(phase.name)}, worklist: WORKLIST, results: results.filter(Boolean) }`,
     ``
   ].join("\n");

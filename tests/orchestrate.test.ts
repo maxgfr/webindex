@@ -280,6 +280,27 @@ describe("the emitted workflow script", () => {
     expect(() => orchestrateRun(run, ENGINE, DEFS, contracts, { constants: { STAMP: "built at Date.now()" } })).toThrow(/Date\.now/);
   });
 
+  it("refuses a constant whose name is not an identifier, or is one of the script's own", () => {
+    // The value is JSON; the name was pasted as it came. `x = 1; evil() //` was
+    // code in the emitted script, and `RUN` a duplicate declaration that only
+    // failed once the harness loaded the file.
+    todo(20);
+    for (const name of ["x = 1; evil() //", "a-b", "1st", "", "RUN", "BATCHES"]) {
+      expect(() => orchestrateRun(run, ENGINE, DEFS, contracts, { constants: { [name]: 1 } }), JSON.stringify(name)).toThrow(/not a usable constant name/);
+    }
+    expect(orchestrateRun(run, ENGINE, DEFS, contracts, { constants: { $ok_1: 1 } }).exitCode).toBe(0);
+  });
+
+  it("keeps a path or a fold hint with a line break inside its comment", () => {
+    // Everything after the break was a line of code of its own.
+    todo(20);
+    const ph = listPhases(run, ENGINE, [VERIFY] as never)[0] as never;
+    const hinted = { ...VERIFY, applyHint: () => ["node engine verify --apply\nevil()"] };
+    const script = emitWorkflowScript(ph, hinted, `${run}\nevil()`, ENGINE, 3);
+    const code = script.split("\n").filter((l) => !l.trimStart().startsWith("//"));
+    expect(code.filter((l) => l.includes("evil()") && !l.startsWith("const RUN = "))).toEqual([]);
+  });
+
   it("splices a phase's own agent options into the dispatch", () => {
     // Worktree isolation is the case: a phase whose subagents WRITE would
     // otherwise have them collide in one checkout.

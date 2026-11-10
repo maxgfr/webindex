@@ -138,6 +138,12 @@ function assertWorkflowSafe(script: string, phaseName: string): void {
   }
 }
 
+/** The names the emitted script declares itself: a caller's constant under one of them is a duplicate declaration. */
+const OWN_CONSTANTS = new Set(["meta", "RUN", "ENGINE", "WORKLIST", "AGENTS", "BATCHES", "SCHEMA", "contract", "results"]);
+
+/** Text for a `//` comment of the emitted script: a line break in it would end the comment, and the rest would be code. */
+const oneLine = (s: string): string => s.replace(/[\r\n\u2028\u2029]+/g, " ");
+
 /**
  * The launchable Workflow script for one ready phase.
  *
@@ -162,6 +168,16 @@ export function emitWorkflowScript<T>(
   const batches = phaseBatches(phase, emission, smallWorklist);
   const hint = emission.applyHint(runAbs, engineAbs, phase);
 
+  // A constant's value is JSON; its name is pasted as a declaration, so it has
+  // to be an identifier, and not one this script declares itself.
+  for (const name of Object.keys(constants)) {
+    if (!/^[A-Za-z_$][\w$]*$/.test(name) || OWN_CONSTANTS.has(name)) {
+      throw new Error(
+        `workflow script for phase "${phase.name}": "${name}" is not a usable constant name — an identifier, other than ${[...OWN_CONSTANTS].join(", ")}.`,
+      );
+    }
+  }
+
   const script = [
     `export const meta = ${JSON.stringify(meta)}`,
     ``,
@@ -169,10 +185,10 @@ export function emitWorkflowScript<T>(
     `// Workflow tool for a one-call parallel fan-out:`,
     `// Workflow({ scriptPath: ${JSON.stringify(scriptPath)} }).`,
     `// Any other host: dispatch one subagent per batch with`,
-    `// ${join(runAbs, "orchestration", "agents", `${emission.role}.md`)}, or follow RUNBOOK.md alone.`,
+    `// ${oneLine(join(runAbs, "orchestration", "agents", `${emission.role}.md`))}, or follow RUNBOOK.md alone.`,
     `//`,
     `// Emitted by \`${cli} orchestrate\` from the CURRENT worklist. The worklist is the`,
-    `// source of truth: if it changes, re-run \`${cli} orchestrate --phase ${phase.name}\``,
+    `// source of truth: if it changes, re-run \`${cli} orchestrate --phase ${oneLine(phase.name)}\``,
     `// before launching this.`,
     ``,
     `// Constants for THIS run, injected at emit time — the harness forbids reading`,
@@ -209,7 +225,7 @@ export function emitWorkflowScript<T>(
     ``,
     `// One-writer rule: this workflow only COLLECTS the subagents' fragments.`,
     `// The main agent runs the fold itself:`,
-    ...hint.map((l) => `//   ${l}`),
+    ...hint.map((l) => `//   ${oneLine(l)}`),
     `return { phase: ${JSON.stringify(phase.name)}, worklist: WORKLIST, results: results.filter(Boolean) }`,
     ``,
   ].join("\n");
