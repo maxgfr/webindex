@@ -11,6 +11,7 @@
 // package layout — and nothing that is the skill's own product. A generator
 // that writes a src/ tree would be writing someone's tool for them.
 
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { ensureDir, writeArtifact } from "../no-write.js";
 import { ENGINE_VERSION } from "../version.js";
@@ -147,10 +148,12 @@ export function scaffoldSkill(
   };
 
   const written: string[] = [];
-  const exists = opts.exists;
+  // The disk is asked unless the caller has its own way to look: with none
+  // named, nothing was checked and a configured skill.json was replaced.
+  const exists = opts.exists ?? existsSync;
   for (const [rel, content] of Object.entries(files)) {
     const path = join(root, rel);
-    if (exists?.(path)) {
+    if (exists(path)) {
       errors.push(`${rel} already exists — left alone.`);
       continue;
     }

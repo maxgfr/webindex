@@ -383,6 +383,16 @@ describe("auditSkillBundle", () => {
 });
 
 describe("scaffoldSkill", () => {
+  it("leaves an existing file alone when the caller names no way to look", () => {
+    // "Never overwrites" held only for a caller that passed `exists`: without
+    // it a configured skill.json was replaced by the template.
+    write("skill.json", '{"mine":true}');
+    const r = scaffoldSkill(root, "newskill");
+    expect(readFileSync(join(root, "skill.json"), "utf8")).toBe('{"mine":true}');
+    expect(r.errors).toEqual(["skill.json already exists — left alone."]);
+    expect(r.written.map((p) => p.replace(`${root}/`, ""))).not.toContain("skill.json");
+  });
+
   it("writes the shape a skill repo needs", () => {
     const r = scaffoldSkill(root, "newskill");
     expect(r.errors).toEqual([]);

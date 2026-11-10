@@ -12249,7 +12249,7 @@ __export(cli_exports, {
   statusText: () => statusText,
   tabLines: () => tabLines
 });
-import { existsSync as existsSync13, mkdirSync as mkdirSync8, statSync as statSync11 } from "fs";
+import { existsSync as existsSync14, mkdirSync as mkdirSync8, statSync as statSync11 } from "fs";
 import { dirname as dirname5, join as join27, resolve as resolve10 } from "path";
 function arity(ctx, min, max = min) {
   if (ctx.args.length < min || ctx.args.length > max) throw usageError(ctx.action);
@@ -12671,7 +12671,7 @@ note: ${r.note}` : text };
         const cwd = ctx.deps.cwd ?? process.cwd();
         const files = ctx.args.slice(1).map((f) => {
           const path = resolve10(cwd, f);
-          if (!existsSync13(path) || !statSync11(path).isFile()) throw new UsageError(`no such file: ${path}`);
+          if (!existsSync14(path) || !statSync11(path).isFile()) throw new UsageError(`no such file: ${path}`);
           return path;
         });
         return mutate(ctx, (s, o) => upload(s, ref2, files, o));
@@ -12851,7 +12851,7 @@ note: ${r.note}` : text };
           arity(ctx, 1);
           await assertProfileIdle(ctx, name2);
           const path = profileDir(name2);
-          const existed = existsSync13(path);
+          const existed = existsSync14(path);
           resetProfile(name2);
           return { json: { ok: true, path, removed: existed }, text: existed ? `removed ${path}: the next launch starts logged out` : `no profile at ${path}` };
         }
@@ -13223,7 +13223,7 @@ async function repinSkill(root, config) {
 // src/cli.ts
 init_brand();
 init_charset();
-import { existsSync as existsSync14, mkdirSync as mkdirSync9, readFileSync as readFileSync19, readSync, realpathSync as realpathSync4, statSync as statSync12 } from "fs";
+import { existsSync as existsSync15, mkdirSync as mkdirSync9, readFileSync as readFileSync19, readSync, realpathSync as realpathSync4, statSync as statSync12 } from "fs";
 import { isIP as isIP2 } from "net";
 import { basename as basename5, extname, isAbsolute as isAbsolute6, join as join28, relative as relative4, resolve as resolve12 } from "path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL } from "url";
@@ -15431,6 +15431,7 @@ function auditSkillBundle(root, config, cli) {
 
 // src/skillkit/scaffold.ts
 init_no_write();
+import { existsSync as existsSync11 } from "fs";
 import { join as join23 } from "path";
 var enginesJson = (engine, repo, minRef) => JSON.stringify(
   {
@@ -15544,10 +15545,10 @@ TODO
     ".gitignore": gitignore
   };
   const written = [];
-  const exists = opts.exists;
+  const exists = opts.exists ?? existsSync11;
   for (const [rel, content] of Object.entries(files)) {
     const path = join23(root, rel);
-    if (exists?.(path)) {
+    if (exists(path)) {
       errors.push(`${rel} already exists \u2014 left alone.`);
       continue;
     }
@@ -16301,14 +16302,14 @@ init_brand();
 init_exec2();
 init_forge_host();
 import { createHash as createHash4, randomBytes as randomBytes2 } from "crypto";
-import { existsSync as existsSync11, mkdirSync as mkdirSync7, readdirSync as readdirSync9, renameSync as renameSync4, rmSync as rmSync7, statSync as statSync9 } from "fs";
+import { existsSync as existsSync12, mkdirSync as mkdirSync7, readdirSync as readdirSync9, renameSync as renameSync4, rmSync as rmSync7, statSync as statSync9 } from "fs";
 import { basename as basename3, join as join24, resolve as resolve6 } from "path";
 init_text();
 function resolveRepo(raw, opts = {}) {
   const trimmed = raw.trim();
   if (trimmed && opts.local !== false) {
     const asPath = resolve6(trimmed);
-    if (existsSync11(asPath) && statSync9(asPath).isDirectory()) {
+    if (existsSync12(asPath) && statSync9(asPath).isDirectory()) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename3(asPath)}-${asPath}`)}` };
     }
   }
@@ -17211,7 +17212,7 @@ function isOriginAllowed(origin, allowed = []) {
 
 // src/mcp/resources.ts
 init_brand();
-import { existsSync as existsSync12, readdirSync as readdirSync10, readFileSync as readFileSync18, realpathSync as realpathSync2, statSync as statSync10 } from "fs";
+import { existsSync as existsSync13, readdirSync as readdirSync10, readFileSync as readFileSync18, realpathSync as realpathSync2, statSync as statSync10 } from "fs";
 import { basename as basename4, dirname as dirname4, join as join25, relative as relative2, resolve as resolve8, sep as sep2 } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
@@ -17220,14 +17221,14 @@ function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname4(fileURLToPath(import.meta.url));
   const name2 = brand().name;
   const candidates2 = [resolve8(here, ".."), resolve8(here, "..", "skills", name2), resolve8(here, "..", "..", "skills", name2)];
-  return candidates2.find((dir) => existsSync12(join25(dir, "SKILL.md")));
+  return candidates2.find((dir) => existsSync13(join25(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
   const refDir = join25(root, "references");
-  if (!existsSync12(refDir)) return out;
+  if (!existsSync13(refDir)) return out;
   for (const file of readdirSync10(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
     out.push(describe(root, join25("references", file), `${skillName()} reference: ${basename4(file, ".md")}`));
@@ -19640,7 +19641,7 @@ function webindexAdapter(policy = {}) {
     }
     mkdirSync9(base2, { recursive: true });
     const target = join28(base2, named);
-    if (existsSync14(target) && relative4(realpathSync4(base2), realpathSync4(target)).startsWith("..")) {
+    if (existsSync15(target) && relative4(realpathSync4(base2), realpathSync4(target)).startsWith("..")) {
       throw new ToolError(`${named} leads outside ${base2}, the only directory this server writes videos to.`);
     }
     return target;
@@ -20401,7 +20402,7 @@ async function dispatch(argv) {
     const bad = urls.find((u) => !/^https?:\/\//i.test(u));
     if (bad !== void 0) {
       fail(
-        `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync14(bad) ? ` \u2014 for a file on disk, \`webindex extract ${bad}\`` : ""}`
+        `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync15(bad) ? ` \u2014 for a file on disk, \`webindex extract ${bad}\`` : ""}`
       );
     }
     const fullPage = argBool(args, "full-page");
@@ -20952,7 +20953,7 @@ ${rows.join("\n")}
         const r2 = await fetchVideoRun(target, root, { lang: argValue(args, "lang") });
         if (!r2.ok) fail(`no transcript for ${target}: ${r2.reason}`);
         runDir = r2.dir;
-      } else runDir = existsSync14(join28(root, target, "meta.json")) ? join28(root, target) : resolve12(target);
+      } else runDir = existsSync15(join28(root, target, "meta.json")) ? join28(root, target) : resolve12(target);
       const r = await extractFrames(runDir, { effort });
       if (!r.ok) {
         if (asJson) process.stdout.write(jsonLine(r));
@@ -21047,7 +21048,7 @@ ${rows.join("\n")}
       if (!name2) usage("usage: webindex skill init <name> [--root <dir>]");
       const badName = skillNameProblem(name2);
       if (badName) usage(badName);
-      const r = scaffoldSkill(root, name2, { exists: existsSync14 });
+      const r = scaffoldSkill(root, name2, { exists: existsSync15 });
       for (const e of r.errors) process.stderr.write(`  ${e}
 `);
       if (asJson) process.stdout.write(jsonLine(r));
@@ -21173,7 +21174,7 @@ ${rows.join("\n")}
       let surface;
       let surfaceProblem;
       const flagList = (v) => v == null || typeof v === "string" || typeof v[Symbol.iterator] !== "function" ? void 0 : [...v];
-      if (existsSync14(built)) {
+      if (existsSync15(built)) {
         try {
           const mod = await import(pathToFileURL(built).href);
           const valueFlags = flagList(mod.VALUE_FLAGS);
@@ -21208,7 +21209,7 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
     }
     if (action === "copy") {
       const from = join28(root, "scripts", `${config.name}.mjs`);
-      if (!existsSync14(from)) fail(`missing ${relative4(root, from)} \u2014 run the build first`);
+      if (!existsSync15(from)) fail(`missing ${relative4(root, from)} \u2014 run the build first`);
       const to = join28(root, "skills", config.name, "scripts", `${config.name}.mjs`);
       ensureDir(join28(to, ".."));
       writeArtifact(to, readFileSync19(from, "utf8"));
