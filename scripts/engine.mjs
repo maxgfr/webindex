@@ -11140,7 +11140,7 @@ function repoSegments(host, rest, kind) {
 async function ensureClone(ref, opts = {}) {
   if (ref.isLocal) return resolve4(ref.raw);
   if (!ref.cloneUrl) throw new Error(`"${ref.raw}" does not name a repository that can be cloned`);
-  if (!have("git")) throw new Error(`git is not installed or not on PATH \u2014 cannot clone ${ref.cloneUrl}`);
+  if (!have("git")) throw new Error(`git is not installed or not on PATH \u2014 cannot clone ${shownUrl(ref.cloneUrl)}`);
   const branch = opts.branch?.trim() || void 0;
   if (branch?.startsWith("-")) throw new Error(`"${branch}" is not a branch name`);
   const dir = join13(repoCacheRoot(), branch ? `${ref.slug}@${branchSlug(branch)}` : ref.slug);
@@ -11177,6 +11177,13 @@ async function obtainClone(ref, dir, opts) {
   if (existsSync8(join13(target, ".git"))) return opts.refresh ? refreshClone(ref, target, opts.branch) : target;
   return freshClone(ref, dir, opts.branch);
 }
+function shownUrl(cloneUrl) {
+  return (cloneUrl ?? "").replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]*@/i, "$1");
+}
+function gitSaid(ref, r) {
+  const said = r.stderr.trim() || `exit ${r.status}`;
+  return ref.cloneUrl ? said.split(ref.cloneUrl).join(shownUrl(ref.cloneUrl)) : said;
+}
 async function refreshClone(ref, dir, branch) {
   deepened.delete(dir);
   const probe = await shAsync("git", ["-C", dir, "rev-parse", "--is-shallow-repository"], { timeoutMs: 1e4 });
@@ -11185,13 +11192,12 @@ async function refreshClone(ref, dir, branch) {
     timeoutMs: fetchTimeoutMs()
   });
   if (!fetched.ok) {
-    throw Object.assign(
-      new Error(`refresh failed for ${ref.cloneUrl}: ${fetched.stderr.trim() || `exit ${fetched.status}`} (the cached tree at ${dir} is unchanged)`),
-      { cachedTree: dir }
-    );
+    throw Object.assign(new Error(`refresh failed for ${shownUrl(ref.cloneUrl)}: ${gitSaid(ref, fetched)} (the cached tree at ${dir} is unchanged)`), {
+      cachedTree: dir
+    });
   }
   const reset = await shAsync("git", ["-C", dir, "reset", "--quiet", "--hard", "FETCH_HEAD"], { timeoutMs: fetchTimeoutMs() });
-  if (!reset.ok) throw new Error(`refresh of ${dir} fetched ${ref.cloneUrl} but could not check it out: ${reset.stderr.trim() || `exit ${reset.status}`}`);
+  if (!reset.ok) throw new Error(`refresh of ${dir} fetched ${shownUrl(ref.cloneUrl)} but could not check it out: ${gitSaid(ref, reset)}`);
   return dir;
 }
 var STALE_STAGING_MS = 24 * 60 * 60 * 1e3;
@@ -11228,20 +11234,20 @@ async function freshClone(ref, dir, branch) {
     if (!done.r.ok) {
       throw new Error(
         [
-          `git clone failed for ${ref.cloneUrl}`,
-          `  attempt 1 (--filter=blob:none): ${first.stderr.trim() || `exit ${first.status}`}`,
-          `  attempt 2 (no filter):          ${done.r.stderr.trim() || `exit ${done.r.status}`}`
+          `git clone failed for ${shownUrl(ref.cloneUrl)}`,
+          `  attempt 1 (--filter=blob:none): ${gitSaid(ref, first)}`,
+          `  attempt 2 (no filter):          ${gitSaid(ref, done.r)}`
         ].join("\n")
       );
     }
   }
-  if (!existsSync8(done.tmp) || readdirSync6(done.tmp).length === 0) throw new Error(`clone produced an empty tree for ${ref.cloneUrl}`);
+  if (!existsSync8(done.tmp) || readdirSync6(done.tmp).length === 0) throw new Error(`clone produced an empty tree for ${shownUrl(ref.cloneUrl)}`);
   if (existsSync8(dir) && !existsSync8(join13(dir, ".git"))) rmSync6(dir, { recursive: true, force: true });
   try {
     renameSync4(done.tmp, dir);
   } catch (e) {
     discard(done.tmp);
-    if (!existsSync8(join13(dir, ".git"))) throw new Error(`could not move the clone of ${ref.cloneUrl} into ${dir}: ${e.message}`);
+    if (!existsSync8(join13(dir, ".git"))) throw new Error(`could not move the clone of ${shownUrl(ref.cloneUrl)} into ${dir}: ${e.message}`);
   }
   return dir;
 }

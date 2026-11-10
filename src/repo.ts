@@ -279,7 +279,7 @@ function repoSegments(host: string, rest: string, kind: ForgeKind | undefined): 
 export async function ensureClone(ref: RepoRef, opts: { refresh?: boolean; branch?: string } = {}): Promise<string> {
   if (ref.isLocal) return resolve(ref.raw);
   if (!ref.cloneUrl) throw new Error(`"${ref.raw}" does not name a repository that can be cloned`);
-  if (!have("git")) throw new Error(`git is not installed or not on PATH — cannot clone ${ref.cloneUrl}`);
+  if (!have("git")) throw new Error(`git is not installed or not on PATH — cannot clone ${shownUrl(ref.cloneUrl)}`);
   const branch = opts.branch?.trim() || undefined;
   // git reads an argument that begins with "-" as an option, and no ref name
   // may begin with one — so such a "branch" is refused before it reaches git.
@@ -337,6 +337,21 @@ async function obtainClone(ref: RepoRef, dir: string, opts: { refresh?: boolean;
   return freshClone(ref, dir, opts.branch);
 }
 
+/**
+ * A clone URL as it may be shown. Its userinfo is kept for git — a private
+ * repository may be reachable no other way — and is a credential
+ * (`https://user:token@host/…`): an error travels into tool output and logs.
+ */
+function shownUrl(cloneUrl: string | undefined): string {
+  return (cloneUrl ?? "").replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]*@/i, "$1");
+}
+
+/** What git said about a failed command, with the clone URL's credential taken out of it too. */
+function gitSaid(ref: RepoRef, r: { stderr: string; status: number | null }): string {
+  const said = r.stderr.trim() || `exit ${r.status}`;
+  return ref.cloneUrl ? said.split(ref.cloneUrl).join(shownUrl(ref.cloneUrl)) : said;
+}
+
 async function refreshClone(ref: RepoRef, dir: string, branch: string | undefined): Promise<string> {
   // Whatever it was deepened to, the history verdict is about to be stale.
   deepened.delete(dir);
@@ -352,13 +367,12 @@ async function refreshClone(ref: RepoRef, dir: string, branch: string | undefine
   });
   if (!fetched.ok) {
     // `cachedTree` is for a caller that joined this refresh without asking for one.
-    throw Object.assign(
-      new Error(`refresh failed for ${ref.cloneUrl}: ${fetched.stderr.trim() || `exit ${fetched.status}`} (the cached tree at ${dir} is unchanged)`),
-      { cachedTree: dir },
-    );
+    throw Object.assign(new Error(`refresh failed for ${shownUrl(ref.cloneUrl)}: ${gitSaid(ref, fetched)} (the cached tree at ${dir} is unchanged)`), {
+      cachedTree: dir,
+    });
   }
   const reset = await shAsync("git", ["-C", dir, "reset", "--quiet", "--hard", "FETCH_HEAD"], { timeoutMs: fetchTimeoutMs() });
-  if (!reset.ok) throw new Error(`refresh of ${dir} fetched ${ref.cloneUrl} but could not check it out: ${reset.stderr.trim() || `exit ${reset.status}`}`);
+  if (!reset.ok) throw new Error(`refresh of ${dir} fetched ${shownUrl(ref.cloneUrl)} but could not check it out: ${gitSaid(ref, reset)}`);
   return dir;
 }
 
@@ -412,14 +426,14 @@ async function freshClone(ref: RepoRef, dir: string, branch: string | undefined)
       // whichever stderr happened to be non-empty.
       throw new Error(
         [
-          `git clone failed for ${ref.cloneUrl}`,
-          `  attempt 1 (--filter=blob:none): ${first.stderr.trim() || `exit ${first.status}`}`,
-          `  attempt 2 (no filter):          ${done.r.stderr.trim() || `exit ${done.r.status}`}`,
+          `git clone failed for ${shownUrl(ref.cloneUrl)}`,
+          `  attempt 1 (--filter=blob:none): ${gitSaid(ref, first)}`,
+          `  attempt 2 (no filter):          ${gitSaid(ref, done.r)}`,
         ].join("\n"),
       );
     }
   }
-  if (!existsSync(done.tmp) || readdirSync(done.tmp).length === 0) throw new Error(`clone produced an empty tree for ${ref.cloneUrl}`);
+  if (!existsSync(done.tmp) || readdirSync(done.tmp).length === 0) throw new Error(`clone produced an empty tree for ${shownUrl(ref.cloneUrl)}`);
 
   // A directory with no .git is what an interrupted clone of an older version
   // left behind — never a clone in progress, which now lives in staging.
@@ -429,7 +443,7 @@ async function freshClone(ref: RepoRef, dir: string, branch: string | undefined)
   } catch (e) {
     discard(done.tmp);
     // Another process finished the same clone first: theirs is as good as ours.
-    if (!existsSync(join(dir, ".git"))) throw new Error(`could not move the clone of ${ref.cloneUrl} into ${dir}: ${(e as Error).message}`);
+    if (!existsSync(join(dir, ".git"))) throw new Error(`could not move the clone of ${shownUrl(ref.cloneUrl)} into ${dir}: ${(e as Error).message}`);
   }
   return dir;
 }

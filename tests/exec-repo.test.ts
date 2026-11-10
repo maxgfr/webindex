@@ -802,6 +802,21 @@ describe("cloning, against a real local repository", () => {
     await expect(ensureClone(missing)).rejects.toThrow(/git clone failed[\s\S]*attempt 1[\s\S]*attempt 2/);
   });
 
+  it("keeps a clone URL's credential out of the error it reports", async () => {
+    // The clone URL keeps its userinfo on purpose — a private repository may be
+    // reachable no other way — but the error travels into tool output and logs.
+    // Port 1 on loopback refuses at once: no network, two failed attempts.
+    const ref = resolveRepo("https://deploy:ghp_SECRETTOKEN@127.0.0.1:1/acme/private");
+    expect(ref.cloneUrl).toContain("ghp_SECRETTOKEN");
+    const err = await ensureClone(ref).then(
+      () => undefined,
+      (e: Error) => e,
+    );
+    expect(err?.message).toMatch(/git clone failed for https:\/\/127\.0\.0\.1:1\/acme\/private\.git/);
+    expect(err?.message).not.toContain("ghp_SECRETTOKEN");
+    expect(err?.message).not.toContain("deploy:");
+  });
+
   it("names a missing git binary instead of reporting a clone failure", async () => {
     // "there is no git on this machine" and "git could not clone that" want
     // completely different answers, and a caller told the second when the first
