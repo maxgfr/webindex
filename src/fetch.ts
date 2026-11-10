@@ -1605,7 +1605,9 @@ async function readWithoutBrowser(
       asBrowser ? { ...fetchOpts, userAgent: contactUa() } : { ...fetchOpts, userAgent: browserUa(), acceptLanguage: opts.acceptLanguage ?? "en-US,en;q=0.9" },
     );
     if (opts.signal?.aborted) return cancelled();
-    if (!challengeUrl(again.url)) res = again;
+    // An answer replaces the challenge; no answer at all (status 0) does not:
+    // what is known is still that the page sits behind one.
+    if (again.status !== 0 && !challengeUrl(again.url)) res = again;
   }
   // Whatever its status — Apple's verify-human page is a 200 — a read that
   // ended on a challenge did not reach the page: its text is the challenge's.

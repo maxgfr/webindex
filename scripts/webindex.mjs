@@ -10187,7 +10187,7 @@ async function readWithoutBrowser(url, opts, wantsPdf, wantsDoc, seen) {
       asBrowser ? { ...fetchOpts, userAgent: contactUa() } : { ...fetchOpts, userAgent: browserUa(), acceptLanguage: opts.acceptLanguage ?? "en-US,en;q=0.9" }
     );
     if (opts.signal?.aborted) return cancelled();
-    if (!challengeUrl(again.url)) res = again;
+    if (again.status !== 0 && !challengeUrl(again.url)) res = again;
   }
   if (challengeUrl(res.url)) {
     seen.page = true;

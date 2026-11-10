@@ -123,6 +123,20 @@ describe("fetchAndExtract on a redirect to a challenge", () => {
     expect(res.note).toMatch(/anti-bot challenge/);
   });
 
+  // The retry under the other UA is a second chance, not a second opinion: when
+  // it gets no answer at all, what is known is still that the page is behind a
+  // challenge — the note said "status 0" and dropped that.
+  it("keeps the challenge when the retry under the other UA gets no answer", async () => {
+    installFetchMock((_url, init) => {
+      if (!uaOf(init).includes("Mozilla/5.0")) throw new TypeError("fetch failed");
+      return { body: "<html><body>Sorry</body></html>", url: "https://x.test/verify-human/verify.html?next=/a" };
+    });
+    const res = await fetchAndExtract("https://x.test/a");
+    expect(res.text).toBe("");
+    expect(res.finalUrl).toContain("/verify-human/");
+    expect(res.note).toMatch(/anti-bot challenge/);
+  });
+
   it("never retries a page that was not redirected to a challenge", async () => {
     let calls = 0;
     installFetchMock(() => {
