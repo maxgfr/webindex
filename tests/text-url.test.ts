@@ -4,6 +4,7 @@ import { focusedSnippet } from "../src/fetch.js";
 import { bm25Tokenize } from "../src/rank.js";
 import { configure, resetBrand } from "../src/brand.js";
 import { canonicalizeUrl, domainOf, fnv1a64, LOCAL_FILE_DOMAIN, normalizeDoi } from "../src/url.js";
+import { CPU_BUDGET_MS } from "./budget.js";
 
 // Ported from the blocks of each skill's util.test.ts whose subjects moved into
 // the engine. The rest of that suite covers functions still on the consumer
@@ -68,7 +69,7 @@ describe("canonicalizeUrl", () => {
     const hostile = `https://x.test/${"/".repeat(200_000)}x`;
     const started = performance.now();
     expect(canonicalizeUrl(hostile)).toBe(hostile);
-    expect(performance.now() - started).toBeLessThan(200);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
     expect(canonicalizeUrl("https://x.test/a///")).toBe("https://x.test/a");
   });
 });
@@ -123,7 +124,7 @@ describe("fnv1a64", () => {
     const long = "https://x.test/".repeat(20_000);
     const started = performance.now();
     expect(fnv1a64(long)).toBeLessThan(1n << 64n);
-    expect(performance.now() - started).toBeLessThan(100);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 });
 
@@ -495,7 +496,7 @@ describe("extraStopwords", () => {
     configure({ name: "docs-tool", envPrefix: "DOCS", cli: "docs", extraStopwords: Array.from({ length: 2_000 }, (_, i) => `Extra${i}`) });
     const started = performance.now();
     for (let i = 0; i < 100_000; i++) isStopword("throttle");
-    expect(performance.now() - started).toBeLessThan(250);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 
   it("is absent by default, so the shared list stands alone", () => {

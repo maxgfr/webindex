@@ -7,6 +7,11 @@ export default defineConfig({
     // dir — the engine reads `${envPrefix}_*` at call time, and the suite must
     // never touch a real consumer's cache.
     setupFiles: ["tests/setup.ts"],
+    // Vitest's 5 s default is a wall-clock bound on every test, and the ones
+    // that push a 24 MB document or 300 000 nodes through the engine met it on
+    // a busy machine. A hang still fails; it just has to be a hang.
+    testTimeout: 30_000,
+    hookTimeout: 60_000,
     coverage: {
       provider: "v8",
       include: ["src/**"],

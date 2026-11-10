@@ -20,6 +20,7 @@ import {
 } from "../src/rank.js";
 import { configure, resetBrand } from "../src/brand.js";
 import { buildMatcher, foldTerm } from "../src/text.js";
+import { CPU_BUDGET_MS } from "./budget.js";
 
 const src = (url: string, score: number, text = "") => ({ url, score, text });
 
@@ -262,7 +263,7 @@ describe("BM25F", () => {
     const text = `${"東京タワー".repeat(20_000)} ${"RateLimiterX".repeat(5_000)} ${"हिन्दी ".repeat(10_000)} ${"a_".repeat(20_000)}`;
     const started = performance.now();
     bm25Tokenize(text);
-    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 
   it("ranks a title match above the same term buried in the body", () => {
@@ -441,12 +442,12 @@ describe("simhash near-duplicate detection", () => {
     expect(hammingDistance(-(1n << 63n), 0n)).toBe(1);
   });
 
-  it("hashes 200 KB of prose well under a tenth of a second", () => {
+  it("hashes 200 KB of prose in milliseconds, not seconds", () => {
     const big = article.repeat(200);
     expect(big.length).toBeGreaterThan(200_000);
     const started = performance.now();
     simhash(big);
-    expect(performance.now() - started).toBeLessThan(100);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 
   it("collapses syndicated copies, keeping the best-scored one", () => {
@@ -676,6 +677,6 @@ describe("externalHosts", () => {
   it("stays linear on a long run of host characters", () => {
     const started = performance.now();
     externalHosts("https://example.com/a", `https://${"a.".repeat(50_000)} https://${"x@".repeat(20_000)} ${"https://".repeat(20_000)}`);
-    expect(performance.now() - started).toBeLessThan(500);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 });

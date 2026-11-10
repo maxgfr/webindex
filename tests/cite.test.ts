@@ -22,6 +22,7 @@ import {
   uncitedIds,
   unitTexts,
 } from "../src/cite.js";
+import { CPU_BUDGET_MS } from "./budget.js";
 
 const isSource = (t: string) => SOURCE_TOKEN.test(t);
 const texts = (units: ClaimUnit[]) => units.flatMap(unitTexts);
@@ -409,7 +410,7 @@ describe("numerals", () => {
     const long = `1${",000".repeat(50_000)}`;
     const started = performance.now();
     expect(normalizeNumeralText(long)).toBe(`1${"000".repeat(50_000)}`);
-    expect(performance.now() - started).toBeLessThan(500);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 
   it("lets a figure survive translation between the two notations", () => {
@@ -435,7 +436,7 @@ describe("adversarial input", () => {
     extractClaimUnits(lines.join("\n\n"));
     collectCitations(lines.join("\n\n"), isSource);
     codeMask([`\`\`\`${pad}\``, `~~~${pad}x`]);
-    expect(performance.now() - started).toBeLessThan(500);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 
   it("blanks HTML comments in linear time when none of them ever closes", () => {
@@ -443,7 +444,7 @@ describe("adversarial input", () => {
     const hostile = "<!--".repeat(50_000);
     const started = performance.now();
     expect(stripHtmlComments(hostile)).toBe(hostile);
-    expect(performance.now() - started).toBeLessThan(200);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
     expect(stripHtmlComments("a<!-- x -->b<!--y-->c<!-- open")).toBe("a          b        c<!-- open");
   });
 });

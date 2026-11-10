@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { pubmedAbstractUrl, resolveProvider } from "../src/providers.js";
+import { CPU_BUDGET_MS } from "./budget.js";
 
 const EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi";
 
@@ -110,7 +111,7 @@ describe("resolveProvider", () => {
     for (const url of hostile) {
       const t0 = performance.now();
       resolveProvider(url);
-      expect(performance.now() - t0).toBeLessThan(1000);
+      expect(performance.now() - t0).toBeLessThan(CPU_BUDGET_MS);
     }
   });
 

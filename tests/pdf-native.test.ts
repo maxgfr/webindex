@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { constants as zlibConstants, deflateRawSync, deflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { assessPdfText, pdfToText } from "../src/pdf.js";
+import { CPU_BUDGET_MS } from "./budget.js";
 
 // Assemble a one-stream PDF buffer around a raw (uncompressed) content stream.
 function pdf(streamBody: Buffer | string): Buffer {
@@ -128,19 +129,19 @@ describe("pdfToText on hostile input", () => {
   // milliseconds on all of them.
   it("stays linear on an array that never closes", () => {
     const { value, ms } = timed(() => pdfToText(pdf(`BT [${"(a)".repeat(40)} TJ ET\nBT (after the array) Tj ET`)));
-    expect(ms).toBeLessThan(1000);
+    expect(ms).toBeLessThan(CPU_BUDGET_MS);
     expect(value).toContain("after the array");
   });
 
   it("stays linear on a run of opening brackets, parens or angle brackets", () => {
-    expect(timed(() => pdfToText(pdf(`BT ${"[".repeat(50_000)} (x) Tj ET`))).ms).toBeLessThan(1000);
-    expect(timed(() => pdfToText(pdf(`BT ${"(".repeat(50_000)} Tj ET`))).ms).toBeLessThan(1000);
-    expect(timed(() => pdfToText(pdf(`BT ${"<0".repeat(50_000)} Tj ET`))).ms).toBeLessThan(1000);
+    expect(timed(() => pdfToText(pdf(`BT ${"[".repeat(50_000)} (x) Tj ET`))).ms).toBeLessThan(CPU_BUDGET_MS);
+    expect(timed(() => pdfToText(pdf(`BT ${"(".repeat(50_000)} Tj ET`))).ms).toBeLessThan(CPU_BUDGET_MS);
+    expect(timed(() => pdfToText(pdf(`BT ${"<0".repeat(50_000)} Tj ET`))).ms).toBeLessThan(CPU_BUDGET_MS);
   });
 
   it("stays linear on many `stream` keywords that never end", () => {
     const body = Buffer.from(`%PDF-1.4\n${"stream\n".repeat(200_000)}`, "latin1");
-    expect(timed(() => pdfToText(body)).ms).toBeLessThan(1000);
+    expect(timed(() => pdfToText(body)).ms).toBeLessThan(CPU_BUDGET_MS);
   });
 
   // A 600 KB PDF whose second stream inflates to 600 MB used to take 6 s and

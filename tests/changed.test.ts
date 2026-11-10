@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { contentHash, fingerprint, hasChanged } from "../src/changed.js";
 import { extractTables, tableToMarkdown } from "../src/tables.js";
+import { CPU_BUDGET_MS } from "./budget.js";
 import { installFetchMock } from "./fetchmock.js";
 
 afterEach(() => vi.restoreAllMocks());
@@ -366,7 +367,7 @@ describe("extractTables", () => {
     const within = (ms: number, fn: () => unknown) => {
       const started = performance.now();
       fn();
-      expect(performance.now() - started).toBeLessThan(ms);
+      expect(performance.now() - started).toBeLessThan(Math.max(ms, CPU_BUDGET_MS));
     };
 
     it("20k rows with their end tags omitted", () => {

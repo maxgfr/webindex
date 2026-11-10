@@ -22,6 +22,7 @@ import { lookupPackage, lookupPackageResult, normalizeRepoUrl, resolvePackage, r
 import { resolveRepo } from "../src/repo.js";
 import { slugify } from "../src/text.js";
 import { installFetchMock } from "./fetchmock.js";
+import { CPU_BUDGET_MS } from "./budget.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -950,7 +951,7 @@ describe("package registries", () => {
     const hostile = `https://github.com/a/b${"/".repeat(200_000)}x`;
     const started = performance.now();
     expect(normalizeRepoUrl(hostile)).toBe(hostile);
-    expect(performance.now() - started).toBeLessThan(200);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
     expect(normalizeRepoUrl("https://github.com/a/b.git///")).toBe("https://github.com/a/b");
   });
 

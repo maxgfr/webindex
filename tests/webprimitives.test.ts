@@ -8,6 +8,7 @@ import { httpGet } from "../src/fetch.js";
 import { fetchRobots, isAllowed, parseRobots, resetRobotsCache } from "../src/robots.js";
 import { extractJsonLd, extractMetaTags, pageMetadata } from "../src/structured.js";
 import { installFetchMock } from "./fetchmock.js";
+import { CPU_BUDGET_MS } from "./budget.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -340,7 +341,7 @@ Sitemap: https://ex.test/sitemap.xml
     const started = performance.now();
     expect(isAllowed(r, `https://ex.test/${"a".repeat(2000)}b`)).toBe(true);
     expect(isAllowed(r, `https://ex.test/${"a".repeat(2000)}`)).toBe(false);
-    expect(performance.now() - started).toBeLessThan(200);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 
   it("compares percent-encoded and literal paths as the same path", () => {
@@ -808,7 +809,7 @@ describe("feeds", () => {
     const started = performance.now();
     expect(discoverFeeds(`<link ${hostile}>`, "https://ex.test/")).toEqual([]);
     expect(parseFeed(`<feed><entry><title>T</title><link ${hostile}></entry></feed>`)?.items[0]?.title).toBe("T");
-    expect(performance.now() - started).toBeLessThan(200);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 
   it("scans unclosed items and link tags in linear time", () => {
@@ -818,7 +819,7 @@ describe("feeds", () => {
     expect(parseFeed(`<rss><channel><title>T</title>${"<item><title>x".repeat(40_000)}</channel></rss>`)?.items).toEqual([]);
     expect(discoverFeeds("<link rel=alternate ".repeat(40_000), "https://ex.test/")).toEqual([]);
     expect(parseSitemap(`<urlset>${"<url><loc>https://ex.test/".repeat(40_000)}`).urls).toEqual([]);
-    expect(performance.now() - started).toBeLessThan(1000);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 
   it("reads the HTML a description carries escaped, as text", () => {

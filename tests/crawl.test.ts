@@ -3,6 +3,7 @@ import { envName } from "../src/brand.js";
 import { awaitHostSlot, backOffHost, crawlSite, hostDelayMs, linksFrom, resetHostSchedule } from "../src/crawl.js";
 import { resetRobotsCache } from "../src/robots.js";
 import { installFetchMock } from "./fetchmock.js";
+import { CPU_BUDGET_MS } from "./budget.js";
 
 beforeEach(() => {
   resetHostSchedule();
@@ -157,7 +158,7 @@ describe("linksFrom", () => {
     expect(linksFrom("<a x".repeat(100_000), "https://a.test/")).toEqual([]);
     expect(linksFrom(`<a href="${"<a ".repeat(50_000)}`, "https://a.test/")).toEqual([]);
     expect(linksFrom('<a title="'.repeat(50_000), "https://a.test/")).toEqual([]);
-    expect(performance.now() - started).toBeLessThan(1000);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 });
 

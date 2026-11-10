@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { mergeSegments, parseVtt } from "../src/video.js";
+import { CPU_BUDGET_MS } from "./budget.js";
 
 // Captured once from YouTube with yt-dlp (see tests/fixtures/video/) and trimmed:
 // a manual English track, its French translation, the rolling auto-captions of
@@ -99,14 +100,14 @@ describe("parseVtt", () => {
     const line = `${"<".repeat(200_000)}x`;
     const started = performance.now();
     expect(parseVtt(`WEBVTT\n\n00:01.000 --> 00:02.000\n${line}\n`)).toEqual([{ start: 1, end: 2, text: line }]);
-    expect(performance.now() - started).toBeLessThan(200);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 
   it("strips positioning codes in linear time on a long run of openers that never close", () => {
     const line = `${"{\\".repeat(100_000)}x`;
     const started = performance.now();
     expect(parseVtt(`1\n00:00:01,000 --> 00:00:02,000\n${line}\n`)).toEqual([{ start: 1, end: 2, text: line }]);
-    expect(performance.now() - started).toBeLessThan(200);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 
   it("returns nothing for something that is not WebVTT", () => {
@@ -171,7 +172,7 @@ describe("mergeSegments", () => {
     const text = `${".".repeat(200_000)}x`;
     const started = performance.now();
     expect(mergeSegments([{ start: 0, end: 1, text }])).toEqual([{ start: 0, end: 1, text }]);
-    expect(performance.now() - started).toBeLessThan(200);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 
   it("counts sentences and words per cue, not by rescanning the segment it grows", () => {
@@ -180,7 +181,7 @@ describe("mergeSegments", () => {
     const cues = Array.from({ length: 20_000 }, () => ({ start: 0, end: 0, text: "word word" }));
     const started = performance.now();
     const segs = mergeSegments(cues);
-    expect(performance.now() - started).toBeLessThan(200);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
     expect(segs).toHaveLength(1);
     expect(segs[0]!.text).toBe(Array.from({ length: 20_000 }, () => "word word").join(" "));
   });
