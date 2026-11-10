@@ -2,7 +2,7 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { batchRefusal, type ProtocolVersion } from "./protocol.js";
 import { createServer, ERR_INVALID_REQUEST, type JsonRpcMessage, type McpAdapter, type ServerOptions } from "./server.js";
-import { MAX_IN_FLIGHT } from "./slots.js";
+import { toolSlots } from "./slots.js";
 
 // The stdio transport: one JSON-RPC message per line, in on stdin, out on
 // stdout. This is what `claude mcp add --transport stdio` and Claude Desktop
@@ -71,12 +71,14 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
   // the notifications/cancelled meant for those very calls sat unread until
   // one of them finished on its own. A ping, a tools/list or a cancel costs
   // nothing, so it is handled the moment it arrives.
-  let active = 0;
-  const waiting: (() => void)[] = [];
+  //
+  // The same slots the HTTP transport hands out (slots.ts): a freed slot is
+  // handed to the head of the queue, never left for whichever call looks first.
+  const slots = toolSlots();
   // Tool calls still waiting for a slot. The server only learns of a request
-  // once it runs, so a cancel for one still queued is recorded here: the call
-  // is then never run and never answered, as the notification asks.
-  const queued = new Map<string | number, { cancelled: boolean }>();
+  // once it runs, so a cancel for one still queued is delivered here: the call
+  // leaves the queue, and is never run and never answered, as the notification asks.
+  const queued = new Map<string | number, AbortController>();
   // The revision `initialize` settled, which decides whether batches exist.
   let negotiated: ProtocolVersion | undefined;
 
@@ -84,24 +86,19 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
   // notifications always go straight out as frames of their own.
   const handleOpts = { notify: send };
   const runToolCall = async (msg: JsonRpcMessage, id: string | number, reply: (out: JsonRpcMessage) => void): Promise<void> => {
-    const ticket = { cancelled: false };
+    const ticket = new AbortController();
     queued.set(id, ticket);
+    let release: (() => void) | undefined;
     try {
-      while (active >= MAX_IN_FLIGHT) await new Promise<void>((resolve) => waiting.push(resolve));
+      release = await slots.acquire(ticket.signal);
     } finally {
       if (queued.get(id) === ticket) queued.delete(id);
     }
-    if (ticket.cancelled) {
-      // The slot this call was woken for goes to the next one in line.
-      waiting.shift()?.();
-      return;
-    }
-    active++;
+    if (!release) return; // cancelled while it queued: it took no slot
     try {
       await server.handle(msg, reply, handleOpts);
     } finally {
-      active--;
-      waiting.shift()?.();
+      release();
     }
   };
 
@@ -109,8 +106,7 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
     if (msg !== null && typeof msg === "object" && !Array.isArray(msg)) {
       if (msg.method === "notifications/cancelled") {
         const target = msg.params?.requestId;
-        const ticket = typeof target === "string" || typeof target === "number" ? queued.get(target) : undefined;
-        if (ticket) ticket.cancelled = true;
+        if (typeof target === "string" || typeof target === "number") queued.get(target)?.abort();
       }
       if (msg.method === "tools/call" && (typeof msg.id === "string" || typeof msg.id === "number")) {
         await runToolCall(msg, msg.id, reply);

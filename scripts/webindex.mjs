@@ -17602,37 +17602,31 @@ async function runStdioServer(adapter, opts = {}) {
     void p.finally(() => inFlight.delete(p));
     return p;
   };
-  let active2 = 0;
-  const waiting = [];
+  const slots = toolSlots();
   const queued = /* @__PURE__ */ new Map();
   let negotiated;
   const handleOpts = { notify: send };
   const runToolCall = async (msg, id, reply) => {
-    const ticket = { cancelled: false };
+    const ticket = new AbortController();
     queued.set(id, ticket);
+    let release2;
     try {
-      while (active2 >= MAX_IN_FLIGHT) await new Promise((resolve13) => waiting.push(resolve13));
+      release2 = await slots.acquire(ticket.signal);
     } finally {
       if (queued.get(id) === ticket) queued.delete(id);
     }
-    if (ticket.cancelled) {
-      waiting.shift()?.();
-      return;
-    }
-    active2++;
+    if (!release2) return;
     try {
       await server.handle(msg, reply, handleOpts);
     } finally {
-      active2--;
-      waiting.shift()?.();
+      release2();
     }
   };
   const dispatch2 = async (msg, reply) => {
     if (msg !== null && typeof msg === "object" && !Array.isArray(msg)) {
       if (msg.method === "notifications/cancelled") {
         const target = msg.params?.requestId;
-        const ticket = typeof target === "string" || typeof target === "number" ? queued.get(target) : void 0;
-        if (ticket) ticket.cancelled = true;
+        if (typeof target === "string" || typeof target === "number") queued.get(target)?.abort();
       }
       if (msg.method === "tools/call" && (typeof msg.id === "string" || typeof msg.id === "number")) {
         await runToolCall(msg, msg.id, reply);
