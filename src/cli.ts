@@ -15,7 +15,7 @@ import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // text, drive the containers, and serve all of that to an agent over MCP.
 import { existsSync, mkdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { isIP } from "node:net";
-import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { configure, env, envFlag, envInt, envName } from "./brand.js";
 import { decodeLocal } from "./charset.js";
@@ -1348,7 +1348,10 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & {
     }
     mkdirSync(base, { recursive: true });
     const target = join(base, named);
-    if (existsSync(target) && relative(realpathSync(base), realpathSync(target)).startsWith("..")) {
+    // Outside is ".." or a path through it — not every name that begins with
+    // two dots: an existing "..cache" was refused as leading out of the root.
+    const rel = existsSync(target) ? relative(realpathSync(base), realpathSync(target)) : "";
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
       throw new ToolError(`${named} leads outside ${base}, the only directory this server writes videos to.`);
     }
     return target;

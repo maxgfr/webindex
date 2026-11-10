@@ -13225,7 +13225,7 @@ init_brand();
 init_charset();
 import { existsSync as existsSync15, mkdirSync as mkdirSync9, readFileSync as readFileSync19, readSync, realpathSync as realpathSync4, statSync as statSync12 } from "fs";
 import { isIP as isIP2 } from "net";
-import { basename as basename5, extname, isAbsolute as isAbsolute6, join as join28, relative as relative4, resolve as resolve12 } from "path";
+import { basename as basename5, extname, isAbsolute as isAbsolute6, join as join28, relative as relative4, resolve as resolve12, sep as sep4 } from "path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL } from "url";
 
 // src/version.ts
@@ -14663,10 +14663,10 @@ function parseRobots(body, userAgent) {
   for (const raw of body.split(/\r\n|\r|\n/)) {
     const line = raw.replace(/#.*$/, "").trim();
     if (!line) continue;
-    const sep4 = line.indexOf(":");
-    if (sep4 === -1) continue;
-    const field = line.slice(0, sep4).trim().toLowerCase();
-    const value = line.slice(sep4 + 1).trim();
+    const sep5 = line.indexOf(":");
+    if (sep5 === -1) continue;
+    const field = line.slice(0, sep5).trim().toLowerCase();
+    const value = line.slice(sep5 + 1).trim();
     if (field === "sitemap") {
       if (value) sitemaps.push(value);
       continue;
@@ -19645,7 +19645,8 @@ function webindexAdapter(policy = {}) {
     }
     mkdirSync9(base2, { recursive: true });
     const target = join28(base2, named);
-    if (existsSync15(target) && relative4(realpathSync4(base2), realpathSync4(target)).startsWith("..")) {
+    const rel = existsSync15(target) ? relative4(realpathSync4(base2), realpathSync4(target)) : "";
+    if (rel === ".." || rel.startsWith(`..${sep4}`) || isAbsolute6(rel)) {
       throw new ToolError(`${named} leads outside ${base2}, the only directory this server writes videos to.`);
     }
     return target;

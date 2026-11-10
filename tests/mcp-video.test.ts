@@ -205,6 +205,12 @@ describe("the MCP video tools", () => {
     }
     const r = await guarded.callTool("webindex_video_fetch", { url: "https://youtu.be/aaaaaaaaaaa", dir: "animals" });
     expect(text(r)).toContain(`run: ${join(root, "animals", "aaaaaaaaaaa")}`);
+    // A name that merely begins with two dots is inside the root: "..cache"
+    // was refused as leading outside it, once the directory existed.
+    for (let i = 0; i < 2; i++) {
+      const dotted = await guarded.callTool("webindex_video_fetch", { url: "https://youtu.be/aaaaaaaaaaa", dir: "..cache" });
+      expect(text(dotted)).toContain(`run: ${join(root, "..cache", "aaaaaaaaaaa")}`);
+    }
     // With no policy, a local caller names any directory.
     const free = mkdtempSync(join(tmpdir(), "mcp-video-free-"));
     try {
