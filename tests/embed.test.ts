@@ -59,6 +59,27 @@ describe("embed", () => {
     expect(r.vectors.map((v) => v[0])).toEqual([1, 2, 3, 4, 5]);
   });
 
+  // The answer to one batch is its vectors as JSON: about 20 KB each at 1024
+  // dimensions. A batch of 300 is 6 MB, over the 4 MB every JSON answer is
+  // capped at, and every batch failed with "response too large" and no word
+  // about the batch size.
+  it("reads the answer to a large batch", async () => {
+    process.env[envName("EMBED_BATCH")] = "300";
+    const vector = Array.from({ length: 1024 }, (_, i) => -0.123456789012345 - i / 1e6);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        if (String(input).includes("/api/tags")) return new Response(JSON.stringify({ models: [] }), { headers: { "content-type": "application/json" } });
+        const n = (JSON.parse(String(init?.body)) as { input: string[] }).input.length;
+        return new Response(JSON.stringify({ embeddings: Array.from({ length: n }, () => vector) }), { headers: { "content-type": "application/json" } });
+      }),
+    );
+    const texts = Array.from({ length: 300 }, (_, i) => `text ${i}`);
+    const r = await embed(texts, { base: OLLAMA });
+    expect(r.note).toBeUndefined();
+    expect(r.vectors).toHaveLength(300);
+  });
+
   // An MCP cancel stopped the tool, not the minute-long embedding request it
   // was waiting on, nor the batches queued after it.
   it("stops its requests, and sends no more, when the caller's signal aborts", async () => {

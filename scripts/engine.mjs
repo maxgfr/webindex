@@ -14731,8 +14731,10 @@ function embedConcurrency() {
   return Math.max(1, envInt("EMBED_CONCURRENCY", 4));
 }
 function embedBatch() {
-  return Math.max(1, envInt("EMBED_BATCH", 16));
+  return envInt("EMBED_BATCH", 16, 1, 1024);
 }
+var MIN_ANSWER_BYTES = 4 * 1024 * 1024;
+var ANSWER_BYTES_PER_VECTOR = 128 * 1024;
 var probed = /* @__PURE__ */ new Map();
 function resetOllamaProbe() {
   probed.clear();
@@ -14757,7 +14759,8 @@ async function embed(texts, opts = {}) {
   let failed2 = false;
   const results = await mapLimit(batches, opts.concurrency ?? embedConcurrency(), async (batch) => {
     if (failed2 || opts.signal?.aborted) return void 0;
-    const r = await httpJson("POST", `${base2}/api/embed`, { model, input: batch }, { timeoutMs: 6e4, signal: opts.signal });
+    const maxBytes = Math.max(MIN_ANSWER_BYTES, batch.length * ANSWER_BYTES_PER_VECTOR);
+    const r = await httpJson("POST", `${base2}/api/embed`, { model, input: batch }, { timeoutMs: 6e4, signal: opts.signal, maxBytes });
     const got = r.ok ? r.data?.embeddings : void 0;
     if (!got || got.length !== batch.length) {
       failed2 = true;

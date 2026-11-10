@@ -38,10 +38,15 @@ function embedConcurrency(): number {
   return Math.max(1, envInt("EMBED_CONCURRENCY", 4));
 }
 
-/** How many texts go in one request. Ollama batches natively; this caps the payload. */
+/** How many texts go in one request (1 to 1024). Ollama batches natively; this caps the payload. */
 function embedBatch(): number {
-  return Math.max(1, envInt("EMBED_BATCH", 16));
+  return envInt("EMBED_BATCH", 16, 1, 1024);
 }
+
+// What one batch's answer may weigh: the usual JSON cap at least, and room for
+// each vector — 4096 dimensions at ~24 characters a number is under 128 KiB.
+const MIN_ANSWER_BYTES = 4 * 1024 * 1024;
+const ANSWER_BYTES_PER_VECTOR = 128 * 1024;
 
 export interface EmbedResult {
   /** One vector per input, in input order. Empty when the service did not answer. */
@@ -108,7 +113,10 @@ export async function embed(
   let failed = false;
   const results = await mapLimit(batches, opts.concurrency ?? embedConcurrency(), async (batch) => {
     if (failed || opts.signal?.aborted) return undefined;
-    const r = await httpJson("POST", `${base}/api/embed`, { model, input: batch }, { timeoutMs: 60_000, signal: opts.signal });
+    // The answer is one vector per text, as JSON: its cap has to grow with the
+    // batch, or a large EMBED_BATCH fails every request as "response too large".
+    const maxBytes = Math.max(MIN_ANSWER_BYTES, batch.length * ANSWER_BYTES_PER_VECTOR);
+    const r = await httpJson("POST", `${base}/api/embed`, { model, input: batch }, { timeoutMs: 60_000, signal: opts.signal, maxBytes });
     const got = r.ok ? (r.data?.embeddings as number[][] | undefined) : undefined;
     if (!got || got.length !== batch.length) {
       failed = true;
