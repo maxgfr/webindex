@@ -83,6 +83,53 @@ describe("assessRisk: click", () => {
     expect(click("deposer").risky).toBe(true);
   });
 
+  it("reads through characters that are not shown", () => {
+    // A soft hyphen, a zero-width space or joiner, a bidi mark: none of them is
+    // drawn, and each one split the word the guard looks for. Full-width
+    // letters read as the same word too.
+    for (const label of [
+      "Del\u00ADete account",
+      "Pay\u200B now",
+      "De\u200Dlete",
+      "\u200EDelete\u200F",
+      "\uFF24\uFF45\uFF4C\uFF45\uFF54\uFF45",
+      "Sup\u00ADprimer",
+    ]) {
+      expect(click(label).risky, JSON.stringify(label)).toBe(true);
+    }
+    // ...without gluing two words into one the guard knows.
+    expect(click("Com\u00ADpost").risky).toBe(false);
+  });
+
+  it("reads a control's whole label in the page, not its first 200 characters", () => {
+    // The collector cut the label at 200 characters before it was matched: a
+    // long title or aria-label ahead of the visible text pushed "Delete" out.
+    const attrs: Record<string, string> = { title: `Your plan includes ${"unlimited projects and priority support, ".repeat(8)}`.trim() };
+    const doc = { getElementById: () => null, body: null, documentElement: null };
+    const button = {
+      nodeType: 1,
+      tagName: "BUTTON",
+      ownerDocument: doc,
+      innerText: "Delete account",
+      textContent: "Delete account",
+      shadowRoot: null,
+      form: null,
+      parentElement: null,
+      labels: [],
+      getRootNode: () => ({ nodeType: 9, getElementById: () => null }),
+      getAttribute: (name: string) => attrs[name] ?? null,
+      hasAttribute: (name: string) => name in attrs,
+      closest: () => null,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+    };
+    expect((attrs.title as string).length).toBeGreaterThan(200);
+    const got = run(COLLECT_SOURCE, button, ["click"]) as { role: string; label: string };
+    expect(got.role).toBe("button");
+    expect(got.label).toContain("Delete account");
+    expect(assessRisk({ action: "click", isSubmit: false, formHasPassword: false, ...got }).risky).toBe(true);
+  });
+
   it("matches whole words only", () => {
     for (const label of [
       "Compost",

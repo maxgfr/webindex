@@ -10755,7 +10755,7 @@ var init_risk = __esm({
     ];
     SIGN = "sign(?!\\s*-?\\s*(?:in|out)(?![a-z0-9]))";
     IRREVERSIBLE_RE = new RegExp(`(?<![a-z0-9])(${[...IRREVERSIBLE, SIGN].join("|")})(?![a-z0-9])`);
-    norm2 = (s) => s.normalize("NFD").replace(new RegExp("\\p{M}", "gu"), "").replace(/[‘’]/g, "'").toLowerCase();
+    norm2 = (s) => s.normalize("NFKD").replace(/[\p{M}\p{Cf}]/gu, "").replace(/[‘’]/g, "'").toLowerCase();
     ENTER = /* @__PURE__ */ new Set(["enter", "numpadenter", "return"]);
     SPACE = /* @__PURE__ */ new Set([" ", "space", "spacebar"]);
     lastKey = (key) => {
@@ -10806,7 +10806,10 @@ var init_risk = __esm({
   const doc = el.ownerDocument || document;
   const BTN = "button,[role=button],input[type=submit],input[type=image],input[type=button]";
   const PW = "input[type=password]";
-  const norm = (s) => (s || "").replace(/\\s+/g, " ").trim().slice(0, 200);
+  // Capped for what crosses back to Node, far above any real label: at 200 a
+  // long title or aria-label ahead of the text pushed "Delete" out of what the
+  // guard reads. The refusal shows 60 characters of it.
+  const norm = (s) => (s || "").replace(/\\s+/g, " ").trim().slice(0, 4000);
   // The control the user means: a click on a span inside a button is a click on the button.
   const ctl = el.closest(BTN) || el;
   const tag = ctl.tagName.toLowerCase();

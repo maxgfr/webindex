@@ -92,7 +92,16 @@ const SIGN = "sign(?!\\s*-?\\s*(?:in|out)(?![a-z0-9]))";
 
 const IRREVERSIBLE_RE = new RegExp(`(?<![a-z0-9])(${[...IRREVERSIBLE, SIGN].join("|")})(?![a-z0-9])`);
 
-const norm = (s: string): string => s.normalize("NFD").replace(/\p{M}/gu, "").replace(/[‘’]/g, "'").toLowerCase();
+// Read as it is shown: compatibility forms folded (full-width letters, ligatures),
+// accents dropped, and the characters that draw nothing — a soft hyphen, a
+// zero-width space or joiner, a bidi mark (\p{Cf}) — taken out, since each one
+// splits the word looked for without changing what the user sees.
+const norm = (s: string): string =>
+  s
+    .normalize("NFKD")
+    .replace(/[\p{M}\p{Cf}]/gu, "")
+    .replace(/[‘’]/g, "'")
+    .toLowerCase();
 
 /** The irreversible word a label contains, if any. */
 function matchLabel(label: string | undefined): string | undefined {
@@ -220,7 +229,10 @@ export const COLLECT_SOURCE = `function (action) {
   const doc = el.ownerDocument || document;
   const BTN = "button,[role=button],input[type=submit],input[type=image],input[type=button]";
   const PW = "input[type=password]";
-  const norm = (s) => (s || "").replace(/\\s+/g, " ").trim().slice(0, 200);
+  // Capped for what crosses back to Node, far above any real label: at 200 a
+  // long title or aria-label ahead of the text pushed "Delete" out of what the
+  // guard reads. The refusal shows 60 characters of it.
+  const norm = (s) => (s || "").replace(/\\s+/g, " ").trim().slice(0, 4000);
   // The control the user means: a click on a span inside a button is a click on the button.
   const ctl = el.closest(BTN) || el;
   const tag = ctl.tagName.toLowerCase();
