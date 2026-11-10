@@ -2231,7 +2231,8 @@ async function dispatch(argv: string[]): Promise<void> {
     // tenth URL should not cost the first nine requests and then fail.
     const bad = urls.find((u) => !/^https?:\/\//i.test(u));
     if (bad !== undefined) {
-      fail(
+      // The invocation was wrong (exit 2), not a read that found nothing (1).
+      usage(
         `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync(bad) ? ` — for a file on disk, \`webindex extract ${bad}\`` : ""}`,
       );
     }
@@ -2521,7 +2522,7 @@ async function dispatch(argv: string[]): Promise<void> {
     if (!target) usage(usageLine);
     // A page's own metadata is in its HTML, wherever that came from; robots,
     // sitemaps and feeds are things a SITE serves.
-    if (cmd !== "meta" && !/^https?:\/\//i.test(target)) fail("expected an http(s) URL");
+    if (cmd !== "meta" && !/^https?:\/\//i.test(target)) usage("expected an http(s) URL");
     const asJson = argBool(args, "json");
     const emit = (obj: unknown, human: string[]) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}\n`);
 
@@ -2639,7 +2640,7 @@ async function dispatch(argv: string[]): Promise<void> {
   if (cmd === "crawl") {
     const seed = positionalText(args);
     if (!seed) usage("usage: webindex crawl <url> --max <n>");
-    if (!/^https?:\/\//i.test(seed)) fail("crawl needs an http(s) URL");
+    if (!/^https?:\/\//i.test(seed)) usage("crawl needs an http(s) URL");
     const max = argInt(args, "max");
     // Required, not defaulted. Enumerating someone else's site is the one
     // operation here that can inconvenience them, so the budget is a decision
@@ -2750,7 +2751,7 @@ async function dispatch(argv: string[]): Promise<void> {
   if (cmd === "changed") {
     const url = positionalText(args);
     if (!url) usage("usage: webindex changed <url> [--etag <v>] [--last-modified <date>] [--hash <sha256>]");
-    if (!/^https?:\/\//i.test(url)) fail("changed needs an http(s) URL");
+    if (!/^https?:\/\//i.test(url)) usage("changed needs an http(s) URL");
     const etag = argValue(args, "etag");
     const lastModified = argValue(args, "last-modified");
     const hash = argValue(args, "hash");

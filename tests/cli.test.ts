@@ -603,14 +603,14 @@ describe("fetch argument handling", () => {
   });
 
   it("refuses a non-http argument rather than guessing", async () => {
-    expect(await run(["fetch", "example.com"])).toBe(1);
+    expect(await run(["fetch", "example.com"])).toBe(2);
     expect(stderr()).toMatch(/http\(s\) URL/);
   });
 
   it("points a file on disk at extract", async () => {
     const path = join(dir, "page.html");
     writeFileSync(path, "<p>hi</p>");
-    expect(await run(["fetch", path])).toBe(1);
+    expect(await run(["fetch", path])).toBe(2);
     expect(stderr()).toMatch(/`webindex extract/);
   });
 
@@ -728,7 +728,8 @@ describe("fetch with several URLs", () => {
   it("refuses the whole list, before fetching anything, when one is not an http(s) URL", async () => {
     const seen = timedFetch(() => 0);
     try {
-      expect(await run(["fetch", "https://x.test/a", "example.com"])).toBe(1);
+      // A wrong invocation, not a failed read: exit 2, as the taxonomy says.
+      expect(await run(["fetch", "https://x.test/a", "example.com"])).toBe(2);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2284,10 +2285,20 @@ describe("the forge, registry and page-metadata commands", () => {
   });
 
   it("insists on an http(s) URL for the site-level lookups", async () => {
+    // Exit 2: the invocation was wrong. It was 1, "ran and found nothing",
+    // which a script could not tell from a site with no robots.txt.
     for (const cmd of ["robots", "sitemap", "feed"]) {
       err = [];
-      expect(await run([cmd, "not-a-url"]), cmd).toBe(1);
+      expect(await run([cmd, "not-a-url"]), cmd).toBe(2);
       expect(stderr(), cmd).toMatch(/expected an http\(s\) URL/);
+    }
+    for (const argv of [
+      ["crawl", "not-a-url", "--max", "2"],
+      ["changed", "not-a-url"],
+    ]) {
+      err = [];
+      expect(await run(argv), argv[0]).toBe(2);
+      expect(stderr(), argv[0]).toMatch(/needs an http\(s\) URL/);
     }
   });
 

@@ -20418,7 +20418,7 @@ async function dispatch(argv) {
     if (!urls.length) usage("usage: webindex fetch <url> [<url> \u2026]");
     const bad = urls.find((u) => !/^https?:\/\//i.test(u));
     if (bad !== void 0) {
-      fail(
+      usage(
         `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync15(bad) ? ` \u2014 for a file on disk, \`webindex extract ${bad}\`` : ""}`
       );
     }
@@ -20663,7 +20663,7 @@ async function dispatch(argv) {
     const target = positionalText(args);
     const usageLine = `usage: webindex ${cmd} <url${cmd === "meta" ? "|file|-" : ""}>`;
     if (!target) usage(usageLine);
-    if (cmd !== "meta" && !/^https?:\/\//i.test(target)) fail("expected an http(s) URL");
+    if (cmd !== "meta" && !/^https?:\/\//i.test(target)) usage("expected an http(s) URL");
     const asJson = argBool(args, "json");
     const emit = (obj, human) => process.stdout.write(asJson ? jsonLine(obj) : `${human.join("\n")}
 `);
@@ -20773,7 +20773,7 @@ async function dispatch(argv) {
   if (cmd === "crawl") {
     const seed = positionalText(args);
     if (!seed) usage("usage: webindex crawl <url> --max <n>");
-    if (!/^https?:\/\//i.test(seed)) fail("crawl needs an http(s) URL");
+    if (!/^https?:\/\//i.test(seed)) usage("crawl needs an http(s) URL");
     const max = argInt(args, "max");
     if (max === void 0) usage("crawl needs --max <n> \u2014 an unbounded walk of somebody else's site is not something to do by accident");
     if (max < 1) usage("--max must be a positive whole number \u2014 a crawl without a budget is not one");
@@ -20880,7 +20880,7 @@ async function dispatch(argv) {
   if (cmd === "changed") {
     const url = positionalText(args);
     if (!url) usage("usage: webindex changed <url> [--etag <v>] [--last-modified <date>] [--hash <sha256>]");
-    if (!/^https?:\/\//i.test(url)) fail("changed needs an http(s) URL");
+    if (!/^https?:\/\//i.test(url)) usage("changed needs an http(s) URL");
     const etag = argValue(args, "etag");
     const lastModified = argValue(args, "last-modified");
     const hash = argValue(args, "hash");
