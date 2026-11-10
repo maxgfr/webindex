@@ -1600,11 +1600,11 @@ function openDocumentText(xml, budget) {
       const p = paragraphs[paragraphs.length - 1];
       const table = tables[tables.length - 1];
       if (name === "text:p" || name === "text:h") {
-        const level = name === "text:h" ? Math.min(6, Number(attr(attrs, "text:outline-level")) || 1) : 0;
+        const level = name === "text:h" ? Math.min(6, Math.max(1, Number(attr(attrs, "text:outline-level")) || 1)) : 0;
         paragraphs.push({ text: "", prefix: level ? `${"#".repeat(level)} ` : listItem && !table ? "- " : "" });
         listItem = false;
       } else if (name === "text:list-item") listItem = true;
-      else if (name === "text:s") add2(p, " ".repeat(Math.min(100, Number(attr(attrs, "text:c")) || 1)));
+      else if (name === "text:s") add2(p, " ".repeat(Math.min(100, Math.max(1, Number(attr(attrs, "text:c")) || 1))));
       else if (name === "text:tab") add2(p, "	");
       else if (name === "text:line-break") add2(p, "\n");
       else if (name === "office:spreadsheet") spreadsheet = true;
@@ -1699,7 +1699,9 @@ function packageText(bytes, budget) {
 function readOffice(bytes) {
   try {
     const text = packageText(bytes, new Budget()).replace(/\n{3,}/g, "\n\n").trim();
-    return { text: text.length > MAX_OUTPUT_CHARS ? text.slice(0, text.lastIndexOf("\n", MAX_OUTPUT_CHARS)) : text };
+    if (text.length <= MAX_OUTPUT_CHARS) return { text };
+    const lineEnd = text.lastIndexOf("\n", MAX_OUTPUT_CHARS);
+    return { text: text.slice(0, lineEnd < 0 ? MAX_OUTPUT_CHARS : lineEnd) };
   } catch (e) {
     return { failure: e instanceof Refused ? e.message : "the built-in reader could not parse it" };
   }

@@ -158,6 +158,13 @@ describe("the OpenDocument reader", () => {
     expect(officeToText(odf("text", text))).toBe("# Title\n\nKept text. More kept text.");
   });
 
+  // " ".repeat(-1) and "#".repeat(-2) throw a RangeError, which refused the
+  // whole document as one "the built-in reader could not parse".
+  it("reads an .odt whose space count or outline level is negative", () => {
+    const text = '<office:text><text:h text:outline-level="-2">Title</text:h><text:p>one<text:s text:c="-1"/>two</text:p></office:text>';
+    expect(officeToText(odf("text", text))).toBe("# Title\n\none two");
+  });
+
   // The .xlsx reader lists no sheet without cells; the ODS one printed a bare
   // "## <sheet>" heading for it.
   it("skips an empty sheet, as the .xlsx reader does", () => {
