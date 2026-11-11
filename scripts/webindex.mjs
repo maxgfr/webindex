@@ -5793,8 +5793,9 @@ function configuredForgeHosts() {
   return out;
 }
 function hostForgeKind(host) {
-  const h = normalizeForgeHost(host);
-  const declared = configuredForgeHosts().get(h);
+  const site = normalizeForgeHost(host);
+  const h = site.replace(/:\d+$/, "");
+  const declared = configuredForgeHosts().get(site) ?? configuredForgeHosts().get(h);
   if (declared) return declared;
   if (h === "github.com" || h.endsWith(".github.com") || h.startsWith("github.")) return "github";
   if (h === "gitlab.com" || h.includes("gitlab")) return "gitlab";
@@ -16426,7 +16427,10 @@ function resolveRepo(raw, opts = {}) {
   const user = transport.kind === "scp" ? transport.user : transport.kind === "url" ? transport.userinfo : void 0;
   if (host.startsWith("-") || user?.startsWith("-")) return generic();
   host = normalizeForgeHost(host);
-  const segments = repoSegments(host, rest, opts.kind ?? hostForgeKind(host));
+  const web = transport.kind === "url" && transport.scheme !== "ssh" ? transport.scheme : "https";
+  const port = transport.kind === "url" && transport.scheme !== "ssh" ? transport.port : void 0;
+  const site = port && port !== (web === "http" ? "80" : "443") ? `${host}:${port}` : host;
+  const segments = repoSegments(host, rest, opts.kind ?? hostForgeKind(site));
   if (!segments) return generic();
   const path = segments.join("/");
   const repo = segments[segments.length - 1];
@@ -16434,13 +16438,13 @@ function resolveRepo(raw, opts = {}) {
   const cloneUrl = transport.kind === "scp" ? `${transport.user}@${host}:${transport.absolute ? "/" : ""}${path}.git` : transport.kind === "url" ? `${transport.scheme}://${transport.userinfo ? `${transport.userinfo}@` : ""}${host}${transport.port ? `:${transport.port}` : ""}/${path}.git` : `https://${host}/${path}.git`;
   return {
     raw: trimmed,
-    host,
+    host: site,
     ...owner ? { owner } : {},
     ...repo ? { repo } : {},
     cloneUrl,
-    webUrl: `https://${host}/${path}`,
+    webUrl: site === host ? `https://${host}/${path}` : `${web}://${site}/${path}`,
     isLocal: false,
-    slug: repoSlug(`${host}/${path}`)
+    slug: repoSlug(`${site}/${path}`)
   };
 }
 function filePath(url) {

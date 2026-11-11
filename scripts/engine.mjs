@@ -8447,8 +8447,9 @@ function configuredForgeHosts() {
   return out;
 }
 function hostForgeKind(host) {
-  const h = normalizeForgeHost(host);
-  const declared = configuredForgeHosts().get(h);
+  const site = normalizeForgeHost(host);
+  const h = site.replace(/:\d+$/, "");
+  const declared = configuredForgeHosts().get(site) ?? configuredForgeHosts().get(h);
   if (declared) return declared;
   if (h === "github.com" || h.endsWith(".github.com") || h.startsWith("github.")) return "github";
   if (h === "gitlab.com" || h.includes("gitlab")) return "gitlab";
@@ -11160,7 +11161,10 @@ function resolveRepo(raw, opts = {}) {
   const user = transport.kind === "scp" ? transport.user : transport.kind === "url" ? transport.userinfo : void 0;
   if (host.startsWith("-") || user?.startsWith("-")) return generic();
   host = normalizeForgeHost(host);
-  const segments = repoSegments(host, rest, opts.kind ?? hostForgeKind(host));
+  const web = transport.kind === "url" && transport.scheme !== "ssh" ? transport.scheme : "https";
+  const port = transport.kind === "url" && transport.scheme !== "ssh" ? transport.port : void 0;
+  const site = port && port !== (web === "http" ? "80" : "443") ? `${host}:${port}` : host;
+  const segments = repoSegments(host, rest, opts.kind ?? hostForgeKind(site));
   if (!segments) return generic();
   const path = segments.join("/");
   const repo = segments[segments.length - 1];
@@ -11168,13 +11172,13 @@ function resolveRepo(raw, opts = {}) {
   const cloneUrl = transport.kind === "scp" ? `${transport.user}@${host}:${transport.absolute ? "/" : ""}${path}.git` : transport.kind === "url" ? `${transport.scheme}://${transport.userinfo ? `${transport.userinfo}@` : ""}${host}${transport.port ? `:${transport.port}` : ""}/${path}.git` : `https://${host}/${path}.git`;
   return {
     raw: trimmed,
-    host,
+    host: site,
     ...owner ? { owner } : {},
     ...repo ? { repo } : {},
     cloneUrl,
-    webUrl: `https://${host}/${path}`,
+    webUrl: site === host ? `https://${host}/${path}` : `${web}://${site}/${path}`,
     isLocal: false,
-    slug: repoSlug(`${host}/${path}`)
+    slug: repoSlug(`${site}/${path}`)
   };
 }
 function filePath(url) {
@@ -11205,7 +11209,8 @@ function legacySlugs(ref) {
   const before = slugify(k);
   const v121 = /^[a-z0-9._/]+$/.test(k) || before !== fold(k) ? before : `${slugify(k, { max: 111 })}-${sha256Hex(k).slice(0, 8)}`;
   const prefix = ref.host === "file" ? "file-" : "";
-  return [.../* @__PURE__ */ new Set([before, v121])].map((s) => `${prefix}${s}`).filter((s) => s !== ref.slug);
+  const portless = ref.host.includes(":") && ref.repo ? [repoSlug(`${ref.host.replace(/:\d+$/, "")}/${[ref.owner, ref.repo].filter(Boolean).join("/")}`)] : [];
+  return [.../* @__PURE__ */ new Set([...portless, before, v121])].map((s) => portless.includes(s) ? s : `${prefix}${s}`).filter((s) => s !== ref.slug);
 }
 var DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
 var TWO_SEGMENT_HOSTS = /* @__PURE__ */ new Set(["bitbucket.org"]);

@@ -165,7 +165,13 @@ export function resolveRepo(raw: string, opts: { kind?: ForgeKind; local?: boole
   if (host.startsWith("-") || user?.startsWith("-")) return generic();
 
   host = normalizeForgeHost(host);
-  const segments = repoSegments(host, rest, opts.kind ?? hostForgeKind(host));
+  // The site an http(s) remote names is its host AND its port: on another port
+  // it is another service, with its own web pages, API and token. (An ssh port
+  // is how git reaches the forge, not which forge it is: it stays in the clone URL.)
+  const web = transport.kind === "url" && transport.scheme !== "ssh" ? transport.scheme : "https";
+  const port = transport.kind === "url" && transport.scheme !== "ssh" ? transport.port : undefined;
+  const site = port && port !== (web === "http" ? "80" : "443") ? `${host}:${port}` : host;
+  const segments = repoSegments(host, rest, opts.kind ?? hostForgeKind(site));
   if (!segments) return generic();
   const path = segments.join("/");
   const repo = segments[segments.length - 1];
@@ -180,13 +186,13 @@ export function resolveRepo(raw: string, opts: { kind?: ForgeKind; local?: boole
 
   return {
     raw: trimmed,
-    host,
+    host: site,
     ...(owner ? { owner } : {}),
     ...(repo ? { repo } : {}),
     cloneUrl,
-    webUrl: `https://${host}/${path}`,
+    webUrl: site === host ? `https://${host}/${path}` : `${web}://${site}/${path}`,
     isLocal: false,
-    slug: repoSlug(`${host}/${path}`),
+    slug: repoSlug(`${site}/${path}`),
   };
 }
 
@@ -247,7 +253,9 @@ function legacySlugs(ref: RepoRef): string[] {
   const before = slugify(k);
   const v121 = /^[a-z0-9._/]+$/.test(k) || before !== fold(k) ? before : `${slugify(k, { max: 111 })}-${sha256Hex(k).slice(0, 8)}`;
   const prefix = ref.host === "file" ? "file-" : "";
-  return [...new Set([before, v121])].map((s) => `${prefix}${s}`).filter((s) => s !== ref.slug);
+  // The port of an http(s) remote was once left out of its slug: a clone made then is found again.
+  const portless = ref.host.includes(":") && ref.repo ? [repoSlug(`${ref.host.replace(/:\d+$/, "")}/${[ref.owner, ref.repo].filter(Boolean).join("/")}`)] : [];
+  return [...new Set([...portless, before, v121])].map((s) => (portless.includes(s) ? s : `${prefix}${s}`)).filter((s) => s !== ref.slug);
 }
 
 // A dot segment, spelled as a URL parser will read it: `%2e` is a dot to WHATWG

@@ -52,8 +52,11 @@ export function configuredForgeHosts(): Map<string, ForgeKind> {
  * decides where a token goes — see `tokenHostAllowed` in forge.ts.
  */
 export function hostForgeKind(host: string): ForgeKind | undefined {
-  const h = normalizeForgeHost(host);
-  const declared = configuredForgeHosts().get(h);
+  const site = normalizeForgeHost(host);
+  // `git.corp:8443` is declared as itself, else as the host it runs on; the
+  // shape is read off the name. (A token goes only to a site declared exactly.)
+  const h = site.replace(/:\d+$/, "");
+  const declared = configuredForgeHosts().get(site) ?? configuredForgeHosts().get(h);
   if (declared) return declared;
   if (h === "github.com" || h.endsWith(".github.com") || h.startsWith("github.")) return "github";
   if (h === "gitlab.com" || h.includes("gitlab")) return "gitlab";

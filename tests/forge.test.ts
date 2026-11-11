@@ -58,13 +58,39 @@ describe("resolveRepo", () => {
     for (const s of [
       "ssh://git@github.com/expressjs/express.git",
       "git://github.com/expressjs/express.git",
-      "https://user:pw@github.com:8443/expressjs/express",
+      "https://user:pw@github.com:443/expressjs/express",
     ]) {
       const r = resolveRepo(s);
       expect(r.host, s).toBe("github.com");
       expect(r.owner, s).toBe("expressjs");
       expect(r.repo, s).toBe("express");
     }
+  });
+
+  it("keeps the port of an http(s) remote in the host, the links and the API it asks", () => {
+    // The port survived in the clone URL only: https://git.corp:8443/g/r was
+    // cited as https://git.corp/g/r, asked at https://git.corp/api/v4 (port
+    // 443, another service), shared its clone directory with the forge on 443,
+    // and a FORGE_HOSTS entry naming the port never matched.
+    const r = resolveRepo("https://git.corp:8443/g/r", { kind: "gitlab" });
+    expect(r).toMatchObject({
+      host: "git.corp:8443",
+      owner: "g",
+      repo: "r",
+      cloneUrl: "https://git.corp:8443/g/r.git",
+      webUrl: "https://git.corp:8443/g/r",
+    });
+    expect(apiBase(r, { kind: "gitlab" })).toBe("https://git.corp:8443/api/v4");
+    expect(r.slug).not.toBe(resolveRepo("https://git.corp/g/r", { kind: "gitlab" }).slug);
+    // An http remote on its own port is cited over http.
+    expect(resolveRepo("http://git.lan:3000/o/r", { kind: "gitea" }).webUrl).toBe("http://git.lan:3000/o/r");
+    // The default port is no port.
+    expect(resolveRepo("https://gitlab.com:443/g/r").host).toBe("gitlab.com");
+    // An entry that names the port declares that service.
+    vi.stubEnv(envName("FORGE_HOSTS"), "git.corp:8443=gitlab");
+    expect(resolveRepo("https://git.corp:8443/g/sub/r")).toMatchObject({ owner: "g/sub", repo: "r" });
+    expect(forgeKind("git.corp:8443")).toBe("gitlab");
+    vi.unstubAllEnvs();
   });
 
   it("keeps GitLab subgroups in the owner", () => {
@@ -361,6 +387,18 @@ describe("where a token is sent", () => {
     });
     return seen;
   }
+
+  it("sends a declared forge's token to the port that was declared, and no other", async () => {
+    vi.stubEnv(envName("FORGE_HOSTS"), "git.corp:8443=gitlab,git.other=gitlab");
+    vi.stubEnv("GITLAB_TOKEN", "glpat-secret");
+    const seen = recordAuth();
+    await repoFacts(resolveRepo("https://git.corp:8443/g/r"));
+    await repoFacts(resolveRepo("https://git.other:9443/g/r", { kind: "gitlab" }));
+    expect(seen.map((s) => [new URL(s.url).host, (s.auth ?? s.privateToken) !== undefined])).toEqual([
+      ["git.corp:8443", true],
+      ["git.other:9443", false],
+    ]);
+  });
 
   it("asks for a whole page size when the limit is a fraction or not a number", async () => {
     const urls: string[] = [];
