@@ -94,6 +94,10 @@ function makeResponse(r: MockResponse, requestedUrl: string) {
       return payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength);
     },
     async text() {
+      // Counts as pulled too, and whole, as arrayBuffer(): a test watching
+      // onPull could not see a body read with text() at all, and a read that
+      // was meant to be capped looked like one.
+      r.onPull?.(payload.length);
       return payload.toString("utf8");
     },
   } as unknown as Response;
