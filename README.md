@@ -322,7 +322,10 @@ message says which walls are up and whether there is a token.
 `--browser` is refused with `--allow-remote` and with `--public-only`: the
 browser tools drive a logged-in browser on this machine, which follows any
 address a page leads it to, private ones included. They are for this machine
-alone.
+alone. Over HTTP with `--browser` and no `WEBINDEX_MCP_TOKEN`, no web page is
+served at all — not even one on a `localhost` port, which could otherwise run
+script in that browser through `webindex_browser_eval`: only a client that
+sends no `Origin` header, as agent CLIs do.
 
 ```bash
 WEBINDEX_MCP_TOKEN=$(openssl rand -hex 32) \

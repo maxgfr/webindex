@@ -5156,6 +5156,14 @@ interface HttpOptions extends ServerOptions {
      * everyone's: the others limit what a caller can do, this limits who calls.
      */
     bearerToken?: string;
+    /**
+     * Serve no browser page unless its origin is named in `allowOrigin`, or a
+     * token guards the server. Loopback origins are otherwise allowed — a local
+     * dev UI talking to its own server — but when this server drives the user's
+     * browser (`mcp --browser`), a page on any localhost port could run script
+     * in it through webindex_browser_eval.
+     */
+    strictOrigin?: boolean;
 }
 interface RunningHttpServer {
     server: Server;

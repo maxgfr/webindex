@@ -40,6 +40,14 @@ export interface HttpOptions extends ServerOptions {
    * everyone's: the others limit what a caller can do, this limits who calls.
    */
   bearerToken?: string;
+  /**
+   * Serve no browser page unless its origin is named in `allowOrigin`, or a
+   * token guards the server. Loopback origins are otherwise allowed — a local
+   * dev UI talking to its own server — but when this server drives the user's
+   * browser (`mcp --browser`), a page on any localhost port could run script
+   * in it through webindex_browser_eval.
+   */
+  strictOrigin?: boolean;
 }
 
 export interface RunningHttpServer {
@@ -115,6 +123,12 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
   // user happens to have open must not be able to drive this server.
   if (!isOriginAllowed(origin, opts.allowOrigin)) {
     sendJson(res, 403, { error: "origin not allowed", origin });
+    return;
+  }
+  // With a token, the token is the wall (checked below, after the preflight).
+  const named = (opts.allowOrigin ?? []).some((a) => a === "*" || a.toLowerCase() === origin?.trim().toLowerCase());
+  if (opts.strictOrigin && opts.bearerToken === undefined && origin !== undefined && !named) {
+    sendJson(res, 403, { error: "origin not allowed: this server drives a browser, so only a client that sends no Origin, or a named one, is served", origin });
     return;
   }
 

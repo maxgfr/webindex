@@ -17765,6 +17765,11 @@ async function route(req, res, adapter, opts, slots) {
     sendJson(res, 403, { error: "origin not allowed", origin });
     return;
   }
+  const named = (opts.allowOrigin ?? []).some((a) => a === "*" || a.toLowerCase() === origin?.trim().toLowerCase());
+  if (opts.strictOrigin && opts.bearerToken === void 0 && origin !== void 0 && !named) {
+    sendJson(res, 403, { error: "origin not allowed: this server drives a browser, so only a client that sends no Origin, or a named one, is served", origin });
+    return;
+  }
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       ...corsHeaders(origin),
@@ -20548,7 +20553,9 @@ async function dispatch(argv) {
         port,
         bind: argValue(args, "bind"),
         allowRemote,
-        ...token ? { bearerToken: token } : {}
+        ...token ? { bearerToken: token } : {},
+        // The browser tools run script in the user's browser: no page may call them.
+        ...policy.browser ? { strictOrigin: true } : {}
       });
     } catch (e) {
       fail(e.message);

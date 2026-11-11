@@ -321,6 +321,36 @@ describe("bearer token", () => {
     }
   });
 
+  it("refuses every page origin when it drives a browser and has no token", async () => {
+    // A page on any localhost port (a dev server, a page the agent's own
+    // browser opened) could POST tools/call webindex_browser_eval and run
+    // script in the logged-in browser. With the browser tools on, only a
+    // client that sends no Origin (an agent CLI) or a named origin is served,
+    // unless a token guards the server anyway.
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" });
+    const post = (url: string, headers: Record<string, string>) =>
+      fetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers }, body });
+    const strict = await startHttpServer(testAdapter(), { port: 0, strictOrigin: true, allowOrigin: ["https://app.test"] });
+    try {
+      expect((await post(strict.url, { origin: "http://localhost:5173" })).status).toBe(403);
+      expect((await post(strict.url, { origin: "http://127.0.0.1:3000" })).status).toBe(403);
+      expect(
+        (await fetch(strict.url, { method: "OPTIONS", headers: { origin: "http://localhost:5173", "access-control-request-method": "POST" } })).status,
+      ).toBe(403);
+      expect((await post(strict.url, {})).status).toBe(200);
+      expect((await post(strict.url, { origin: "https://app.test" })).status).toBe(200);
+    } finally {
+      await strict.close();
+    }
+    const guarded = await startHttpServer(testAdapter(), { port: 0, strictOrigin: true, bearerToken: "t0k" });
+    try {
+      expect((await post(guarded.url, { origin: "http://localhost:5173", authorization: "Bearer t0k" })).status).toBe(200);
+      expect((await post(guarded.url, { origin: "http://localhost:5173" })).status).toBe(401);
+    } finally {
+      await guarded.close();
+    }
+  });
+
   it("still answers a CORS preflight, which a browser sends without credentials", async () => {
     const s = await startHttpServer(testAdapter(), { port: 0, bearerToken: "s3cret-token" });
     try {

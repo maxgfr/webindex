@@ -2348,6 +2348,8 @@ async function dispatch(argv: string[]): Promise<void> {
         bind: argValue(args, "bind"),
         allowRemote,
         ...(token ? { bearerToken: token } : {}),
+        // The browser tools run script in the user's browser: no page may call them.
+        ...(policy.browser ? { strictOrigin: true } : {}),
       });
     } catch (e) {
       fail((e as Error).message);
