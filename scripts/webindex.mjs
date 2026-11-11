@@ -12749,7 +12749,7 @@ var init_cli = __esm({
         let held;
         let r;
         try {
-          r = await withBrowserLock(close, { deps: browserDeps(ctx.deps.browser) });
+          r = ctx.deps.page ? await close() : await withBrowserLock(close, { deps: browserDeps(ctx.deps.browser) });
         } catch (e) {
           if (!/^browser busy/.test(e.message)) throw e;
           held = "another webindex command still held the browser after 10 s; it was closed under it";

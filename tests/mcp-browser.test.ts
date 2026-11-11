@@ -591,6 +591,9 @@ describe("the other tools", () => {
     const before = sent("Target.attachToTarget").length;
     const r = await h.call("webindex_browser_close", { forget: "all" });
     expect(r.text).toMatch(/left running/); // attached, not ours
+    // The server already holds the browser lock around every call: close must
+    // not wait for it a second time and then report another command held it.
+    expect(r.text).not.toMatch(/still held the browser/);
     expect(readSession()).toBeNull();
     await expect(h.call("webindex_browser_status", { show: "browser" })).resolves.toMatchObject({ text: expect.stringMatching(/no browser session/) });
     await runBrowserCommand("attach", [String(fake.port)], {}, { browser: browserDeps() });

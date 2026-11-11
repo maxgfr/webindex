@@ -593,7 +593,8 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
     let held: string | undefined;
     let r: Awaited<ReturnType<typeof closeBrowser>>;
     try {
-      r = await withBrowserLock(close, { deps: browserDeps(ctx.deps.browser) });
+      // The MCP server (ctx.deps.page) already holds the lock around every call, and the lock is not re-entrant.
+      r = ctx.deps.page ? await close() : await withBrowserLock(close, { deps: browserDeps(ctx.deps.browser) });
     } catch (e) {
       if (!/^browser busy/.test((e as Error).message)) throw e;
       held = "another webindex command still held the browser after 10 s; it was closed under it";
