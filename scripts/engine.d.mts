@@ -1062,8 +1062,6 @@ declare function dialHost(host: string): string;
 declare function getVersion(port: number, host?: string): Promise<BrowserVersion>;
 declare function listTargets(port: number, host?: string): Promise<TargetInfo[]>;
 declare function listPages(port: number, host?: string): Promise<TargetInfo[]>;
-/** Open a tab. Chrome >= 111 wants PUT; older and other builds only answer GET. */
-declare function newTarget(port: number, url?: string, host?: string): Promise<TargetInfo>;
 declare function closeTarget(port: number, id: string, host?: string): Promise<void>;
 declare function activateTarget(port: number, id: string, host?: string): Promise<void>;
 /** True when something answers DevTools on `port`. Never throws. */
@@ -1081,10 +1079,9 @@ declare const discovery_isPortAlive: typeof isPortAlive;
 declare const discovery_listPages: typeof listPages;
 declare const discovery_listTargets: typeof listTargets;
 declare const discovery_loopbackSocketUrl: typeof loopbackSocketUrl;
-declare const discovery_newTarget: typeof newTarget;
 declare const discovery_parseCdpEndpoint: typeof parseCdpEndpoint;
 declare namespace discovery {
-  export { type discovery_BrowserVersion as BrowserVersion, type discovery_CdpEndpoint as CdpEndpoint, type discovery_TargetInfo as TargetInfo, discovery_activateTarget as activateTarget, discovery_assertLoopback as assertLoopback, discovery_closeTarget as closeTarget, discovery_dialHost as dialHost, discovery_getVersion as getVersion, discovery_isPortAlive as isPortAlive, discovery_listPages as listPages, discovery_listTargets as listTargets, discovery_loopbackSocketUrl as loopbackSocketUrl, discovery_newTarget as newTarget, discovery_parseCdpEndpoint as parseCdpEndpoint };
+  export { type discovery_BrowserVersion as BrowserVersion, type discovery_CdpEndpoint as CdpEndpoint, type discovery_TargetInfo as TargetInfo, discovery_activateTarget as activateTarget, discovery_assertLoopback as assertLoopback, discovery_closeTarget as closeTarget, discovery_dialHost as dialHost, discovery_getVersion as getVersion, discovery_isPortAlive as isPortAlive, discovery_listPages as listPages, discovery_listTargets as listTargets, discovery_loopbackSocketUrl as loopbackSocketUrl, discovery_parseCdpEndpoint as parseCdpEndpoint };
 }
 
 /** The slice of a child process the launcher uses. */

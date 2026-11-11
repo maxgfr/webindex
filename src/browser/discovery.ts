@@ -131,18 +131,6 @@ export async function listPages(port: number, host = "127.0.0.1"): Promise<Targe
   return (await listTargets(port, host)).filter((t) => t.type === "page");
 }
 
-/** Open a tab. Chrome >= 111 wants PUT; older and other builds only answer GET. */
-export async function newTarget(port: number, url?: string, host = "127.0.0.1"): Promise<TargetInfo> {
-  const path = url === undefined ? "/json/new" : `/json/new?${encodeURIComponent(url)}`;
-  try {
-    return await json<TargetInfo>("PUT", port, host, path);
-  } catch (e) {
-    // Only an HTTP refusal means "try the other verb"; a dead port or a timeout would fail again.
-    if (!/answered HTTP/.test((e as Error).message)) throw e;
-    return json<TargetInfo>("GET", port, host, path);
-  }
-}
-
 async function command(port: number, host: string, path: string): Promise<string> {
   const { status, body } = await http("GET", port, host, path);
   if (status < 200 || status >= 300) throw new Error(`DevTools GET ${path} answered HTTP ${status}`);

@@ -7038,7 +7038,6 @@ __export(discovery_exports, {
   listPages: () => listPages,
   listTargets: () => listTargets,
   loopbackSocketUrl: () => loopbackSocketUrl,
-  newTarget: () => newTarget,
   parseCdpEndpoint: () => parseCdpEndpoint
 });
 function assertLoopback(host) {
@@ -7112,15 +7111,6 @@ function listTargets(port, host = "127.0.0.1") {
 }
 async function listPages(port, host = "127.0.0.1") {
   return (await listTargets(port, host)).filter((t) => t.type === "page");
-}
-async function newTarget(port, url, host = "127.0.0.1") {
-  const path = url === void 0 ? "/json/new" : `/json/new?${encodeURIComponent(url)}`;
-  try {
-    return await json("PUT", port, host, path);
-  } catch (e) {
-    if (!/answered HTTP/.test(e.message)) throw e;
-    return json("GET", port, host, path);
-  }
 }
 async function command(port, host, path) {
   const { status, body } = await http("GET", port, host, path);

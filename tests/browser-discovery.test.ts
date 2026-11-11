@@ -10,7 +10,6 @@ import {
   listPages,
   listTargets,
   loopbackSocketUrl,
-  newTarget,
   parseCdpEndpoint,
 } from "../src/browser/discovery.js";
 import { FakeCdp } from "./helpers/fake-cdp.js";
@@ -36,33 +35,6 @@ describe("DevTools endpoints", () => {
     expect(await listTargets(fake.port)).toHaveLength(2);
     const pages = await listPages(fake.port);
     expect(pages.map((t) => t.url)).toEqual(["https://a.test/"]);
-  });
-
-  it("newTarget uses PUT with the url encoded, and returns the target", async () => {
-    const t = await newTarget(fake.port, "https://a.test/?q=1&r=2");
-    expect(fake.requests).toEqual([`PUT /json/new?${encodeURIComponent("https://a.test/?q=1&r=2")}`]);
-    expect(t.url).toBe("https://a.test/?q=1&r=2");
-    expect(t.webSocketDebuggerUrl).toContain(`/devtools/page/${t.id}`);
-  });
-
-  it("newTarget without a url opens about:blank", async () => {
-    const t = await newTarget(fake.port);
-    expect(fake.requests).toEqual(["PUT /json/new"]);
-    expect(t.url).toBe("about:blank");
-  });
-
-  it("newTarget falls back to GET when PUT is refused with 405", async () => {
-    fake.rejectPut = true;
-    const t = await newTarget(fake.port, "https://b.test/");
-    expect(fake.requests.map((r) => r.split(" ")[0])).toEqual(["PUT", "GET"]);
-    expect(t.url).toBe("https://b.test/");
-  });
-
-  it("newTarget does not retry when the port is dead", async () => {
-    const dead = await FakeCdp.start();
-    const port = dead.port;
-    await dead.close();
-    await expect(newTarget(port, "https://c.test/")).rejects.toThrow();
   });
 
   it("closeTarget and activateTarget", async () => {
