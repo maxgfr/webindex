@@ -4052,7 +4052,7 @@ function searchVideoRuns(dir, query, opts = {}) {
     const key = meta.key ?? meta.id;
     for (const parts of passageGroups(
       run.segments,
-      (meta.chapters ?? []).map((c) => c.start)
+      (meta.chapters ?? []).map((c) => c.start).sort((a, b) => a - b)
     )) {
       const chapter = chapterAt(meta.chapters ?? [], parts[0].start);
       docs.push({ id: `${key}@${parts[0].start}`, title: "", headings: chapter ?? "", body: parts.map((s) => s.text).join(" "), parts, meta, key, chapter });
@@ -4104,7 +4104,7 @@ var init_run = __esm({
       }
     };
     PASSAGE_S = 45;
-    chapterAt = (chapters, t) => [...chapters].reverse().find((c) => c.start <= t + 0.5)?.title;
+    chapterAt = (chapters, t) => [...chapters].sort((a, b) => b.start - a.start).find((c) => c.start <= t + 0.5)?.title;
   }
 });
 

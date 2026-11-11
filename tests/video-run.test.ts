@@ -215,6 +215,19 @@ describe("searchVideoRuns", () => {
     expect(hits.slice(0, 2).map((h) => h.videoId)).toEqual(["Bkey0000000", "akey0000000"]);
   });
 
+  it("labels passages with the right chapter however meta.json orders them", async () => {
+    // chapterAt took the list as sorted; frames.ts's own copy sorts it. Out of
+    // order, a passage got the chapter of an earlier one.
+    await fetchVideoRun(ZOO, root);
+    const metaPath = join(root, "jNQXAC9IVRw", "meta.json");
+    const sorted = searchVideoRuns(root, "elephants trunks cool");
+    const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+    const [a, b, c] = meta.chapters;
+    writeFileSync(metaPath, JSON.stringify({ ...meta, chapters: [b, a, c] }));
+    expect(searchVideoRuns(root, "elephants trunks cool").map((h) => [h.start, h.chapter])).toEqual(sorted.map((h) => [h.start, h.chapter]));
+    expect(sorted.map((h) => h.chapter)).toContain("The cool thing");
+  });
+
   it("finds nothing in a directory with no runs", () => {
     expect(searchVideoRuns(join(root, "missing"), "anything")).toEqual([]);
   });

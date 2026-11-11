@@ -225,7 +225,8 @@ export function corpusLabels(dir: string): Map<string, string> {
   return out;
 }
 
-const chapterAt = (chapters: VideoChapter[], t: number) => [...chapters].reverse().find((c) => c.start <= t + 0.5)?.title;
+// The latest chapter that has started by `t`, whatever order meta.json lists them in.
+const chapterAt = (chapters: VideoChapter[], t: number) => [...chapters].sort((a, b) => b.start - a.start).find((c) => c.start <= t + 0.5)?.title;
 
 /**
  * Search the transcripts under `dir` — one run, or every run in it — for a
@@ -241,7 +242,7 @@ export function searchVideoRuns(dir: string, query: string, opts: { limit?: numb
     const key = meta.key ?? meta.id;
     for (const parts of passageGroups(
       run.segments,
-      (meta.chapters ?? []).map((c) => c.start),
+      (meta.chapters ?? []).map((c) => c.start).sort((a, b) => a - b),
     )) {
       const chapter = chapterAt(meta.chapters ?? [], parts[0]!.start);
       docs.push({ id: `${key}@${parts[0]!.start}`, title: "", headings: chapter ?? "", body: parts.map((s) => s.text).join(" "), parts, meta, key, chapter });
