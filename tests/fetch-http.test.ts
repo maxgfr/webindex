@@ -81,6 +81,17 @@ describe("a request that carries a credential, across a redirect", () => {
     expect(sent.cookie).toBeUndefined();
   });
 
+  it("treats the usual API-key headers as credentials too", async () => {
+    for (const header of ["x-api-key", "api-key", "private-token", "x-auth-token"]) {
+      const spy = installFetchMock((url) =>
+        url.startsWith("https://a.test/") ? hop("https://b.test/x", 302) : { body: "{}", contentType: "application/json" },
+      );
+      await httpJson("GET", "https://a.test/x", undefined, { headers: { [header]: "K" } });
+      expect(headersOf(spy.mock.calls[0]!)[header], header).toBe("K");
+      expect(headersOf(spy.mock.calls[1]!)[header], header).toBeUndefined();
+    }
+  });
+
   it("leaves a request with no credential to fetch, as before", async () => {
     const spy = installFetchMock(() => ({ body: "{}", contentType: "application/json" }));
     await httpJson("GET", "https://x.test/j");

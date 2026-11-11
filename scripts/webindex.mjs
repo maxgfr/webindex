@@ -10491,7 +10491,7 @@ var init_fetch = __esm({
     DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
     mimeOf = (contentType) => contentType.split(";")[0].trim().toLowerCase();
     namesDocument = (filename) => filename !== void 0 && (PDF_URL_RE.test(filename) || docFormatForUrl(filename) !== void 0);
-    CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization"];
+    CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization", "x-api-key", "api-key", "private-token", "x-auth-token"];
     carriesCredential = (headers) => CREDENTIAL_HEADERS.some((h) => headers[h] !== void 0);
     anyUrl = async () => true;
     INLINE_FORMAT = /* @__PURE__ */ new Set([...INLINE_TAGS, "br", "scp"]);

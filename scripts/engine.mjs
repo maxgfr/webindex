@@ -9567,7 +9567,7 @@ var init_fetch = __esm({
     DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
     mimeOf = (contentType) => contentType.split(";")[0].trim().toLowerCase();
     namesDocument = (filename) => filename !== void 0 && (PDF_URL_RE.test(filename) || docFormatForUrl(filename) !== void 0);
-    CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization"];
+    CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization", "x-api-key", "api-key", "private-token", "x-auth-token"];
     carriesCredential = (headers) => CREDENTIAL_HEADERS.some((h) => headers[h] !== void 0);
     anyUrl = async () => true;
     INLINE_FORMAT = /* @__PURE__ */ new Set([...INLINE_TAGS, "br", "scp"]);
@@ -15251,7 +15251,11 @@ function uncitedIds(cited, known) {
   return [...new Set(known)].filter((id) => !used.has(id));
 }
 function normalizeNumeralText(text) {
-  return text.replace(/(\d)[\u00A0\u202F'](?=\d)/g, "$1").replace(/(?<!\d)\d+(?:[, ]\d{3}(?!\d))+/g, (run) => run.replace(/^\d{4,}/.test(run) ? /,/g : /[, ]/g, "")).replace(/(\d),(?=\d)/g, "$1.");
+  return text.replace(/(\d)[\u00A0\u202F'](?=\d)/g, "$1").replace(/(?<!\d)\d+(?:[, ]\d{3}(?!\d))+/g, (run) => {
+    const year = /^(\d{4,}) (.*)$/s.exec(run);
+    if (year) return `${year[1]} ${year[2].replace(/[, ]/g, "")}`;
+    return run.replace(/^\d{4,}/.test(run) ? /,/g : /[, ]/g, "");
+  }).replace(/(\d),(?=\d)/g, "$1.");
 }
 function extractNumerals(text, max = 8) {
   const cleaned = normalizeNumeralText(

@@ -310,7 +310,7 @@ const namesDocument = (filename: string | undefined): boolean =>
   filename !== undefined && (PDF_URL_RE.test(filename) || docFormatForUrl(filename) !== undefined);
 
 /** The request headers that are a credential: sent to the origin they were meant for, and no further. */
-const CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization"];
+const CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization", "x-api-key", "api-key", "private-token", "x-auth-token"];
 const carriesCredential = (headers: Record<string, string>): boolean => CREDENTIAL_HEADERS.some((h) => headers[h] !== undefined);
 const anyUrl = async (): Promise<boolean> => true;
 

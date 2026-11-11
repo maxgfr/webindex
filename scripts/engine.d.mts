@@ -2029,6 +2029,12 @@ interface RunResult {
     /** What the tool wrote to stderr — its first and last ~1 KB — when `ok` is false and it wrote any. */
     stderr?: string;
 }
+/**
+ * Spawn `cmd args…`, write `input` to its stdin, resolve with its stdout.
+ * Never throws and never leaves a child behind: a missing binary, a non-zero
+ * exit and a timeout all come back as `{ ok: false, error }` — with the tail
+ * of stderr, when the tool wrote one, so a caller can say WHY.
+ */
 declare function runWithInput(cmd: string, args: string[], input: Buffer, timeoutMs: number, opts?: {
     env?: NodeJS.ProcessEnv;
 }): Promise<RunResult>;
@@ -4022,6 +4028,25 @@ declare function hostDelayMs(): number;
  * and none of the ways of not honouring it is polite.
  */
 declare function maxCrawlDelayMs(): number;
+/**
+ * Wait until this host is willing to hear from us again, then claim the slot.
+ *
+ * The claim happens BEFORE the await returns, so two concurrent callers for one
+ * host serialise instead of both reading the same free time and departing
+ * together — which is the bug a naive "sleep if too soon" has, and the one that
+ * makes a rate limiter look like it works right up until the pool widens.
+ *
+ * A back-off (backOffHost) holds every departure, with or without a delay, and
+ * is checked again after each sleep: a slot claimed before the server said
+ * "not now" must not go out inside the window it asked for.
+ *
+ * Different hosts never wait on each other: the whole point is to keep
+ * concurrency high across a candidate list while staying single-file per site.
+ *
+ * `signal` ends the wait early, and the caller must then not send: the slot
+ * stays claimed, which errs on the polite side, and the time returned is the
+ * time actually waited.
+ */
 declare function awaitHostSlot(url: string, delayMs?: number, now?: number, signal?: AbortSignal): Promise<number>;
 /**
  * Hold a host's departures for `ms` — what a `Retry-After` means.
