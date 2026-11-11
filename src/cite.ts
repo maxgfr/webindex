@@ -556,10 +556,15 @@ export function uncitedIds(cited: Iterable<string>, known: Iterable<string>): st
  * figure of a million or more was misread.
  */
 export function normalizeNumeralText(text: string): string {
-  return text
-    .replace(/(\d)[\u00A0\u202F'](?=\d)/g, "$1")
-    .replace(/(?<=\d)[, ](?=\d{3}(?!\d))/g, "")
-    .replace(/(\d),(?=\d)/g, "$1.");
+  return (
+    text
+      .replace(/(\d)[\u00A0\u202F'](?=\d)/g, "$1")
+      // A run of groups, matched from the start of its digits (the lookbehind
+      // keeps it linear on a long digit run). A plain space groups only after a
+      // lead of one to three digits: "2019 150" is two figures, not 2019150.
+      .replace(/(?<!\d)\d+(?:[, ]\d{3}(?!\d))+/g, (run) => run.replace(/^\d{4,}/.test(run) ? /,/g : /[, ]/g, ""))
+      .replace(/(\d),(?=\d)/g, "$1.")
+  );
 }
 
 /**

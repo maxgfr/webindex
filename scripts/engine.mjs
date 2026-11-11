@@ -15242,7 +15242,7 @@ function uncitedIds(cited, known) {
   return [...new Set(known)].filter((id) => !used.has(id));
 }
 function normalizeNumeralText(text) {
-  return text.replace(/(\d)[\u00A0\u202F'](?=\d)/g, "$1").replace(/(?<=\d)[, ](?=\d{3}(?!\d))/g, "").replace(/(\d),(?=\d)/g, "$1.");
+  return text.replace(/(\d)[\u00A0\u202F'](?=\d)/g, "$1").replace(/(?<!\d)\d+(?:[, ]\d{3}(?!\d))+/g, (run) => run.replace(/^\d{4,}/.test(run) ? /,/g : /[, ]/g, "")).replace(/(\d),(?=\d)/g, "$1.");
 }
 function extractNumerals(text, max = 8) {
   const cleaned = normalizeNumeralText(

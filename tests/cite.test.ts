@@ -351,6 +351,15 @@ describe("numerals", () => {
     expect(normalizeNumeralText("10,000")).toBe("10000");
     expect(normalizeNumeralText("10 000")).toBe("10000");
     expect(normalizeNumeralText("1'000")).toBe("1000");
+    expect(normalizeNumeralText("12 345 678")).toBe("12345678");
+  });
+
+  it("does not glue two figures a space separates into one", () => {
+    // A space after four digits groups nothing — no thousands group is four
+    // digits long — so "In 2019 150 firms" asserted 2019150.
+    expect(normalizeNumeralText("In 2019 150 firms")).toBe("In 2019 150 firms");
+    expect(extractNumerals("In 2019 150 firms left")).toEqual(["2019", "150"]);
+    expect(normalizeNumeralText("between 1 000 and 2024 305")).toBe("between 1000 and 2024 305");
   });
 
   it("extracts the figures a claim asserts, normalised", () => {
