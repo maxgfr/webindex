@@ -38,6 +38,17 @@ describe("per-host politeness", () => {
     expect(waited).toBe(100);
   });
 
+  it("forgets hosts whose slot has passed, and still spaces the ones it keeps", async () => {
+    // A long-lived server kept an entry for every host it ever crawled. Past
+    // the pruning threshold the expired ones go; a host still inside its
+    // delay keeps its schedule.
+    await awaitHostSlot("https://busy.test/1", 100, 5000);
+    for (let i = 0; i < 600; i++) await awaitHostSlot(`https://h${i}.test/`, 100, 1000);
+    expect(await awaitHostSlot("https://busy.test/2", 1, 5050)).toBe(50);
+    expect(await awaitHostSlot("https://h1.test/again", 1, 5050)).toBe(0);
+    resetHostSchedule();
+  });
+
   it("claims the slot before awaiting, so two concurrent callers serialise", async () => {
     // The bug a naive "sleep if too soon" has: both read the same free time,
     // both decide they may go, and both leave together. Claiming first is what

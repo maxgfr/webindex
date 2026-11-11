@@ -14921,9 +14921,16 @@ function hostOf2(url) {
     return "";
   }
 }
+function pruneHostSchedule(now) {
+  if (nextFree.size + holdUntil.size < HOST_SCHEDULE_PRUNE_AT) return;
+  for (const [h, at] of nextFree) if (at <= now && (holdUntil.get(h) ?? 0) <= now) nextFree.delete(h);
+  for (const [h, at] of holdUntil) if (at <= now) holdUntil.delete(h);
+}
+var HOST_SCHEDULE_PRUNE_AT = 512;
 async function awaitHostSlot(url, delayMs = hostDelayMs(), now = Date.now(), signal) {
   const host = hostOf2(url);
   if (!host) return 0;
+  pruneHostSchedule(now);
   const spaced = delayMs > 0;
   let waited = 0;
   let t = now;
