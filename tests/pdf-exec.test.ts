@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { runWithInput, binaryName } from "../src/pdf/exec.js";
+import { binaryName, cmdLine, runWithInput } from "../src/pdf/exec.js";
 
 // Real spawns, except where a case stands in for Windows: there the call spawn
 // receives is what is under test, and nothing is actually run.
@@ -99,6 +99,22 @@ describe("runWithInput", () => {
     const r = await runWithInput(NODE, script("process.stderr.write('x'.repeat(200_000)); process.stdout.write('ok')"), Buffer.alloc(0), 30_000);
     expect(r.ok).toBe(true);
     expect(r.stdout).toBe("ok");
+  });
+});
+
+describe("cmdLine (a .cmd run through cmd.exe on Windows)", () => {
+  it("quotes every argument", () => {
+    expect(cmdLine("C:\\npm\\copyable-pdf.cmd", ["-o", 'C:\\Temp\\a "b"\\out.pdf', "-l", "fra+eng"])).toBe(
+      '"C:\\npm\\copyable-pdf.cmd" "-o" "C:\\Temp\\a ""b""\\out.pdf" "-l" "fra+eng"',
+    );
+  });
+
+  it("refuses an argument cmd.exe would rewrite inside its quotes", () => {
+    // `%USERPROFILE%` expands even quoted, and a line break ends the command:
+    // OCR_LANG and the temp paths are not constants of this engine.
+    for (const bad of ["%USERPROFILE%", "eng\r\ncalc.exe", "a\nb"]) {
+      expect(() => cmdLine("x.cmd", ["-l", bad]), JSON.stringify(bad)).toThrow(/would rewrite it/);
+    }
   });
 });
 

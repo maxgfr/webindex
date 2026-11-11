@@ -2032,12 +2032,6 @@ interface RunResult {
     /** What the tool wrote to stderr — its first and last ~1 KB — when `ok` is false and it wrote any. */
     stderr?: string;
 }
-/**
- * Spawn `cmd args…`, write `input` to its stdin, resolve with its stdout.
- * Never throws and never leaves a child behind: a missing binary, a non-zero
- * exit and a timeout all come back as `{ ok: false, error }` — with the tail
- * of stderr, when the tool wrote one, so a caller can say WHY.
- */
 declare function runWithInput(cmd: string, args: string[], input: Buffer, timeoutMs: number, opts?: {
     env?: NodeJS.ProcessEnv;
 }): Promise<RunResult>;

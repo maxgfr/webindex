@@ -60,6 +60,19 @@ export function binaryName(name: string): string {
  * exit and a timeout all come back as `{ ok: false, error }` — with the tail
  * of stderr, when the tool wrote one, so a caller can say WHY.
  */
+/**
+ * The one command line cmd.exe is given for a .cmd or .bat. Every argument is
+ * quoted, and one cmd.exe would still rewrite inside its quotes is refused:
+ * `%NAME%` expands there, and a line break ends the command. Not every
+ * argument is a constant of this engine — the OCR rung passes temp paths and
+ * the OCR_LANG the user set.
+ */
+export function cmdLine(bin: string, args: readonly string[]): string {
+  const bad = [bin, ...args].find((a) => /[%\r\n]/.test(a));
+  if (bad !== undefined) throw new Error(`refusing to pass ${JSON.stringify(bad)} through cmd.exe, which would rewrite it`);
+  return [bin, ...args].map((s) => `"${s.replace(/"/g, '""')}"`).join(" ");
+}
+
 export function runWithInput(cmd: string, args: string[], input: Buffer, timeoutMs: number, opts: { env?: NodeJS.ProcessEnv } = {}): Promise<RunResult> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
@@ -73,9 +86,8 @@ export function runWithInput(cmd: string, args: string[], input: Buffer, timeout
       // `shell: true` is only concatenated, which Node 24 flags at runtime
       // (DEP0190) and a later Node may refuse.
       const viaShell = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(bin);
-      const quote = (s: string) => `"${s.replace(/"/g, '""')}"`;
       const common: SpawnOptions = { stdio: ["pipe", "pipe", "pipe"], ...(opts.env ? { env: opts.env } : {}) };
-      child = viaShell ? spawn([bin, ...args].map(quote).join(" "), { ...common, shell: true, windowsHide: true }) : spawn(bin, args, common);
+      child = viaShell ? spawn(cmdLine(bin, args), { ...common, shell: true, windowsHide: true }) : spawn(bin, args, common);
     } catch (e) {
       resolve({ ok: false, stdout: "", error: (e as Error).message });
       return;

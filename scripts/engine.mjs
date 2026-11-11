@@ -576,15 +576,19 @@ import { spawn as spawn2 } from "child_process";
 function binaryName(name) {
   return process.platform === "win32" && name === "npx" ? "npx.cmd" : name;
 }
+function cmdLine(bin, args) {
+  const bad = [bin, ...args].find((a) => /[%\r\n]/.test(a));
+  if (bad !== void 0) throw new Error(`refusing to pass ${JSON.stringify(bad)} through cmd.exe, which would rewrite it`);
+  return [bin, ...args].map((s) => `"${s.replace(/"/g, '""')}"`).join(" ");
+}
 function runWithInput(cmd, args, input, timeoutMs, opts = {}) {
   return new Promise((resolve9) => {
     let child;
     try {
       const bin = binaryName(cmd);
       const viaShell = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(bin);
-      const quote = (s) => `"${s.replace(/"/g, '""')}"`;
       const common = { stdio: ["pipe", "pipe", "pipe"], ...opts.env ? { env: opts.env } : {} };
-      child = viaShell ? spawn2([bin, ...args].map(quote).join(" "), { ...common, shell: true, windowsHide: true }) : spawn2(bin, args, common);
+      child = viaShell ? spawn2(cmdLine(bin, args), { ...common, shell: true, windowsHide: true }) : spawn2(bin, args, common);
     } catch (e) {
       resolve9({ ok: false, stdout: "", error: e.message });
       return;
