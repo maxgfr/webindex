@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fetchAndExtract, looksLikePdfUrl, type ExtractorId } from "./fetch.js";
 import { docFormatForUrl } from "./doc.js";
@@ -362,11 +363,18 @@ function readCacheBody({ entry, body }: CacheMeta): CacheEntry | undefined {
     // touch or refresh.
     const text = existsSync(body) ? readFileSync(body, "utf8") : entry.text;
     if (!text?.trim()) return undefined; // only successes are cached; ignore anything else
-    return { ...entry, text };
+    // The pair is two renames, not one: a body another process wrote for the
+    // same URL in between is not the one these validators describe.
+    const { bodyHash, ...rest } = entry as CacheEntry & { bodyHash?: string };
+    if (bodyHash !== undefined && bodyHash !== hashBody(text)) return undefined;
+    return { ...rest, text };
   } catch {
     return undefined;
   }
 }
+
+/** What ties an entry's metadata to its body. Short: it guards a pairing, not against tampering. */
+const hashBody = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 16);
 
 function writeCache(url: string, res: Extract, now: number, acceptLanguage = "", extractor: CacheNamespace = "native", variant: CacheVariant = ""): void {
   // Under no-write the cache degrades to READ-only rather than being disabled:
@@ -390,7 +398,7 @@ function writeCache(url: string, res: Extract, now: number, acceptLanguage = "",
     // deep tier's sibling processes share this directory — never sees a
     // half-written body either.
     writeFileAtomic(body, text ?? "");
-    writeFileAtomic(meta, JSON.stringify({ ...rest, cachedAt: now }));
+    writeFileAtomic(meta, JSON.stringify({ ...rest, cachedAt: now, bodyHash: hashBody(text ?? "") }));
   };
   try {
     write();

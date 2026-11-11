@@ -48,6 +48,20 @@ describe("cache writes", () => {
     expect(b.cached).toBe(true);
   });
 
+  it("serves no body that is not the one its metadata was written with", async () => {
+    // Body and metadata each land by rename, the pair does not: two processes
+    // writing one URL could leave A's metadata (its etag) with B's body, and a
+    // 304 against that etag then served and re-stamped B's text indefinitely.
+    const spy = installFetchMock(() => PAGE);
+    await cachedFetchAndExtract(URL, {}, true, 1000);
+    const body = readdirSync(dir).find((n) => n.endsWith(".body"))!;
+    writeFileSync(join(dir, body), "another process's body for the same URL");
+    const again = await cachedFetchAndExtract(URL, {}, true, 1500);
+    expect(again.cached).toBeUndefined();
+    expect(again.text).toContain("token buckets");
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
   it("recreates a cache directory removed mid-run", async () => {
     const spy = installFetchMock(() => PAGE);
     await cachedFetchAndExtract(URL, {}, true, 1000);

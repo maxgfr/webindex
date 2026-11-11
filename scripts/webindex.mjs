@@ -13384,6 +13384,7 @@ init_private_dir();
 init_brand();
 init_mode();
 import { existsSync as existsSync8, mkdirSync as mkdirSync5, readFileSync as readFileSync14, readdirSync as readdirSync6, rmSync as rmSync6, statSync as statSync6 } from "fs";
+import { createHash as createHash3 } from "crypto";
 import { join as join19 } from "path";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
@@ -13505,11 +13506,14 @@ function readCacheBody({ entry, body }) {
   try {
     const text = existsSync8(body) ? readFileSync14(body, "utf8") : entry.text;
     if (!text?.trim()) return void 0;
-    return { ...entry, text };
+    const { bodyHash, ...rest } = entry;
+    if (bodyHash !== void 0 && bodyHash !== hashBody(text)) return void 0;
+    return { ...rest, text };
   } catch {
     return void 0;
   }
 }
+var hashBody = (text) => createHash3("sha256").update(text).digest("hex").slice(0, 16);
 function writeCache(url, res, now, acceptLanguage = "", extractor = "native", variant = "") {
   if (isNoWrite()) return;
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
@@ -13517,7 +13521,7 @@ function writeCache(url, res, now, acceptLanguage = "", extractor = "native", va
   const write = () => {
     if (!entryDir(true)) return;
     writeFileAtomic(body, text ?? "");
-    writeFileAtomic(meta, JSON.stringify({ ...rest, cachedAt: now }));
+    writeFileAtomic(meta, JSON.stringify({ ...rest, cachedAt: now, bodyHash: hashBody(text ?? "") }));
   };
   try {
     write();
@@ -15288,9 +15292,9 @@ init_markdown2();
 
 // src/changed.ts
 init_fetch();
-import { createHash as createHash3 } from "crypto";
+import { createHash as createHash4 } from "crypto";
 function contentHash(body) {
-  return createHash3("sha256").update(body).digest("hex");
+  return createHash4("sha256").update(body).digest("hex");
 }
 var FINGERPRINT_MAX_BYTES = 64 * 1024 * 1024;
 function read2(url, opts, headers) {
@@ -16404,7 +16408,7 @@ init_exec2();
 init_forge_host();
 init_private_dir();
 init_text();
-import { createHash as createHash4, randomBytes as randomBytes2 } from "crypto";
+import { createHash as createHash5, randomBytes as randomBytes2 } from "crypto";
 import { existsSync as existsSync12, mkdirSync as mkdirSync7, readdirSync as readdirSync9, renameSync as renameSync4, rmSync as rmSync7, statSync as statSync9 } from "fs";
 import { basename as basename3, join as join24, resolve as resolve6 } from "path";
 function resolveRepo(raw, opts = {}) {
@@ -16489,7 +16493,7 @@ function trimRuns(s, ch, start = true) {
   return s.slice(a, b);
 }
 var fold = (k) => trimRuns(k.replace(/[^a-z0-9._-]+/g, "-"), "-");
-var sha256Hex = (k) => createHash4("sha256").update(k).digest("hex");
+var sha256Hex = (k) => createHash5("sha256").update(k).digest("hex");
 function repoSlug(key) {
   const k = key.toLowerCase();
   const folded = fold(k);
@@ -17769,7 +17773,7 @@ function reportInternal(send) {
 
 // src/mcp/http.ts
 init_brand();
-import { createHash as createHash5, timingSafeEqual } from "crypto";
+import { createHash as createHash6, timingSafeEqual } from "crypto";
 var MCP_PATH = "/mcp";
 var MAX_BODY_BYTES2 = 4 * 1024 * 1024;
 var REQUEST_TIMEOUT_MS2 = 6e4;
@@ -17943,7 +17947,7 @@ data: ${JSON.stringify(m)}
 function bearerMatches(sent, token) {
   const m = /^Bearer[ \t]+(\S+)[ \t]*$/i.exec(sent ?? "");
   if (!m) return false;
-  const digest = (s) => createHash5("sha256").update(s).digest();
+  const digest = (s) => createHash6("sha256").update(s).digest();
   return timingSafeEqual(digest(m[1]), digest(token));
 }
 function header(req, name2) {
