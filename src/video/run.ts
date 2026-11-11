@@ -1,7 +1,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { env, userTmpDir } from "../brand.js";
+import { env, envName, userTmpDir } from "../brand.js";
 import { ensureDir, isNoWrite, writeArtifact } from "../no-write.js";
+import { openPrivateTmpDir } from "../private-dir.js";
 import { bm25Score, buildBm25Index, type Bm25Doc } from "../rank.js";
 import { transcribeVideo, videoDeps, type VideoLadderOptions, type VideoTranscriberId, type VideoTranscript } from "./ladder.js";
 import { formatStamp, transcriptMarkdown } from "./markdown.js";
@@ -21,7 +22,17 @@ import { probeVideo, type VideoChapter, type VideoMeta } from "./ytdlp.js";
 export function videoRoot(out?: string): string {
   // A blank `--out=` is none, as a blank variable is unset: resolve("") is the
   // current directory, and the runs were written wherever the command ran.
-  return resolve((out?.trim() ? out : undefined) ?? env("VIDEO_DIR") ?? userTmpDir("video"));
+  const named = (out?.trim() ? out : undefined) ?? env("VIDEO_DIR");
+  if (named !== undefined || typeof process.getuid !== "function") return resolve(named ?? userTmpDir("video"));
+  // The default sits under the shared temp dir, at a path any local user can
+  // predict and create first: it must prove to be the caller's own (0700, no
+  // link, not writable by others — see openPrivateTmpDir), as the fetch cache
+  // and the clone cache beside it must. A run planted there was searched and
+  // cited as the video's transcript. A directory that is named is taken as given.
+  const dir = resolve(userTmpDir("video"));
+  const { refused } = openPrivateTmpDir(dir, !isNoWrite());
+  if (refused) throw new Error(`the video directory is not used: ${refused}. Remove it, or set ${envName("VIDEO_DIR")} to a directory only you can write.`);
+  return dir;
 }
 
 /** meta.json: the video's metadata plus how and when its transcript was made. */

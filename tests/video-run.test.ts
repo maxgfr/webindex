@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -64,6 +64,51 @@ describe("videoRoot", () => {
     // Per user, as the cache is: one shared <tmp>/<brand> served one user's runs to another.
     const uid = process.getuid?.();
     expect(videoRoot()).toBe(join(tmpdir(), uid === undefined ? "webindex-tests" : `webindex-tests-${uid}`, "video"));
+  });
+
+  describe("the default directory, under the temp dir", () => {
+    // <tmp>/<brand>-<uid>/video is a path any local user can predict and create
+    // first, as the fetch cache and the clone cache beside it were: a run
+    // planted there was searched and cited as the video's transcript.
+    const SETUP_TMPDIR = process.env.TMPDIR;
+    const hasUids = typeof process.getuid === "function";
+    let tmp: string;
+    beforeEach(() => {
+      tmp = mkdtempSync(join(tmpdir(), "wi-video-tmp-"));
+      process.env.TMPDIR = tmp;
+      delete process.env.WEBINDEX_TEST_VIDEO_DIR;
+    });
+    afterEach(() => {
+      if (SETUP_TMPDIR === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = SETUP_TMPDIR;
+      rmSync(tmp, { recursive: true, force: true });
+    });
+
+    it.runIf(hasUids)("is created private to the caller", () => {
+      const umask = process.umask(0o022);
+      let dir: string;
+      try {
+        dir = videoRoot();
+      } finally {
+        process.umask(umask);
+      }
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+      expect(statSync(join(dir, "..")).mode & 0o777).toBe(0o700);
+    });
+
+    it.runIf(hasUids)("is not used when other users may write it", () => {
+      const dir = videoRoot();
+      chmodSync(dir, 0o777);
+      expect(() => videoRoot()).toThrow(/writable by other users[\s\S]*WEBINDEX_TEST_VIDEO_DIR/);
+      // A directory the caller names is theirs to vouch for, as before.
+      expect(videoRoot(dir)).toBe(dir);
+    });
+
+    it.runIf(hasUids)("creates nothing when nothing may be written", () => {
+      setNoWrite(true);
+      const dir = videoRoot();
+      expect(existsSync(dir)).toBe(false);
+    });
   });
 
   it("reads a blank --out as none, never as the current directory", () => {

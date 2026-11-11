@@ -2984,6 +2984,48 @@ var init_markdown = __esm({
   }
 });
 
+// src/private-dir.ts
+import { chmodSync, lstatSync, mkdirSync as mkdirSync2 } from "fs";
+import { dirname } from "path";
+function openPrivateTmpDir(dir, create) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
+  if (create) mkdirSync2(dirname(dirname(dir)), { recursive: true });
+  for (const p of [dirname(dir), dir]) {
+    if (create) mkdirPrivate(p);
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch (e) {
+      if (e.code === "ENOENT") return {};
+      return { refused: `${p} cannot be inspected (${e.message})` };
+    }
+    if (st.isSymbolicLink()) return { refused: `${p} is a symbolic link` };
+    if (!st.isDirectory()) return { refused: `${p} is not a directory` };
+    if (st.uid !== uid) return { refused: `${p} belongs to another user` };
+    if (st.mode & 18) return { refused: `${p} is writable by other users` };
+    if (st.mode & 63 && !isNoWrite()) {
+      try {
+        chmodSync(p, 448);
+      } catch {
+      }
+    }
+  }
+  return { dir };
+}
+function mkdirPrivate(p) {
+  try {
+    mkdirSync2(p, { mode: 448 });
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+  }
+}
+var init_private_dir = __esm({
+  "src/private-dir.ts"() {
+    "use strict";
+    init_no_write();
+  }
+});
+
 // src/text.ts
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -3701,7 +3743,12 @@ var init_rank = __esm({
 import { existsSync as existsSync3, readdirSync as readdirSync3, readFileSync as readFileSync10, statSync } from "fs";
 import { join as join11, resolve } from "path";
 function videoRoot(out) {
-  return resolve((out?.trim() ? out : void 0) ?? env("VIDEO_DIR") ?? userTmpDir("video"));
+  const named = (out?.trim() ? out : void 0) ?? env("VIDEO_DIR");
+  if (named !== void 0 || typeof process.getuid !== "function") return resolve(named ?? userTmpDir("video"));
+  const dir = resolve(userTmpDir("video"));
+  const { refused } = openPrivateTmpDir(dir, !isNoWrite());
+  if (refused) throw new Error(`the video directory is not used: ${refused}. Remove it, or set ${envName("VIDEO_DIR")} to a directory only you can write.`);
+  return dir;
 }
 function servesLang(meta, lang) {
   if (!lang) return true;
@@ -3850,6 +3897,7 @@ var init_run = __esm({
     "use strict";
     init_brand();
     init_no_write();
+    init_private_dir();
     init_rank();
     init_ladder3();
     init_markdown();
@@ -3960,7 +4008,7 @@ var init_dhash = __esm({
 
 // src/video/frames.ts
 import { randomUUID } from "crypto";
-import { copyFileSync, cpSync, existsSync as existsSync4, mkdirSync as mkdirSync2, readdirSync as readdirSync4, readFileSync as readFileSync11, renameSync as renameSync2, rmSync as rmSync3 } from "fs";
+import { copyFileSync, cpSync, existsSync as existsSync4, mkdirSync as mkdirSync3, readdirSync as readdirSync4, readFileSync as readFileSync11, renameSync as renameSync2, rmSync as rmSync3 } from "fs";
 import { join as join12, resolve as resolve2 } from "path";
 function parseShowinfo(stderr) {
   const out = [];
@@ -4011,7 +4059,7 @@ async function extractFrames(runDir, opts = {}) {
     const input = join12(tmp, video);
     const ffmpeg = (args) => deps.run("ffmpeg", ["-nostdin", "-hide_banner", ...args], { timeoutMs: FRAMES_TIMEOUT_MS, signal: opts.signal });
     const sceneDir = join12(tmp, "scene");
-    mkdirSync2(sceneDir);
+    mkdirSync3(sceneDir);
     const sceneArgs = (sync) => [
       "-i",
       input,
@@ -4044,7 +4092,7 @@ async function extractFrames(runDir, opts = {}) {
     if (!candidates2.length) return { ok: false, reason: `ffmpeg took no frame from the video${scenes.ok ? "" : ` (${lastLine(scenes.stderr)})`}` };
     candidates2.sort((a, b) => a.time - b.time);
     const candDir = join12(tmp, "cand");
-    mkdirSync2(candDir);
+    mkdirSync3(candDir);
     candidates2.forEach((c, i) => copyFileSync(c.path, join12(candDir, `${String(i + 1).padStart(4, "0")}.jpg`)));
     const raw = join12(tmp, "hash.raw");
     await ffmpeg(["-loglevel", "error", "-i", join12(candDir, "%04d.jpg"), "-vf", "scale=9:8,format=gray", "-f", "rawvideo", "-y", raw]);
@@ -4057,7 +4105,7 @@ async function extractFrames(runDir, opts = {}) {
     }
     const chosen = capFrames(kept, FRAME_EFFORT[effort]);
     const staged = join12(tmp, "frames");
-    mkdirSync2(staged);
+    mkdirSync3(staged);
     const placed = chosen.map((c, i) => {
       const file = `frames/${String(i + 1).padStart(4, "0")}_${fileStamp(c.time)}.jpg`;
       copyFileSync(c.path, join12(tmp, file));
@@ -7212,7 +7260,7 @@ var init_cli_kit = __esm({
 });
 
 // src/browser/profile.ts
-import { chmodSync, copyFileSync as copyFileSync2, existsSync as existsSync5, lstatSync, mkdirSync as mkdirSync3, readdirSync as readdirSync5, readFileSync as readFileSync12, realpathSync, rmSync as rmSync4, statSync as statSync3, writeFileSync as writeFileSync6 } from "fs";
+import { chmodSync as chmodSync2, copyFileSync as copyFileSync2, existsSync as existsSync5, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readdirSync as readdirSync5, readFileSync as readFileSync12, realpathSync, rmSync as rmSync4, statSync as statSync3, writeFileSync as writeFileSync6 } from "fs";
 import { homedir as homedir2 } from "os";
 import { basename as basename2, join as join14, resolve as resolve3, sep } from "path";
 function browserHome() {
@@ -7245,11 +7293,11 @@ function writeProfileKind(name2, kind) {
 }
 function ensurePrivateDir(path) {
   try {
-    mkdirSync3(path, { recursive: true, mode: 448 });
+    mkdirSync4(path, { recursive: true, mode: 448 });
   } catch (e) {
     if (e.code !== "EEXIST") throw e;
   }
-  const st = lstatSync(path);
+  const st = lstatSync2(path);
   if (st.isSymbolicLink()) throw new Error(`${path} is a symbolic link`);
   if (!st.isDirectory()) throw new Error(`${path} is not a directory`);
   if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
@@ -7257,7 +7305,7 @@ function ensurePrivateDir(path) {
   }
   if (process.platform === "win32") return;
   if (st.mode & 18) throw new Error(`${path} is writable by other users`);
-  if (st.mode & 63) chmodSync(path, 448);
+  if (st.mode & 63) chmodSync2(path, 448);
 }
 function realish(path) {
   const p = resolve3(path);
@@ -7304,7 +7352,7 @@ function copyTree(from, to, rel, tally) {
       copyTree(src, dst, childRel, tally);
     } else if (entry.isFile()) {
       copyFileSync2(src, dst);
-      chmodSync(dst, 384);
+      chmodSync2(dst, 384);
       tally.files++;
       tally.bytes += statSync3(dst).size;
     }
@@ -7320,7 +7368,7 @@ function importProfile(source2, opts = {}) {
   const lockNames = (opts.platform ?? process.platform) === "win32" ? ["SingletonLock", "lockfile"] : ["SingletonLock"];
   const locked = lockNames.some((n) => {
     try {
-      lstatSync(join14(from, n));
+      lstatSync2(join14(from, n));
       return true;
     } catch (e) {
       if (e.code !== "ENOENT") throw e;
@@ -7345,7 +7393,7 @@ function importProfile(source2, opts = {}) {
   ensurePrivateDir(to);
   if (hasState) {
     copyFileSync2(join14(from, "Local State"), join14(to, "Local State"));
-    chmodSync(join14(to, "Local State"), 384);
+    chmodSync2(join14(to, "Local State"), 384);
     tally.files++;
     tally.bytes += statSync3(join14(to, "Local State")).size;
   }
@@ -13280,49 +13328,11 @@ init_video();
 init_firecrawl();
 init_url();
 init_no_write();
-import { existsSync as existsSync8, mkdirSync as mkdirSync5, readFileSync as readFileSync14, readdirSync as readdirSync6, rmSync as rmSync6, statSync as statSync6 } from "fs";
-import { join as join19 } from "path";
-
-// src/private-dir.ts
-init_no_write();
-import { chmodSync as chmodSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync4 } from "fs";
-import { dirname } from "path";
-function openPrivateTmpDir(dir, create) {
-  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
-  if (create) mkdirSync4(dirname(dirname(dir)), { recursive: true });
-  for (const p of [dirname(dir), dir]) {
-    if (create) mkdirPrivate(p);
-    let st;
-    try {
-      st = lstatSync2(p);
-    } catch (e) {
-      if (e.code === "ENOENT") return {};
-      return { refused: `${p} cannot be inspected (${e.message})` };
-    }
-    if (st.isSymbolicLink()) return { refused: `${p} is a symbolic link` };
-    if (!st.isDirectory()) return { refused: `${p} is not a directory` };
-    if (st.uid !== uid) return { refused: `${p} belongs to another user` };
-    if (st.mode & 18) return { refused: `${p} is writable by other users` };
-    if (st.mode & 63 && !isNoWrite()) {
-      try {
-        chmodSync2(p, 448);
-      } catch {
-      }
-    }
-  }
-  return { dir };
-}
-function mkdirPrivate(p) {
-  try {
-    mkdirSync4(p, { mode: 448 });
-  } catch (e) {
-    if (e.code !== "EEXIST") throw e;
-  }
-}
-
-// src/cache.ts
+init_private_dir();
 init_brand();
 init_mode();
+import { existsSync as existsSync8, mkdirSync as mkdirSync5, readFileSync as readFileSync14, readdirSync as readdirSync6, rmSync as rmSync6, statSync as statSync6 } from "fs";
+import { join as join19 } from "path";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
 function cacheDir() {
   return namedCacheDir() ?? userTmpDir("cache");
@@ -16340,10 +16350,11 @@ function resolveUrl2(url, base2) {
 init_brand();
 init_exec2();
 init_forge_host();
+init_private_dir();
+init_text();
 import { createHash as createHash4, randomBytes as randomBytes2 } from "crypto";
 import { existsSync as existsSync12, mkdirSync as mkdirSync7, readdirSync as readdirSync9, renameSync as renameSync4, rmSync as rmSync7, statSync as statSync9 } from "fs";
 import { basename as basename3, join as join24, resolve as resolve6 } from "path";
-init_text();
 function resolveRepo(raw, opts = {}) {
   const trimmed = raw.trim();
   if (trimmed && opts.local !== false) {

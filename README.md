@@ -116,7 +116,7 @@ default, and one out of range is clamped to it.
 | `WEBINDEX_OCR_MAX`, `WEBINDEX_OCR_LANG`, `WEBINDEX_OCR_TIMEOUT_MS` | documents one process may OCR (default 3), tesseract's language (default `eng`), and one document's budget (default 300000) |
 | `WEBINDEX_VIDEO_ENGINES` | the video transcript rungs to run, in order: a comma list of `manual-subs`, `auto-subs`, `whisper`, or `none` |
 | `WEBINDEX_WHISPER_MODEL`, `WEBINDEX_WHISPER_MAX`, `WEBINDEX_WHISPER_TIMEOUT_MS` | the whisper model (default `small`, about 500 MB on first use), videos one process may transcribe locally (default 3), and one video's budget (default 1800000) |
-| `WEBINDEX_VIDEO_DIR` | where `video` keeps its runs (default `<tmp>/webindex-<uid>/video`, under the consumer's own name when vendored) |
+| `WEBINDEX_VIDEO_DIR` | where `video` keeps its runs (default `<tmp>/webindex-<uid>/video`, under the consumer's own name when vendored; created private to you, and one another user created first, or may write, is not used) |
 | `WEBINDEX_YTDLP_ARGS` | extra flags appended to every yt-dlp call, split on whitespace — yt-dlp's browser-cookies option when YouTube or another site asks to sign in, or a proxy |
 | `WEBINDEX_NO_ROBOTS` | `robots` and `crawl` do not consult robots.txt — only right on a site you own |
 | `WEBINDEX_ROBOTS_UA` | the user-agent token robots.txt groups are matched against (default `webindex`) |
