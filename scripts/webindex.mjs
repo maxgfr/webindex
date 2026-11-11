@@ -12064,10 +12064,14 @@ var init_actions = __esm({
 });
 
 // src/browser/network.ts
+function secretKey(key) {
+  const words = key.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  return words.some((w) => SECRET_WORDS.has(w)) || SECRET_JOINED.test(words.join(""));
+}
 function redactJson(v) {
   if (Array.isArray(v)) return v.map(redactJson);
   if (v === null || typeof v !== "object") return v;
-  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, SECRET_KEY.test(k) && (typeof x !== "object" || x === null) ? REDACTED : redactJson(x)]));
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, secretKey(k) ? REDACTED : redactJson(x)]));
 }
 function redactRequestBody(body) {
   const trimmed = body.trim();
@@ -12077,9 +12081,9 @@ function redactRequestBody(body) {
     } catch {
     }
   }
-  if (/^[^\s=&]+=[^\s&]*(?:&[^\s=&]+=?[^\s&]*)*$/.test(trimmed)) {
+  if (trimmed.includes("=") && !/\s/.test(trimmed)) {
     const form = new URLSearchParams(trimmed);
-    for (const k of new Set(form.keys())) if (SECRET_KEY.test(k)) form.set(k, REDACTED);
+    for (const k of new Set(form.keys())) if (secretKey(k)) form.set(k, REDACTED);
     return form.toString().slice(0, REQUEST_BODY_CAP);
   }
   return body.slice(0, REQUEST_BODY_CAP);
@@ -12104,13 +12108,35 @@ function getNetworkEntry(targetId, n, o) {
 function clearNetworkLog(targetId, o) {
   clearNetwork(targetId, o);
 }
-var REQUEST_BODY_CAP, SECRET_KEY, REDACTED, TRACKED_CAP, DEFAULT_RESOURCE_TYPES, JSON_MIME, NetworkRecorder;
+var REQUEST_BODY_CAP, SECRET_WORDS, SECRET_JOINED, REDACTED, TRACKED_CAP, DEFAULT_RESOURCE_TYPES, JSON_MIME, NetworkRecorder;
 var init_network = __esm({
   "src/browser/network.ts"() {
     "use strict";
     init_state();
     REQUEST_BODY_CAP = 4096;
-    SECRET_KEY = /pass(?:word|wd|phrase)?|pwd|secret|token|api[-_]?key|auth|credential|session|otp|pin|cvc|cvv|card|iban/i;
+    SECRET_WORDS = /* @__PURE__ */ new Set([
+      "password",
+      "passwd",
+      "passphrase",
+      "pass",
+      "pwd",
+      "secret",
+      "token",
+      "auth",
+      "authorization",
+      "credential",
+      "credentials",
+      "session",
+      "sessionid",
+      "otp",
+      "pin",
+      "cvc",
+      "cvv",
+      "card",
+      "iban",
+      "cookie"
+    ]);
+    SECRET_JOINED = /apikey|privatekey|secretkey|accesskey/;
     REDACTED = "[redacted]";
     TRACKED_CAP = 1e3;
     DEFAULT_RESOURCE_TYPES = /* @__PURE__ */ new Set(["XHR", "Fetch", "Document", "Other"]);
@@ -18215,6 +18241,7 @@ init_network();
 init_profile();
 init_risk();
 init_session();
+init_launch();
 init_state();
 var PREFIX = "webindex_browser_";
 var RUN_LOCK = "\0browser-session";
@@ -18621,10 +18648,13 @@ var Host = class {
    * here, under the lock, and the session is opened again from session.json.
    */
   async outdated(s) {
+    if (this.dialog) return false;
     const saved = readSession();
-    if (saved && (saved.targetId !== s.targetId || saved.wsBrowserUrl !== void 0 && saved.wsBrowserUrl !== s.browserSocket)) return true;
+    if (saved && (saved.targetId !== s.targetId || saved.wsBrowserUrl !== void 0 && socketPath(saved.wsBrowserUrl) !== socketPath(s.browserSocket))) {
+      return true;
+    }
     try {
-      await s.page.send("Page.getFrameTree", {}, { timeoutMs: OUTDATED_PROBE_MS });
+      await s.cdp.send("Target.getTargetInfo", { targetId: s.targetId }, { timeoutMs: OUTDATED_PROBE_MS });
       return false;
     } catch {
       return true;

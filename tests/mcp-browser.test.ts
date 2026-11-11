@@ -387,6 +387,32 @@ describe("dialogs", () => {
     expect(decl.description).toMatch(/confirm: true/);
   });
 
+  it("answers a dialog through the session that saw it, while the renderer behind it answers nothing", async () => {
+    // Behind an open dialog the renderer does not answer Page.* at all, and
+    // only the connection that saw the dialog can answer it. A page-side
+    // liveness probe waited out its timeout, dropped that connection, and the
+    // dialog could never be answered.
+    const h = await host();
+    await h.call("webindex_browser_snapshot", { mode: "full" });
+    const frameTree = fake.handlerOf("Page.getFrameTree")!;
+    let frozen = false;
+    fake.handle("Page.getFrameTree", (p, sid) => (frozen ? new Promise(() => {}) : frameTree(p, sid)));
+    world.dialogOnClick = { type: "alert", message: "Saved" };
+    await h.call("webindex_browser_click", { ref: "e1" });
+    frozen = true;
+    // Answering the dialog is what lets the renderer go on.
+    fake.handle("Page.handleJavaScriptDialog", () => {
+      frozen = false;
+      return {};
+    });
+    const attaches = sent("Target.attachToTarget").length;
+    const started = Date.now();
+    await h.call("webindex_browser_dialog", { action: "accept" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(sent("Target.attachToTarget").length).toBe(attaches);
+    expect(sent("Page.handleJavaScriptDialog").at(-1)?.params).toEqual({ accept: true });
+  });
+
   it("forgets a dialog the browser says is not showing", async () => {
     const h = await host();
     await h.call("webindex_browser_snapshot", { mode: "full" });

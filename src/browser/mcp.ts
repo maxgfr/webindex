@@ -34,6 +34,7 @@ import { NetworkRecorder } from "./network.js";
 import { readProfileKind } from "./profile.js";
 import { assessDialog } from "./risk.js";
 import { type BrowserSession, browserStatus, openBrowserSession } from "./session.js";
+import { socketPath } from "./launch.js";
 import { readSession, withBrowserLock } from "./state.js";
 
 const PREFIX = "webindex_browser_";
@@ -541,10 +542,16 @@ class Host implements BrowserToolHost {
    * here, under the lock, and the session is opened again from session.json.
    */
   private async outdated(s: BrowserSession): Promise<boolean> {
+    // A dialog is answered only through the connection that saw it open.
+    if (this.dialog) return false;
     const saved = readSession();
-    if (saved && (saved.targetId !== s.targetId || (saved.wsBrowserUrl !== undefined && saved.wsBrowserUrl !== s.browserSocket))) return true;
+    if (saved && (saved.targetId !== s.targetId || (saved.wsBrowserUrl !== undefined && socketPath(saved.wsBrowserUrl) !== socketPath(s.browserSocket)))) {
+      return true;
+    }
+    // Asked of the browser, not the page: a renderer that is busy, or behind a
+    // dialog, answers nothing, and that is not a tab that is gone.
     try {
-      await s.page.send("Page.getFrameTree", {}, { timeoutMs: OUTDATED_PROBE_MS });
+      await s.cdp.send("Target.getTargetInfo", { targetId: s.targetId }, { timeoutMs: OUTDATED_PROBE_MS });
       return false;
     } catch {
       return true;
