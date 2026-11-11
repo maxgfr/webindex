@@ -1266,6 +1266,7 @@ function resolvedHost(url: string): string | undefined {
 export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & { close(): Promise<void> } {
   // Nothing starts until a browser tool is called.
   const browserHost = policy.browser ? createBrowserToolHost({ policy }) : undefined;
+  const browserTools = new Set(policy.browser ? browserToolDecls().map((t) => t.name) : []);
   // One authorizer for the adapter's life: fetchRobots keys its cache by it.
   const guard = policy.publicOnly ? publicUrlsOnly() : undefined;
   const refuseUrl = async (url: string): Promise<void> => {
@@ -1753,6 +1754,8 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & {
       webindex_video_list: "lower `limit`",
       ...(policy.browser ? BROWSER_CAP_ADVICE : {}),
     },
+    // The browser tools run one at a time behind their own lock: they take no server slot.
+    serialized: (name) => browserTools.has(name),
     async callTool(name, args, ctx) {
       // What the server hands every call: the client's cancel, and a way to
       // report progress. Passed on to whatever takes it — a cancelled call must

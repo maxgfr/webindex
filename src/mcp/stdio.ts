@@ -108,7 +108,9 @@ export async function runStdioServer(adapter: McpAdapter, opts: StdioOptions = {
         const target = msg.params?.requestId;
         if (typeof target === "string" || typeof target === "number") queued.get(target)?.abort();
       }
-      if (msg.method === "tools/call" && (typeof msg.id === "string" || typeof msg.id === "number")) {
+      const tool = (msg.params as { name?: unknown } | undefined)?.name;
+      const ownQueue = typeof tool === "string" && adapter.serialized?.(tool) === true;
+      if (msg.method === "tools/call" && !ownQueue && (typeof msg.id === "string" || typeof msg.id === "number")) {
         await runToolCall(msg, msg.id, reply);
         return;
       }

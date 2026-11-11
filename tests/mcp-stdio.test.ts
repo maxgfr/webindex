@@ -192,6 +192,31 @@ describe("a busy server still listens", () => {
     expect(h.frames).toHaveLength(5);
   });
 
+  it("gives no slot to a tool the adapter already runs one at a time", async () => {
+    // The browser tools queue on their own lock. Holding a server slot while
+    // they queued, four of them — one a five-minute `wait` — kept every other
+    // tool waiting behind the browser.
+    const input = new PassThrough();
+    const output = new Writable({ write: (_c, _e, cb) => cb() });
+    const releases: (() => void)[] = [];
+    let started = 0;
+    const adapter = testAdapter({
+      serialized: (name) => name === "probe_echo",
+      async callTool() {
+        started++;
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return { text: "ok" };
+      },
+    });
+    const done = runStdioServer(adapter, { input, output, captureStdout: true });
+    for (const id of [1, 2, 3, 4, 5, 6]) input.write(`${JSON.stringify(toolCall(id))}\n`);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(started).toBe(6);
+    for (const r of releases.splice(0)) r();
+    input.end();
+    await done;
+  });
+
   it("drops a call cancelled while it waited for a slot, without running it", async () => {
     const h = harness();
     for (const id of [1, 2, 3, 4, 5]) h.send(toolCall(id));

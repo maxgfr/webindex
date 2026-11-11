@@ -118,7 +118,10 @@ describe("tools/list", () => {
       expect(t.inputSchema.required.length, t.name).toBeGreaterThan(0);
       expect(BROWSER_CAP_ADVICE[t.name], t.name).toBeTruthy();
       expect(webindexAdapter({ browser: true }).capAdvice?.[t.name], t.name).toBe(BROWSER_CAP_ADVICE[t.name]);
+      // They queue on their own lock, so they take none of the server's slots.
+      expect(webindexAdapter({ browser: true }).serialized?.(t.name), t.name).toBe(true);
     }
+    expect(webindexAdapter({ browser: true }).serialized?.("webindex_fetch")).toBe(false);
     // The default tools keep their own hints.
     const fetchTool = (await list({ browser: true })).find((t) => t.name === "webindex_fetch");
     expect(fetchTool?.annotations).toMatchObject({ readOnlyHint: true, idempotentHint: true });

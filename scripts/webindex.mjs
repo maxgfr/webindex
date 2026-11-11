@@ -17656,7 +17656,9 @@ async function runStdioServer(adapter, opts = {}) {
         const target = msg.params?.requestId;
         if (typeof target === "string" || typeof target === "number") queued.get(target)?.abort();
       }
-      if (msg.method === "tools/call" && (typeof msg.id === "string" || typeof msg.id === "number")) {
+      const tool2 = msg.params?.name;
+      const ownQueue = typeof tool2 === "string" && adapter.serialized?.(tool2) === true;
+      if (msg.method === "tools/call" && !ownQueue && (typeof msg.id === "string" || typeof msg.id === "number")) {
         await runToolCall(msg, msg.id, reply);
         return;
       }
@@ -17846,6 +17848,8 @@ async function route(req, res, adapter, opts, slots) {
   });
   const handle = async (m, reply, o) => {
     if (m?.method !== "tools/call") return mcp.handle(m, reply, o);
+    const tool2 = m.params?.name;
+    if (typeof tool2 === "string" && adapter.serialized?.(tool2)) return mcp.handle(m, reply, o);
     const release2 = await slots.acquire(lost.signal);
     if (!release2) return;
     try {
@@ -19637,6 +19641,7 @@ function resolvedHost(url) {
 }
 function webindexAdapter(policy = {}) {
   const browserHost = policy.browser ? createBrowserToolHost({ policy }) : void 0;
+  const browserTools = new Set(policy.browser ? browserToolDecls().map((t) => t.name) : []);
   const guard = policy.publicOnly ? publicUrlsOnly() : void 0;
   const refuseUrl = async (url) => {
     if (!guard) return;
@@ -20027,6 +20032,8 @@ function webindexAdapter(policy = {}) {
       webindex_video_list: "lower `limit`",
       ...policy.browser ? BROWSER_CAP_ADVICE : {}
     },
+    // The browser tools run one at a time behind their own lock: they take no server slot.
+    serialized: (name2) => browserTools.has(name2),
     async callTool(name2, args, ctx) {
       const signal = ctx?.signal;
       if (browserHost && name2.startsWith("webindex_browser_")) return browserHost.call(name2, args, ctx);

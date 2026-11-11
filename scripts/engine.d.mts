@@ -5116,6 +5116,12 @@ interface McpAdapter {
      * overflow; only the skill knows which argument makes the result smaller.
      */
     capAdvice?: CapAdvice;
+    /**
+     * The tools this adapter already runs one at a time on its own (the browser
+     * tools, behind their run lock). They take none of the server's slots: held
+     * while queued on that lock, four of them kept every other tool waiting.
+     */
+    serialized?(name: string): boolean;
     /** Omit to advertise no prompts; the capability is declared either way. */
     prompts?: PromptDecl[];
     getPrompt?(name: string, args: Record<string, unknown>): PromptResult;

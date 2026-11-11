@@ -243,6 +243,9 @@ async function route(req: IncomingMessage, res: ServerResponse, adapter: McpAdap
   // hangs up while queued is never run.
   const handle: typeof mcp.handle = async (m, reply, o) => {
     if ((m as JsonRpcMessage | undefined)?.method !== "tools/call") return mcp.handle(m, reply, o);
+    // A tool the adapter queues on its own takes no slot (see McpAdapter.serialized).
+    const tool = ((m as JsonRpcMessage).params as { name?: unknown } | undefined)?.name;
+    if (typeof tool === "string" && adapter.serialized?.(tool)) return mcp.handle(m, reply, o);
     const release = await slots.acquire(lost.signal);
     if (!release) return;
     try {

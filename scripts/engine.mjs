@@ -15959,7 +15959,9 @@ async function runStdioServer(adapter, opts = {}) {
         const target = msg.params?.requestId;
         if (typeof target === "string" || typeof target === "number") queued.get(target)?.abort();
       }
-      if (msg.method === "tools/call" && (typeof msg.id === "string" || typeof msg.id === "number")) {
+      const tool = msg.params?.name;
+      const ownQueue = typeof tool === "string" && adapter.serialized?.(tool) === true;
+      if (msg.method === "tools/call" && !ownQueue && (typeof msg.id === "string" || typeof msg.id === "number")) {
         await runToolCall(msg, msg.id, reply);
         return;
       }
@@ -16149,6 +16151,8 @@ async function route(req, res, adapter, opts, slots) {
   });
   const handle = async (m, reply, o) => {
     if (m?.method !== "tools/call") return mcp.handle(m, reply, o);
+    const tool = m.params?.name;
+    if (typeof tool === "string" && adapter.serialized?.(tool)) return mcp.handle(m, reply, o);
     const release = await slots.acquire(lost.signal);
     if (!release) return;
     try {
