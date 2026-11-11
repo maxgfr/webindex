@@ -113,10 +113,10 @@ async function evaluate(page: CdpSession, expression: string): Promise<unknown> 
   }
 }
 
-/** `/re/flags` is a regex, a pattern with `*` a glob over the whole url, anything else a substring. */
 /** How long a caller's /regex/ may take on one URL. */
 const REGEX_BUDGET_MS = 200;
 
+/** `/re/flags` is a regex, a pattern with `*` a glob over the whole url, anything else a substring. */
 function urlMatcher(pattern: string): (url: string) => boolean {
   const re = /^\/(.+)\/([a-z]*)$/.exec(pattern);
   if (re) {
