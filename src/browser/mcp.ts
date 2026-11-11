@@ -34,11 +34,13 @@ import { NetworkRecorder } from "./network.js";
 import { readProfileKind } from "./profile.js";
 import { assessDialog } from "./risk.js";
 import { type BrowserSession, browserStatus, openBrowserSession } from "./session.js";
-import { withBrowserLock } from "./state.js";
+import { readSession, withBrowserLock } from "./state.js";
 
 const PREFIX = "webindex_browser_";
 /** Calls of every host in this process queue on one chain: they share session.json and the tabs. */
 const RUN_LOCK = "\0browser-session";
+/** How long the kept session's tab has to answer before it is taken for gone. */
+const OUTDATED_PROBE_MS = 3_000;
 const JPEG_QUALITY = 70;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
@@ -507,6 +509,10 @@ class Host implements BrowserToolHost {
    */
   private async onPage<T>(fn: (s: BrowserSession) => Promise<T>, o: { newTab?: boolean }, run: RunOptions = {}): Promise<T> {
     let s = this.live();
+    if (s && (await this.outdated(s))) {
+      await this.drop();
+      s = undefined;
+    }
     if (!s) {
       await this.drop();
       s = this.session = await openBrowserSession({ ...run.launch, ...(this.deps.browser ? { deps: this.deps.browser } : {}) });
@@ -524,6 +530,25 @@ class Host implements BrowserToolHost {
     await this.follow(s, capture);
     s.save();
     return out;
+  }
+
+  /**
+   * Whether the session this server kept is no longer the one to act in. Its
+   * socket outlives the tab: the person may have closed the agent's tab, or a
+   * renderer crashed, and every page call then failed until a tab switch. And
+   * between two calls a CLI command (run under the same lock) may have chosen
+   * another tab or browser, which this server then saved over. Both are seen
+   * here, under the lock, and the session is opened again from session.json.
+   */
+  private async outdated(s: BrowserSession): Promise<boolean> {
+    const saved = readSession();
+    if (saved && (saved.targetId !== s.targetId || (saved.wsBrowserUrl !== undefined && saved.wsBrowserUrl !== s.browserSocket))) return true;
+    try {
+      await s.page.send("Page.getFrameTree", {}, { timeoutMs: OUTDATED_PROBE_MS });
+      return false;
+    } catch {
+      return true;
+    }
   }
 
   /** Listen for dialogs on the session's current tab, and record it when asked: a tab switch moves both. */

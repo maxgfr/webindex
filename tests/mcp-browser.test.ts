@@ -234,6 +234,34 @@ describe("one live session", () => {
     expect(readSession()).toMatchObject({ port: fake.port, targetId: "T1" });
   });
 
+  it("opens the session again when its tab was closed in the window", async () => {
+    // The browser-level socket stays open when the person closes the agent's
+    // tab, so the session counted as live and every page call failed until the
+    // agent happened to switch tabs.
+    const h = await host();
+    await h.call("webindex_browser_snapshot", { mode: "full" });
+    fake.addTarget("https://other.test/", "Other");
+    fake.targets.splice(
+      fake.targets.findIndex((t) => t.id === "T1"),
+      1,
+    );
+    const r = await h.call("webindex_browser_snapshot", { mode: "full" });
+    expect(r.text).toContain("Other");
+  });
+
+  it("follows a tab another command selected between two calls", async () => {
+    // A CLI `tabs select` saves the tab in session.json; the server's next
+    // call went on in the tab it had, and saved that over the CLI's choice.
+    const h = await host();
+    await h.call("webindex_browser_snapshot", { mode: "full" });
+    const second = fake.addTarget("https://second.test/", "Second");
+    const saved = readSession()!;
+    writeSession({ ...saved, targetId: second.id, updatedAt: saved.updatedAt + 1 });
+    const r = await h.call("webindex_browser_snapshot", { mode: "full" });
+    expect(r.text).toContain("Second");
+    expect(readSession()?.targetId).toBe(second.id);
+  });
+
   it("serialises calls", async () => {
     const h = await host();
     await h.call("webindex_browser_snapshot", { mode: "full" });

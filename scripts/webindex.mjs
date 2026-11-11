@@ -18204,6 +18204,7 @@ init_session();
 init_state();
 var PREFIX = "webindex_browser_";
 var RUN_LOCK = "\0browser-session";
+var OUTDATED_PROBE_MS = 3e3;
 var JPEG_QUALITY = 70;
 var MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 var FOLLOW_UPS = {
@@ -18575,6 +18576,10 @@ var Host = class {
    */
   async onPage(fn, o, run = {}) {
     let s = this.live();
+    if (s && await this.outdated(s)) {
+      await this.drop();
+      s = void 0;
+    }
     if (!s) {
       await this.drop();
       s = this.session = await openBrowserSession({ ...run.launch, ...this.deps.browser ? { deps: this.deps.browser } : {} });
@@ -18592,6 +18597,24 @@ var Host = class {
     await this.follow(s, capture);
     s.save();
     return out;
+  }
+  /**
+   * Whether the session this server kept is no longer the one to act in. Its
+   * socket outlives the tab: the person may have closed the agent's tab, or a
+   * renderer crashed, and every page call then failed until a tab switch. And
+   * between two calls a CLI command (run under the same lock) may have chosen
+   * another tab or browser, which this server then saved over. Both are seen
+   * here, under the lock, and the session is opened again from session.json.
+   */
+  async outdated(s) {
+    const saved = readSession();
+    if (saved && (saved.targetId !== s.targetId || saved.wsBrowserUrl !== void 0 && saved.wsBrowserUrl !== s.browserSocket)) return true;
+    try {
+      await s.page.send("Page.getFrameTree", {}, { timeoutMs: OUTDATED_PROBE_MS });
+      return false;
+    } catch {
+      return true;
+    }
   }
   /** Listen for dialogs on the session's current tab, and record it when asked: a tab switch moves both. */
   async follow(s, capture) {
