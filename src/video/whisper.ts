@@ -99,7 +99,8 @@ export async function whisperTranscribe(
     writeFileSync(infoPath, info);
     const dl = await downloadMedia(["--load-info-json", infoPath, "-f", AUDIO_FORMAT], dir, "audio", { run, timeoutMs: left, signal, knownOnly });
     if (signal?.aborted) return refund({ failed: "whisper: cancelled" });
-    if ("timedOut" in dl) return timedOut;
+    // Timed out before any transcription ran: the budget counts transcriptions.
+    if ("timedOut" in dl) return refund(timedOut);
     if ("error" in dl) return refund({ failed: `whisper: the audio download failed (${dl.error})` });
     const audio = dl.file;
 
@@ -110,7 +111,7 @@ export async function whisperTranscribe(
     });
     if (ff.missing) return refund({ failed: "whisper needs ffmpeg", unavailable: true });
     if (signal?.aborted) return refund({ failed: "whisper: cancelled" });
-    if (ff.status === 124) return timedOut;
+    if (ff.status === 124) return refund(timedOut);
     if (!ff.ok || !existsSync(wav)) return refund({ failed: "whisper: ffmpeg could not convert the audio" });
 
     // PyAV 18 dropped the `metadata_errors` argument faster-whisper still

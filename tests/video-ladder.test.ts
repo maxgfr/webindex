@@ -374,6 +374,23 @@ describe("whisper", () => {
     expect(second.via).toBe("whisper");
   });
 
+  it("refunds the budget when the audio download or its conversion timed out", async () => {
+    // The budget counts transcriptions. A download that ran out of time never
+    // reached one, and the next video was refused as if it had.
+    process.env.WEBINDEX_TEST_WHISPER_MAX = "1";
+    for (const slow of ["yt-dlp", "ffmpeg"]) {
+      resetVideoLadderCache();
+      const timesOut: VideoRunner = async (cmd, args, opts) =>
+        cmd === slow && (cmd === "ffmpeg" || args.includes(AUDIO_FORMAT))
+          ? { ok: false, status: 124, stdout: "", stderr: "" }
+          : runner({ info, whisper: talk(130) })(cmd, args, opts);
+      const first = await transcribeVideo(URL, { deps: { run: timesOut, have: haveAll } });
+      expect(first.reason, slow).toContain("timed out");
+      const second = await transcribeVideo(URL, { deps: { run: runner({ info, whisper: talk(130) }), have: haveAll } });
+      expect(second.via, slow).toBe("whisper");
+    }
+  });
+
   it("gives the three steps one deadline between them", async () => {
     process.env.WEBINDEX_TEST_WHISPER_TIMEOUT_MS = "60000";
     // Each step "takes" 25 s of a fake clock.
