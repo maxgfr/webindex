@@ -55,12 +55,6 @@ export function binaryName(name: string): string {
 }
 
 /**
- * Spawn `cmd args…`, write `input` to its stdin, resolve with its stdout.
- * Never throws and never leaves a child behind: a missing binary, a non-zero
- * exit and a timeout all come back as `{ ok: false, error }` — with the tail
- * of stderr, when the tool wrote one, so a caller can say WHY.
- */
-/**
  * The one command line cmd.exe is given for a .cmd or .bat. Every argument is
  * quoted, and one cmd.exe would still rewrite inside its quotes is refused:
  * `%NAME%` expands there, and a line break ends the command. Not every
@@ -73,6 +67,12 @@ export function cmdLine(bin: string, args: readonly string[]): string {
   return [bin, ...args].map((s) => `"${s.replace(/"/g, '""')}"`).join(" ");
 }
 
+/**
+ * Spawn `cmd args…`, write `input` to its stdin, resolve with its stdout.
+ * Never throws and never leaves a child behind: a missing binary, a non-zero
+ * exit and a timeout all come back as `{ ok: false, error }` — with the tail
+ * of stderr, when the tool wrote one, so a caller can say WHY.
+ */
 export function runWithInput(cmd: string, args: string[], input: Buffer, timeoutMs: number, opts: { env?: NodeJS.ProcessEnv } = {}): Promise<RunResult> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
