@@ -1654,7 +1654,9 @@ describe("the fetch cache", () => {
     chmodSync(planted, 0o777);
     try {
       expect(await run(["cache", "status"])).toBe(0);
-      expect(stdout()).toContain(`unused   ${planted} is writable by other users: remove it, or set WEBINDEX_TEST_CACHE_DIR`);
+      expect(stdout()).toContain(
+        `unused   ${planted} is writable by other users (it is yours: \`chmod 700 ${planted}\` if you trust what it holds): remove it, or set WEBINDEX_TEST_CACHE_DIR`,
+      );
     } finally {
       if (saved === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = saved;
