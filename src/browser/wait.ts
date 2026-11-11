@@ -2,6 +2,7 @@
 // action (`settle`). Both poll through the injected `now`/`sleep`, so tests run
 // on a fake clock.
 
+import { createContext, Script } from "node:vm";
 import { brand } from "../brand.js";
 import type { CdpHandler, CdpSession } from "./cdp.js";
 import { probeChallenge } from "./challenge.js";
@@ -113,13 +114,30 @@ async function evaluate(page: CdpSession, expression: string): Promise<unknown> 
 }
 
 /** `/re/flags` is a regex, a pattern with `*` a glob over the whole url, anything else a substring. */
+/** How long a caller's /regex/ may take on one URL. */
+const REGEX_BUDGET_MS = 200;
+
 function urlMatcher(pattern: string): (url: string) => boolean {
   const re = /^\/(.+)\/([a-z]*)$/.exec(pattern);
   if (re) {
     try {
-      const rx = new RegExp(re[1] as string, re[2]);
-      return (u) => rx.test(u);
-    } catch {
+      new RegExp(re[1] as string, re[2]); // only to know it is one
+      // The pattern is the caller's (an agent's, or a page steering one), and a
+      // backtracking one run here held the event loop: an MCP server stopped
+      // answering anything, its lock heartbeat included. So it runs in a vm
+      // context, which can interrupt it.
+      const ctx = createContext({ src: re[1], flags: re[2], u: "" });
+      const test = new Script("new RegExp(src, flags).test(u)");
+      return (u) => {
+        ctx.u = u;
+        try {
+          return test.runInContext(ctx, { timeout: REGEX_BUDGET_MS }) === true;
+        } catch {
+          throw new Error(`the /regex/ given to wait --url took too long on ${u.slice(0, 200)}: simplify it`);
+        }
+      };
+    } catch (e) {
+      if ((e as Error).message.includes("took too long")) throw e;
       /* not a regex after all: a substring */
     }
   }

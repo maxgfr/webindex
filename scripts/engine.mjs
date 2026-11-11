@@ -10188,6 +10188,7 @@ var init_overlay = __esm({
 });
 
 // src/browser/wait.ts
+import { createContext, Script } from "vm";
 function timeoutText(c, elapsedMs) {
   if ("text" in c) return `text ${JSON.stringify(c.text)} did not appear after ${elapsedMs} ms`;
   if ("gone" in c) return `text ${JSON.stringify(c.gone)} is still on the page after ${elapsedMs} ms`;
@@ -10228,9 +10229,19 @@ function urlMatcher(pattern) {
   const re = /^\/(.+)\/([a-z]*)$/.exec(pattern);
   if (re) {
     try {
-      const rx = new RegExp(re[1], re[2]);
-      return (u) => rx.test(u);
-    } catch {
+      new RegExp(re[1], re[2]);
+      const ctx = createContext({ src: re[1], flags: re[2], u: "" });
+      const test = new Script("new RegExp(src, flags).test(u)");
+      return (u) => {
+        ctx.u = u;
+        try {
+          return test.runInContext(ctx, { timeout: REGEX_BUDGET_MS }) === true;
+        } catch {
+          throw new Error(`the /regex/ given to wait --url took too long on ${u.slice(0, 200)}: simplify it`);
+        }
+      };
+    } catch (e) {
+      if (e.message.includes("took too long")) throw e;
     }
   }
   if (pattern.includes("*")) {
@@ -10309,7 +10320,7 @@ async function waitFor(session, cond, opts = {}) {
     net?.stop();
   }
 }
-var WaitTimeoutError, WaitCancelledError, POLL_MS2, DEFAULT_TIMEOUT_MS3, CLEAR_TIMEOUT_MS, EVAL_TIMEOUT_MS, IDLE_MS, KEYS;
+var WaitTimeoutError, WaitCancelledError, POLL_MS2, DEFAULT_TIMEOUT_MS3, CLEAR_TIMEOUT_MS, EVAL_TIMEOUT_MS, IDLE_MS, REGEX_BUDGET_MS, KEYS;
 var init_wait = __esm({
   "src/browser/wait.ts"() {
     "use strict";
@@ -10337,6 +10348,7 @@ var init_wait = __esm({
     CLEAR_TIMEOUT_MS = 3e5;
     EVAL_TIMEOUT_MS = 2e3;
     IDLE_MS = 500;
+    REGEX_BUDGET_MS = 200;
     KEYS = ["text", "gone", "selector", "url", "load", "idle", "ms", "clear"];
   }
 });

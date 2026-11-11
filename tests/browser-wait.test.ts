@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { armSettle, awaitParsed, settle, WaitCancelledError, WaitTimeoutError, waitFor } from "../src/browser/wait.js";
+import { CPU_BUDGET_MS } from "./budget.js";
 import { fakeClock, FakePage } from "./helpers/fake-page.js";
 
 /** A page whose Runtime.evaluate answers from a mutable state, by what the expression asks. */
@@ -95,6 +96,18 @@ describe("waitFor", () => {
       if (hit) await expect(run, name).resolves.toBeDefined();
       else await expect(run, name).rejects.toBeInstanceOf(WaitTimeoutError);
     }
+  });
+
+  it("stops a /regex/ that backtracks without end, instead of freezing the process", async () => {
+    // The pattern is the caller's — an agent's, or a page steering one — and it
+    // ran in this process: /(a+)+$/ on a long run of a's held the event loop,
+    // so an MCP server stopped answering anything, its lock heartbeat included.
+    const p = scriptedPage({ url: `https://a.test/${"a".repeat(40)}!` });
+    const started = Date.now();
+    await expect(waitFor({ page: p }, { url: "/(a+)+$/" }, { deps: fakeClock(), timeoutMs: 300 })).rejects.toThrow(/took too long/);
+    expect(Date.now() - started).toBeLessThan(CPU_BUDGET_MS);
+    // An ordinary one still matches.
+    await expect(waitFor({ page: scriptedPage({ url: "https://a.test/done" }) }, { url: "/done$/" }, { deps: fakeClock() })).resolves.toMatchObject({});
   });
 
   it("treats an invalid regex as a plain substring", async () => {

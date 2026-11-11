@@ -8969,6 +8969,7 @@ var init_session = __esm({
 });
 
 // src/browser/wait.ts
+import { createContext, Script } from "vm";
 function timeoutText(c, elapsedMs) {
   if ("text" in c) return `text ${JSON.stringify(c.text)} did not appear after ${elapsedMs} ms`;
   if ("gone" in c) return `text ${JSON.stringify(c.gone)} is still on the page after ${elapsedMs} ms`;
@@ -9009,9 +9010,19 @@ function urlMatcher(pattern) {
   const re = /^\/(.+)\/([a-z]*)$/.exec(pattern);
   if (re) {
     try {
-      const rx = new RegExp(re[1], re[2]);
-      return (u) => rx.test(u);
-    } catch {
+      new RegExp(re[1], re[2]);
+      const ctx = createContext({ src: re[1], flags: re[2], u: "" });
+      const test = new Script("new RegExp(src, flags).test(u)");
+      return (u) => {
+        ctx.u = u;
+        try {
+          return test.runInContext(ctx, { timeout: REGEX_BUDGET_MS }) === true;
+        } catch {
+          throw new Error(`the /regex/ given to wait --url took too long on ${u.slice(0, 200)}: simplify it`);
+        }
+      };
+    } catch (e) {
+      if (e.message.includes("took too long")) throw e;
     }
   }
   if (pattern.includes("*")) {
@@ -9222,7 +9233,7 @@ async function awaitParsed(session, opts = {}) {
     await sleep2(Math.min(PARSE_POLL_MS, timeoutMs - elapsed));
   }
 }
-var WaitTimeoutError, WaitCancelledError, POLL_MS2, DEFAULT_TIMEOUT_MS3, CLEAR_TIMEOUT_MS, EVAL_TIMEOUT_MS, IDLE_MS, SETTLE_NAV_WINDOW_MS, SETTLE_STEP_MS, SETTLE_QUIET_MS, SETTLE_MAX_INFLIGHT, SETTLE_TIMEOUT_MS, KEYS, PARSE_TIMEOUT_MS, PARSE_POLL_MS;
+var WaitTimeoutError, WaitCancelledError, POLL_MS2, DEFAULT_TIMEOUT_MS3, CLEAR_TIMEOUT_MS, EVAL_TIMEOUT_MS, IDLE_MS, SETTLE_NAV_WINDOW_MS, SETTLE_STEP_MS, SETTLE_QUIET_MS, SETTLE_MAX_INFLIGHT, SETTLE_TIMEOUT_MS, REGEX_BUDGET_MS, KEYS, PARSE_TIMEOUT_MS, PARSE_POLL_MS;
 var init_wait = __esm({
   "src/browser/wait.ts"() {
     "use strict";
@@ -9255,6 +9266,7 @@ var init_wait = __esm({
     SETTLE_QUIET_MS = 300;
     SETTLE_MAX_INFLIGHT = 2;
     SETTLE_TIMEOUT_MS = 5e3;
+    REGEX_BUDGET_MS = 200;
     KEYS = ["text", "gone", "selector", "url", "load", "idle", "ms", "clear"];
     PARSE_TIMEOUT_MS = 3e3;
     PARSE_POLL_MS = 100;
