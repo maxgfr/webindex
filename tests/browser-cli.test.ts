@@ -9,7 +9,7 @@ import type { BrowserDeps } from "../src/browser/deps.js";
 import * as discovery from "../src/browser/discovery.js";
 import { READ_DOCUMENT } from "../src/browser/overlay.js";
 import { profileDir } from "../src/browser/profile.js";
-import { appendNetwork, readNetwork, readSession, writeSession } from "../src/browser/state.js";
+import { appendNetwork, readNetwork, readSession, withBrowserLock, writeSession } from "../src/browser/state.js";
 import { main } from "../src/cli.js";
 import { resetNoWrite, setNoWrite } from "../src/no-write.js";
 import { BrowserWorld as World } from "./helpers/browser-world.js";
@@ -220,6 +220,57 @@ describe("attach, status, close", () => {
       "closed the browser",
       "note: the browser (pid 4242) was still running 5000 ms after it was told to quit: let it exit before you remove its profile or launch it again",
     ]);
+  });
+
+  it("waits for a command that holds the browser before it closes it", async () => {
+    // close took no lock: it shut the browser down, and wiped the session and
+    // refs, under a command another process was running.
+    writeSession({
+      version: 1,
+      port: fake.port,
+      wsBrowserUrl: fake.browserWsUrl,
+      launchedByUs: true,
+      profile: "default",
+      headless: false,
+      targetId: "T1",
+      updatedAt: 1,
+    });
+    const order: string[] = [];
+    const holder = withBrowserLock(async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      order.push("command done");
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    // A real clock: the suite's fake one runs any wait out at once.
+    const r = await cli("close", [], { all: true }, { now: () => Date.now(), sleep: (ms) => new Promise((s) => setTimeout(s, ms)) });
+    order.push(`closed (${sent("Browser.close").length})`);
+    await holder;
+    expect(order).toEqual(["command done", "closed (1)"]);
+    expect(r.text).toMatch(/closed the browser/);
+  });
+
+  it("still closes a browser held past its wait — the way out of a frozen tab — and says so", async () => {
+    writeSession({
+      version: 1,
+      port: fake.port,
+      wsBrowserUrl: fake.browserWsUrl,
+      launchedByUs: true,
+      profile: "default",
+      headless: false,
+      targetId: "T1",
+      updatedAt: 1,
+    });
+    let release!: () => void;
+    const holder = withBrowserLock(() => new Promise<void>((r) => (release = r)));
+    await new Promise((r) => setTimeout(r, 20));
+    // A clock that runs out the wait at once.
+    let t = 0;
+    const r = await cli("close", [], { all: true }, { now: () => (t += 60_000), sleep: async () => {} });
+    expect(sent("Browser.close")).toHaveLength(1);
+    expect(r.text).toMatch(/closed the browser/);
+    expect(r.text).toMatch(/another webindex command still held the browser/);
+    release();
+    await holder;
   });
 
   it("has nothing to close when no browser runs", async () => {

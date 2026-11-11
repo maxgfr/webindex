@@ -31,7 +31,7 @@ import { clearNetworkLog, getNetworkEntry, listNetwork, NetworkRecorder } from "
 import { ensurePrivateDir, importProfile, profileDir, resetProfile } from "./profile.js";
 import { type BrowserSession, type BrowserStatus, type BrowserTab, browserStatus, closeBrowser, type OpenOptions, withPage } from "./session.js";
 import { checkRef, type SnapshotOptions, type SnapshotResult, takeSnapshot } from "./snapshot.js";
-import { readSession } from "./state.js";
+import { readSession, withBrowserLock } from "./state.js";
 import { readPageText } from "./text.js";
 import { awaitParsed, settle, type WaitCondition, waitFor } from "./wait.js";
 
@@ -581,11 +581,25 @@ const HANDLERS: Record<Action, (ctx: Ctx) => Promise<Out>> = {
   async close(ctx) {
     arity(ctx, 0);
     const had = readSession();
-    const r = await closeBrowser({
-      ...(ctx.flags.all ? { all: true } : {}),
-      ...(ctx.flags.profile !== undefined ? { profile: ctx.flags.profile } : {}),
-      ...(ctx.deps.browser ? { deps: ctx.deps.browser } : {}),
-    });
+    const close = () =>
+      closeBrowser({
+        ...(ctx.flags.all ? { all: true } : {}),
+        ...(ctx.flags.profile !== undefined ? { profile: ctx.flags.profile } : {}),
+        ...(ctx.deps.browser ? { deps: ctx.deps.browser } : {}),
+      });
+    // Under the lock every other action holds, so a running command finishes
+    // before its browser and session go. Past the wait it closes anyway: this
+    // is also the way out of a tab a page froze, and of a holder that hung.
+    let held: string | undefined;
+    let r: Awaited<ReturnType<typeof closeBrowser>>;
+    try {
+      r = await withBrowserLock(close, { deps: browserDeps(ctx.deps.browser) });
+    } catch (e) {
+      if (!/^browser busy/.test((e as Error).message)) throw e;
+      held = "another webindex command still held the browser after 10 s; it was closed under it";
+      r = await close();
+    }
+    if (held) r = { ...r, note: r.note ? `${held}; ${r.note}` : held };
     const text = r.closed
       ? "closed the browser"
       : had && !had.launchedByUs

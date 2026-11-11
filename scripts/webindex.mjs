@@ -12688,11 +12688,21 @@ var init_cli = __esm({
       async close(ctx) {
         arity(ctx, 0);
         const had = readSession();
-        const r = await closeBrowser({
+        const close = () => closeBrowser({
           ...ctx.flags.all ? { all: true } : {},
           ...ctx.flags.profile !== void 0 ? { profile: ctx.flags.profile } : {},
           ...ctx.deps.browser ? { deps: ctx.deps.browser } : {}
         });
+        let held;
+        let r;
+        try {
+          r = await withBrowserLock(close, { deps: browserDeps(ctx.deps.browser) });
+        } catch (e) {
+          if (!/^browser busy/.test(e.message)) throw e;
+          held = "another webindex command still held the browser after 10 s; it was closed under it";
+          r = await close();
+        }
+        if (held) r = { ...r, note: r.note ? `${held}; ${r.note}` : held };
         const text = r.closed ? "closed the browser" : had && !had.launchedByUs ? `forgot the browser on port ${had.port}; it is not ours, so it was left running` : "no browser to close";
         return { json: r, text: r.note ? `${text}
 note: ${r.note}` : text };
