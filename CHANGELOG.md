@@ -2,6 +2,44 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.37.2](https://github.com/maxgfr/webindex/compare/v1.37.1...v1.37.2) (2026-11-11)
+
+
+### Bug Fixes
+
+* **browser:** close over MCP without waiting for the server's own lock ([cdadcf3](https://github.com/maxgfr/webindex/commit/cdadcf323b56433d15833df40c9e8fa5ef83c324))
+* **browser:** judge a captured body by its decoded size ([f0b9c0c](https://github.com/maxgfr/webindex/commit/f0b9c0cbef1098e4b4f258e9008299b6f7ddfc54))
+* **browser:** keep a login's secrets out of the network capture log ([febfb4d](https://github.com/maxgfr/webindex/commit/febfb4d47caf23a881a9742dfb3bb2aed18dc4d2))
+* **browser:** let a running command finish before `browser close` ([dca51ce](https://github.com/maxgfr/webindex/commit/dca51ceb094afed6fd1124f8f3a6ab574d817abf))
+* **browser:** probe the MCP server's session through the browser, never past an open dialog ([577d6e9](https://github.com/maxgfr/webindex/commit/577d6e942db79885fa043e6327deb555f860479e))
+* **browser:** redact a capture by key word, whole values, in linear time ([0010970](https://github.com/maxgfr/webindex/commit/001097019963333ae390e08d9a417de2f77b3d39))
+* **browser:** reopen the MCP server's session when its tab is gone or another command moved it ([db9f3da](https://github.com/maxgfr/webindex/commit/db9f3dacc79668fbe3c0aa0816d4d5223d6642c3))
+* **browser:** resolve `open "#part"` against the page it belongs to ([0f437a3](https://github.com/maxgfr/webindex/commit/0f437a3101c7c4397bbdbbae2fe61f903311d0df))
+* **browser:** stop a /regex/ URL wait that backtracks without end ([ee86a96](https://github.com/maxgfr/webindex/commit/ee86a96ad2ead2c346de2d94c0e3c993b2abf850))
+* **cache:** serve no body but the one its metadata was written with ([26190bc](https://github.com/maxgfr/webindex/commit/26190bc3cec19cc818a4dd27e5dc36a32c9b058a))
+* **cite:** read "2019 150" as two figures, not one ([ac4a1e5](https://github.com/maxgfr/webindex/commit/ac4a1e5e5ebaba2e4229da12147dda135a590cb0))
+* **cite:** read the figure after a year through its own groups ([049267a](https://github.com/maxgfr/webindex/commit/049267a8ee07c45f0f5da8edf9a03fc51c43fc69))
+* **cli:** exit 2, not 1, when an argument is not an http(s) URL ([303d723](https://github.com/maxgfr/webindex/commit/303d723bcc270cd464e02b87f79906923a0eeb5b))
+* **crawl:** read a video link as a page, not through the transcript ladder ([5bea726](https://github.com/maxgfr/webindex/commit/5bea7265d08d0d1e1aadb4b8407b39c9eca2b28e))
+* **embed:** let the answer to a large batch through ([39c2c1f](https://github.com/maxgfr/webindex/commit/39c2c1f63b4309b5660f9bdf7c083c90293a883e))
+* **fetch:** keep a credential on its origin when a request is redirected ([f57a78f](https://github.com/maxgfr/webindex/commit/f57a78ff3b96562b1e8c872422cfff519926093f))
+* **fetch:** treat the usual API-key headers as credentials across a redirect ([a13008f](https://github.com/maxgfr/webindex/commit/a13008f6930e670e5185582bf16437e2ca09edea))
+* **forge:** ask a plain-http forge on its own port over http ([0ab8709](https://github.com/maxgfr/webindex/commit/0ab87094ce7900be2cfe8421c6fd43adc3bb6b9e))
+* **mcp:** give the browser tools none of the server's tool slots ([d603f00](https://github.com/maxgfr/webindex/commit/d603f000ea82b899a45210ec5ace0ac00c720d06))
+* **mcp:** serve no web page over HTTP when the browser tools are on ([b1c1d8c](https://github.com/maxgfr/webindex/commit/b1c1d8c303ca31546e201a5b9d163324046d3f6e))
+* **pdf:** pass nothing through cmd.exe that it would rewrite ([4427967](https://github.com/maxgfr/webindex/commit/44279675fe882d468fdb255ff58d6f7962259762))
+* **rank:** score a stem once, however many of its forms the question holds ([a054224](https://github.com/maxgfr/webindex/commit/a0542242ef1d9678220e4d1648409484cf02159a))
+* **repo:** keep the port of an http(s) remote ([0be8d5a](https://github.com/maxgfr/webindex/commit/0be8d5a4788c622ad4e4ee384ae596e4a93a33e1))
+* **video:** give the whisper budget back when no transcription ran ([75fd575](https://github.com/maxgfr/webindex/commit/75fd5754aabdd6c8ba8c25110f898171a58b3984))
+* **video:** keep the default video directory private ([0100bf5](https://github.com/maxgfr/webindex/commit/0100bf550961562c56769e47cfe3588233ed3551))
+* **video:** label a passage with its chapter whatever order the chapters come in ([504ea6e](https://github.com/maxgfr/webindex/commit/504ea6eb2fddd7bb52945c65499726847f08791a))
+* **video:** make private a directory an earlier release left group-writable ([5a06643](https://github.com/maxgfr/webindex/commit/5a06643c2ff3e2104386e08b36fdf52ac5726145))
+
+
+### Performance Improvements
+
+* **crawl:** forget the hosts whose politeness slot has passed ([83e88a8](https://github.com/maxgfr/webindex/commit/83e88a8893257367073ecf6055d9ad8a7cc0f67c))
+
 ## [1.37.1](https://github.com/maxgfr/webindex/compare/v1.37.0...v1.37.1) (2026-11-10)
 
 
