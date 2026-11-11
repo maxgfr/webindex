@@ -2,6 +2,7 @@ import { brand } from "./brand.js";
 import { foldTerm, isStopword, type KeywordMatcher, subtokens } from "./text.js";
 import { trimTrailing } from "./trim.js";
 import { canonicalizeUrl, domainOf, fnv1a64Words, normalizeDoi } from "./url.js";
+import { MAX_IDENT } from "./shared.js";
 
 // Ranking: turning a pool of candidates into a reading order.
 //
@@ -227,9 +228,6 @@ const CJK_CHAR = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
 const CJK_RUNS = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
 // Where an identifier has inner words: RateLimiter, rate_limiter, http2Client.
 const IDENT_BOUNDARY = /_|[\p{Ll}\p{N}]\p{Lu}|\p{Lu}\p{Lu}\p{Ll}|\p{L}\p{N}|\p{N}\p{L}/u;
-// Real identifiers are short. The cap keeps `subtokens`, which backtracks on a
-// long run of capitals, off a hostile 100 KB "word".
-const MAX_IDENT = 64;
 
 function tokenize(text: string, expand: boolean): string[] {
   if (!text) return [];

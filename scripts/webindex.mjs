@@ -3030,6 +3030,20 @@ var init_private_dir = __esm({
   }
 });
 
+// src/shared.ts
+function spentSlackMs(budgetMs) {
+  return budgetMs === void 0 ? 0 : Math.min(25, budgetMs / 4);
+}
+var REDIRECT_STATUS, DOT_SEGMENT, MAX_IDENT;
+var init_shared = __esm({
+  "src/shared.ts"() {
+    "use strict";
+    REDIRECT_STATUS = /* @__PURE__ */ new Set([301, 302, 303, 307, 308]);
+    DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
+    MAX_IDENT = 64;
+  }
+});
+
 // src/text.ts
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -3145,12 +3159,13 @@ function slugify(input, opts = {}) {
   const head = readable.slice(0, Math.max(0, max - tag.length - 1)).replace(/-+$/, "");
   return head ? `${head}-${tag}` : tag;
 }
-var STOPWORDS, LOCALE_STOPWORDS, extraSets, TOKEN_RE, CJK_CHAR, CJK_RUNS, ACCENT_CLASSES, BASE_OF, NON_ASCII, MAX_IDENT;
+var STOPWORDS, LOCALE_STOPWORDS, extraSets, TOKEN_RE, CJK_CHAR, CJK_RUNS, ACCENT_CLASSES, BASE_OF, NON_ASCII;
 var init_text = __esm({
   "src/text.ts"() {
     "use strict";
     init_brand();
     init_url();
+    init_shared();
     STOPWORDS = /* @__PURE__ */ new Set([
       "the",
       "a",
@@ -3365,7 +3380,6 @@ var init_text = __esm({
       for (const ch of cls) BASE_OF.set(ch, base2);
     }
     NON_ASCII = /[\u0080-\uffff]/;
-    MAX_IDENT = 64;
   }
 });
 
@@ -3407,7 +3421,7 @@ function pushTerm(raw, out, expand2) {
   const t = foldCached(raw);
   if (t.length < 2) return;
   out.push(t);
-  if (!expand2 || raw.length > MAX_IDENT2) return;
+  if (!expand2 || raw.length > MAX_IDENT) return;
   for (const sub of subtermsCached(raw, t)) out.push(sub);
 }
 function pushBigrams(run, out) {
@@ -3716,7 +3730,7 @@ function jaccardSorted(a, b) {
   }
   return inter / (na + nb - inter);
 }
-var byCodeUnit, indexTokenCache, WORD_SPLIT, NON_ASCII2, CJK_CHAR2, CJK_RUNS2, IDENT_BOUNDARY, MAX_IDENT2, FOLD_CACHE_MAX, foldCache, NO_SUBTERMS, subtermCache, subtermExtras, STEM_CACHE_MAX, stemCache, PAIR_CACHE_MAX;
+var byCodeUnit, indexTokenCache, WORD_SPLIT, NON_ASCII2, CJK_CHAR2, CJK_RUNS2, IDENT_BOUNDARY, FOLD_CACHE_MAX, foldCache, NO_SUBTERMS, subtermCache, subtermExtras, STEM_CACHE_MAX, stemCache, PAIR_CACHE_MAX;
 var init_rank = __esm({
   "src/rank.ts"() {
     "use strict";
@@ -3724,6 +3738,7 @@ var init_rank = __esm({
     init_text();
     init_trim();
     init_url();
+    init_shared();
     byCodeUnit = (a, b) => a < b ? -1 : a > b ? 1 : 0;
     indexTokenCache = /* @__PURE__ */ new WeakMap();
     WORD_SPLIT = /[^\p{L}\p{M}\p{N}_]+/u;
@@ -3731,7 +3746,6 @@ var init_rank = __esm({
     CJK_CHAR2 = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]/u;
     CJK_RUNS2 = /([\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}]+)/u;
     IDENT_BOUNDARY = new RegExp("_|[\\p{Ll}\\p{N}]\\p{Lu}|\\p{Lu}\\p{Lu}\\p{Ll}|\\p{L}\\p{N}|\\p{N}\\p{L}", "u");
-    MAX_IDENT2 = 64;
     FOLD_CACHE_MAX = 5e4;
     foldCache = /* @__PURE__ */ new Map();
     NO_SUBTERMS = [];
@@ -10455,7 +10469,7 @@ function metaDescriptionOf(html) {
   }
   return og;
 }
-var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, REDIRECT_STATUS, CREDENTIAL_HEADERS, carriesCredential, anyUrl, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, PRE_SLOT_INLINE, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, CLOSES_P, isLinkList, MIN_PROSE, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP;
+var DEFAULT_BROWSER_UA, RETRY_STATUS, defaultTimeoutMs2, DEFAULT_MAX_RESPONSE_BYTES, mimeOf, namesDocument, CREDENTIAL_HEADERS, carriesCredential, anyUrl, INLINE_FORMAT, INLINE_FORMAT_TAG, NUL2, PRE_SLOT, PRE_SLOT_INLINE, HEADING_OPEN, HEADING_BOUNDARY, PERMALINK, visibleLength, ROLE_MAIN, ROLE_MAIN_TAG, CONTENT_WORDS, CHROME_WORDS, CLOSES_P, isLinkList, MIN_PROSE, PDF_URL_RE, PDF_ROUTE_RE, NON_PDF_TAIL_RE, PDF_FETCH_OPTS, DOC_FETCH_OPTS, PURE_VIDEO_HOSTS, HTML_TYPE_RE, NON_TEXT_TYPE_RE, CONSENT_PATTERNS, CONSENT_ACTIONS, BANNER_VOICE, BUTTON_LABEL, BUTTON_LENGTH, NOTICE_LENGTH, MD_FENCE, MD_LINE_START, MD_DESTINATION, MD_MARKUP;
 var init_fetch = __esm({
   "src/fetch.ts"() {
     "use strict";
@@ -10475,13 +10489,13 @@ var init_fetch = __esm({
     init_mode();
     init_junk();
     init_walls();
+    init_shared();
     DEFAULT_BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
     RETRY_STATUS = /* @__PURE__ */ new Set([429, 503, 502, 504]);
     defaultTimeoutMs2 = () => envInt("TIMEOUT_MS", 2e4, 1e3, 3e5);
     DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
     mimeOf = (contentType) => contentType.split(";")[0].trim().toLowerCase();
     namesDocument = (filename) => filename !== void 0 && (PDF_URL_RE.test(filename) || docFormatForUrl(filename) !== void 0);
-    REDIRECT_STATUS = /* @__PURE__ */ new Set([301, 302, 303, 307, 308]);
     CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization"];
     carriesCredential = (headers) => CREDENTIAL_HEADERS.some((h) => headers[h] !== void 0);
     anyUrl = async () => true;
@@ -15675,6 +15689,7 @@ init_brand();
 init_fetch();
 init_locale();
 init_url();
+init_shared();
 var KEYLESS_ENGINES = ["ddg", "ddglite", "mojeek"];
 function isKeylessEngine(v) {
   return KEYLESS_ENGINES.includes(v);
@@ -15851,9 +15866,6 @@ var SPECS = {
     parse: parseMojeek
   }
 };
-function spentSlackMs(budgetMs) {
-  return budgetMs === void 0 ? 0 : Math.min(25, budgetMs / 4);
-}
 async function searchViaKeyless(engine, query, opts = {}) {
   const spec = SPECS[engine];
   const q = query.trim();
@@ -15924,6 +15936,7 @@ init_firecrawl();
 init_locale();
 init_trim();
 init_url();
+init_shared();
 var SEARXNG_DEFAULT_BASE = "http://localhost:8888";
 var PROBE_TIMEOUT_MS5 = 2e3;
 var PROBE_BODY_BYTES2 = 4096;
@@ -16042,7 +16055,7 @@ async function searchViaSearxng(query, opts = {}) {
     if (hits.length === before) break;
     if (p < pages - 1) {
       const pause = pageDelayMs();
-      if (opts.signal?.aborted || Date.now() + pause >= deadline - spentSlackMs2(opts.timeoutMs)) break;
+      if (opts.signal?.aborted || Date.now() + pause >= deadline - spentSlackMs(opts.timeoutMs)) break;
       if (pause) await sleep(pause, opts.signal);
     }
   }
@@ -16056,12 +16069,9 @@ async function searchViaSearxng(query, opts = {}) {
 function budgetDeadline(opts) {
   return opts.timeoutMs !== void 0 && opts.timeoutMs > 0 ? Date.now() + opts.timeoutMs : Number.POSITIVE_INFINITY;
 }
-function spentSlackMs2(budgetMs) {
-  return budgetMs === void 0 ? 0 : Math.min(25, budgetMs / 4);
-}
 function halted(opts, deadline) {
   if (opts.signal?.aborted) return "cancelled";
-  return Date.now() >= deadline - spentSlackMs2(opts.timeoutMs) ? "out of time" : void 0;
+  return Date.now() >= deadline - spentSlackMs(opts.timeoutMs) ? "out of time" : void 0;
 }
 function rungResult(rung, outcome, hits, notes) {
   return { hits, notes, rungs: [report(rung, outcome, hits.length, notes.join(" "))], searched: answered2(outcome) };
@@ -16419,6 +16429,7 @@ init_exec2();
 init_forge_host();
 init_private_dir();
 init_text();
+init_shared();
 import { createHash as createHash5, randomBytes as randomBytes2 } from "crypto";
 import { existsSync as existsSync12, mkdirSync as mkdirSync7, readdirSync as readdirSync9, renameSync as renameSync4, rmSync as rmSync7, statSync as statSync9 } from "fs";
 import { basename as basename3, join as join24, resolve as resolve6 } from "path";
@@ -16511,7 +16522,6 @@ function repoSlug(key) {
   if (/^[a-z0-9._/]+$/.test(k) && slugify(k) === folded) return folded;
   return `${folded.slice(0, 105).replace(/-+$/, "") || "repo"}--${sha256Hex(k).slice(0, 12)}`;
 }
-var DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
 var TWO_SEGMENT_HOSTS = /* @__PURE__ */ new Set(["bitbucket.org"]);
 function repoSegments(host, rest, kind) {
   let segments = rest.replace(/[?#].*$/s, "").split("/").filter(Boolean);
@@ -16538,6 +16548,7 @@ import { resolve as resolve7 } from "path";
 init_retry();
 init_text();
 init_trim();
+init_shared();
 function forgeKind(host, opts = {}) {
   return opts.kind ?? hostForgeKind(host);
 }
@@ -16599,7 +16610,6 @@ function quotaState(headers) {
   if (remaining === null || remaining.trim() === "" || !Number.isFinite(Number(remaining))) return void 0;
   return Number(remaining) <= 0 ? "spent" : "left";
 }
-var REDIRECT_STATUS2 = /* @__PURE__ */ new Set([301, 302, 303, 307, 308]);
 var RETRY_STATUS2 = /* @__PURE__ */ new Set([502, 503, 504]);
 var MAX_REDIRECTS = 5;
 var MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -16635,7 +16645,7 @@ async function forgeGetOnce(url, headers, timeoutMs, authorize) {
       if (refused) return refused;
       const res = await fetch(target, { headers: sent, redirect: "manual", signal: ctrl.signal });
       const location = res.headers.get("location");
-      if (REDIRECT_STATUS2.has(res.status) && location) {
+      if (REDIRECT_STATUS.has(res.status) && location) {
         await res.body?.cancel().catch(() => {
         });
         if (hop >= MAX_REDIRECTS) return { ok: false, status: 0, data: void 0, error: `more than ${MAX_REDIRECTS} redirects from ${url}`, permanent: true };
@@ -16732,10 +16742,9 @@ function failure(r, forge, ref2, action, opts) {
 function failed(r, forge, ref2, action, opts) {
   return { items: [], ...failure(r, forge, ref2, action, opts) };
 }
-var DOT_SEGMENT2 = /^(?:\.|%2e){1,2}$/i;
 function repoPath(ref2, forge) {
   if (!ref2.owner || !ref2.repo) return void 0;
-  if ([...ref2.owner.split("/"), ref2.repo].some((s) => !s || DOT_SEGMENT2.test(s))) return void 0;
+  if ([...ref2.owner.split("/"), ref2.repo].some((s) => !s || DOT_SEGMENT.test(s))) return void 0;
   return forge === "gitlab" ? `projects/${encodeURIComponent(`${ref2.owner}/${ref2.repo}`)}` : `repos/${encodeURIComponent(ref2.owner)}/${encodeURIComponent(ref2.repo)}`;
 }
 function clip3(s, n = 1200) {

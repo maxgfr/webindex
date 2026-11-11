@@ -7,6 +7,7 @@ import { originUrl, type RepoRef, resolveRepo } from "./repo.js";
 import { defaultRetryMs, isPermanentFailure, maxAttempts, retryDelayMs } from "./retry.js";
 import { rankedKeywords } from "./text.js";
 import { trimTrailing } from "./trim.js";
+import { DOT_SEGMENT, REDIRECT_STATUS } from "./shared.js";
 
 // Forge APIs: asking a code host about a repository.
 //
@@ -230,7 +231,6 @@ function quotaState(headers: Headers): "spent" | "left" | undefined {
   return Number(remaining) <= 0 ? "spent" : "left";
 }
 
-const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 // The only answers a second try can change: a gateway that hiccuped. A quota —
 // a 429, or GitHub's 403 — is never retried; waiting it out is the caller's call.
 const RETRY_STATUS = new Set([502, 503, 504]);
@@ -444,10 +444,6 @@ function failure(r: ForgeResponse, forge: ForgeKind, ref: RepoRef, action: strin
 function failed(r: ForgeResponse, forge: ForgeKind, ref: RepoRef, action: string, opts: ForgeOptions): ForgeResult {
   return { items: [], ...failure(r, forge, ref, action, opts) };
 }
-
-// A dot segment as a URL parser reads one — `%2e` included, which WHATWG URL
-// treats as a dot.
-const DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
 
 /**
  * The repository's place in an API path: `owner/repo` for GitHub and Gitea, the

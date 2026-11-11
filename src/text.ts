@@ -10,6 +10,7 @@
 
 import { brand } from "./brand.js";
 import { fnv1a64 } from "./url.js";
+import { MAX_IDENT } from "./shared.js";
 
 export function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -373,15 +374,6 @@ function foldPlural(t: string): string {
 export function foldTerm(raw: string): string {
   return foldPlural(deaccent(raw.toLowerCase()));
 }
-
-/**
- * Real identifiers are short. Past this length a "word" is not split: the
- * camelCase regexes below backtrack on a long run of capitals (quadratic), and
- * a hostile 200 KB word in a question held the process for tens of seconds.
- * The same bound rank.ts keeps for its own tokens; not exported, since every
- * export of this module is part of the library's surface.
- */
-const MAX_IDENT = 64;
 
 export function subtokens(raw: string): string[] {
   if (raw.length > MAX_IDENT) return [];

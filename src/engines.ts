@@ -2,6 +2,7 @@ import { countOption, env } from "./brand.js";
 import { decodeEntities, httpGet, pageDelayMs, sleep } from "./fetch.js";
 import { acceptLanguageHeader, baseLang, ddgRegion, resolveRegion } from "./locale.js";
 import { canonicalizeUrl } from "./url.js";
+import { spentSlackMs } from "./shared.js";
 
 // Keyless web engines: the HTML endpoints that answer without a key, a container
 // or an account.
@@ -414,15 +415,6 @@ const SPECS: Record<KeylessEngine, EngineSpec> = {
     parse: parseMojeek,
   },
 };
-
-// A timer can fire a millisecond or two before Date.now() reaches the instant
-// it was set for, so a request aborted AT the deadline could leave a sliver of
-// budget on the clock and let the next page start with ~1 ms to run — a
-// request that can only fail, sent to a real engine. A remainder this small
-// counts as spent; a tiny budget keeps a proportionate slack.
-function spentSlackMs(budgetMs: number | undefined): number {
-  return budgetMs === undefined ? 0 : Math.min(25, budgetMs / 4);
-}
 
 /**
  * Ask one keyless engine, walking `pages` result pages.

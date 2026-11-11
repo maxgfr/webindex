@@ -7,6 +7,7 @@ import type { ForgeKind } from "./forge.js";
 import { hostForgeKind, normalizeForgeHost } from "./forge-host.js";
 import { openPrivateTmpDir } from "./private-dir.js";
 import { slugify } from "./text.js";
+import { DOT_SEGMENT } from "./shared.js";
 
 // Naming a repository, and getting a working tree for it.
 //
@@ -257,10 +258,6 @@ function legacySlugs(ref: RepoRef): string[] {
   const portless = ref.host.includes(":") && ref.repo ? [repoSlug(`${ref.host.replace(/:\d+$/, "")}/${[ref.owner, ref.repo].filter(Boolean).join("/")}`)] : [];
   return [...new Set([...portless, before, v121])].map((s) => (portless.includes(s) ? s : `${prefix}${s}`)).filter((s) => s !== ref.slug);
 }
-
-// A dot segment, spelled as a URL parser will read it: `%2e` is a dot to WHATWG
-// URL, so `/repos/%2e%2e/%2e%2e/user` resolves to `/user` just as `..` does.
-const DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
 
 // Hosts whose repositories are exactly `owner/repo`, where anything after that
 // is a page INSIDE the repository — `/tree/main/src`, `/issues/12`, `/src/branch/x`.

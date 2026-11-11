@@ -42,6 +42,7 @@ import { knownVideo, transcribeVideo, transcriptMarkdown } from "./video.js";
 import { type BrowserFetchMode, browserFetchModeFor, type HumanHandoff, type HumanOutcome, humanWall, worthRendering } from "./browser/mode.js";
 import { challengePage, looksLikeJunkExtraction } from "./junk.js";
 import { challengeUrl } from "./walls.js";
+import { REDIRECT_STATUS } from "./shared.js";
 
 export { challengePage, looksLikeJunkExtraction };
 
@@ -307,8 +308,6 @@ function dispositionFilename(header: string | null): string | undefined {
 /** Does this filename announce a PDF or an office document? */
 const namesDocument = (filename: string | undefined): boolean =>
   filename !== undefined && (PDF_URL_RE.test(filename) || docFormatForUrl(filename) !== undefined);
-
-const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 
 /** The request headers that are a credential: sent to the origin they were meant for, and no further. */
 const CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization"];
