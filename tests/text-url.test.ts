@@ -493,7 +493,9 @@ describe("extraStopwords", () => {
   it("costs a lookup per term, not a scan of the extras", () => {
     // The tokeniser asks for every word it reads; lowercasing each extra per
     // word doubled bm25Tokenize's cost with forty extras.
-    configure({ name: "docs-tool", envPrefix: "DOCS", cli: "docs", extraStopwords: Array.from({ length: 2_000 }, (_, i) => `Extra${i}`) });
+    // Sized so a scan (20 000 extras for each of 100 000 words, ~10 s) is far
+    // over the budget while a lookup is milliseconds.
+    configure({ name: "docs-tool", envPrefix: "DOCS", cli: "docs", extraStopwords: Array.from({ length: 20_000 }, (_, i) => `Extra${i}`) });
     const started = performance.now();
     for (let i = 0; i < 100_000; i++) isStopword("throttle");
     expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
