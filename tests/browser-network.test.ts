@@ -182,6 +182,25 @@ describe("NetworkRecorder", () => {
     expect(out[1]).toMatchObject({ method: "GET", resourceType: "Other", status: 201 });
   });
 
+  it("judges a body by its decoded size, not the bytes on the wire", async () => {
+    // encodedDataLength is the compressed size (0 for a cache hit). A gzip
+    // answer that decodes to tens of MB passed the cap and was asked for
+    // whole — past 64 MiB that one message closed the CDP connection.
+    const { page, rec } = setup({ maxBodyBytes: 1024 });
+    let asked = 0;
+    page.handle("Network.getResponseBody", () => {
+      asked++;
+      return { body: "{}", base64Encoded: false };
+    });
+    await rec.start();
+    request(page, "big", { finish: false });
+    page.emit("Network.dataReceived", { requestId: "big", dataLength: 64 * 1024, encodedDataLength: 900 });
+    page.emit("Network.loadingFinished", { requestId: "big", encodedDataLength: 900 });
+    const out = await rec.stop();
+    expect(asked).toBe(0);
+    expect(out[0]).toMatchObject({ bodyTruncated: true, size: 64 * 1024 });
+  });
+
   it("keeps a login's secrets out of the recorded request body", async () => {
     // A login POST was written to network/<id>.jsonl as it was sent, password
     // and all, and printed by `network list --json`.

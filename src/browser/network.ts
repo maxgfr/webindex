@@ -108,6 +108,8 @@ interface Pending {
   mime: string;
   resourceType: string;
   requestBody?: string;
+  /** Decoded bytes received so far (Network.dataReceived): what getResponseBody would return. */
+  decoded?: number;
 }
 
 export class NetworkRecorder {
@@ -151,6 +153,7 @@ export class NetworkRecorder {
     this.handlers = [
       ["Network.requestWillBeSent", (p) => this.onRequest(p)],
       ["Network.responseReceived", (p) => this.onResponse(p)],
+      ["Network.dataReceived", (p) => this.onData(p)],
       ["Network.loadingFinished", (p) => this.onFinished(p)],
       ["Network.loadingFailed", (p) => this.onFailed(p)],
     ];
@@ -222,6 +225,11 @@ export class NetworkRecorder {
     if (this.keep(rec)) track(this.pending, p.requestId, rec);
   }
 
+  private onData(p: any): void {
+    const rec = this.pending.get(p?.requestId);
+    if (rec) rec.decoded = (rec.decoded ?? 0) + Number(p.dataLength ?? 0);
+  }
+
   private onFailed(p: any): void {
     this.requests.delete(p?.requestId);
     this.pending.delete(p?.requestId);
@@ -233,7 +241,11 @@ export class NetworkRecorder {
     this.requests.delete(p?.requestId);
     if (!rec) return;
     this.pending.delete(p.requestId);
-    const job = this.finish(p.requestId, rec, Number(p.encodedDataLength ?? 0)).finally(() => this.inflight.delete(job));
+    // The larger of what crossed the wire and what it decodes to: a gzip answer
+    // is small on the wire (a cached one is 0) and as large as it decodes to in
+    // getResponseBody, which past the socket's 64 MiB closes the connection.
+    const size = Math.max(Number(p.encodedDataLength ?? 0), rec.decoded ?? 0);
+    const job = this.finish(p.requestId, rec, size).finally(() => this.inflight.delete(job));
     this.inflight.add(job);
   }
 

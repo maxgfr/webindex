@@ -12145,6 +12145,7 @@ var init_network = __esm({
         this.handlers = [
           ["Network.requestWillBeSent", (p) => this.onRequest(p)],
           ["Network.responseReceived", (p) => this.onResponse(p)],
+          ["Network.dataReceived", (p) => this.onData(p)],
           ["Network.loadingFinished", (p) => this.onFinished(p)],
           ["Network.loadingFailed", (p) => this.onFailed(p)]
         ];
@@ -12210,6 +12211,10 @@ var init_network = __esm({
         };
         if (this.keep(rec)) track2(this.pending, p.requestId, rec);
       }
+      onData(p) {
+        const rec = this.pending.get(p?.requestId);
+        if (rec) rec.decoded = (rec.decoded ?? 0) + Number(p.dataLength ?? 0);
+      }
       onFailed(p) {
         this.requests.delete(p?.requestId);
         this.pending.delete(p?.requestId);
@@ -12220,7 +12225,8 @@ var init_network = __esm({
         this.requests.delete(p?.requestId);
         if (!rec) return;
         this.pending.delete(p.requestId);
-        const job = this.finish(p.requestId, rec, Number(p.encodedDataLength ?? 0)).finally(() => this.inflight.delete(job));
+        const size = Math.max(Number(p.encodedDataLength ?? 0), rec.decoded ?? 0);
+        const job = this.finish(p.requestId, rec, size).finally(() => this.inflight.delete(job));
         this.inflight.add(job);
       }
       keep(r) {
