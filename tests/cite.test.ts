@@ -360,6 +360,8 @@ describe("numerals", () => {
     expect(normalizeNumeralText("In 2019 150 firms")).toBe("In 2019 150 firms");
     expect(extractNumerals("In 2019 150 firms left")).toEqual(["2019", "150"]);
     expect(normalizeNumeralText("between 1 000 and 2024 305")).toBe("between 1000 and 2024 305");
+    // ...and the figure after the year is still read through its own groups.
+    expect(extractNumerals("In 2019 150 000 firms left")).toEqual(["2019", "150000"]);
   });
 
   it("extracts the figures a claim asserts, normalised", () => {

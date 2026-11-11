@@ -562,7 +562,12 @@ export function normalizeNumeralText(text: string): string {
       // A run of groups, matched from the start of its digits (the lookbehind
       // keeps it linear on a long digit run). A plain space groups only after a
       // lead of one to three digits: "2019 150" is two figures, not 2019150.
-      .replace(/(?<!\d)\d+(?:[, ]\d{3}(?!\d))+/g, (run) => run.replace(/^\d{4,}/.test(run) ? /,/g : /[, ]/g, ""))
+      .replace(/(?<!\d)\d+(?:[, ]\d{3}(?!\d))+/g, (run) => {
+        // "2019 150 000": the year stands alone, and what follows it is a figure of its own.
+        const year = /^(\d{4,}) (.*)$/s.exec(run);
+        if (year) return `${year[1]} ${(year[2] as string).replace(/[, ]/g, "")}`;
+        return run.replace(/^\d{4,}/.test(run) ? /,/g : /[, ]/g, "");
+      })
       .replace(/(\d),(?=\d)/g, "$1.")
   );
 }
