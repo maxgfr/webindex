@@ -1307,7 +1307,7 @@ declare class BrowserSession {
      * (a cold server, a render-blocking script that holds even DOMContentLoaded)
      * is the page now, still loading: it resolves, with a `note`.
      */
-    navigate(url: string, opts?: NavigateOptions): Promise<NavigationResult>;
+    navigate(given: string, opts?: NavigateOptions): Promise<NavigationResult>;
     /**
      * Run a history move or a reload and wait until the main frame shows another
      * document (or the same one, scrolled). One that committed but has not loaded

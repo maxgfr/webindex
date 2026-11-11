@@ -85,8 +85,11 @@ export function scriptBrowser(fake: FakeCdp, opts: ScriptOptions = {}) {
     const id = targetOf(sessionId);
     if (p.url.includes("unreachable")) return { frameId: id, errorText: "net::ERR_NAME_NOT_RESOLVED" };
     const pg = page(id);
-    if (p.url.startsWith("#")) {
-      target(id).url = target(id).url.replace(/#.*$/, "") + p.url;
+    // As Chrome does: the current URL with another fragment is a same-document
+    // navigation, answered with no loaderId.
+    const base = (u: string) => u.replace(/#.*$/, "");
+    if (p.url.startsWith("#") || (p.url.includes("#") && base(p.url) === base(target(id).url))) {
+      target(id).url = base(target(id).url) + p.url.slice(p.url.indexOf("#"));
       return { frameId: id }; // same-document: no loaderId
     }
     pg.history = [...pg.history.slice(0, pg.index + 1), p.url];

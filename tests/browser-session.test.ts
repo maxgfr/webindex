@@ -410,6 +410,10 @@ describe("navigation", () => {
     const r = await s.navigate("#part");
     expect(r.loaderId).toBe("L1");
     expect(readRefs(s.targetId)).not.toBeNull();
+    // Chrome's Page.navigate takes an absolute URL only: "#part" is resolved
+    // against the page it belongs to, as a link in it would be.
+    const asked = fake.calls.filter((c) => c.method === "Page.navigate").map((c) => (c.params as { url: string }).url);
+    expect(asked.at(-1)).toBe("https://h.test/#part");
   });
 
   it("tolerates a page whose status cannot be read", async () => {

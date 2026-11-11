@@ -592,8 +592,11 @@ export class BrowserSession {
    * (a cold server, a render-blocking script that holds even DOMContentLoaded)
    * is the page now, still loading: it resolves, with a `note`.
    */
-  async navigate(url: string, opts: NavigateOptions = {}): Promise<NavigationResult> {
-    assertOpenableUrl(url);
+  async navigate(given: string, opts: NavigateOptions = {}): Promise<NavigationResult> {
+    assertOpenableUrl(given);
+    // Page.navigate takes an absolute URL only: a bare fragment is resolved
+    // against the page it belongs to, as a link in that page would be.
+    const url = given.trim().startsWith("#") ? new URL(given.trim(), await this.currentUrl()).href : given;
     const waitUntil = opts.waitUntil ?? "load";
     const timeoutMs = opts.timeoutMs ?? NAVIGATION_TIMEOUT_MS;
     const nav = this.watch();

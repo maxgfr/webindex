@@ -6601,8 +6601,9 @@ var init_session = __esm({
        * (a cold server, a render-blocking script that holds even DOMContentLoaded)
        * is the page now, still loading: it resolves, with a `note`.
        */
-      async navigate(url, opts = {}) {
-        assertOpenableUrl(url);
+      async navigate(given, opts = {}) {
+        assertOpenableUrl(given);
+        const url = given.trim().startsWith("#") ? new URL(given.trim(), await this.currentUrl()).href : given;
         const waitUntil = opts.waitUntil ?? "load";
         const timeoutMs = opts.timeoutMs ?? NAVIGATION_TIMEOUT_MS;
         const nav = this.watch();
