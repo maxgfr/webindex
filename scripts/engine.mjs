@@ -11435,9 +11435,10 @@ function apiBase(ref, opts = {}) {
   if (opts.apiBase) return trimTrailing(opts.apiBase, "/");
   const host = normalizeForgeHost(typeof ref === "string" ? ref : ref.host);
   const kind = forgeKind(host, opts);
-  if (kind === "github") return host === "github.com" ? "https://api.github.com" : `https://${host}/api/v3`;
-  if (kind === "gitlab") return `https://${host}/api/v4`;
-  return `https://${host}/api/v1`;
+  const scheme = typeof ref !== "string" && host.includes(":") && ref.webUrl?.startsWith("http://") ? "http" : "https";
+  if (kind === "github") return host === "github.com" ? "https://api.github.com" : `${scheme}://${host}/api/v3`;
+  if (kind === "gitlab") return `${scheme}://${host}/api/v4`;
+  return `${scheme}://${host}/api/v1`;
 }
 var TOKEN_HOSTS = {
   github: ["github.com", "api.github.com"],

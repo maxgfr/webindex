@@ -83,7 +83,9 @@ describe("resolveRepo", () => {
     expect(apiBase(r, { kind: "gitlab" })).toBe("https://git.corp:8443/api/v4");
     expect(r.slug).not.toBe(resolveRepo("https://git.corp/g/r", { kind: "gitlab" }).slug);
     // An http remote on its own port is cited over http.
-    expect(resolveRepo("http://git.lan:3000/o/r", { kind: "gitea" }).webUrl).toBe("http://git.lan:3000/o/r");
+    const lan = resolveRepo("http://git.lan:3000/o/r", { kind: "gitea" });
+    expect(lan.webUrl).toBe("http://git.lan:3000/o/r");
+    expect(apiBase(lan, { kind: "gitea" })).toBe("http://git.lan:3000/api/v1"); // TLS to a plain-HTTP port answers nothing
     // The default port is no port.
     expect(resolveRepo("https://gitlab.com:443/g/r").host).toBe("gitlab.com");
     // An entry that names the port declares that service.

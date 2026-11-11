@@ -115,13 +115,16 @@ export function forgeRef(ref: RepoRef, opts: Pick<ForgeOptions, "kind"> = {}): R
  * fabricate one just to ask this question is exactly why a second copy of this
  * function grew downstream.
  */
-export function apiBase(ref: Pick<RepoRef, "host"> | string, opts: ForgeOptions = {}): string {
+export function apiBase(ref: (Pick<RepoRef, "host"> & Partial<Pick<RepoRef, "webUrl">>) | string, opts: ForgeOptions = {}): string {
   if (opts.apiBase) return trimTrailing(opts.apiBase, "/");
   const host = normalizeForgeHost(typeof ref === "string" ? ref : ref.host);
   const kind = forgeKind(host, opts);
-  if (kind === "github") return host === "github.com" ? "https://api.github.com" : `https://${host}/api/v3`;
-  if (kind === "gitlab") return `https://${host}/api/v4`;
-  return `https://${host}/api/v1`;
+  // A forge served over plain http on its own port (http://git.lan:3000) is
+  // asked over http there: TLS to a plain-HTTP port answers nothing.
+  const scheme = typeof ref !== "string" && host.includes(":") && ref.webUrl?.startsWith("http://") ? "http" : "https";
+  if (kind === "github") return host === "github.com" ? "https://api.github.com" : `${scheme}://${host}/api/v3`;
+  if (kind === "gitlab") return `${scheme}://${host}/api/v4`;
+  return `${scheme}://${host}/api/v1`;
 }
 
 // The hosts each token is FOR, with no configuration. Deliberately not "every

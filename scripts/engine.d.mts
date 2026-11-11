@@ -2773,7 +2773,7 @@ declare function forgeRef(ref: RepoRef, opts?: Pick<ForgeOptions, "kind">): Repo
  * fabricate one just to ask this question is exactly why a second copy of this
  * function grew downstream.
  */
-declare function apiBase(ref: Pick<RepoRef, "host"> | string, opts?: ForgeOptions): string;
+declare function apiBase(ref: (Pick<RepoRef, "host"> & Partial<Pick<RepoRef, "webUrl">>) | string, opts?: ForgeOptions): string;
 /**
  * Auth headers when a token is in the environment; none when it is not.
  *
