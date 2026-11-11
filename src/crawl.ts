@@ -77,6 +77,18 @@ function hostOf(url: string): string {
 }
 
 /**
+ * Forget the hosts whose slot and hold are both in the past: they constrain
+ * nothing. Without it a long-lived MCP server kept an entry for every host it
+ * ever crawled. Only past a few hundred, so a crawl never pays for it.
+ */
+function pruneHostSchedule(now: number): void {
+  if (nextFree.size + holdUntil.size < HOST_SCHEDULE_PRUNE_AT) return;
+  for (const [h, at] of nextFree) if (at <= now && (holdUntil.get(h) ?? 0) <= now) nextFree.delete(h);
+  for (const [h, at] of holdUntil) if (at <= now) holdUntil.delete(h);
+}
+const HOST_SCHEDULE_PRUNE_AT = 512;
+
+/**
  * Wait until this host is willing to hear from us again, then claim the slot.
  *
  * The claim happens BEFORE the await returns, so two concurrent callers for one
@@ -95,18 +107,6 @@ function hostOf(url: string): string {
  * stays claimed, which errs on the polite side, and the time returned is the
  * time actually waited.
  */
-/**
- * Forget the hosts whose slot and hold are both in the past: they constrain
- * nothing. Without it a long-lived MCP server kept an entry for every host it
- * ever crawled. Only past a few hundred, so a crawl never pays for it.
- */
-function pruneHostSchedule(now: number): void {
-  if (nextFree.size + holdUntil.size < HOST_SCHEDULE_PRUNE_AT) return;
-  for (const [h, at] of nextFree) if (at <= now && (holdUntil.get(h) ?? 0) <= now) nextFree.delete(h);
-  for (const [h, at] of holdUntil) if (at <= now) holdUntil.delete(h);
-}
-const HOST_SCHEDULE_PRUNE_AT = 512;
-
 export async function awaitHostSlot(url: string, delayMs: number = hostDelayMs(), now: number = Date.now(), signal?: AbortSignal): Promise<number> {
   const host = hostOf(url);
   if (!host) return 0;
