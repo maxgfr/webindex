@@ -361,9 +361,11 @@ across commands until `network clear`. Each command says both counts:
 reaches the log, and only the first count is said. `network list` numbers the
 entries, `network get <n>` prints one body as JSON, and `network clear` empties
 the log. Headers are never stored. URLs keep their
-query strings, and request bodies (`postData`, up to 4 KiB) are stored raw, so a
-recorded login POST can hold the password. Clear the log after a session where
-that matters.
+query strings, and request bodies (`postData`) are kept up to 4 KiB, with the
+value of every field that names a secret — a password, a token, an API key, a
+session, a card — replaced by `[redacted]` in a JSON or form body. A body of
+another shape is kept as sent, so clear the log after a session where that
+matters.
 
 ## Accepted limits
 

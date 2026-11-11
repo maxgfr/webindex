@@ -63,6 +63,35 @@ export interface NetworkTarget {
 }
 
 const REQUEST_BODY_CAP = 4096;
+
+// A field whose value is a secret: a login's password, a token, a card. The
+// body of a login POST was stored as sent; these values never reach the log.
+const SECRET_KEY = /pass(?:word|wd|phrase)?|pwd|secret|token|api[-_]?key|auth|credential|session|otp|pin|cvc|cvv|card|iban/i;
+const REDACTED = "[redacted]";
+
+function redactJson(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(redactJson);
+  if (v === null || typeof v !== "object") return v;
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, SECRET_KEY.test(k) && (typeof x !== "object" || x === null) ? REDACTED : redactJson(x)]));
+}
+
+/** A request body as it may be stored: secret-looking fields of a JSON or form body replaced, then capped. */
+export function redactRequestBody(body: string): string {
+  const trimmed = body.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return JSON.stringify(redactJson(JSON.parse(trimmed))).slice(0, REQUEST_BODY_CAP);
+    } catch {
+      /* not JSON after all */
+    }
+  }
+  if (/^[^\s=&]+=[^\s&]*(?:&[^\s=&]+=?[^\s&]*)*$/.test(trimmed)) {
+    const form = new URLSearchParams(trimmed);
+    for (const k of new Set(form.keys())) if (SECRET_KEY.test(k)) form.set(k, REDACTED);
+    return form.toString().slice(0, REQUEST_BODY_CAP);
+  }
+  return body.slice(0, REQUEST_BODY_CAP);
+}
 /**
  * Requests seen but not finished, kept to pair with their response. One that
  * never finishes (a long poll, a stream) would stay forever in a recorder an
@@ -188,7 +217,7 @@ export class NetworkRecorder {
       status: Number(r.status ?? 0),
       mime: String(r.mimeType ?? ""),
       resourceType: String(p.type ?? req?.resourceType ?? "Other"),
-      requestBody: typeof req?.postData === "string" ? req.postData.slice(0, REQUEST_BODY_CAP) : undefined,
+      requestBody: typeof req?.postData === "string" ? redactRequestBody(req.postData) : undefined,
     };
     if (this.keep(rec)) track(this.pending, p.requestId, rec);
   }

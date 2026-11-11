@@ -12042,6 +12042,26 @@ var init_actions = __esm({
 });
 
 // src/browser/network.ts
+function redactJson(v) {
+  if (Array.isArray(v)) return v.map(redactJson);
+  if (v === null || typeof v !== "object") return v;
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, SECRET_KEY.test(k) && (typeof x !== "object" || x === null) ? REDACTED : redactJson(x)]));
+}
+function redactRequestBody(body) {
+  const trimmed = body.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return JSON.stringify(redactJson(JSON.parse(trimmed))).slice(0, REQUEST_BODY_CAP);
+    } catch {
+    }
+  }
+  if (/^[^\s=&]+=[^\s&]*(?:&[^\s=&]+=?[^\s&]*)*$/.test(trimmed)) {
+    const form = new URLSearchParams(trimmed);
+    for (const k of new Set(form.keys())) if (SECRET_KEY.test(k)) form.set(k, REDACTED);
+    return form.toString().slice(0, REQUEST_BODY_CAP);
+  }
+  return body.slice(0, REQUEST_BODY_CAP);
+}
 function track2(map, key, value) {
   map.delete(key);
   map.set(key, value);
@@ -12062,12 +12082,14 @@ function getNetworkEntry(targetId, n, o) {
 function clearNetworkLog(targetId, o) {
   clearNetwork(targetId, o);
 }
-var REQUEST_BODY_CAP, TRACKED_CAP, DEFAULT_RESOURCE_TYPES, JSON_MIME, NetworkRecorder;
+var REQUEST_BODY_CAP, SECRET_KEY, REDACTED, TRACKED_CAP, DEFAULT_RESOURCE_TYPES, JSON_MIME, NetworkRecorder;
 var init_network = __esm({
   "src/browser/network.ts"() {
     "use strict";
     init_state();
     REQUEST_BODY_CAP = 4096;
+    SECRET_KEY = /pass(?:word|wd|phrase)?|pwd|secret|token|api[-_]?key|auth|credential|session|otp|pin|cvc|cvv|card|iban/i;
+    REDACTED = "[redacted]";
     TRACKED_CAP = 1e3;
     DEFAULT_RESOURCE_TYPES = /* @__PURE__ */ new Set(["XHR", "Fetch", "Document", "Other"]);
     JSON_MIME = /^(application\/(.+\+)?json|text\/json|application\/x-ndjson)\s*(;|$)/i;
@@ -12170,7 +12192,7 @@ var init_network = __esm({
           status: Number(r.status ?? 0),
           mime: String(r.mimeType ?? ""),
           resourceType: String(p.type ?? req?.resourceType ?? "Other"),
-          requestBody: typeof req?.postData === "string" ? req.postData.slice(0, REQUEST_BODY_CAP) : void 0
+          requestBody: typeof req?.postData === "string" ? redactRequestBody(req.postData) : void 0
         };
         if (this.keep(rec)) track2(this.pending, p.requestId, rec);
       }

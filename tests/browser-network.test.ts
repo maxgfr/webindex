@@ -182,6 +182,28 @@ describe("NetworkRecorder", () => {
     expect(out[1]).toMatchObject({ method: "GET", resourceType: "Other", status: 201 });
   });
 
+  it("keeps a login's secrets out of the recorded request body", async () => {
+    // A login POST was written to network/<id>.jsonl as it was sent, password
+    // and all, and printed by `network list --json`.
+    const { page, rec } = setup();
+    page.handle("Network.getResponseBody", () => ({ body: "{}", base64Encoded: false }));
+    await rec.start();
+    request(page, "json", { method: "POST", postData: JSON.stringify({ email: "a@b.test", password: "hunter2", nested: { apiKey: "k-123", keep: 1 } }) });
+    request(page, "form", { method: "POST", postData: "user=alice&passwd=hunter2&csrf_token=t0k&q=rate+limits" });
+    request(page, "text", { method: "POST", postData: "just some text" });
+    const out = await rec.stop();
+    const bodies = out.map((e) => e.requestBody ?? "");
+    for (const b of bodies) {
+      expect(b).not.toContain("hunter2");
+      expect(b).not.toContain("k-123");
+      expect(b).not.toContain("t0k");
+    }
+    expect(JSON.parse(bodies[0]!)).toEqual({ email: "a@b.test", password: "[redacted]", nested: { apiKey: "[redacted]", keep: 1 } });
+    expect(new URLSearchParams(bodies[1]!).get("user")).toBe("alice");
+    expect(new URLSearchParams(bodies[1]!).get("q")).toBe("rate limits");
+    expect(bodies[2]).toBe("just some text");
+  });
+
   it("keeps the newest maxEntries", async () => {
     const { page, rec } = setup({ maxEntries: 2 });
     page.handle("Network.getResponseBody", () => ({ body: "{}", base64Encoded: false }));
