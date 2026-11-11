@@ -66,16 +66,50 @@ const REQUEST_BODY_CAP = 4096;
 
 // A field whose value is a secret: a login's password, a token, a card. The
 // body of a login POST was stored as sent; these values never reach the log.
-const SECRET_KEY = /pass(?:word|wd|phrase)?|pwd|secret|token|api[-_]?key|auth|credential|session|otp|pin|cvc|cvv|card|iban/i;
+// Matched by WORD of the key (camelCase, snake_case and kebab-case split), not
+// by substring: "author", "pinned" and "shipping" are not secrets.
+const SECRET_WORDS = new Set([
+  "password",
+  "passwd",
+  "passphrase",
+  "pass",
+  "pwd",
+  "secret",
+  "token",
+  "auth",
+  "authorization",
+  "credential",
+  "credentials",
+  "session",
+  "sessionid",
+  "otp",
+  "pin",
+  "cvc",
+  "cvv",
+  "card",
+  "iban",
+  "cookie",
+]);
+const SECRET_JOINED = /apikey|privatekey|secretkey|accesskey/;
 const REDACTED = "[redacted]";
 
+function secretKey(key: string): boolean {
+  const words = key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  return words.some((w) => SECRET_WORDS.has(w)) || SECRET_JOINED.test(words.join(""));
+}
+
+/** A JSON value with everything under a secret-named key replaced — a list or an object there too. */
 function redactJson(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(redactJson);
   if (v === null || typeof v !== "object") return v;
-  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, SECRET_KEY.test(k) && (typeof x !== "object" || x === null) ? REDACTED : redactJson(x)]));
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, secretKey(k) ? REDACTED : redactJson(x)]));
 }
 
-/** A request body as it may be stored: secret-looking fields of a JSON or form body replaced, then capped. */
+/** A request body as it may be stored: secret-named fields of a JSON or form body replaced, then capped. */
 export function redactRequestBody(body: string): string {
   const trimmed = body.trim();
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
@@ -85,9 +119,12 @@ export function redactRequestBody(body: string): string {
       /* not JSON after all */
     }
   }
-  if (/^[^\s=&]+=[^\s&]*(?:&[^\s=&]+=?[^\s&]*)*$/.test(trimmed)) {
+  // A form body: one run of `key=value` pairs. Told by a plain scan — a regex
+  // over the pairs backtracked exponentially on a body that almost matched,
+  // and this runs on every request a page sends.
+  if (trimmed.includes("=") && !/\s/.test(trimmed)) {
     const form = new URLSearchParams(trimmed);
-    for (const k of new Set(form.keys())) if (SECRET_KEY.test(k)) form.set(k, REDACTED);
+    for (const k of new Set(form.keys())) if (secretKey(k)) form.set(k, REDACTED);
     return form.toString().slice(0, REQUEST_BODY_CAP);
   }
   return body.slice(0, REQUEST_BODY_CAP);

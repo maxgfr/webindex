@@ -2,8 +2,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { clearNetworkLog, getNetworkEntry, listNetwork, NetworkRecorder, type NetworkRecorderOptions } from "../src/browser/network.js";
+import { clearNetworkLog, getNetworkEntry, listNetwork, NetworkRecorder, type NetworkRecorderOptions, redactRequestBody } from "../src/browser/network.js";
 import { readNetwork } from "../src/browser/state.js";
+import { CPU_BUDGET_MS } from "./budget.js";
 import { FakePage } from "./helpers/fake-page.js";
 
 let home: string;
@@ -199,6 +200,39 @@ describe("NetworkRecorder", () => {
     const out = await rec.stop();
     expect(asked).toBe(0);
     expect(out[0]).toMatchObject({ bodyTruncated: true, size: 64 * 1024 });
+  });
+
+  it("redacts a whole secret value, keeps keys that only contain a secret word, and stays linear", () => {
+    expect(
+      JSON.parse(
+        redactRequestBody(
+          JSON.stringify({
+            otp: ["1", "2"],
+            tokens: ["abc"],
+            password: { value: "hunter2" },
+            author: "Ann",
+            pinned: true,
+            shipping_address: "x",
+            accessToken: "t",
+            apiKey: "k",
+          }),
+        ),
+      ),
+    ).toEqual({
+      otp: "[redacted]",
+      tokens: ["abc"], // "tokens" is not the word "token"
+      password: "[redacted]",
+      author: "Ann",
+      pinned: true,
+      shipping_address: "x",
+      accessToken: "[redacted]",
+      apiKey: "[redacted]",
+    });
+    // A body that almost reads as a form: the old pattern backtracked
+    // exponentially on it, and this runs on every request a page sends.
+    const started = performance.now();
+    redactRequestBody(`a=b${"&cc".repeat(5_000)} d`);
+    expect(performance.now() - started).toBeLessThan(CPU_BUDGET_MS);
   });
 
   it("keeps a login's secrets out of the recorded request body", async () => {
