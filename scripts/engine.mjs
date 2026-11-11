@@ -2865,7 +2865,9 @@ import { dirname } from "path";
 function openPrivateTmpDir(dir, create) {
   const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
   if (create) mkdirSync2(dirname(dirname(dir)), { recursive: true });
-  for (const p of [dirname(dir), dir]) {
+  const levels = [dirname(dir), dir];
+  let parentClosed = false;
+  for (const [i, p] of levels.entries()) {
     if (create) mkdirPrivate(p);
     let st;
     try {
@@ -2877,7 +2879,10 @@ function openPrivateTmpDir(dir, create) {
     if (st.isSymbolicLink()) return { refused: `${p} is a symbolic link` };
     if (!st.isDirectory()) return { refused: `${p} is not a directory` };
     if (st.uid !== uid) return { refused: `${p} belongs to another user` };
-    if (st.mode & 18) return { refused: `${p} is writable by other users` };
+    if (i === 0) parentClosed = (st.mode & 9) === 0;
+    if (st.mode & 18 && (i === 0 || !parentClosed || isNoWrite())) {
+      return { refused: `${p} is writable by other users (it is yours: \`chmod 700 ${p}\` if you trust what it holds)` };
+    }
     if (st.mode & 63 && !isNoWrite()) {
       try {
         chmodSync(p, 448);

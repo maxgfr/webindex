@@ -99,9 +99,24 @@ describe("videoRoot", () => {
     it.runIf(hasUids)("is not used when other users may write it", () => {
       const dir = videoRoot();
       chmodSync(dir, 0o777);
+      chmodSync(join(dir, ".."), 0o711); // others can enter it, so could write below it
       expect(() => videoRoot()).toThrow(/writable by other users[\s\S]*WEBINDEX_TEST_VIDEO_DIR/);
       // A directory the caller names is theirs to vouch for, as before.
       expect(videoRoot(dir)).toBe(dir);
+    });
+
+    it.runIf(hasUids)("makes private the one an earlier release left group-writable, under a parent nobody else could enter", () => {
+      // Before the check, the directory was made with the umask's mode: 0775
+      // under a umask of 002. Refused, every `video` command failed and told
+      // the user to remove it — their saved transcripts with it.
+      const dir = videoRoot();
+      chmodSync(dir, 0o775);
+      expect(videoRoot()).toBe(dir);
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+      // A parent others could enter is another matter: anyone may have written below it.
+      chmodSync(dir, 0o775);
+      chmodSync(join(dir, ".."), 0o755);
+      expect(() => videoRoot()).toThrow(/writable by other users/);
     });
 
     it.runIf(hasUids)("creates nothing when nothing may be written", () => {

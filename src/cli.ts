@@ -1338,12 +1338,15 @@ export function webindexAdapter(policy: WebindexToolPolicy = {}): McpAdapter & {
   // a path would let a caller write, or list, anywhere on the machine.
   const guarded = guard !== undefined || root !== undefined || policy.noLocalFiles === true;
   const videoDir = (raw: unknown): string => {
-    const base = videoRoot();
-    if (raw === undefined || raw === null || raw === "") return base;
+    if (raw === undefined || raw === null || raw === "") return videoRoot();
     const named = String(raw);
+    // A directory a local caller names is taken as given, without the default
+    // one being opened (or refused) on its behalf.
+    if (!guarded && isAbsolute(named)) return named;
+    const base = videoRoot();
     // A relative name belongs under the video root, never under wherever the
     // server happened to start: "animals" once landed in the caller's cwd.
-    if (!guarded) return isAbsolute(named) ? named : resolve(base, named);
+    if (!guarded) return resolve(base, named);
     if (!/^[A-Za-z0-9._-]+$/.test(named) || named === "." || named === "..") {
       throw new ToolError(`\`dir\` must be the name of a directory inside ${base} on this server, not a path.`);
     }

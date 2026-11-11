@@ -34,7 +34,10 @@ import { isNoWrite } from "./no-write.js";
 export function openPrivateTmpDir(dir: string, create: boolean): { dir?: string; refused?: string } {
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
   if (create) mkdirSync(dirname(dirname(dir)), { recursive: true }); // the temp dir itself
-  for (const p of [dirname(dir), dir]) {
+  const levels = [dirname(dir), dir];
+  // Whether nobody but the caller could traverse the parent, as it was found.
+  let parentClosed = false;
+  for (const [i, p] of levels.entries()) {
     if (create) mkdirPrivate(p);
     let st: Stats;
     try {
@@ -46,7 +49,14 @@ export function openPrivateTmpDir(dir: string, create: boolean): { dir?: string;
     if (st.isSymbolicLink()) return { refused: `${p} is a symbolic link` };
     if (!st.isDirectory()) return { refused: `${p} is not a directory` };
     if (st.uid !== uid) return { refused: `${p} belongs to another user` };
-    if (st.mode & 0o022) return { refused: `${p} is writable by other users` };
+    // Writable by others: refused, since anyone may have planted something in
+    // it. Except below a parent nobody else could traverse — nobody could have
+    // reached it there to write — where it is one of ours an earlier engine
+    // made with the umask's mode (0775 under a umask of 002): made private.
+    if (i === 0) parentClosed = (st.mode & 0o011) === 0;
+    if (st.mode & 0o022 && (i === 0 || !parentClosed || isNoWrite())) {
+      return { refused: `${p} is writable by other users (it is yours: \`chmod 700 ${p}\` if you trust what it holds)` };
+    }
     if (st.mode & 0o077 && !isNoWrite()) {
       try {
         chmodSync(p, 0o700);
