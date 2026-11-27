@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { repinWorkflows } from "./workflows.js";
 
 interface Run {
   databaseId: number;
@@ -11,8 +10,7 @@ interface Run {
 }
 /** Resume publication even when every pin already matches. Green means CI/publication completed. */
 export async function finishRepin(root: string): Promise<void> {
-  const config = JSON.parse(readFileSync(join(root, "skill.json"), "utf8"));
-  const workflows: string[] = config.repin?.workflows ?? ["ci.yml", "release.yml"];
+  const workflows = repinWorkflows(root);
   const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
   const repo = githubRepoForRemote(git(["remote", "get-url", "origin"]));
   const env = { ...process.env, GH_REPO: repo };

@@ -18,3 +18,4 @@ export { auditEngineUsage, engineExports, walkSources, type UsageReport } from "
 export { checkPins, sha256, vendorEngine, type PinFile, type PinStatus, type VendorResult } from "./vendor.js";
 export { auditSkillBundle, DESC_MAX, type BundleCheck, type CliSurface } from "./bundle.js";
 export { scaffoldSkill, skillNameProblem, type ScaffoldResult } from "./scaffold.js";
+export { auditRepinWorkflows, hasDispatchTrigger, repinWorkflows, DEFAULT_REPIN_WORKFLOWS, type RepinWorkflowCheck } from "./workflows.js";

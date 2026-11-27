@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { checkArtifactRecall, recallPolicy } from "./skillkit/recall.js";
 import { finishRepin } from "./skillkit/finish.js";
+import { auditRepinWorkflows } from "./skillkit/workflows.js";
 import { repinSkill, releaseCommit } from "./skillkit/repin.js";
 // The webindex command line.
 //
@@ -3070,6 +3071,27 @@ async function dispatch(argv: string[]): Promise<void> {
           process.stdout.write(
             `  ok   ${report.imported.length} engine symbols in use (floor ${usageConfig.usageFloor})${forks}, of a ${report.surface}-symbol surface.\n`,
           );
+        }
+      }
+      if (!only) {
+        // `skill finish` dispatches these on every repin; one that cannot be
+        // dispatched only fails on the nightly cron, never on a PR.
+        let dispatch: ReturnType<typeof auditRepinWorkflows> | undefined;
+        try {
+          dispatch = auditRepinWorkflows(root);
+        } catch (e) {
+          fail((e as Error).message);
+        }
+        if (dispatch?.applies) {
+          if (asJson) process.stdout.write(jsonLine({ repinWorkflows: dispatch }));
+          else {
+            for (const w of dispatch.missing) process.stderr.write(`  FAIL repin dispatches ${w}, but .github/workflows/${w} does not exist\n`);
+            for (const w of dispatch.undispatchable)
+              process.stderr.write(`  FAIL repin dispatches ${w}, but it has no \`workflow_dispatch\` trigger — add \`workflow_dispatch: {}\` under \`on:\`\n`);
+            if (!dispatch.missing.length && !dispatch.undispatchable.length)
+              process.stdout.write(`  ok   repin can dispatch ${dispatch.workflows.join(", ")}.\n`);
+          }
+          failedAny ||= dispatch.missing.length > 0 || dispatch.undispatchable.length > 0;
         }
       }
       if (failedAny) exitAfterOutput(EXIT_FAILURE);

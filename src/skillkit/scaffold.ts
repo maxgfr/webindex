@@ -67,6 +67,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # \`webindex skill finish\` dispatches this workflow after an engine repin: a
+  # push made with GITHUB_TOKEN does not fire another workflow's \`on: push\`.
+  workflow_dispatch: {}
 
 jobs:
   build-test:
