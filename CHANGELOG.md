@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, generated automatically from the [Conventional Commits](https://www.conventionalcommits.org/) by [semantic-release](https://github.com/semantic-release/semantic-release).
 
+## [1.37.3](https://github.com/maxgfr/webindex/compare/v1.37.2...v1.37.3) (2026-11-27)
+
+
+### Bug Fixes
+
+* **skill:** fail skill check when repin cannot dispatch its workflows ([#60](https://github.com/maxgfr/webindex/issues/60)) ([f202e6b](https://github.com/maxgfr/webindex/commit/f202e6b534f4dfc59aeb3b2b89746105f001d30c))
+
 ## [1.37.2](https://github.com/maxgfr/webindex/compare/v1.37.1...v1.37.2) (2026-11-11)
 
 
