@@ -1080,7 +1080,7 @@ var init_native = __esm({
 });
 
 // src/pdf/ocr.ts
-import { mkdtempSync, readFileSync as readFileSync7, rmSync, writeFileSync as writeFileSync3, existsSync } from "fs";
+import { mkdtempSync, readFileSync as readFileSync7, rmSync, writeFileSync as writeFileSync3, existsSync as existsSync2 } from "fs";
 import { join as join8 } from "path";
 import { tmpdir as tmpdir2 } from "os";
 function ocrBudgetLeft() {
@@ -1115,7 +1115,7 @@ async function ocrAttempt(bytes) {
     }
     if (!r.ok) return { failed: true };
     const md = output.replace(/\.pdf$/, ".md");
-    return existsSync(md) ? { text: readFileSync7(md, "utf8") } : { failed: true };
+    return existsSync2(md) ? { text: readFileSync7(md, "utf8") } : { failed: true };
   } catch {
     return { failed: true };
   } finally {
@@ -2716,7 +2716,7 @@ var init_vtt = __esm({
 });
 
 // src/video/whisper.ts
-import { existsSync as existsSync2, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "fs";
+import { existsSync as existsSync3, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "fs";
 import { join as join10 } from "path";
 function whisperBudgetLeft() {
   return Math.max(0, envInt("WHISPER_MAX", DEFAULT_MAX) - spent2);
@@ -2767,7 +2767,7 @@ async function whisperTranscribe(info, language, run, signal, knownOnly = false)
     if (ff.missing) return refund({ failed: "whisper needs ffmpeg", unavailable: true });
     if (signal?.aborted) return refund({ failed: "whisper: cancelled" });
     if (ff.status === 124) return refund(timedOut);
-    if (!ff.ok || !existsSync2(wav)) return refund({ failed: "whisper: ffmpeg could not convert the audio" });
+    if (!ff.ok || !existsSync3(wav)) return refund({ failed: "whisper: ffmpeg could not convert the audio" });
     const args = ["--with", PYAV_PIN, "whisper-ctranslate2", wav, "--model", whisperModel(), "--output_format", "json", "--output_dir", dir];
     const lang = whisperLanguage(language);
     if (lang) args.push("--language", lang);
@@ -2776,7 +2776,7 @@ async function whisperTranscribe(info, language, run, signal, knownOnly = false)
     if (signal?.aborted) return { failed: "whisper: cancelled" };
     if (w.status === 124) return timedOut;
     const out = join10(dir, "speech.json");
-    if (!w.ok || !existsSync2(out)) return { failed: `whisper: ${w.stderr.trim().split("\n").pop() || "failed"}` };
+    if (!w.ok || !existsSync3(out)) return { failed: `whisper: ${w.stderr.trim().split("\n").pop() || "failed"}` };
     return { segments: whisperSegments(readFileSync9(out, "utf8")) };
   });
 }
@@ -3763,7 +3763,7 @@ var init_rank = __esm({
 });
 
 // src/video/run.ts
-import { existsSync as existsSync3, readdirSync as readdirSync3, readFileSync as readFileSync10, statSync } from "fs";
+import { existsSync as existsSync4, readdirSync as readdirSync3, readFileSync as readFileSync10, statSync } from "fs";
 import { join as join11, resolve } from "path";
 function videoRoot(out) {
   const named = (out?.trim() ? out : void 0) ?? env("VIDEO_DIR");
@@ -3790,7 +3790,7 @@ async function fetchVideoRun(url, root, opts = {}) {
   const kept = (key) => {
     const dir2 = join11(root, key);
     const run = opts.refresh ? void 0 : readVideoRun(dir2);
-    if (!run || !existsSync3(join11(dir2, "TRANSCRIPT.md")) || !servesLang(run.meta, opts.lang)) return void 0;
+    if (!run || !existsSync4(join11(dir2, "TRANSCRIPT.md")) || !servesLang(run.meta, opts.lang)) return void 0;
     return { ok: true, id: key, dir: dir2, transcript: join11(dir2, "TRANSCRIPT.md"), reused: true, meta: run.meta, segments: run.segments.length };
   };
   if (source2.key) {
@@ -4031,7 +4031,7 @@ var init_dhash = __esm({
 
 // src/video/frames.ts
 import { randomUUID } from "crypto";
-import { copyFileSync, cpSync, existsSync as existsSync4, mkdirSync as mkdirSync3, readdirSync as readdirSync4, readFileSync as readFileSync11, renameSync as renameSync2, rmSync as rmSync3 } from "fs";
+import { copyFileSync, cpSync, existsSync as existsSync5, mkdirSync as mkdirSync3, readdirSync as readdirSync4, readFileSync as readFileSync11, renameSync as renameSync2, rmSync as rmSync3 } from "fs";
 import { join as join12, resolve as resolve2 } from "path";
 function parseShowinfo(stderr) {
   const out = [];
@@ -4103,7 +4103,7 @@ async function extractFrames(runDir, opts = {}) {
     const single = async (time, kind) => {
       const path = join12(tmp, `${kind}-${candidates2.length}.jpg`);
       await ffmpeg(["-loglevel", "error", "-ss", time.toFixed(2), "-i", input, "-frames:v", "1", "-vf", JPEG_FILTER, "-q:v", "3", "-y", path]);
-      if (existsSync4(path)) candidates2.push({ path, time, kind });
+      if (existsSync5(path)) candidates2.push({ path, time, kind });
     };
     const last = duration > 1 ? duration - 0.5 : Number.POSITIVE_INFINITY;
     for (const c of meta.chapters ?? []) await single(Math.min(c.start + 1, last), "chapter");
@@ -4119,7 +4119,7 @@ async function extractFrames(runDir, opts = {}) {
     candidates2.forEach((c, i) => copyFileSync(c.path, join12(candDir, `${String(i + 1).padStart(4, "0")}.jpg`)));
     const raw = join12(tmp, "hash.raw");
     await ffmpeg(["-loglevel", "error", "-i", join12(candDir, "%04d.jpg"), "-vf", "scale=9:8,format=gray", "-f", "rawvideo", "-y", raw]);
-    const hashes = existsSync4(raw) ? dhashStream(readFileSync11(raw)) : [];
+    const hashes = existsSync5(raw) ? dhashStream(readFileSync11(raw)) : [];
     const kept = [];
     for (const [i, c] of candidates2.entries()) {
       const hash = hashes.length === candidates2.length ? hashes[i] : void 0;
@@ -7274,7 +7274,7 @@ var init_cli_kit = __esm({
 });
 
 // src/browser/profile.ts
-import { chmodSync as chmodSync2, copyFileSync as copyFileSync2, existsSync as existsSync5, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readdirSync as readdirSync5, readFileSync as readFileSync12, realpathSync, rmSync as rmSync4, statSync as statSync3, writeFileSync as writeFileSync6 } from "fs";
+import { chmodSync as chmodSync2, copyFileSync as copyFileSync2, existsSync as existsSync6, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readdirSync as readdirSync5, readFileSync as readFileSync12, realpathSync, rmSync as rmSync4, statSync as statSync3, writeFileSync as writeFileSync6 } from "fs";
 import { homedir as homedir2 } from "os";
 import { basename as basename2, join as join14, resolve as resolve3, sep } from "path";
 function browserHome() {
@@ -7338,7 +7338,7 @@ function assertInsideHome(path) {
 }
 function resetProfile(name2 = "default") {
   const dir = profileDir(name2);
-  if (!existsSync5(dir)) return;
+  if (!existsSync6(dir)) return;
   assertInsideHome(dir);
   rmSync4(dir, { recursive: true, force: true });
 }
@@ -7375,9 +7375,9 @@ function copyTree(from, to, rel, tally) {
 function importProfile(source2, opts = {}) {
   const to = profileDir(opts.name ?? "default");
   const from = userDataDir(source2, opts);
-  if (!existsSync5(from)) throw new Error(`browser profile not found at ${from}`);
-  const hasState = existsSync5(join14(from, "Local State"));
-  const hasDefault = existsSync5(join14(from, "Default"));
+  if (!existsSync6(from)) throw new Error(`browser profile not found at ${from}`);
+  const hasState = existsSync6(join14(from, "Local State"));
+  const hasDefault = existsSync6(join14(from, "Default"));
   if (!hasState && !hasDefault) throw new Error(`${from} has no Local State or Default profile to import`);
   const lockNames = (opts.platform ?? process.platform) === "win32" ? ["SingletonLock", "lockfile"] : ["SingletonLock"];
   const locked = lockNames.some((n) => {
@@ -7392,7 +7392,7 @@ function importProfile(source2, opts = {}) {
   if (locked && !opts.force) {
     throw new Error(`the browser using ${from} appears to be running: close it, or pass force to import anyway`);
   }
-  if (existsSync5(to) && readdirSync5(to).length > 0) {
+  if (existsSync6(to) && readdirSync5(to).length > 0) {
     if (!opts.force) throw new Error(`${to} already holds a profile: pass force to replace it`);
     const a = realish(from);
     const b = realish(to);
@@ -7466,7 +7466,7 @@ var init_profile = __esm({
 
 // src/browser/state.ts
 import { randomUUID as randomUUID2 } from "crypto";
-import { appendFileSync, closeSync, existsSync as existsSync6, linkSync, openSync, readFileSync as readFileSync13, renameSync as renameSync3, rmSync as rmSync5, statSync as statSync4, unlinkSync as unlinkSync2, writeSync } from "fs";
+import { appendFileSync, closeSync, existsSync as existsSync7, linkSync, openSync, readFileSync as readFileSync13, renameSync as renameSync3, rmSync as rmSync5, statSync as statSync4, unlinkSync as unlinkSync2, writeSync } from "fs";
 import { join as join15 } from "path";
 function checkTargetId(id) {
   if (!/^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(id)) throw new Error(`invalid target id: ${JSON.stringify(id)}`);
@@ -7536,7 +7536,7 @@ function appendNetwork(targetId, entries, o) {
   if (isNoWrite() || entries.length === 0) return;
   ensurePrivateDir(join15(homeOf(o), "network"));
   const lines = entries.map((e) => JSON.stringify(e));
-  const existing = existsSync6(file) ? readFileSync13(file, "utf8").split("\n").filter(Boolean) : [];
+  const existing = existsSync7(file) ? readFileSync13(file, "utf8").split("\n").filter(Boolean) : [];
   if (existing.length + lines.length <= NETWORK_CAP) {
     appendFileSync(file, `${lines.join("\n")}
 `, { mode: FILE_MODE });
@@ -7723,7 +7723,7 @@ var init_deps = __esm({
 });
 
 // src/browser/extensions.ts
-import { existsSync as existsSync7, statSync as statSync5 } from "fs";
+import { existsSync as existsSync8, statSync as statSync5 } from "fs";
 import { isAbsolute as isAbsolute3, join as join16 } from "path";
 function extensionDirs(raw) {
   const name2 = envName("BROWSER_EXTENSIONS");
@@ -7735,7 +7735,7 @@ function extensionDirs(raw) {
     } catch {
     }
     if (!isDir) throw new UsageError(`${name2}: no such directory: ${dir}`);
-    if (!existsSync7(join16(dir, "manifest.json"))) {
+    if (!existsSync8(join16(dir, "manifest.json"))) {
       throw new UsageError(`${name2}: ${dir} has no manifest.json \u2014 name the unpacked extension's own folder, the one that holds manifest.json`);
     }
     return dir;
@@ -12402,7 +12402,7 @@ __export(cli_exports, {
   statusText: () => statusText,
   tabLines: () => tabLines
 });
-import { existsSync as existsSync14, mkdirSync as mkdirSync8, statSync as statSync11 } from "fs";
+import { existsSync as existsSync15, mkdirSync as mkdirSync8, statSync as statSync11 } from "fs";
 import { dirname as dirname5, join as join27, resolve as resolve10 } from "path";
 function arity(ctx, min, max = min) {
   if (ctx.args.length < min || ctx.args.length > max) throw usageError(ctx.action);
@@ -12834,7 +12834,7 @@ note: ${r.note}` : text };
         const cwd = ctx.deps.cwd ?? process.cwd();
         const files = ctx.args.slice(1).map((f) => {
           const path = resolve10(cwd, f);
-          if (!existsSync14(path) || !statSync11(path).isFile()) throw new UsageError(`no such file: ${path}`);
+          if (!existsSync15(path) || !statSync11(path).isFile()) throw new UsageError(`no such file: ${path}`);
           return path;
         });
         return mutate(ctx, (s, o) => upload(s, ref2, files, o));
@@ -13014,7 +13014,7 @@ note: ${r.note}` : text };
           arity(ctx, 1);
           await assertProfileIdle(ctx, name2);
           const path = profileDir(name2);
-          const existed = existsSync14(path);
+          const existed = existsSync15(path);
           resetProfile(name2);
           return { json: { ok: true, path, removed: existed }, text: existed ? `removed ${path}: the next launch starts logged out` : `no profile at ${path}` };
         }
@@ -13091,11 +13091,48 @@ function checkArtifactRecall(root, ref2 = "HEAD") {
 
 // src/skillkit/finish.ts
 import { execFileSync as execFileSync2 } from "child_process";
-import { readFileSync as readFileSync2 } from "fs";
+
+// src/skillkit/workflows.ts
+import { existsSync, readFileSync as readFileSync2 } from "fs";
 import { join as join2 } from "path";
+var DEFAULT_REPIN_WORKFLOWS = ["ci.yml", "release.yml"];
+var REPIN_WORKFLOW = "engine-repin.yml";
+function repinWorkflows(root) {
+  const raw = JSON.parse(readFileSync2(join2(root, "skill.json"), "utf8"));
+  const listed = raw.repin?.workflows;
+  if (listed === void 0) return DEFAULT_REPIN_WORKFLOWS;
+  if (!Array.isArray(listed) || !listed.every((w) => typeof w === "string" && w.length > 0))
+    throw new Error("skill.json repin.workflows must be an array of workflow file names");
+  return listed;
+}
+function hasDispatchTrigger(yaml) {
+  const lines = yaml.split(/\r?\n/).map((l) => l.replace(/(^|\s)#.*$/, ""));
+  const start = lines.findIndex((l) => /^["']?on["']?\s*:/.test(l));
+  if (start === -1) return false;
+  const block = [lines[start].replace(/^["']?on["']?\s*:/, "")];
+  for (const line of lines.slice(start + 1)) {
+    if (/^\S/.test(line)) break;
+    block.push(line);
+  }
+  return /(^|[\s[,{])workflow_dispatch\s*(:|,|\]|}|$)/m.test(block.join("\n"));
+}
+function auditRepinWorkflows(root) {
+  const dir = join2(root, ".github", "workflows");
+  if (!existsSync(join2(dir, REPIN_WORKFLOW))) return { applies: false, workflows: [], missing: [], undispatchable: [] };
+  const workflows = repinWorkflows(root);
+  const missing = [];
+  const undispatchable = [];
+  for (const workflow of workflows) {
+    const path = join2(dir, workflow);
+    if (!existsSync(path)) missing.push(workflow);
+    else if (!hasDispatchTrigger(readFileSync2(path, "utf8"))) undispatchable.push(workflow);
+  }
+  return { applies: true, workflows, missing, undispatchable };
+}
+
+// src/skillkit/finish.ts
 async function finishRepin(root) {
-  const config = JSON.parse(readFileSync2(join2(root, "skill.json"), "utf8"));
-  const workflows = config.repin?.workflows ?? ["ci.yml", "release.yml"];
+  const workflows = repinWorkflows(root);
   const git = (args) => execFileSync2("git", args, { cwd: root, encoding: "utf8" }).trim();
   const repo = githubRepoForRemote(git(["remote", "get-url", "origin"]));
   const env2 = { ...process.env, GH_REPO: repo };
@@ -13386,7 +13423,7 @@ async function repinSkill(root, config) {
 // src/cli.ts
 init_brand();
 init_charset();
-import { existsSync as existsSync15, mkdirSync as mkdirSync9, readFileSync as readFileSync19, readSync, realpathSync as realpathSync4, statSync as statSync12 } from "fs";
+import { existsSync as existsSync16, mkdirSync as mkdirSync9, readFileSync as readFileSync19, readSync, realpathSync as realpathSync4, statSync as statSync12 } from "fs";
 import { isIP as isIP2 } from "net";
 import { basename as basename5, extname, isAbsolute as isAbsolute6, join as join28, relative as relative4, resolve as resolve12, sep as sep4 } from "path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL } from "url";
@@ -13409,7 +13446,7 @@ init_firecrawl();
 // src/stack.ts
 init_brand();
 import { spawnSync as spawnSync3 } from "child_process";
-import { existsSync as existsSync9, lstatSync as lstatSync3, mkdirSync as mkdirSync6, readFileSync as readFileSync15, statSync as statSync7, writeFileSync as writeFileSync7 } from "fs";
+import { existsSync as existsSync10, lstatSync as lstatSync3, mkdirSync as mkdirSync6, readFileSync as readFileSync15, statSync as statSync7, writeFileSync as writeFileSync7 } from "fs";
 import { dirname as dirname2, join as join20, resolve as resolve4 } from "path";
 
 // src/cache.ts
@@ -13422,7 +13459,7 @@ init_no_write();
 init_private_dir();
 init_brand();
 init_mode();
-import { existsSync as existsSync8, mkdirSync as mkdirSync5, readFileSync as readFileSync14, readdirSync as readdirSync6, rmSync as rmSync6, statSync as statSync6 } from "fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync5, readFileSync as readFileSync14, readdirSync as readdirSync6, rmSync as rmSync6, statSync as statSync6 } from "fs";
 import { createHash as createHash3 } from "crypto";
 import { join as join19 } from "path";
 var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
@@ -13533,7 +13570,7 @@ function cacheReader(url, acceptLanguage = "") {
 }
 function readCacheMeta(url, acceptLanguage, extractor, variant) {
   const { meta, body } = entryPaths(url, acceptLanguage, extractor, variant);
-  if (!existsSync8(meta)) return void 0;
+  if (!existsSync9(meta)) return void 0;
   try {
     const entry = JSON.parse(readFileSync14(meta, "utf8"));
     return typeof entry.cachedAt === "number" ? { entry, body } : void 0;
@@ -13543,7 +13580,7 @@ function readCacheMeta(url, acceptLanguage, extractor, variant) {
 }
 function readCacheBody({ entry, body }) {
   try {
-    const text = existsSync8(body) ? readFileSync14(body, "utf8") : entry.text;
+    const text = existsSync9(body) ? readFileSync14(body, "utf8") : entry.text;
     if (!text?.trim()) return void 0;
     const { bodyHash, ...rest } = entry;
     if (bodyHash !== void 0 && bodyHash !== hashBody(text)) return void 0;
@@ -13698,7 +13735,7 @@ function cacheStats(now = Date.now()) {
   const out = { dir, entries: 0, bytes: 0, fresh: 0, stale: 0, ttlMs: ttlMs() };
   const { refused } = openCacheDir(false);
   if (refused) return { ...out, refused };
-  if (!existsSync8(dir)) return out;
+  if (!existsSync9(dir)) return out;
   let oldest = Number.POSITIVE_INFINITY;
   let newest = 0;
   for (const name2 of readdirSync6(dir)) {
@@ -13726,7 +13763,7 @@ function cacheStats(now = Date.now()) {
 }
 function cacheClean(all = false, now = Date.now()) {
   const dir = cacheDir();
-  if (isNoWrite() || !openCacheDir(false).dir || !existsSync8(dir)) return 0;
+  if (isNoWrite() || !openCacheDir(false).dir || !existsSync9(dir)) return 0;
   const names = readdirSync6(dir);
   const present = new Set(names);
   const remove = (name2) => {
@@ -14066,7 +14103,7 @@ function untrustedStack() {
 }
 function writeIfChanged(path, content) {
   try {
-    if (existsSync9(path) && readFileSync15(path, "utf8") === content) return;
+    if (existsSync10(path) && readFileSync15(path, "utf8") === content) return;
     mkdirSync6(dirname2(path), { recursive: true, mode: 448 });
     writeFileSync7(path, content);
   } catch {
@@ -15484,7 +15521,7 @@ function auditEngineUsage(root, config, dts, engineName) {
 
 // src/skillkit/bundle.ts
 init_cli_kit();
-import { existsSync as existsSync10, readdirSync as readdirSync8, readFileSync as readFileSync17 } from "fs";
+import { existsSync as existsSync11, readdirSync as readdirSync8, readFileSync as readFileSync17 } from "fs";
 import { join as join22 } from "path";
 var DESC_MAX = 1e3;
 function auditSkillBundle(root, config, cli) {
@@ -15493,11 +15530,11 @@ function auditSkillBundle(root, config, cli) {
   const name2 = config.name;
   const skillDir = join22(root, "skills", name2);
   check(
-    !existsSync10(join22(root, "SKILL.md")),
-    existsSync10(join22(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name2}/SKILL.md` : "no root SKILL.md"
+    !existsSync11(join22(root, "SKILL.md")),
+    existsSync11(join22(root, "SKILL.md")) ? `a SKILL.md exists at the repo ROOT \u2014 \`skills add\` would install it alone, dropping the engine. Move it to skills/${name2}/SKILL.md` : "no root SKILL.md"
   );
   const skillMd = join22(skillDir, "SKILL.md");
-  if (!existsSync10(skillMd)) {
+  if (!existsSync11(skillMd)) {
     check(false, `missing skills/${name2}/SKILL.md \u2014 the skill package has no SKILL.md`);
     return out;
   }
@@ -15525,12 +15562,12 @@ function auditSkillBundle(root, config, cli) {
     );
   }
   const refsDir = join22(skillDir, "references");
-  if (existsSync10(refsDir)) {
+  if (existsSync11(refsDir)) {
     const files = readdirSync8(refsDir).filter((f) => f.endsWith(".md"));
     for (const m of new Set(raw.match(/references\/[\w.-]+\.md/g) ?? [])) {
       check(
-        existsSync10(join22(skillDir, m)),
-        existsSync10(join22(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
+        existsSync11(join22(skillDir, m)),
+        existsSync11(join22(skillDir, m)) ? `mentioned ${m} exists` : `${m} is mentioned in SKILL.md but missing from the package`
       );
     }
     for (const f of files) {
@@ -15543,8 +15580,8 @@ function auditSkillBundle(root, config, cli) {
   const bundleRel = `scripts/${name2}.mjs`;
   const rootBundle = join22(root, bundleRel);
   const pkgBundle = join22(skillDir, bundleRel);
-  if (!existsSync10(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
-  else if (!existsSync10(pkgBundle)) check(false, `missing skills/${name2}/${bundleRel} \u2014 run \`skill copy\``);
+  if (!existsSync11(rootBundle)) check(false, `missing ${bundleRel} at the repo root \u2014 run the build`);
+  else if (!existsSync11(pkgBundle)) check(false, `missing skills/${name2}/${bundleRel} \u2014 run \`skill copy\``);
   else {
     const same = readFileSync17(rootBundle).equals(readFileSync17(pkgBundle));
     check(
@@ -15555,7 +15592,7 @@ function auditSkillBundle(root, config, cli) {
   if (!cli) return out;
   const universe = /* @__PURE__ */ new Set([...cli.valueFlags, ...cli.boolFlags, "help", "version", ...config.allowedForeignFlags]);
   const docs = [["SKILL.md", raw]];
-  if (existsSync10(refsDir)) {
+  if (existsSync11(refsDir)) {
     for (const f of readdirSync8(refsDir).filter((f2) => f2.endsWith(".md"))) docs.push([`references/${f}`, readFileSync17(join22(refsDir, f), "utf8")]);
   }
   let unknown = 0;
@@ -15578,7 +15615,7 @@ function auditSkillBundle(root, config, cli) {
 
 // src/skillkit/scaffold.ts
 init_no_write();
-import { existsSync as existsSync11 } from "fs";
+import { existsSync as existsSync12 } from "fs";
 import { join as join23 } from "path";
 var enginesJson = (engine, repo, minRef) => JSON.stringify(
   {
@@ -15621,6 +15658,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # \`webindex skill finish\` dispatches this workflow after an engine repin: a
+  # push made with GITHUB_TOKEN does not fire another workflow's \`on: push\`.
+  workflow_dispatch: {}
 
 jobs:
   build-test:
@@ -15692,7 +15732,7 @@ TODO
     ".gitignore": gitignore
   };
   const written = [];
-  const exists = opts.exists ?? existsSync11;
+  const exists = opts.exists ?? existsSync12;
   for (const [rel, content] of Object.entries(files)) {
     const path = join23(root, rel);
     if (exists(path)) {
@@ -16452,13 +16492,13 @@ init_private_dir();
 init_text();
 init_shared();
 import { createHash as createHash5, randomBytes as randomBytes2 } from "crypto";
-import { existsSync as existsSync12, mkdirSync as mkdirSync7, readdirSync as readdirSync9, renameSync as renameSync4, rmSync as rmSync7, statSync as statSync9 } from "fs";
+import { existsSync as existsSync13, mkdirSync as mkdirSync7, readdirSync as readdirSync9, renameSync as renameSync4, rmSync as rmSync7, statSync as statSync9 } from "fs";
 import { basename as basename3, join as join24, resolve as resolve6 } from "path";
 function resolveRepo(raw, opts = {}) {
   const trimmed = raw.trim();
   if (trimmed && opts.local !== false) {
     const asPath = resolve6(trimmed);
-    if (existsSync12(asPath) && statSync9(asPath).isDirectory()) {
+    if (existsSync13(asPath) && statSync9(asPath).isDirectory()) {
       return { raw: trimmed, host: "local", isLocal: true, slug: `local-${slugify(`${basename3(asPath)}-${asPath}`)}` };
     }
   }
@@ -17363,7 +17403,7 @@ function isOriginAllowed(origin, allowed = []) {
 
 // src/mcp/resources.ts
 init_brand();
-import { existsSync as existsSync13, readdirSync as readdirSync10, readFileSync as readFileSync18, realpathSync as realpathSync2, statSync as statSync10 } from "fs";
+import { existsSync as existsSync14, readdirSync as readdirSync10, readFileSync as readFileSync18, realpathSync as realpathSync2, statSync as statSync10 } from "fs";
 import { basename as basename4, dirname as dirname4, join as join25, relative as relative2, resolve as resolve8, sep as sep2 } from "path";
 import { fileURLToPath } from "url";
 var skillName = () => brand().name;
@@ -17372,14 +17412,14 @@ function resolveSkillRoot(moduleDir) {
   const here = moduleDir ?? dirname4(fileURLToPath(import.meta.url));
   const name2 = brand().name;
   const candidates2 = [resolve8(here, ".."), resolve8(here, "..", "skills", name2), resolve8(here, "..", "..", "skills", name2)];
-  return candidates2.find((dir) => existsSync13(join25(dir, "SKILL.md")));
+  return candidates2.find((dir) => existsSync14(join25(dir, "SKILL.md")));
 }
 function listResources(moduleDir) {
   const root = resolveSkillRoot(moduleDir);
   if (!root) return [];
   const out = [describe(root, "SKILL.md", `${skillName()}: the skill`)];
   const refDir = join25(root, "references");
-  if (!existsSync13(refDir)) return out;
+  if (!existsSync14(refDir)) return out;
   for (const file of readdirSync10(refDir).sort()) {
     if (!file.endsWith(".md")) continue;
     out.push(describe(root, join25("references", file), `${skillName()} reference: ${basename4(file, ".md")}`));
@@ -19824,7 +19864,7 @@ function webindexAdapter(policy = {}) {
     }
     mkdirSync9(base2, { recursive: true });
     const target = join28(base2, named);
-    const rel = existsSync15(target) ? relative4(realpathSync4(base2), realpathSync4(target)) : "";
+    const rel = existsSync16(target) ? relative4(realpathSync4(base2), realpathSync4(target)) : "";
     if (rel === ".." || rel.startsWith(`..${sep4}`) || isAbsolute6(rel)) {
       throw new ToolError(`${named} leads outside ${base2}, the only directory this server writes videos to.`);
     }
@@ -20588,7 +20628,7 @@ async function dispatch(argv) {
     const bad = urls.find((u) => !/^https?:\/\//i.test(u));
     if (bad !== void 0) {
       usage(
-        `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync15(bad) ? ` \u2014 for a file on disk, \`webindex extract ${bad}\`` : ""}`
+        `fetch needs an http(s) URL${urls.length > 1 ? `, got "${bad}"` : ""}${existsSync16(bad) ? ` \u2014 for a file on disk, \`webindex extract ${bad}\`` : ""}`
       );
     }
     const fullPage = argBool(args, "full-page");
@@ -21141,7 +21181,7 @@ ${rows.join("\n")}
         const r2 = await fetchVideoRun(target, root, { lang: argValue(args, "lang") });
         if (!r2.ok) fail(`no transcript for ${target}: ${r2.reason}`);
         runDir = r2.dir;
-      } else runDir = existsSync15(join28(root, target, "meta.json")) ? join28(root, target) : resolve12(target);
+      } else runDir = existsSync16(join28(root, target, "meta.json")) ? join28(root, target) : resolve12(target);
       const r = await extractFrames(runDir, { effort });
       if (!r.ok) {
         if (asJson) process.stdout.write(jsonLine(r));
@@ -21236,7 +21276,7 @@ ${rows.join("\n")}
       if (!name2) usage("usage: webindex skill init <name> [--root <dir>]");
       const badName = skillNameProblem(name2);
       if (badName) usage(badName);
-      const r = scaffoldSkill(root, name2, { exists: existsSync15 });
+      const r = scaffoldSkill(root, name2, { exists: existsSync16 });
       for (const e of r.errors) process.stderr.write(`  ${e}
 `);
       if (asJson) process.stdout.write(jsonLine(r));
@@ -21354,6 +21394,28 @@ ${rows.join("\n")}
           );
         }
       }
+      if (!only) {
+        let dispatch2;
+        try {
+          dispatch2 = auditRepinWorkflows(root);
+        } catch (e) {
+          fail(e.message);
+        }
+        if (dispatch2?.applies) {
+          if (asJson) process.stdout.write(jsonLine({ repinWorkflows: dispatch2 }));
+          else {
+            for (const w of dispatch2.missing) process.stderr.write(`  FAIL repin dispatches ${w}, but .github/workflows/${w} does not exist
+`);
+            for (const w of dispatch2.undispatchable)
+              process.stderr.write(`  FAIL repin dispatches ${w}, but it has no \`workflow_dispatch\` trigger \u2014 add \`workflow_dispatch: {}\` under \`on:\`
+`);
+            if (!dispatch2.missing.length && !dispatch2.undispatchable.length)
+              process.stdout.write(`  ok   repin can dispatch ${dispatch2.workflows.join(", ")}.
+`);
+          }
+          failedAny ||= dispatch2.missing.length > 0 || dispatch2.undispatchable.length > 0;
+        }
+      }
       if (failedAny) exitAfterOutput(EXIT_FAILURE);
       return;
     }
@@ -21362,7 +21424,7 @@ ${rows.join("\n")}
       let surface;
       let surfaceProblem;
       const flagList = (v) => v == null || typeof v === "string" || typeof v[Symbol.iterator] !== "function" ? void 0 : [...v];
-      if (existsSync15(built)) {
+      if (existsSync16(built)) {
         try {
           const mod = await import(pathToFileURL(built).href);
           const valueFlags = flagList(mod.VALUE_FLAGS);
@@ -21397,7 +21459,7 @@ webindex: ${bad} problem(s) \u2014 the published skill would not install correct
     }
     if (action === "copy") {
       const from = join28(root, "scripts", `${config.name}.mjs`);
-      if (!existsSync15(from)) fail(`missing ${relative4(root, from)} \u2014 run the build first`);
+      if (!existsSync16(from)) fail(`missing ${relative4(root, from)} \u2014 run the build first`);
       const to = join28(root, "skills", config.name, "scripts", `${config.name}.mjs`);
       ensureDir(join28(to, ".."));
       writeArtifact(to, readFileSync19(from, "utf8"));

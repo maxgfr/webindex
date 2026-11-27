@@ -36,7 +36,7 @@ silently, which is the exact failure the ratchet exists to prevent.
 ```bash
 webindex skill vendor --ref v1.15.0     # fetch + pin, bytes unmodified
 webindex skill vendor --check           # offline drift + staleness gate (CI)
-webindex skill check                    # no module may DECLARE an engine export
+webindex skill check                    # no module may DECLARE an engine export; repin can dispatch its workflows
 webindex skill bundle                   # `skills add` would install a working skill
 webindex skill copy                     # embed the built engine in the package
 webindex skill doctor                   # pins, lag, outstanding forks
@@ -52,6 +52,13 @@ the GitHub CLI when `gh` is installed, and through GitHub's REST API otherwise
 (keyless for a public repository; `GITHUB_TOKEN` raises the quota). `repin` and
 `finish` drive `gh` itself and need it. `skill init` pins `minRef` to the
 engine release doing the scaffolding.
+
+`finish` dispatches every workflow in `skill.json > repin.workflows` (default
+`ci.yml` and `release.yml`), because a push made with `GITHUB_TOKEN` does not
+fire another workflow's `on: push`. Each one therefore needs a
+`workflow_dispatch` trigger. Once a repo has `.github/workflows/engine-repin.yml`,
+`skill check` fails when one of them is missing or has no such trigger, so the
+gap shows up on a PR instead of on the nightly cron.
 
 Your `package.json` becomes one line:
 

@@ -12,6 +12,7 @@ import {
   engineExports,
   readSkillConfig,
   scaffoldSkill,
+  hasDispatchTrigger,
   sha256,
   vendorEngine,
 } from "../src/skillkit/index.js";
@@ -403,6 +404,11 @@ describe("scaffoldSkill", () => {
       "skills/newskill/SKILL.md",
       "src/engine.ts",
     ]);
+  });
+
+  it("scaffolds a CI workflow the engine repin can dispatch", () => {
+    scaffoldSkill(root, "newskill");
+    expect(hasDispatchTrigger(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8"))).toBe(true);
   });
 
   it("derives the env prefix from the name", () => {
